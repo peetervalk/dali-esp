@@ -16,6 +16,16 @@ The long-term goal is:
 
 ---
 
+## For AI Coding Agents
+
+* Use `current_status.md` as the active project status and roadmap; it is the most reliable source for what is implemented vs pending.
+* Preserve the existing architecture: `components/dali` is the protocol/PHY stack, `main/main.c` is the device entry point, and `esphome/dali_esphome.h` is a stub integration layer.
+* Avoid making ESPHome integration changes until the core PHY/Protocol/Scheduler stack is verified working.
+* Use `test/CMakeLists.txt` and the Unity tests as the canonical host test harness for portable DALI logic.
+* Do not assume 16-bit-only DALI frames; the architecture must support 16-bit and 24-bit DALI-2 frames.
+
+---
+
 ## Hardware
 
 ### MCU
@@ -432,6 +442,17 @@ project/
 └── main/
     └── main.c                    # Entry point, hardware init
 ```
+
+## Build & Test Notes
+
+* Top-level build is `idf.py` via ESP-IDF. The project is currently an ESP-IDF native CMake project.
+* Host tests are standalone in `test/` using CMake and Unity. `DALI_HOST_BUILD=1` is defined for host portability.
+* Expected host test workflow:
+  * `cd test`
+  * `cmake -B build -G "MinGW Makefiles"` or `"Unix Makefiles"` on WSL
+  * `cmake --build build`
+  * `ctest --output-on-failure`
+* There is no repository `README.md`; use `current_status.md` for status, architecture, and phase guidance.
 
 **Naming conventions:**
 
