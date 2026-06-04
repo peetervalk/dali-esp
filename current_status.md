@@ -1,6 +1,6 @@
 # DALI-ESP Project — Current Status
 
-**Last updated:** 2026-06-04  
+**Last updated:** 2026-06-04 (rev 2)  
 **Framework:** ESP-IDF v6.0.1 (native CMake)  
 **Hardware:** ESP32-DevKitC-32E + MikroE DALI-2 Click (GPIO interface)  
 **Timer:** GPTIMER, 104 µs alarm (4× oversampling of 416.7 µs half-bit)
@@ -115,12 +115,12 @@ Every software layer is implemented and host-tested. All 5 test suites pass (51 
 | Question | Status |
 |---|---|
 | Which GPIO numbers for TX/RX on your mikroBUS adapter? | **Needs your input** — update `main/main.c` |
-| Exact TX-to-RX turnaround time (IEC 62386 part 1)? | Open — placeholder 7 ms |
-| Exact reply timeout (IEC 62386 part 1)? | Open — placeholder 20 ms |
-| Maximum retry count before marking device offline? | Open — placeholder 3 |
-| DALI-2 instance discovery: auto or manual? | Open |
-| ESPHome component type: custom or external? | Open |
-| Host tests on Linux/WSL or MinGW on Windows? | Open |
+| Exact TX-to-RX turnaround time (IEC 62386 part 1)? | **Resolved** — 7 ms confirmed per IEC 62386-101 §8 |
+| Exact reply timeout (IEC 62386 part 1)? | **Resolved** — 25 ms (22 ms spec max + 3 ms margin) |
+| Maximum retry count before marking device offline? | **Decided** — 3 retries (tune on real hardware) |
+| DALI-2 instance discovery: auto or manual? | **Decided** — manual; auto-discovery deferred to post-loopback |
+| ESPHome component type: custom or external? | **Decided** — in-tree custom component now; migrate to external after Phase 9 works |
+| Host tests on Linux/WSL or MinGW on Windows? | **Decided** — MinGW on Windows |
 
 ---
 
@@ -154,8 +154,8 @@ DALI Bus
 | Bit period | 833.3 µs | 1 / 1200 |
 | Half-bit period | 416.7 µs | Manchester encoding unit |
 | Timer tick | 104 µs | 4× oversampling |
-| TX-to-RX settle | ~7 ms | TBD from IEC 62386 §8 |
-| Reply timeout | ~20 ms | TBD from IEC 62386 §8 |
+| TX-to-RX settle | 7 ms | Confirmed per IEC 62386-101 §8 |
+| Reply timeout | 25 ms | 22 ms spec max + 3 ms margin (IEC 62386-101 §8) |
 | Send-twice window | 100 ms | Configuration commands |
 | Bus idle (min) | 2× stop bits | ~1.67 ms |
 

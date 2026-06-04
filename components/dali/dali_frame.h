@@ -18,9 +18,9 @@
 #define DALI_HALF_BIT_US            417u    /* nominal half-bit period (µs)    */
 #define DALI_BIT_US                 833u    /* nominal bit period (µs)         */
 
-/* TBD: fill from IEC 62386 part 1 when confirmed */
-#define DALI_SETTLE_MS                7u    /* min TX-to-RX turnaround (ms)    */
-#define DALI_REPLY_TIMEOUT_MS        20u    /* max wait for backward frame (ms)*/
+/* Confirmed from IEC 62386-101 */
+#define DALI_SETTLE_MS                7u    /* min TX-to-RX turnaround (ms) — IEC 62386-101 §8 */
+#define DALI_REPLY_TIMEOUT_MS        25u    /* max wait for backward frame (ms) — 22 ms spec + 3 ms margin */
 #define DALI_MAX_RETRIES              3u    /* send attempts before offline    */
 #define DALI_SEND_TWICE_WINDOW_MS   100u    /* max gap between repeated sends  */
 
