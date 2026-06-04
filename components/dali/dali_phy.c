@@ -11,8 +11,15 @@
 #include "freertos/task.h"
 #else
 #define IRAM_ATTR
+/* Stub out ESP-IDF logging for host builds */
+#define ESP_LOGE(tag, fmt, ...) ((void)(tag))
+#define ESP_LOGW(tag, fmt, ...) ((void)(tag))
+#define ESP_LOGI(tag, fmt, ...) ((void)(tag))
+#define ESP_LOGD(tag, fmt, ...) ((void)(tag))
+#define ESP_LOGV(tag, fmt, ...) ((void)(tag))
 #endif
 
+#include <inttypes.h>
 #include <string.h>
 
 static const char *TAG = "DALI-PHY";
@@ -28,6 +35,18 @@ dali_stats_t g_dali_stats;
  * --------------------------------------------------------------------------*/
 static uint32_t s_rx_edge_buf[DALI_RX_EDGE_BUFFER_SIZE];
 static DaliRingBuf s_rx_rb;
+
+/* ---------------------------------------------------------------------------
+ * RX frame accumulation state (task context only — never touched from ISR)
+ *
+ * Intervals between consecutive RX edges, in microseconds.
+ * Max: 1 start + 24 data bits Manchester-encoded = up to ~54 edge intervals.
+ * --------------------------------------------------------------------------*/
+#define RX_INTERVAL_BUF_MAX 56u
+static uint32_t s_rx_intervals[RX_INTERVAL_BUF_MAX];
+static uint8_t  s_rx_interval_count;
+static uint32_t s_rx_last_edge_ts_us;   /* 31-bit wrapped µs timestamp */
+static bool     s_rx_in_frame;           /* currently accumulating edges */
 
 /* ---------------------------------------------------------------------------
  * TX half-bit buffer: one byte per half-bit (1 = HIGH, 0 = LOW)
@@ -126,49 +145,86 @@ DaliError dali_phy_decode_manchester(const uint32_t *intervals,
         return DALI_ERR_INVALID;
     }
 
-    /* Tolerance: ±25% of nominal half-bit period */
+    /* Tolerance: ±25% of nominal half-bit period (IEC 62386 Annex A) */
     const uint32_t half_min = (DALI_HALF_BIT_US * 3u) / 4u;  /* 312 µs */
     const uint32_t half_max = (DALI_HALF_BIT_US * 5u) / 4u;  /* 521 µs */
     const uint32_t full_min = (DALI_BIT_US      * 3u) / 4u;  /* 625 µs */
     const uint32_t full_max = (DALI_BIT_US      * 5u) / 4u;  /* 1041 µs*/
 
-    /* Expand intervals into individual half-bits (1 or 2 per interval) */
-    uint8_t half_bits[128u];
-    uint8_t num_half = 0u;
+    /*
+     * Interval-based Manchester decoder.
+     *
+     * The first edge in intervals[] is always the mid-bit falling edge of the
+     * start bit (bus is idle HIGH; start bit = '1' → HIGH first half, LOW
+     * second half).  Initial decoder state after this implicit first edge:
+     *   level  = LOW  (bus level after the falling start-bit mid-edge)
+     *   at_mid = 1    (we have just processed a mid-bit edge)
+     *
+     * Interval classification:
+     *   SHORT (~417 µs): one half-bit gap.
+     *     From at_mid=1: a bit-boundary edge (cross into next bit territory).
+     *     From at_mid=0: the mid-bit edge of the current bit.
+     *   LONG  (~833 µs): two half-bit gap.
+     *     Only valid from at_mid=1: no bit-boundary edge occurred (adjacent
+     *     bits share the same first-half level); this edge is the mid-bit of
+     *     the next bit.
+     *
+     * Bit value extraction: at every mid-bit edge, the bus level AFTER the
+     * edge is the second half of the current bit:
+     *   level = LOW  after mid-bit edge  →  bit '1'
+     *   level = HIGH after mid-bit edge  →  bit '0'
+     *
+     * Valid DALI frame bit lengths: 8 (backward), 16 (forward), 24 (DALI-2).
+     */
+    uint8_t  level    = 0u;   /* 0=LOW, 1=HIGH; starts LOW after start falling edge */
+    uint8_t  at_mid   = 1u;   /* 1=just saw mid-bit edge; 0=at bit-boundary         */
+    uint32_t data     = 0u;
+    uint8_t  num_bits = 0u;
 
     for (uint8_t i = 0u; i < num_intervals; i++) {
-        uint32_t iv = intervals[i];
-        if (iv >= half_min && iv <= half_max) {
-            /* one half-bit boundary */
-            if (num_half >= 128u) { return DALI_ERR_MALFORMED; }
-            /* direction determined later; placeholder */
-            half_bits[num_half++] = 1u;  /* edge occurred — level toggles */
-        } else if (iv >= full_min && iv <= full_max) {
-            /* two half-bit boundaries with same level */
-            if (num_half + 1u >= 128u) { return DALI_ERR_MALFORMED; }
-            half_bits[num_half++] = 2u;  /* no edge in middle */
-        } else {
+        uint32_t iv       = intervals[i];
+        uint8_t  is_short = (iv >= half_min && iv <= half_max) ? 1u : 0u;
+        uint8_t  is_long  = (iv >= full_min && iv <= full_max) ? 1u : 0u;
+
+        if (!is_short && !is_long) {
             return DALI_ERR_MALFORMED;
+        }
+
+        if (at_mid) {
+            if (is_long) {
+                /* No bit-boundary edge; this is the mid-bit of the next bit.
+                 * Consecutive bits share the same first-half level so the
+                 * boundary transition did not occur. */
+                level ^= 1u;
+                if (num_bits >= 24u) { return DALI_ERR_MALFORMED; }
+                data = (data << 1u) | (level == 0u ? 1u : 0u);
+                num_bits++;
+                /* at_mid remains 1 */
+            } else {
+                /* Short interval: bit-boundary edge. */
+                level ^= 1u;
+                at_mid = 0u;
+            }
+        } else {
+            /* At bit-boundary: the only valid next interval is SHORT (mid-bit). */
+            if (!is_short) {
+                return DALI_ERR_MALFORMED;
+            }
+            level ^= 1u;
+            if (num_bits >= 24u) { return DALI_ERR_MALFORMED; }
+            data = (data << 1u) | (level == 0u ? 1u : 0u);
+            num_bits++;
+            at_mid = 1u;
         }
     }
 
-    /*
-     * Full Manchester decode from edge list:
-     * This implementation takes the raw edge timestamp intervals and converts
-     * them to bit values.  The algorithm re-runs the standard approach:
-     * treat the stream as half-bit-aligned and reconstruct data bits.
-     *
-     * Note: a more complete implementation processes the actual edge-level
-     * transitions rather than just interval lengths.  The timestamp ring
-     * buffer stores {timestamp, level} pairs; the full decoder in
-     * dali_phy_rx_process() uses that richer representation.
-     * This function accepts raw intervals for unit testing.
-     */
-    (void)half_bits;
-    (void)num_half;
+    if (num_bits != 8u && num_bits != 16u && num_bits != 24u) {
+        return DALI_ERR_MALFORMED;
+    }
 
-    /* Placeholder — fully implemented in dali_phy_rx_process() */
-    return DALI_ERR_MALFORMED;
+    frame_out->data       = data;
+    frame_out->bit_length = num_bits;
+    return DALI_OK;
 }
 
 /* ===========================================================================
@@ -374,24 +430,69 @@ DaliError dali_phy_tx(const DaliFrame *frame)
 void dali_phy_rx_process(void)
 {
     /*
-     * Drain the RX ring buffer and decode Manchester.
+     * Drain the RX ring buffer.  Each entry: bits[31:1] = timestamp_us,
+     * bit[0] = bus level after the edge.
      *
-     * Each ring buffer entry: bits[31:1] = timestamp_us, bit[0] = edge level.
+     * Accumulate edge-to-edge intervals.  When the bus has been silent
+     * for at least one bit period (DALI_BIT_US) after the last edge, the
+     * frame is complete and we attempt Manchester decode.
      *
-     * Algorithm:
-     *   Track the previous timestamp and level.  Compute the interval since
-     *   the last edge.  Classify as half-bit (~417 µs) or full-bit (~833 µs).
-     *   Manchester rule: within a bit period there is exactly one mid-bit
-     *   transition.  The level at the START of the bit period determines the
-     *   bit value: HIGH start → '0', LOW start → '1'.
-     *
-     * This is a placeholder stub; full decode is implemented incrementally
-     * as integration testing progresses.
+     * First edge received starts the frame; its timestamp becomes the
+     * reference — no interval is generated for it because we need two
+     * edges to compute a gap.
      */
     uint32_t entry;
     while (dali_rb_pop(&s_rx_rb, &entry) == DALI_OK) {
-        /* TODO: full Manchester decode implementation */
-        (void)entry;
+        uint32_t ts_us = entry >> 1u;
+        if (!s_rx_in_frame) {
+            /* First edge: start-bit mid-bit falling edge. */
+            s_rx_in_frame        = true;
+            s_rx_interval_count  = 0u;
+            s_rx_last_edge_ts_us = ts_us;
+        } else {
+            /* Compute interval; handle 31-bit counter wrap. */
+            uint32_t iv = (ts_us - s_rx_last_edge_ts_us) & 0x7FFFFFFFu;
+            s_rx_last_edge_ts_us = ts_us;
+            if (s_rx_interval_count < RX_INTERVAL_BUF_MAX) {
+                s_rx_intervals[s_rx_interval_count++] = iv;
+            } else {
+                /* Interval buffer overflow — discard this frame. */
+                s_rx_in_frame       = false;
+                s_rx_interval_count = 0u;
+                g_dali_stats.malformed_frames++;
+                ESP_LOGW(TAG, "RX interval buffer overflow; frame discarded");
+            }
+        }
+    }
+
+    /* Check for frame completion: bus silent for >= 1 bit period. */
+    if (s_rx_in_frame && s_rx_interval_count > 0u) {
+#ifndef DALI_HOST_BUILD
+        uint32_t now_us  = (uint32_t)(esp_timer_get_time() & 0x7FFFFFFFu);
+        uint32_t silence = (now_us - s_rx_last_edge_ts_us) & 0x7FFFFFFFu;
+        if (silence >= DALI_BIT_US) {
+            DaliFrame frame;
+            DaliError err = dali_phy_decode_manchester(
+                s_rx_intervals, s_rx_interval_count, &frame);
+            if (err == DALI_OK) {
+                ESP_LOGD(TAG, "RX frame: 0x%"PRIx32" (%u bits)",
+                         frame.data, (unsigned)frame.bit_length);
+                if (s_rx_callback != NULL) {
+                    s_rx_callback(&frame, s_rx_callback_ctx);
+                }
+            } else {
+                g_dali_stats.malformed_frames++;
+                ESP_LOGD(TAG, "RX decode error %d (%u intervals)",
+                         (int)err, (unsigned)s_rx_interval_count);
+            }
+            s_rx_in_frame       = false;
+            s_rx_interval_count = 0u;
+        }
+#else
+        /* Host build: no real time source; just drain. */
+        s_rx_in_frame       = false;
+        s_rx_interval_count = 0u;
+#endif
     }
 }
 
@@ -405,6 +506,8 @@ DaliError dali_phy_reset(void)
     s_tx_total_half_bits = 0u;
     s_tx_tick_count      = 0u;
     dali_rb_clear(&s_rx_rb);
+    s_rx_in_frame        = false;
+    s_rx_interval_count  = 0u;
     ESP_LOGD(TAG, "PHY reset");
     return DALI_OK;
 }
