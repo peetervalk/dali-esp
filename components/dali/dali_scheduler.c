@@ -40,6 +40,10 @@ static uint32_t        s_state_entered_ms;
 static volatile bool   s_reply_received;
 static DaliFrame       s_reply_frame;
 
+/* Unsolicited raw-event routing */
+static DaliSchedEventCb s_event_cb;
+static void            *s_event_cb_ctx;
+
 /* ---------------------------------------------------------------------------
  * Internal helpers
  * --------------------------------------------------------------------------*/
@@ -54,6 +58,28 @@ static void sched_complete(DaliError result, const DaliFrame *reply)
     if (s_active.on_complete != NULL) {
         s_active.on_complete(result, reply, s_active.cb_ctx);
     }
+}
+
+static bool sched_is_unsolicited_event_frame(const DaliFrame *frame)
+{
+    return frame->bit_length == 24u;
+}
+
+static bool sched_can_route_unsolicited_event(void)
+{
+    return s_state == SCHED_IDLE || s_state == SCHED_WAIT_REPLY;
+}
+
+static void sched_route_unsolicited_or_ignore(const DaliFrame *frame)
+{
+    if (sched_can_route_unsolicited_event() &&
+        sched_is_unsolicited_event_frame(frame) &&
+        s_event_cb != NULL) {
+        g_dali_stats.unsolicited_events_routed++;
+        s_event_cb(frame, s_event_cb_ctx);
+        return;
+    }
+    g_dali_stats.rx_ignored_outside_reply++;
 }
 
 /* Dequeue one item into s_active.  Caller must hold critical section. */
@@ -95,6 +121,8 @@ DaliError dali_sched_init(const DaliSchedOps *ops)
     s_state       = SCHED_IDLE;
     s_send_count  = 0u;
     s_reply_received = false;
+    s_event_cb        = NULL;
+    s_event_cb_ctx    = NULL;
     s_initialized = true;
 
     s_ops.set_rx_callback(phy_rx_handler, NULL);
@@ -139,6 +167,7 @@ next:
                 return;
             }
             s_send_count = 0u;
+            s_reply_received = false;
             s_state = SCHED_TX;
             goto next;
         }
@@ -181,6 +210,7 @@ next:
         case SCHED_WAIT_REPLY: {
             if (s_reply_received) {
                 sched_complete(DALI_OK, &s_reply_frame);
+                s_reply_received = false;
                 s_state = SCHED_IDLE;
                 goto next;
             }
@@ -208,11 +238,31 @@ next:
 
 void dali_sched_notify_rx(const DaliFrame *frame)
 {
-    if (frame == NULL) {
+    if (!s_initialized || frame == NULL) {
         return;
     }
-    s_reply_frame    = *frame;
-    s_reply_received = true;
+
+    if (s_state == SCHED_WAIT_REPLY &&
+        s_active.needs_reply &&
+        !s_reply_received &&
+        frame->bit_length == 8u &&
+        elapsed_ms(s_state_entered_ms) < DALI_REPLY_TIMEOUT_MS) {
+        s_reply_frame    = *frame;
+        s_reply_received = true;
+        return;
+    }
+
+    sched_route_unsolicited_or_ignore(frame);
+}
+
+DaliError dali_sched_set_event_callback(DaliSchedEventCb cb, void *cb_ctx)
+{
+    if (!s_initialized) {
+        return DALI_ERR_INVALID;
+    }
+    s_event_cb     = cb;
+    s_event_cb_ctx = cb != NULL ? cb_ctx : NULL;
+    return DALI_OK;
 }
 
 DaliError dali_sched_reset(void)

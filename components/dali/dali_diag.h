@@ -10,7 +10,7 @@
  *   stats            — print all diagnostic counters
  *   trace on|off     — enable/disable per-frame bus trace logging
  *   reset            — reset PHY and scheduler state machines
- *   raw <hex> len=<n>— transmit arbitrary frame (requires PHY init)
+ *   raw <hex> len=<n> [wait] — transmit arbitrary frame, optionally wait for reply
  *   scan             — scan short addresses 0–63 (requires scheduler)
  *   query <addr>     — query device status (requires scheduler)
  */

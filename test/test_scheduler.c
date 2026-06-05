@@ -44,6 +44,10 @@ static uint32_t mock_get_tick_ms(void)
 static DaliError  g_cb_result;
 static DaliFrame  g_cb_reply;
 static int        g_cb_count;
+static DaliFrame  g_event_frame;
+static int        g_event_count;
+static void      *g_event_ctx;
+static uint8_t    g_event_marker;
 
 static void on_complete(DaliError result, const DaliFrame *reply, void *ctx)
 {
@@ -55,6 +59,17 @@ static void on_complete(DaliError result, const DaliFrame *reply, void *ctx)
         memset(&g_cb_reply, 0, sizeof(g_cb_reply));
     }
     g_cb_count++;
+}
+
+static void on_event(const DaliFrame *frame, void *ctx)
+{
+    if (frame != NULL) {
+        g_event_frame = *frame;
+    } else {
+        memset(&g_event_frame, 0, sizeof(g_event_frame));
+    }
+    g_event_ctx = ctx;
+    g_event_count++;
 }
 
 /* ---------------------------------------------------------------------------
@@ -69,6 +84,11 @@ static void inject_reply(uint32_t data, uint8_t bits)
 {
     DaliFrame f = { .data = data, .bit_length = bits };
     dali_sched_notify_rx(&f);
+}
+
+static void inject_event(uint32_t data)
+{
+    inject_reply(data, 24u);
 }
 
 /* ---------------------------------------------------------------------------
@@ -86,6 +106,9 @@ void setUp(void)
     g_cb_count  = 0;
     g_cb_result = DALI_OK;
     memset(&g_cb_reply, 0, sizeof(g_cb_reply));
+    g_event_count = 0;
+    g_event_ctx   = NULL;
+    memset(&g_event_frame, 0, sizeof(g_event_frame));
 
     memset(&g_dali_stats, 0, sizeof(g_dali_stats));
 
@@ -200,7 +223,205 @@ void test_reply_received(void)
     TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
 }
 
-/* 4. Reply timeout followed by successful retry */
+/* 4. Stray RX while idle must not complete the next transaction */
+void test_stray_rx_while_idle_is_ignored(void)
+{
+    inject_reply(0x11u, 8u);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .send_twice   = false,
+        .retries_left = 0u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+
+    g_mock_tick_ms += DALI_REPLY_TIMEOUT_MS;
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT, g_cb_result);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.reply_timeouts);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+}
+
+/* 5. A duplicate/stale RX frame must not overwrite the latched reply */
+void test_stale_duplicate_rx_does_not_overwrite_latched_reply(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .send_twice   = false,
+        .retries_left = 0u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+
+    inject_reply(0xAAu, 8u);
+    inject_reply(0xBBu, 8u);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+    TEST_ASSERT_EQUAL_HEX32(0xAAu, g_cb_reply.data);
+    TEST_ASSERT_EQUAL_UINT8(8u, g_cb_reply.bit_length);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+}
+
+/* 6. RX arriving after the reply window must time out, not complete OK */
+void test_late_rx_after_reply_timeout_is_ignored(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .send_twice   = false,
+        .retries_left = 0u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+
+    g_mock_tick_ms += DALI_REPLY_TIMEOUT_MS;
+    inject_reply(0xAFu, 8u);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT, g_cb_result);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.reply_timeouts);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+}
+
+/* 7. Unsolicited 24-bit frames are routed to the raw event path */
+void test_unsolicited_24bit_idle_routes_event(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_set_event_callback(on_event, &g_event_marker));
+
+    inject_event(0x123456u);
+
+    TEST_ASSERT_EQUAL(1, g_event_count);
+    TEST_ASSERT_EQUAL_HEX32(0x123456u, g_event_frame.data);
+    TEST_ASSERT_EQUAL_UINT8(24u, g_event_frame.bit_length);
+    TEST_ASSERT_EQUAL_PTR(&g_event_marker, g_event_ctx);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.unsolicited_events_routed);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_outside_reply);
+}
+
+/* 8. A 24-bit RX candidate during settle is ignored, not routed as an event */
+void test_24bit_rx_during_settle_is_ignored_not_routed(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_set_event_callback(on_event, &g_event_marker));
+
+    DaliTransaction txn = {
+        .frame        = { .data = 0x123456u, .bit_length = 24u },
+        .needs_reply  = false,
+        .send_twice   = false,
+        .retries_left = 0u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_SETTLE, dali_sched_state());
+
+    inject_event(0x123456u);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(0, g_event_count);
+    TEST_ASSERT_EQUAL(0, g_cb_count);
+    TEST_ASSERT_EQUAL(SCHED_WAIT_SETTLE, dali_sched_state());
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.unsolicited_events_routed);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+}
+
+/* 9. A 24-bit event during WAIT_REPLY must not complete the transaction */
+void test_unsolicited_24bit_during_reply_window_routes_without_completing(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_set_event_callback(on_event, &g_event_marker));
+
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .send_twice   = false,
+        .retries_left = 0u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+
+    inject_event(0x123456u);
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(0, g_cb_count);
+    TEST_ASSERT_EQUAL(1, g_event_count);
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.unsolicited_events_routed);
+
+    inject_reply(0xAFu, 8u);
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+    TEST_ASSERT_EQUAL_HEX32(0xAFu, g_cb_reply.data);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_outside_reply);
+}
+
+/* 10. Non-8-bit traffic cannot satisfy a solicited backward reply */
+void test_16bit_frame_during_reply_window_is_ignored_not_reply(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .send_twice   = false,
+        .retries_left = 0u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+
+    inject_reply(0x1234u, 16u);
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(0, g_cb_count);
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+
+    inject_reply(0xAFu, 8u);
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+    TEST_ASSERT_EQUAL_HEX32(0xAFu, g_cb_reply.data);
+}
+
+/* 11. Reply timeout followed by successful retry */
 void test_reply_timeout_then_retry_succeeds(void)
 {
     DaliTransaction txn = {
@@ -235,7 +456,7 @@ void test_reply_timeout_then_retry_succeeds(void)
     TEST_ASSERT_EQUAL_HEX32(0xAFu, g_cb_reply.data);
 }
 
-/* 5. Reply timeout with retries exhausted → ERR_TIMEOUT */
+/* 12. Reply timeout with retries exhausted -> ERR_TIMEOUT */
 void test_reply_timeout_exhausted(void)
 {
     DaliTransaction txn = {
@@ -261,7 +482,7 @@ void test_reply_timeout_exhausted(void)
     TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
 }
 
-/* 6. Queue full returns DALI_ERR_QUEUE_FULL */
+/* 13. Queue full returns DALI_ERR_QUEUE_FULL */
 void test_queue_full(void)
 {
     DaliTransaction txn = {
@@ -275,7 +496,7 @@ void test_queue_full(void)
     TEST_ASSERT_EQUAL(DALI_ERR_QUEUE_FULL, dali_sched_enqueue(&txn));
 }
 
-/* 7. Reset clears mid-flight state */
+/* 14. Reset clears mid-flight state */
 void test_reset_clears_state(void)
 {
     DaliTransaction txn = {
@@ -295,7 +516,7 @@ void test_reset_clears_state(void)
     TEST_ASSERT_EQUAL(1, g_mock_tx_count);
 }
 
-/* 8. Multiple queued transactions drain in order */
+/* 15. Multiple queued transactions drain in order */
 void test_multiple_transactions_in_order(void)
 {
     DaliTransaction txn = { .needs_reply = false, .retries_left = 0u };
@@ -340,6 +561,13 @@ int main(void)
     RUN_TEST(test_simple_send);
     RUN_TEST(test_send_twice);
     RUN_TEST(test_reply_received);
+    RUN_TEST(test_stray_rx_while_idle_is_ignored);
+    RUN_TEST(test_stale_duplicate_rx_does_not_overwrite_latched_reply);
+    RUN_TEST(test_late_rx_after_reply_timeout_is_ignored);
+    RUN_TEST(test_unsolicited_24bit_idle_routes_event);
+    RUN_TEST(test_24bit_rx_during_settle_is_ignored_not_routed);
+    RUN_TEST(test_unsolicited_24bit_during_reply_window_routes_without_completing);
+    RUN_TEST(test_16bit_frame_during_reply_window_is_ignored_not_reply);
     RUN_TEST(test_reply_timeout_then_retry_succeeds);
     RUN_TEST(test_reply_timeout_exhausted);
     RUN_TEST(test_queue_full);

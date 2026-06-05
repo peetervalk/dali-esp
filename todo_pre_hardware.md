@@ -5,12 +5,12 @@ The goal is to make native ESP-IDF bring-up less ambiguous.
 
 ## Configuration
 
-- [ ] Add committed `sdkconfig.defaults`.
-  - [ ] Set flash size for ESP32-WROVER-E 8 MB flash.
-  - [ ] Decide whether to set CPU frequency to 240 MHz for ISR margin.
-  - [ ] Avoid a high-priority busy loop if `pdMS_TO_TICKS(1u)` becomes 0 with
+- [x] Add committed `sdkconfig.defaults`.
+  - [x] Set flash size for ESP32-WROVER-E 8 MB flash.
+  - [x] Decide whether to set CPU frequency to 240 MHz for ISR margin.
+  - [x] Avoid a high-priority busy loop if `pdMS_TO_TICKS(1u)` becomes 0 with
         a 100 Hz FreeRTOS tick.
-  - [ ] Verify or enable IRAM-safe GPTIMER/GPIO options if available.
+  - [x] Verify or enable IRAM-safe GPTIMER/GPIO options if available.
 
 ## PHY
 
@@ -19,17 +19,17 @@ The goal is to make native ESP-IDF bring-up less ambiguous.
   - [ ] Increment a diagnostic counter readable by `stats`.
 - [ ] Add RX self-echo suppression while the controller is transmitting.
 - [ ] Suppress RX during the 7 ms TX-to-RX settle period.
-- [ ] Audit every ISR-called function for IRAM safety.
-- [ ] Keep ISR work limited to symbol output, timestamp capture, state advance,
+- [x] Audit every ISR-called function for IRAM safety.
+- [x] Keep ISR work limited to symbol output, timestamp capture, state advance,
       and counters.
 
 ## Scheduler And RX Routing
 
-- [ ] Gate scheduler replies so `dali_sched_notify_rx()` only completes a
+- [x] Gate scheduler replies so `dali_sched_notify_rx()` only completes a
       transaction when the scheduler is actually in `SCHED_WAIT_REPLY`.
-- [ ] Add tests for stray, stale, and late RX frames.
-- [ ] Add a separate event path for unsolicited DALI-2 input-device events.
-- [ ] Make sure unsolicited frames cannot complete unrelated request/reply
+- [x] Add tests for stray, stale, and late RX frames.
+- [x] Add a separate event path for unsolicited DALI-2 input-device events.
+- [x] Make sure unsolicited frames cannot complete unrelated request/reply
       transactions.
 
 ## Diagnostic CLI
@@ -38,7 +38,7 @@ The goal is to make native ESP-IDF bring-up less ambiguous.
   - TX example: `[BUS] TX 0x0B90 (16-bit)`
   - RX example: `[BUS] RX 0xAF (8-bit, 3.1 ms after TX)`
 - [ ] Add `read` to print the last received raw frame.
-- [ ] Extend `raw <hex> len=<n>` with an optional wait-for-reply mode.
+- [x] Extend `raw <hex> len=<n>` with an optional wait-for-reply mode.
 - [ ] Add richer named command helpers so diagnostics do not require raw hex for
       common operations.
 - [ ] Add `discover`, `inventory`, and `identify` commands after the scheduler
@@ -60,7 +60,7 @@ The goal is to make native ESP-IDF bring-up less ambiguous.
 
 - [ ] Consider adding counters for:
   - [ ] Bus stuck / idle failures.
-  - [ ] RX frames ignored outside reply window.
-  - [ ] Unsolicited events routed.
+  - [x] RX frames ignored outside reply window.
+  - [x] Unsolicited events routed.
   - [ ] RX self-echo frames suppressed.
-  - [ ] Raw malformed frame length / parser failures.
+  - [x] Raw malformed frame length / parser failures.

@@ -39,6 +39,12 @@ typedef void (*DaliSchedCompletionCb)(DaliError result,
                                       const DaliFrame *reply,
                                       void *cb_ctx);
 
+/*
+ * Unsolicited RX event callback — invoked from task context for raw DALI-2
+ * event candidates that are not solicited backward replies.
+ */
+typedef void (*DaliSchedEventCb)(const DaliFrame *frame, void *cb_ctx);
+
 /* ---------------------------------------------------------------------------
  * Transaction descriptor
  * --------------------------------------------------------------------------*/
@@ -78,10 +84,16 @@ DaliError dali_sched_enqueue(const DaliTransaction *txn);
 void dali_sched_run(void);
 
 /*
- * Notify the scheduler that a backward frame arrived.
+ * Notify the scheduler that a bus frame arrived.
  * Called by the PHY RX callback; also callable directly in host tests.
  */
 void dali_sched_notify_rx(const DaliFrame *frame);
+
+/*
+ * Register a raw unsolicited-event callback.
+ * Passing NULL disables event routing.
+ */
+DaliError dali_sched_set_event_callback(DaliSchedEventCb cb, void *cb_ctx);
 
 /* Reset scheduler: clear queue and return to IDLE. */
 DaliError dali_sched_reset(void);

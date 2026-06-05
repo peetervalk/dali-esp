@@ -22,10 +22,15 @@ static const char *TAG = "main";
 static void dali_task(void *arg)
 {
     (void)arg;
+    TickType_t loop_delay_ticks = pdMS_TO_TICKS(1u);
+    if (loop_delay_ticks == 0u) {
+        loop_delay_ticks = 1u;
+    }
+
     for (;;) {
         dali_phy_rx_process();
         dali_sched_run();
-        vTaskDelay(pdMS_TO_TICKS(1u));
+        vTaskDelay(loop_delay_ticks);
     }
 }
 

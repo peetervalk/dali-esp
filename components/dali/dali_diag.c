@@ -8,6 +8,7 @@
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -51,10 +52,11 @@ static void diag_sync_cb(DaliError result, const DaliFrame *reply, void *cb_ctx)
 
 /*
  * Enqueue frame, wait up to 200 ms for completion.
+ * retries_left is the scheduler retry budget after the first attempt.
  * reply_out may be NULL when the reply data is not needed.
  */
 static DaliError diag_sched_sync(const DaliFrame *frame, bool needs_reply,
-                                  DaliFrame *reply_out)
+                                  uint8_t retries_left, DaliFrame *reply_out)
 {
     DiagSyncCtx ctx = {
         .waiting_task = xTaskGetCurrentTaskHandle(),
@@ -66,7 +68,7 @@ static DaliError diag_sched_sync(const DaliFrame *frame, bool needs_reply,
         .frame        = *frame,
         .needs_reply  = needs_reply,
         .send_twice   = false,
-        .retries_left = 1u,
+        .retries_left = retries_left,
         .on_complete  = diag_sync_cb,
         .cb_ctx       = &ctx,
     };
@@ -95,6 +97,9 @@ static void cmd_stats(void)
     printf("TX retries:       %" PRIu32 "\r\n", g_dali_stats.tx_retries);
     printf("Malformed frames: %" PRIu32 "\r\n", g_dali_stats.malformed_frames);
     printf("Reply timeouts:   %" PRIu32 "\r\n", g_dali_stats.reply_timeouts);
+    printf("RX ignored:       %" PRIu32 "\r\n", g_dali_stats.rx_ignored_outside_reply);
+    printf("RX events routed: %" PRIu32 "\r\n", g_dali_stats.unsolicited_events_routed);
+    printf("Raw malformed:    %" PRIu32 "\r\n", g_dali_stats.raw_malformed);
     printf("ISR overruns:     %" PRIu32 "\r\n", g_dali_stats.isr_overruns);
 #endif
 }
@@ -130,14 +135,43 @@ static void cmd_raw(const char *args)
 #ifndef DALI_HOST_BUILD
     unsigned long hex_val = 0;
     int bit_len = 0;
-    if (sscanf(args, "%lx len=%d", &hex_val, &bit_len) != 2 ||
-        bit_len < 1 || bit_len > 24) {
-        printf("usage: raw <hex> len=<bits>\r\n");
+    char opt[8] = {0};
+    char extra[2] = {0};
+    int parsed = sscanf(args, "%lx len=%d %7s %1s",
+                        &hex_val, &bit_len, opt, extra);
+    bool wait_reply = false;
+
+    if (parsed == 3) {
+        wait_reply = (strcmp(opt, "wait") == 0);
+    }
+    if (parsed < 2 || parsed > 3 ||
+        (parsed == 3 && !wait_reply) ||
+        bit_len < 1 || bit_len > 24 ||
+        hex_val > ((1UL << (unsigned)bit_len) - 1UL)) {
+        g_dali_stats.raw_malformed++;
+        printf("usage: raw <hex> len=<bits> [wait]\r\n");
         return;
     }
     DaliFrame f;
     f.data       = (uint32_t)hex_val;
     f.bit_length = (uint8_t)bit_len;
+
+    if (wait_reply) {
+        DaliFrame reply = {0u, 0u};
+        DaliError err = diag_sched_sync(&f, true, 0u, &reply);
+        if (err == DALI_OK) {
+            printf("RX: 0x%0*" PRIX32 " (%u-bit)\r\n",
+                   (int)((reply.bit_length + 3u) / 4u),
+                   reply.data,
+                   (unsigned)reply.bit_length);
+        } else if (err == DALI_ERR_TIMEOUT) {
+            printf("RX: timeout\r\n");
+        } else {
+            printf("TX/RX: ERR %d\r\n", (int)err);
+        }
+        return;
+    }
+
     DaliError err = dali_phy_tx(&f);
     if (err == DALI_OK) {
         printf("TX: OK\r\n");
@@ -157,7 +191,7 @@ static void cmd_scan(void)
     for (uint8_t addr = 0u; addr < 64u; addr++) {
         DaliFrame f     = dali_cmd_query_status(addr);
         DaliFrame reply = {0u, 0u};
-        DaliError err   = diag_sched_sync(&f, true, &reply);
+        DaliError err   = diag_sched_sync(&f, true, 1u, &reply);
         if (err == DALI_OK) {
             printf("Device %2u: present (status=0x%02X)\r\n",
                    (unsigned)addr, (unsigned)(reply.data & 0xFFu));
@@ -179,7 +213,7 @@ static void cmd_query(const char *args)
     uint8_t addr    = (uint8_t)addr_val;
     DaliFrame f     = dali_cmd_query_status(addr);
     DaliFrame reply = {0u, 0u};
-    DaliError err   = diag_sched_sync(&f, true, &reply);
+    DaliError err   = diag_sched_sync(&f, true, 1u, &reply);
     if (err == DALI_OK) {
         DaliStatus s;
         dali_parse_status((uint8_t)(reply.data & 0xFFu), &s);
@@ -230,7 +264,7 @@ static void dispatch(char *line)
         cmd_query(line + 6);
     } else {
         printf("unknown command: %s\r\n", line);
-        printf("commands: stats, trace on|off, reset, raw <hex> len=<n>, scan, query <addr>\r\n");
+        printf("commands: stats, trace on|off, reset, raw <hex> len=<n> [wait], scan, query <addr>\r\n");
     }
 #else
     (void)line;

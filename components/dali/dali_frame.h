@@ -76,6 +76,9 @@ typedef struct {
     volatile uint32_t tx_retries;       /* scheduler TX retry count           */
     volatile uint32_t malformed_frames; /* Manchester decode errors            */
     volatile uint32_t reply_timeouts;   /* scheduler reply timeout count      */
+    volatile uint32_t rx_ignored_outside_reply; /* scheduler rejected RX frames */
+    volatile uint32_t unsolicited_events_routed; /* raw 24-bit RX event frames  */
+    volatile uint32_t raw_malformed;    /* diagnostic raw command parse errors*/
     volatile uint32_t isr_overruns;     /* timer fired before previous ISR done*/
 } dali_stats_t;
 

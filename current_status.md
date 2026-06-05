@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-06-05 (rev 5)
+**Last updated:** 2026-06-05 (rev 9)
 **Framework:** ESP-IDF v6.0.1 native CMake
 **Hardware target:** ESP32-DevKitC-VE / ESP32-WROVER-E + MikroE DALI-2 Click
 **Timer:** GPTIMER, 104 us alarm, 4x oversampling of the DALI half-bit
@@ -14,19 +14,24 @@ bring-up:
 - SPSC RX ring buffer exists and is host-tested.
 - PHY TX encode path and RX Manchester decode path exist and are host-tested.
 - Scheduler queue/state machine exists with retry, reply timeout, send-twice,
-  and host mock tests.
+  8-bit reply gating, raw 24-bit unsolicited event routing, and host mock tests.
 - Protocol builders and response parser dispatch exist for standard 16-bit
   commands plus draft DALI-2 instance commands.
 - `dali_control` is a first command-translation layer for short/group/broadcast
   targets and Home Assistant-style brightness values.
-- Native diagnostic CLI exists with `stats`, `trace on/off`, `reset`, `raw`,
-  `scan`, and `query`.
+- Native diagnostic CLI exists with `stats`, `trace on/off`, `reset`, `raw`
+  including optional reply wait, `scan`, and `query`.
+- Added `sdkconfig.defaults` for ESP32-WROVER-E bring-up: 8 MB flash,
+  240 MHz CPU, 1000 Hz FreeRTOS tick, and ISR-adjacent GPIO/GPTIMER/FreeRTOS
+  IRAM options; fresh generated config keeps `esp_timer_get_time()` in IRAM.
 - ESPHome integration is intentionally still a stub.
 
 Latest known verification:
 
 - `idf.py build` passes as of 2026-06-05.
-- Host tests pass: 6 suites, 78 tests.
+- Fresh build from `sdkconfig.defaults` passes and generates 8 MB flash image
+  arguments as of 2026-06-05.
+- Host tests pass: 6 suites, 85 tests.
 - Real hardware flashing, timing, loopback, and device communication are still
   pending.
 
@@ -103,7 +108,7 @@ Steinel conversions to implement after input-value reads work:
 |---|---|
 | GPIO wiring for MikroE DALI-2 Click | Needs hardware confirmation. Do not use GPIO 16/17 on WROVER-E. |
 | HA brightness 0 behavior | Prefer explicit `OFF`; confirm on hardware. |
-| Scheduler RX handling | Needs solicited-reply vs unsolicited-event split. |
+| Scheduler RX handling | Raw 8-bit reply vs 24-bit event routing implemented; protocol-level event parsing pending. |
 | DALI-2 instance discovery | Manual/profile-driven first; automatic discovery later. |
 | ESPHome component packaging | In-tree custom component first; external component later. |
 | DALI-2 firmware update / DFU | Out of scope. |
