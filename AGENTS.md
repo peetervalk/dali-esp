@@ -30,13 +30,15 @@ The long-term goal is:
 
 ### MCU
 
-ESP32-DevKitC-32E (ESP32-WROOM-32E)
+ESP32-DevKitC-VE (ESP32-WROVER-E)
 
 **Key ESP32 characteristics relevant to this project:**
 
 * Dual-core Xtensa LX6, 240 MHz
 * 520 KB SRAM total
-* 4 MB Flash (WROOM-32E default)
+* 8 MB Flash (WROVER-E default)
+* 8 MB SPI PSRAM (on-module; not required for DALI operation but available)
+* **GPIO 16 and GPIO 17 are connected to the on-module PSRAM and must NOT be used for any application I/O**
 * FreeRTOS-based; ISR-safe APIs are distinct from task-level APIs
 * ISR functions must be placed in IRAM using `IRAM_ATTR` to avoid cache-miss latency spikes
 * Watchdog timer must not be starved; avoid long or blocking ISR execution
@@ -69,8 +71,8 @@ MikroE DALI-2 Click
 | Timer ISR period | ~104 μs | Hard upper bound on ISR execution time; 4× oversampling of half-bit |
 | DALI bit period | ~833.3 μs | 1200 bps nominal (IEC 62386) |
 | Half-bit period | ~416.7 μs | Manchester encoding unit |
-| TX-to-RX turnaround | TBD | Check IEC 62386; typically ~7 ms |
-| Reply timeout | TBD | Typically 20 ms per spec |
+| TX-to-RX turnaround | 7 ms | Confirmed per IEC 62386-101 §8 |
+| Reply timeout | 25 ms | 22 ms spec max + 3 ms margin (IEC 62386-101 §8) |
 | Max bus scan time | TBD | Target: < 5 s for 64 addresses |
 | Command round-trip latency | TBD | Soft target, to be determined |
 
@@ -210,7 +212,7 @@ Avoid:
 |---|---|---|
 | SRAM | 520 KB | Budget ring buffers and queues conservatively |
 | IRAM | ~128 KB shared with ISR code | Keep ISR footprint small |
-| Flash | 4 MB | Not a primary concern |
+| Flash | 8 MB | WROVER-E default; sdkconfig flash size must be set to 8 MB |
 | CPU | 240 MHz dual-core | ISR must complete < 104 μs |
 
 Suggested initial buffer sizes (validate and adjust):
@@ -436,7 +438,9 @@ project/
 ├── esphome/
 │   └── dali_esphome.h/.cpp       # ESPHome integration (thin layer only)
 ├── test/
-│   ├── test_phy.c                # PHY encode/decode unit tests (host-runnable)
+│   ├── test_ringbuf.c            # Ring buffer unit tests (host-runnable)
+│   ├── test_phy_encode.c         # PHY Manchester encode unit tests (host-runnable)
+│   ├── test_phy_decode.c         # PHY Manchester decode unit tests (host-runnable)
 │   ├── test_protocol.c           # Protocol frame construction/parsing tests
 │   └── test_scheduler.c          # Scheduler state machine tests with mock PHY
 └── main/
@@ -552,13 +556,13 @@ Track these explicitly rather than letting them become hidden assumptions:
 
 | Question | Status |
 |---|---|
-| Which ESP32 timer peripheral to use? (Timer Group vs RMT vs LEDC) | Open |
-| Exact TX-to-RX turnaround time from IEC 62386? | Open |
-| Exact reply timeout from IEC 62386? | Open |
-| Maximum retry count before marking device offline? | Open |
-| How to handle DALI-2 instance discovery (auto vs manual)? | Open |
-| ESPHome component type: custom component or external component? | Open |
-| Will unit tests run on host (Linux) or on-device only? | Open |
+| Which ESP32 timer peripheral to use? (Timer Group vs RMT vs LEDC) | **Resolved** — GPTIMER, 104 µs alarm |
+| Exact TX-to-RX turnaround time from IEC 62386? | **Resolved** — 7 ms (IEC 62386-101 §8) |
+| Exact reply timeout from IEC 62386? | **Resolved** — 25 ms (22 ms spec max + 3 ms margin) |
+| Maximum retry count before marking device offline? | **Decided** — 3 retries (tune on real hardware) |
+| How to handle DALI-2 instance discovery (auto vs manual)? | **Decided** — manual; auto-discovery deferred to post-loopback |
+| ESPHome component type: custom component or external component? | **Decided** — in-tree custom component now; migrate to external after Phase 9 works |
+| Will unit tests run on host (Linux) or on-device only? | **Decided** — MinGW on Windows |
 | How to handle firmware updates to DALI-2 devices (DFU)? | Out of scope for now |
 
 ---

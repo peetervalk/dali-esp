@@ -1,8 +1,8 @@
 # DALI-ESP Project — Current Status
 
-**Last updated:** 2026-06-04 (rev 2)  
+**Last updated:** 2026-06-05 (rev 3)  
 **Framework:** ESP-IDF v6.0.1 (native CMake)  
-**Hardware:** ESP32-DevKitC-32E + MikroE DALI-2 Click (GPIO interface)  
+**Hardware:** ESP32-DevKitC-VE (ESP32-WROVER-E) + MikroE DALI-2 Click (GPIO interface)  
 **Timer:** GPTIMER, 104 µs alarm (4× oversampling of 416.7 µs half-bit)
 
 ---
@@ -27,7 +27,7 @@ Every software layer is implemented and host-tested. All 5 test suites pass (51 
 - [x] **ESP-IDF VS Code extension** (`espressif.esp-idf-extension`) installed and configured
 - [x] Setup wizard run: `idf.hasWalkthroughBeenShown: true`, workspace `idf.currentSetup` set
 - [x] `idf.py --version` returns `ESP-IDF v6.0.1` (activate via `. "C:\Espressif\tools\Microsoft.v6.0.1.PowerShell_profile.ps1"`)
-- [ ] Flash a hello_world project to the ESP32-DevKitC-32E to confirm toolchain works (**requires hardware**)
+- [ ] Flash a hello_world project to the ESP32-DevKitC-VE to confirm toolchain works (**requires hardware**)
 
 > Note: Activate ESP-IDF environment in each new PowerShell terminal by running:
 > `. "C:\Espressif\tools\Microsoft.v6.0.1.PowerShell_profile.ps1"`
@@ -67,6 +67,7 @@ Every software layer is implemented and host-tested. All 5 test suites pass (51 
   #define DALI_TX_GPIO  18   // ← Update to match your wiring
   #define DALI_RX_GPIO  19   // ← Update to match your wiring
   ```
+  > **WROVER-E constraint:** GPIO 16 and GPIO 17 are connected to the on-module PSRAM and must NOT be used. Current placeholder values (18, 19) are safe.
 
 ### Phase 4 — PHY RX Edge Capture + Manchester Decode ✅ DONE
 - [x] `dali_phy_decode_manchester()` fully implemented (interval-based state machine, ±25% tolerance)
@@ -114,13 +115,21 @@ Every software layer is implemented and host-tested. All 5 test suites pass (51 
 
 | Question | Status |
 |---|---|
-| Which GPIO numbers for TX/RX on your mikroBUS adapter? | **Needs your input** — update `main/main.c` |
+| Which GPIO numbers for TX/RX on your mikroBUS adapter? | **Needs your input** — update `main/main.c`; GPIO 16/17 are reserved for PSRAM on WROVER-E, must not be used |
 | Exact TX-to-RX turnaround time (IEC 62386 part 1)? | **Resolved** — 7 ms confirmed per IEC 62386-101 §8 |
 | Exact reply timeout (IEC 62386 part 1)? | **Resolved** — 25 ms (22 ms spec max + 3 ms margin) |
 | Maximum retry count before marking device offline? | **Decided** — 3 retries (tune on real hardware) |
 | DALI-2 instance discovery: auto or manual? | **Decided** — manual; auto-discovery deferred to post-loopback |
 | ESPHome component type: custom or external? | **Decided** — in-tree custom component now; migrate to external after Phase 9 works |
 | Host tests on Linux/WSL or MinGW on Windows? | **Decided** — MinGW on Windows |
+
+---
+
+## TODOs (require compiler / hardware access — do not edit source files until available)
+
+- [ ] **sdkconfig — flash size:** After first `idf.py build` or via `idf.py menuconfig`, set `CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y` (WROVER-E ships with 8 MB Flash; default ESP-IDF config targets 2 MB).
+- [ ] **sdkconfig — PSRAM (optional):** If PSRAM is ever needed, enable `CONFIG_SPIRAM=y` (formerly `CONFIG_ESP32_SPIRAM_SUPPORT`) in menuconfig. Not required for DALI operation.
+- [ ] **GPIO assignment:** Confirm mikroBUS header wiring on DevKitC-VE and update `DALI_TX_GPIO` / `DALI_RX_GPIO` in `main/main.c`. Avoid GPIO 16 and 17 (PSRAM).
 
 ---
 
