@@ -182,11 +182,14 @@ app_main
 ---
 
 ## Build Commands (once ESP-IDF is installed)
-# On-device build and flash
+### On-device build and flash
+```bash
 idf.py build
 idf.py -p COM<N> flash monitor
+```
 
-# Host unit tests (MinGW or WSL)
+### Host unit tests (MinGW or WSL)
+```bash
 cd test
 cmake -B build -G "MinGW Makefiles"   # or "Unix Makefiles" on WSL
 cmake --build build
