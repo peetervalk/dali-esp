@@ -28,6 +28,7 @@ uint8_t dali_control_percent_to_dapc(uint8_t percent);
 DaliError dali_control_build_dapc(DaliTarget target, uint8_t level, DaliFrame *out);
 DaliError dali_control_build_off(DaliTarget target, DaliFrame *out);
 DaliError dali_control_build_recall_max(DaliTarget target, DaliFrame *out);
+DaliError dali_control_build_recall_min(DaliTarget target, DaliFrame *out);
 DaliError dali_control_build_query_status(DaliTarget target, DaliFrame *out);
 
 /* Build and enqueue common transactions. */
@@ -36,6 +37,7 @@ DaliError dali_control_set_brightness(DaliTarget target, uint8_t brightness);
 DaliError dali_control_set_percent(DaliTarget target, uint8_t percent);
 DaliError dali_control_off(DaliTarget target);
 DaliError dali_control_recall_max(DaliTarget target);
+DaliError dali_control_recall_min(DaliTarget target);
 DaliError dali_control_query_status(DaliTarget target,
                                     DaliSchedCompletionCb cb,
                                     void *cb_ctx);

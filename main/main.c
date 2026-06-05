@@ -53,7 +53,11 @@ void app_main(void)
     xTaskCreatePinnedToCore(dali_task, "dali", DALI_TASK_STACK, NULL,
                             DALI_TASK_PRIORITY, NULL, DALI_TASK_CORE);
 
-    dali_diag_init();
+    err = dali_diag_init();
+    if (err != DALI_OK) {
+        ESP_LOGE(TAG, "dali_diag_init failed: %d", (int)err);
+        return;
+    }
 
     ESP_LOGI(TAG, "Initialisation complete");
 }

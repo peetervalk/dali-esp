@@ -5,8 +5,11 @@
  *
  * Responsibilities:
  *   - Stateless frame builders for standard 16-bit DALI commands
- *   - Stateless frame builders for DALI-2 24-bit extended commands
+ *   - Stateless frame builders for standard DALI-2 24-bit instance commands
  *   - Response parsing (8-bit backward frames)
+ *
+ * Vendor-specific commands and device profiles live in dedicated helper
+ * modules so IEC/common behavior stays separate from custom behavior.
  *
  * No hardware dependencies.  No ESPHome dependencies.
  * All functions are pure (no global state modified).
@@ -34,6 +37,7 @@ typedef enum {
     DALI_RESP_MEMORY_BYTE       = 5,
     DALI_RESP_INPUT_VALUE_MSB   = 6,
     DALI_RESP_INPUT_VALUE_LATCH = 7,
+    DALI_RESP_FADE_TIME_RATE    = 8,
 } DaliResponseKind;
 
 typedef enum {
@@ -126,16 +130,11 @@ typedef enum {
     DALI_CMD_WRITE_MEMORY_LOCATION,
     DALI_CMD_WRITE_MEMORY_LOCATION_NO_REPLY,
 
-    DALI_CMD_QUERY_VALUE_MULTIPLICATOR,
-    DALI_CMD_QUERY_VALUE_DIVISOR,
-    DALI_CMD_QUERY_OFFSET_MSB,
-    DALI_CMD_QUERY_OFFSET_LSB,
-    DALI_CMD_QUERY_OFFSET_MULTIPLICATOR,
-    DALI_CMD_QUERY_OFFSET_DIVISOR,
-    DALI_CMD_QUERY_UNIT,
     DALI_CMD_QUERY_RESOLUTION,
     DALI_CMD_QUERY_INPUT_VALUE,
     DALI_CMD_QUERY_INPUT_VALUE_LATCH,
+
+    DALI_CMD_COUNT,
 } DaliCommandId;
 
 typedef struct {
@@ -199,6 +198,9 @@ DaliFrame dali_cmd_recall_min(uint8_t addr);
 /* Group recall min level */
 DaliFrame dali_cmd_group_recall_min(uint8_t group);
 
+/* Broadcast: recall min all devices */
+DaliFrame dali_cmd_broadcast_recall_min(void);
+
 /* Turn off */
 DaliFrame dali_cmd_off(uint8_t addr);
 
@@ -228,7 +230,7 @@ DaliFrame dali_cmd_broadcast_recall_max(void);
  *   Byte 1 (middle):   instance byte — 0x00..0x1F specific; 0xFF = all
  *   Byte 0 (last tx):  command byte
  *
- * Command codes should be verified against IEC 62386-103/3xx before use.
+ * Custom/vendor instance commands should be built by dedicated helper modules.
  * --------------------------------------------------------------------------*/
 
 /* Instance command to a single device (short address 0–63).
@@ -270,12 +272,40 @@ typedef struct {
 DaliError dali_parse_status(uint8_t raw, DaliStatus *out);
 
 typedef struct {
+    uint8_t fade_time;
+    uint8_t fade_rate;
+} DaliFadeTimeRate;
+
+/* Split a packed QUERY FADE TIME / FADE RATE byte into high/low nibbles. */
+DaliError dali_parse_fade_time_rate(uint8_t raw, DaliFadeTimeRate *out);
+
+typedef struct {
+    uint32_t value;          /* MSB-first combined value, up to 4 bytes */
+    uint8_t  byte_count;
+    uint8_t  expected_bytes;
+    bool     complete;
+} DaliInputValue;
+
+/* Initialise an MSB-first DALI-2 input-value accumulator. expected: 1..4. */
+DaliError dali_input_value_start(DaliInputValue *out, uint8_t expected_bytes);
+
+/* Append one raw byte to an input-value accumulator. */
+DaliError dali_input_value_push(DaliInputValue *value, uint8_t byte);
+
+/* Append one 8-bit backward frame to an input-value accumulator. */
+DaliError dali_input_value_push_frame(DaliInputValue *value, const DaliFrame *frame);
+
+/* Convenience helper for the common 16-bit two-byte input-value case. */
+DaliError dali_input_value_parse_16(uint8_t msb, uint8_t lsb, uint16_t *out);
+
+typedef struct {
     DaliResponseKind kind;
     uint8_t          raw;
     uint8_t          value;
     uint8_t          bitset;
     bool             yes;
     DaliStatus       status;
+    DaliFadeTimeRate fade;
 } DaliParsedResponse;
 
 /* Parse a backward frame according to an explicit response kind. */

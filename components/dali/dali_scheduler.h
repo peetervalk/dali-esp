@@ -8,6 +8,7 @@
  *   - Send-twice enforcement (DALI_SEND_TWICE_WINDOW_MS)
  *   - Reply timeout (DALI_REPLY_TIMEOUT_MS) and retry (retries_left)
  *   - TX/RX handoff with DaliPhy via injected ops
+ *   - Optional task-context trace callbacks for diagnostics
  *
  * All functions run in task context — never called from ISR.
  *
@@ -45,6 +46,25 @@ typedef void (*DaliSchedCompletionCb)(DaliError result,
  */
 typedef void (*DaliSchedEventCb)(const DaliFrame *frame, void *cb_ctx);
 
+typedef enum {
+    DALI_SCHED_TRACE_TX = 0,
+    DALI_SCHED_TRACE_RX = 1,
+} DaliSchedTraceDirection;
+
+typedef struct {
+    DaliSchedTraceDirection direction;
+    DaliFrame               frame;
+    uint32_t                timestamp_us;
+    uint32_t                since_tx_us;
+    bool                    has_since_tx;
+} DaliSchedTraceEvent;
+
+/*
+ * Per-frame trace callback. Invoked from task context after TX completes or
+ * when RX frames reach the scheduler.
+ */
+typedef void (*DaliSchedTraceCb)(const DaliSchedTraceEvent *event, void *cb_ctx);
+
 /* ---------------------------------------------------------------------------
  * Transaction descriptor
  * --------------------------------------------------------------------------*/
@@ -65,6 +85,7 @@ typedef struct {
     DaliError (*tx)(const DaliFrame *frame);
     void      (*set_rx_callback)(DaliPhyRxCallback cb, void *ctx);
     uint32_t  (*get_tick_ms)(void);
+    uint32_t  (*get_time_us)(void); /* optional; falls back to get_tick_ms */
 } DaliSchedOps;
 
 /* ---------------------------------------------------------------------------
@@ -94,6 +115,12 @@ void dali_sched_notify_rx(const DaliFrame *frame);
  * Passing NULL disables event routing.
  */
 DaliError dali_sched_set_event_callback(DaliSchedEventCb cb, void *cb_ctx);
+
+/*
+ * Register a task-context frame trace callback.
+ * Passing NULL disables trace routing.
+ */
+DaliError dali_sched_set_trace_callback(DaliSchedTraceCb cb, void *cb_ctx);
 
 /* Reset scheduler: clear queue and return to IDLE. */
 DaliError dali_sched_reset(void);

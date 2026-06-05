@@ -1,9 +1,19 @@
 # DALI Command Reference — Working Draft
 
-This is a working implementation reference for `dali_protocol` and parsers.
-It is not a replacement for IEC 62386. Public manufacturer/library references are
-used to build the first command database; commands marked **verify** should be
-checked against IEC 62386 before relying on them for commissioning or sensors.
+This is a working implementation reference for `dali_protocol`, parsers, and
+dedicated vendor/profile helpers. It is not a replacement for IEC 62386. Public
+manufacturer/library references are used to build the first command database.
+
+Verification status as of 2026-06-06:
+
+- Standard control-gear opcodes, response kind assignments, and special command
+  opcodes are source-checked against the Microchip/IEC references.
+- Standard DALI-2 input-device opcodes `0x81`, `0x8C`, and `0x8D` are
+  source-checked against IEC 62386-103 references.
+- Instance opcodes `0x40`..`0x46` are real Lunatone sensor-instance scaling
+  queries implemented in `dali_lunatone`; they are intentionally excluded from
+  generic `dali_protocol` metadata because they are sensor-specific extensions
+  rather than generic IEC 62386-103 commands.
 
 ## Sources Used
 
@@ -11,6 +21,7 @@ checked against IEC 62386 before relying on them for commissioning or sensors.
 - Microchip TB3200 PDF: https://ww1.microchip.com/downloads/en/Appnotes/90003200A.pdf
 - Beckhoff DALI-2 Query Input Value: https://infosys.beckhoff.com/content/1033/tcplclib_tc2_dali/4346134027.html
 - Lunatone DALI-2 instance guide: https://www.lunatone.com/wp-content/uploads/2021/10/DALI-2_Instance-Guide_EN_M0024.pdf
+- Lunatone DALI-2 sensor instances: https://www.lunatone.com/wp-content/uploads/2022/11/Lunatone_DALI-2_Sensor_Instances_EN_M0026.pdf
 - Steinel DALI-2 interface description: https://www.steinel.de/out/media/interfacedoc/94546_DALI-2%20Interface%20Description_V1.5.pdf
 
 ## Frame Encoding Notes
@@ -60,6 +71,7 @@ Instance addressing modes beyond direct instance number need verification.
 | `MEMORY_BYTE` | memory location value | read memory |
 | `INPUT_VALUE_MSB` | first byte of latched DALI-2 input value | input devices |
 | `INPUT_VALUE_LATCH` | subsequent byte of latched DALI-2 input value | input devices |
+| `FADE_TIME_RATE` | packed high/low nibbles | fade-time/fade-rate query |
 
 ## Standard Control Gear Commands
 
@@ -82,7 +94,7 @@ Instance addressing modes beyond direct instance number need verification.
 | `0x06` | RECALL MIN LEVEL | none | implemented for short/group |
 | `0x07` | STEP DOWN AND OFF | none | planned |
 | `0x08` | ON AND STEP UP | none | planned |
-| `0x09` | ENABLE DAPC SEQUENCE | none | planned, verify DALI-2 semantics |
+| `0x09` | ENABLE DAPC SEQUENCE | none | planned, DALI-2 |
 | `0x0A` | GO TO LAST ACTIVE LEVEL | none | planned, DALI-2 |
 | `0x10..0x1F` | GO TO SCENE 0..15 | none | planned |
 
@@ -95,9 +107,9 @@ control/query commands.
 |---:|---|---|---|
 | `0x20` | RESET | none | planned, send twice |
 | `0x21` | STORE ACTUAL LEVEL IN DTR0 | none | planned |
-| `0x22` | SAVE PERSISTENT VARIABLES | none | planned, DALI-2, verify |
-| `0x23` | SET OPERATING MODE DTR0 | none | planned, DALI-2, verify |
-| `0x24` | RESET MEMORY BANK DTR0 | none | planned, DALI-2, verify |
+| `0x22` | SAVE PERSISTENT VARIABLES | none | planned, DALI-2 |
+| `0x23` | SET OPERATING MODE DTR0 | none | planned, DALI-2 |
+| `0x24` | RESET MEMORY BANK DTR0 | none | planned, DALI-2 |
 | `0x25` | IDENTIFY DEVICE | none | planned, useful for diagnostics |
 | `0x2A` | SET MAX LEVEL DTR0 | none | planned |
 | `0x2B` | SET MIN LEVEL DTR0 | none | planned |
@@ -105,7 +117,7 @@ control/query commands.
 | `0x2D` | SET POWER ON LEVEL DTR0 | none | planned |
 | `0x2E` | SET FADE TIME DTR0 | none | planned |
 | `0x2F` | SET FADE RATE DTR0 | none | planned |
-| `0x30` | SET EXTENDED FADE TIME DTR0 | none | planned, DALI-2, verify |
+| `0x30` | SET EXTENDED FADE TIME DTR0 | none | planned, DALI-2 |
 | `0x40..0x4F` | SET SCENE 0..15 DTR0 | none | planned |
 | `0x50..0x5F` | REMOVE FROM SCENE 0..15 | none | planned |
 | `0x60..0x6F` | ADD TO GROUP 0..15 | none | planned |
@@ -134,18 +146,18 @@ can create multiple simultaneous backward frames.
 | `0x9B` | QUERY POWER FAILURE | `YES_NO` | planned |
 | `0x9C` | QUERY CONTENT DTR1 | `UINT8` | planned |
 | `0x9D` | QUERY CONTENT DTR2 | `UINT8` | planned |
-| `0x9E` | QUERY OPERATING MODE | `UINT8` | planned, DALI-2, verify |
-| `0x9F` | QUERY LIGHT SOURCE TYPE | `UINT8` | planned, DALI-2, verify |
+| `0x9E` | QUERY OPERATING MODE | `UINT8` | planned, DALI-2 |
+| `0x9F` | QUERY LIGHT SOURCE TYPE | `UINT8` | planned, DALI-2 |
 | `0xA0` | QUERY ACTUAL LEVEL | `UINT8` | frame builder implemented; parser generic only |
 | `0xA1` | QUERY MAX LEVEL | `UINT8` | planned |
 | `0xA2` | QUERY MIN LEVEL | `UINT8` | planned |
 | `0xA3` | QUERY POWER ON LEVEL | `UINT8` | planned |
 | `0xA4` | QUERY SYSTEM FAILURE LEVEL | `UINT8` | planned |
-| `0xA5` | QUERY FADE TIME / FADE RATE | `UINT8` packed nibbles | planned |
-| `0xA6` | QUERY MANUFACTURER SPECIFIC MODE | `YES_NO` | planned, DALI-2, verify |
-| `0xA7` | QUERY NEXT DEVICE TYPE | `UINT8` or special sequence | planned, DALI-2, verify |
-| `0xA8` | QUERY EXTENDED FADE TIME | `UINT8` packed nibbles | planned, DALI-2, verify |
-| `0xAA` | QUERY CONTROL GEAR FAILURE | `YES_NO` | planned, DALI-2, verify |
+| `0xA5` | QUERY FADE TIME / FADE RATE | `FADE_TIME_RATE` | parser implemented |
+| `0xA6` | QUERY MANUFACTURER SPECIFIC MODE | `YES_NO` | planned, DALI-2 |
+| `0xA7` | QUERY NEXT DEVICE TYPE | `UINT8` or special sequence | planned, DALI-2 |
+| `0xA8` | QUERY EXTENDED FADE TIME | `UINT8` packed nibbles | planned, DALI-2 |
+| `0xAA` | QUERY CONTROL GEAR FAILURE | `YES_NO` | planned, DALI-2 |
 | `0xB0..0xBF` | QUERY SCENE LEVEL 0..15 | `UINT8` | planned |
 | `0xC0` | QUERY GROUPS 0-7 | `BITSET8` | planned |
 | `0xC1` | QUERY GROUPS 8-15 | `BITSET8` | planned |
@@ -168,7 +180,7 @@ Special commands do not use the same normal addressed-command shape as ordinary
 | `0xA7` | RANDOMIZE | none | planned, special frame, send twice |
 | `0xA9` | COMPARE | `YES_NO` | planned, special frame |
 | `0xAB` | WITHDRAW | none | planned, special frame |
-| `0xAD` | PING | none | planned, DALI-2, verify |
+| `0xAD` | PING | none | planned, DALI-2 |
 | `0xB1` | SEARCH ADDRH | none | planned, special frame |
 | `0xB3` | SEARCH ADDRM | none | planned, special frame |
 | `0xB5` | SEARCH ADDRL | none | planned, special frame |
@@ -188,16 +200,25 @@ HF 360 II DALI-2 IPD sensor.
 
 | Opcode | Name | Response | Status |
 |---:|---|---|---|
-| `0x40` | QUERY VALUE MULTIPLICATOR | `UINT8` | planned for generic sensors |
-| `0x41` | QUERY VALUE DIVISOR | `UINT8` | planned for generic sensors |
-| `0x42` | QUERY OFFSET MSB | `UINT8` | planned for generic sensors |
-| `0x43` | QUERY OFFSET LSB | `UINT8` | planned for generic sensors |
-| `0x44` | QUERY OFFSET MULTIPLICATOR | `UINT8` | planned for generic sensors |
-| `0x45` | QUERY OFFSET DIVISOR | `UINT8` | planned for generic sensors |
-| `0x46` | QUERY UNIT | `UINT8` | planned for generic sensors |
 | `0x81` | QUERY RESOLUTION | `UINT8` | planned |
 | `0x8C` | QUERY INPUT VALUE | `INPUT_VALUE_MSB` | planned |
 | `0x8D` | QUERY INPUT VALUE LATCH | `INPUT_VALUE_LATCH` | planned |
+
+### Lunatone Sensor-Specific Instance Queries
+
+These are documented by Lunatone for their generic-purpose sensor instances.
+They should not be treated as standard IEC 62386-103 commands or assumed to
+work on the Steinel sensor until confirmed on hardware or in Steinel docs.
+
+| Opcode | Name | Response | Status |
+|---:|---|---|---|
+| `0x40` | QUERY VALUE MULTIPLICATOR | `UINT8` | implemented in `dali_lunatone` |
+| `0x41` | QUERY VALUE DIVISOR | `UINT8` | implemented in `dali_lunatone` |
+| `0x42` | QUERY OFFSET MSB | `UINT8` | implemented in `dali_lunatone` |
+| `0x43` | QUERY OFFSET LSB | `UINT8` | implemented in `dali_lunatone` |
+| `0x44` | QUERY OFFSET MULTIPLICATOR | `UINT8` | implemented in `dali_lunatone` |
+| `0x45` | QUERY OFFSET DIVISOR | `UINT8` | implemented in `dali_lunatone` |
+| `0x46` | QUERY UNIT | `UINT8` | implemented in `dali_lunatone` |
 
 Known Steinel HF 360 II DALI-2 IPD instance targets:
 
@@ -214,6 +235,8 @@ Known Steinel HF 360 II DALI-2 IPD instance targets:
 - [x] Add generic addressed command builders by target type.
 - [x] Add response parser functions by `ResponseKind`.
 - [x] Add DALI-2 input-device constants and short-address instance builders.
-- [ ] Add Steinel-specific value conversion helpers.
+- [x] Add Lunatone-specific query helpers outside generic `dali_protocol`.
+- [x] Add Steinel-specific value conversion helpers outside PHY/scheduler.
+- [x] Add static mapping validation helpers without entity-name assumptions.
 - [x] Add initial unit tests for command metadata, generic builders, and parser dispatch.
-- [ ] Add focused unit tests for every new specialized command/parser before hardware tests.
+- [x] Add focused unit tests for every new specialized command/parser before hardware tests.

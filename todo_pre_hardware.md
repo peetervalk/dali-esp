@@ -14,11 +14,11 @@ The goal is to make native ESP-IDF bring-up less ambiguous.
 
 ## PHY
 
-- [ ] Add bus-idle / stuck-low guard before TX.
-  - [ ] Return `DALI_ERR_BUS_STUCK` when the line is active too long.
-  - [ ] Increment a diagnostic counter readable by `stats`.
-- [ ] Add RX self-echo suppression while the controller is transmitting.
-- [ ] Suppress RX during the 7 ms TX-to-RX settle period.
+- [x] Add bus-idle / stuck-low guard before TX.
+  - [x] Return `DALI_ERR_BUS_STUCK` when the line is active too long.
+  - [x] Increment a diagnostic counter readable by `stats`.
+- [x] Add RX self-echo suppression while the controller is transmitting.
+- [x] Suppress RX during the 7 ms TX-to-RX settle period.
 - [x] Audit every ISR-called function for IRAM safety.
 - [x] Keep ISR work limited to symbol output, timestamp capture, state advance,
       and counters.
@@ -34,33 +34,37 @@ The goal is to make native ESP-IDF bring-up less ambiguous.
 
 ## Diagnostic CLI
 
-- [ ] Implement real task-context trace output.
+- [x] Implement real task-context trace output.
   - TX example: `[BUS] TX 0x0B90 (16-bit)`
   - RX example: `[BUS] RX 0xAF (8-bit, 3.1 ms after TX)`
-- [ ] Add `read` to print the last received raw frame.
+- [x] Add `read` to print the last received raw frame.
 - [x] Extend `raw <hex> len=<n>` with an optional wait-for-reply mode.
-- [ ] Add richer named command helpers so diagnostics do not require raw hex for
+- [x] Route `raw` TX through the scheduler in both wait and no-wait modes.
+- [x] Add richer named command helpers so diagnostics do not require raw hex for
       common operations.
-- [ ] Add `discover`, `inventory`, and `identify` commands after the scheduler
+- [x] Add `discover`, `inventory`, and `identify` commands after the scheduler
       RX gating is safe.
 
 ## Protocol And Control
 
-- [ ] Finish specialized parser helpers.
-  - [ ] Packed fade-time/fade-rate nibbles.
-  - [ ] Combined 16-bit / multi-byte DALI-2 input values.
-- [ ] Add focused tests for each command metadata entry and parser kind.
-- [ ] Verify public-source command constants against IEC 62386 or manufacturer
+- [x] Finish specialized parser helpers.
+  - [x] Packed fade-time/fade-rate nibbles.
+  - [x] Combined 16-bit / multi-byte DALI-2 input values.
+- [x] Add focused tests for each command metadata entry and parser kind.
+- [x] Verify public-source command constants against IEC 62386 or manufacturer
       documentation before relying on them for commissioning.
-- [ ] Keep Steinel-specific helpers out of PHY and scheduler.
-- [ ] Add a future static mapping layer, but do not hard-code entity names or
+  - [x] Mark `0x40`..`0x46` input-instance scaling queries as Lunatone-specific,
+        not generic IEC 62386-103 commands.
+- [x] Keep Steinel-specific helpers out of PHY and scheduler.
+- [x] Add a future static mapping layer, but do not hard-code entity names or
       "lamp 1 means group 0" assumptions in protocol code.
 
 ## Diagnostics Counters
 
-- [ ] Consider adding counters for:
-  - [ ] Bus stuck / idle failures.
+- [x] Consider adding counters for:
+  - [x] Bus stuck / idle failures.
   - [x] RX frames ignored outside reply window.
   - [x] Unsolicited events routed.
-  - [ ] RX self-echo frames suppressed.
+  - [x] RX self-echo frames suppressed.
+  - [x] RX settle-period frames suppressed.
   - [x] Raw malformed frame length / parser failures.

@@ -1,26 +1,35 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-06-05 (rev 9)
+**Last updated:** 2026-06-06 (rev 14)
 **Framework:** ESP-IDF v6.0.1 native CMake
 **Hardware target:** ESP32-DevKitC-VE / ESP32-WROVER-E + MikroE DALI-2 Click
 **Timer:** GPTIMER, 104 us alarm, 4x oversampling of the DALI half-bit
 
 ## Status Summary
 
-The core software stack is implemented enough for pre-hardware cleanup and
+The pre-hardware software stack is complete enough to move into hardware
 bring-up:
 
 - `DaliFrame`, error types, timing constants, and stats exist.
 - SPSC RX ring buffer exists and is host-tested.
-- PHY TX encode path and RX Manchester decode path exist and are host-tested.
+- PHY TX encode path and RX Manchester decode path exist and are host-tested;
+  TX now guards for bus idle and suppresses RX self-echo / settle-period edges.
 - Scheduler queue/state machine exists with retry, reply timeout, send-twice,
-  8-bit reply gating, raw 24-bit unsolicited event routing, and host mock tests.
-- Protocol builders and response parser dispatch exist for standard 16-bit
-  commands plus draft DALI-2 instance commands.
+  8-bit reply gating, task-context trace hooks, raw 24-bit unsolicited event
+  routing, and host mock tests.
+- Protocol builders and response parser dispatch exist for standard/common
+  16-bit commands plus draft standard DALI-2 instance commands; parser helpers
+  cover packed fade-time/rate and MSB-first multi-byte input values.
+- Vendor/profile helpers are separate from the generic protocol layer:
+  Lunatone-only instance scaling queries live in `dali_lunatone`, and the
+  Steinel HF 360 II instance profile/conversions live in `dali_steinel`.
+- Static mapping helpers in `dali_mapping` validate configured outputs and
+  input instances without assigning room/entity semantics.
 - `dali_control` is a first command-translation layer for short/group/broadcast
   targets and Home Assistant-style brightness values.
-- Native diagnostic CLI exists with `stats`, `trace on/off`, `reset`, `raw`
-  including optional reply wait, `scan`, and `query`.
+- Native diagnostic CLI exists with `help`, `stats`, `trace on/off`, `read`,
+  `reset`, scheduler-routed `raw`, named `level/off/max/min/status`, `scan`,
+  `discover`, `inventory`, and `identify`.
 - Added `sdkconfig.defaults` for ESP32-WROVER-E bring-up: 8 MB flash,
   240 MHz CPU, 1000 Hz FreeRTOS tick, and ISR-adjacent GPIO/GPTIMER/FreeRTOS
   IRAM options; fresh generated config keeps `esp_timer_get_time()` in IRAM.
@@ -28,10 +37,10 @@ bring-up:
 
 Latest known verification:
 
-- `idf.py build` passes as of 2026-06-05.
+- `idf.py build` passes as of 2026-06-06.
 - Fresh build from `sdkconfig.defaults` passes and generates 8 MB flash image
   arguments as of 2026-06-05.
-- Host tests pass: 6 suites, 85 tests.
+- Host tests pass as of 2026-06-06: 8 suites, 121 `RUN_TEST` cases.
 - Real hardware flashing, timing, loopback, and device communication are still
   pending.
 
@@ -60,9 +69,9 @@ There are two distinct workflows:
 
 ```text
 ESPHome / Home Assistant integration      (stub)
-DALI entity mapping / release integration (future)
+DALI entity mapping / release integration (mapping helpers ready, release future)
 DaliControl                               (draft implemented)
-DaliProtocol                              (core implemented, sensor work pending)
+DaliProtocol                              (core implemented, hardware sensor polling pending)
 DaliScheduler                             (implemented, host-tested)
 DaliPhy                                   (software implemented, hardware pending)
 DaliRingBuf                               (implemented, host-tested)
@@ -72,11 +81,10 @@ DALI bus
 
 ## Immediate Priorities
 
-1. Finish pre-hardware software cleanup from `todo_pre_hardware.md`.
-2. Validate native firmware on the ESP32 with serial CLI and logic analyzer.
-3. Compare real DALI traffic against Lunatone DALI Cockpit captures.
-4. Bring up known control gear first, then the Steinel HF 360 II DALI-2 sensor.
-5. Only after native diagnostics are reliable, build the ESPHome-flashable
+1. Validate native firmware on the ESP32 with serial CLI and logic analyzer.
+2. Compare real DALI traffic against Lunatone DALI Cockpit captures.
+3. Bring up known control gear first, then the Steinel HF 360 II DALI-2 sensor.
+4. Only after native diagnostics are reliable, build the ESPHome-flashable
    diagnostic/discovery firmware described in `todo_esphome_release.md`.
 
 ## Known Target Sensor
@@ -97,7 +105,7 @@ Expected non-ECO instances:
 | 2 | 0 | Generic temperature |
 | 3 | 0 | Generic humidity |
 
-Steinel conversions to implement after input-value reads work:
+Steinel conversions available in `dali_steinel` after input-value reads work:
 
 - Temperature: `T_C = (binValue * 0.1) - 5`
 - Humidity: `H_percent = binValue * 0.5`

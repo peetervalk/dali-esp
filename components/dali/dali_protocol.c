@@ -1,7 +1,7 @@
 #include "dali_protocol.h"
 
-#define CMD(id, name, first, last, frame, resp, twice, done) \
-    { id, name, first, last, frame, resp, twice, done }
+#define CMD(id, name, first, last, frame, resp, twice, implemented) \
+    { id, name, first, last, frame, resp, twice, implemented }
 
 static const DaliCommandInfo s_command_table[] = {
     CMD(DALI_CMD_DAPC, "DAPC", 0x00u, 0xFEu, DALI_CMD_FRAME_DAPC, DALI_RESP_NONE, false, true),
@@ -20,24 +20,24 @@ static const DaliCommandInfo s_command_table[] = {
     CMD(DALI_CMD_GO_TO_SCENE, "GO TO SCENE", 0x10u, 0x1Fu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
 
     CMD(DALI_CMD_RESET, "RESET", 0x20u, 0x20u, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
-    CMD(DALI_CMD_STORE_ACTUAL_LEVEL_DTR0, "STORE ACTUAL LEVEL IN DTR0", 0x21u, 0x21u, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_SAVE_PERSISTENT_VARIABLES, "SAVE PERSISTENT VARIABLES", 0x22u, 0x22u, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_SET_OPERATING_MODE_DTR0, "SET OPERATING MODE DTR0", 0x23u, 0x23u, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_RESET_MEMORY_BANK_DTR0, "RESET MEMORY BANK DTR0", 0x24u, 0x24u, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_IDENTIFY_DEVICE, "IDENTIFY DEVICE", 0x25u, 0x25u, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_SET_MAX_LEVEL_DTR0, "SET MAX LEVEL DTR0", 0x2Au, 0x2Au, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_SET_MIN_LEVEL_DTR0, "SET MIN LEVEL DTR0", 0x2Bu, 0x2Bu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_SET_SYSTEM_FAILURE_LEVEL_DTR0, "SET SYSTEM FAILURE LEVEL DTR0", 0x2Cu, 0x2Cu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_SET_POWER_ON_LEVEL_DTR0, "SET POWER ON LEVEL DTR0", 0x2Du, 0x2Du, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_SET_FADE_TIME_DTR0, "SET FADE TIME DTR0", 0x2Eu, 0x2Eu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_SET_FADE_RATE_DTR0, "SET FADE RATE DTR0", 0x2Fu, 0x2Fu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_SET_EXTENDED_FADE_TIME_DTR0, "SET EXTENDED FADE TIME DTR0", 0x30u, 0x30u, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_SET_SCENE, "SET SCENE", 0x40u, 0x4Fu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_REMOVE_FROM_SCENE, "REMOVE FROM SCENE", 0x50u, 0x5Fu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_ADD_TO_GROUP, "ADD TO GROUP", 0x60u, 0x6Fu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_REMOVE_FROM_GROUP, "REMOVE FROM GROUP", 0x70u, 0x7Fu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_SET_SHORT_ADDRESS_DTR0, "SET SHORT ADDRESS DTR0", 0x80u, 0x80u, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_ENABLE_WRITE_MEMORY, "ENABLE WRITE MEMORY", 0x81u, 0x81u, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, false),
+    CMD(DALI_CMD_STORE_ACTUAL_LEVEL_DTR0, "STORE ACTUAL LEVEL IN DTR0", 0x21u, 0x21u, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
+    CMD(DALI_CMD_SAVE_PERSISTENT_VARIABLES, "SAVE PERSISTENT VARIABLES", 0x22u, 0x22u, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
+    CMD(DALI_CMD_SET_OPERATING_MODE_DTR0, "SET OPERATING MODE DTR0", 0x23u, 0x23u, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
+    CMD(DALI_CMD_RESET_MEMORY_BANK_DTR0, "RESET MEMORY BANK DTR0", 0x24u, 0x24u, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
+    CMD(DALI_CMD_IDENTIFY_DEVICE, "IDENTIFY DEVICE", 0x25u, 0x25u, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
+    CMD(DALI_CMD_SET_MAX_LEVEL_DTR0, "SET MAX LEVEL DTR0", 0x2Au, 0x2Au, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
+    CMD(DALI_CMD_SET_MIN_LEVEL_DTR0, "SET MIN LEVEL DTR0", 0x2Bu, 0x2Bu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
+    CMD(DALI_CMD_SET_SYSTEM_FAILURE_LEVEL_DTR0, "SET SYSTEM FAILURE LEVEL DTR0", 0x2Cu, 0x2Cu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
+    CMD(DALI_CMD_SET_POWER_ON_LEVEL_DTR0, "SET POWER ON LEVEL DTR0", 0x2Du, 0x2Du, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
+    CMD(DALI_CMD_SET_FADE_TIME_DTR0, "SET FADE TIME DTR0", 0x2Eu, 0x2Eu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
+    CMD(DALI_CMD_SET_FADE_RATE_DTR0, "SET FADE RATE DTR0", 0x2Fu, 0x2Fu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
+    CMD(DALI_CMD_SET_EXTENDED_FADE_TIME_DTR0, "SET EXTENDED FADE TIME DTR0", 0x30u, 0x30u, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
+    CMD(DALI_CMD_SET_SCENE, "SET SCENE", 0x40u, 0x4Fu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
+    CMD(DALI_CMD_REMOVE_FROM_SCENE, "REMOVE FROM SCENE", 0x50u, 0x5Fu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
+    CMD(DALI_CMD_ADD_TO_GROUP, "ADD TO GROUP", 0x60u, 0x6Fu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
+    CMD(DALI_CMD_REMOVE_FROM_GROUP, "REMOVE FROM GROUP", 0x70u, 0x7Fu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
+    CMD(DALI_CMD_SET_SHORT_ADDRESS_DTR0, "SET SHORT ADDRESS DTR0", 0x80u, 0x80u, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
+    CMD(DALI_CMD_ENABLE_WRITE_MEMORY, "ENABLE WRITE MEMORY", 0x81u, 0x81u, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, true, false),
 
     CMD(DALI_CMD_QUERY_STATUS, "QUERY STATUS", 0x90u, 0x90u, DALI_CMD_FRAME_16BIT, DALI_RESP_STATUS, false, true),
     CMD(DALI_CMD_QUERY_CONTROL_GEAR_PRESENT, "QUERY CONTROL GEAR PRESENT", 0x91u, 0x91u, DALI_CMD_FRAME_16BIT, DALI_RESP_YES_NO, false, false),
@@ -60,7 +60,7 @@ static const DaliCommandInfo s_command_table[] = {
     CMD(DALI_CMD_QUERY_MIN_LEVEL, "QUERY MIN LEVEL", 0xA2u, 0xA2u, DALI_CMD_FRAME_16BIT, DALI_RESP_UINT8, false, false),
     CMD(DALI_CMD_QUERY_POWER_ON_LEVEL, "QUERY POWER ON LEVEL", 0xA3u, 0xA3u, DALI_CMD_FRAME_16BIT, DALI_RESP_UINT8, false, false),
     CMD(DALI_CMD_QUERY_SYSTEM_FAILURE_LEVEL, "QUERY SYSTEM FAILURE LEVEL", 0xA4u, 0xA4u, DALI_CMD_FRAME_16BIT, DALI_RESP_UINT8, false, false),
-    CMD(DALI_CMD_QUERY_FADE_TIME_FADE_RATE, "QUERY FADE TIME/FADE RATE", 0xA5u, 0xA5u, DALI_CMD_FRAME_16BIT, DALI_RESP_UINT8, false, false),
+    CMD(DALI_CMD_QUERY_FADE_TIME_FADE_RATE, "QUERY FADE TIME/FADE RATE", 0xA5u, 0xA5u, DALI_CMD_FRAME_16BIT, DALI_RESP_FADE_TIME_RATE, false, false),
     CMD(DALI_CMD_QUERY_MANUFACTURER_SPECIFIC_MODE, "QUERY MANUFACTURER SPECIFIC MODE", 0xA6u, 0xA6u, DALI_CMD_FRAME_16BIT, DALI_RESP_YES_NO, false, false),
     CMD(DALI_CMD_QUERY_NEXT_DEVICE_TYPE, "QUERY NEXT DEVICE TYPE", 0xA7u, 0xA7u, DALI_CMD_FRAME_16BIT, DALI_RESP_UINT8, false, false),
     CMD(DALI_CMD_QUERY_EXTENDED_FADE_TIME, "QUERY EXTENDED FADE TIME", 0xA8u, 0xA8u, DALI_CMD_FRAME_16BIT, DALI_RESP_UINT8, false, false),
@@ -93,13 +93,6 @@ static const DaliCommandInfo s_command_table[] = {
     CMD(DALI_CMD_WRITE_MEMORY_LOCATION, "WRITE MEMORY LOCATION", 0xC7u, 0xC7u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_MEMORY_BYTE, false, false),
     CMD(DALI_CMD_WRITE_MEMORY_LOCATION_NO_REPLY, "WRITE MEMORY LOCATION NO REPLY", 0xC9u, 0xC9u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, false),
 
-    CMD(DALI_CMD_QUERY_VALUE_MULTIPLICATOR, "QUERY VALUE MULTIPLICATOR", 0x40u, 0x40u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, false),
-    CMD(DALI_CMD_QUERY_VALUE_DIVISOR, "QUERY VALUE DIVISOR", 0x41u, 0x41u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, false),
-    CMD(DALI_CMD_QUERY_OFFSET_MSB, "QUERY OFFSET MSB", 0x42u, 0x42u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, false),
-    CMD(DALI_CMD_QUERY_OFFSET_LSB, "QUERY OFFSET LSB", 0x43u, 0x43u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, false),
-    CMD(DALI_CMD_QUERY_OFFSET_MULTIPLICATOR, "QUERY OFFSET MULTIPLICATOR", 0x44u, 0x44u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, false),
-    CMD(DALI_CMD_QUERY_OFFSET_DIVISOR, "QUERY OFFSET DIVISOR", 0x45u, 0x45u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, false),
-    CMD(DALI_CMD_QUERY_UNIT, "QUERY UNIT", 0x46u, 0x46u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, false),
     CMD(DALI_CMD_QUERY_RESOLUTION, "QUERY RESOLUTION", 0x81u, 0x81u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, false),
     CMD(DALI_CMD_QUERY_INPUT_VALUE, "QUERY INPUT VALUE", 0x8Cu, 0x8Cu, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_INPUT_VALUE_MSB, false, false),
     CMD(DALI_CMD_QUERY_INPUT_VALUE_LATCH, "QUERY INPUT VALUE LATCH", 0x8Du, 0x8Du, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_INPUT_VALUE_LATCH, false, false),
@@ -352,6 +345,13 @@ DaliFrame dali_cmd_group_recall_min(uint8_t group)
     return f;
 }
 
+DaliFrame dali_cmd_broadcast_recall_min(void)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_command(DALI_ADDR_BROADCAST, 0u, DALI_CMD_RECALL_MIN_LEVEL, 0u, &f);
+    return f;
+}
+
 DaliFrame dali_cmd_off(uint8_t addr)
 {
     DaliFrame f = {0u, 0u};
@@ -454,6 +454,62 @@ DaliError dali_parse_status(uint8_t raw, DaliStatus *out)
     return DALI_OK;
 }
 
+DaliError dali_parse_fade_time_rate(uint8_t raw, DaliFadeTimeRate *out)
+{
+    if (out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    out->fade_time = (uint8_t)((raw >> 4u) & 0x0Fu);
+    out->fade_rate = (uint8_t)(raw & 0x0Fu);
+    return DALI_OK;
+}
+
+DaliError dali_input_value_start(DaliInputValue *out, uint8_t expected_bytes)
+{
+    if (out == NULL || expected_bytes == 0u || expected_bytes > 4u) {
+        return DALI_ERR_INVALID;
+    }
+
+    *out = (DaliInputValue){
+        .value          = 0u,
+        .byte_count     = 0u,
+        .expected_bytes = expected_bytes,
+        .complete       = false,
+    };
+    return DALI_OK;
+}
+
+DaliError dali_input_value_push(DaliInputValue *value, uint8_t byte)
+{
+    if (value == NULL || value->expected_bytes == 0u ||
+        value->expected_bytes > 4u ||
+        value->byte_count >= value->expected_bytes) {
+        return DALI_ERR_INVALID;
+    }
+
+    value->value = (value->value << 8u) | (uint32_t)byte;
+    value->byte_count++;
+    value->complete = value->byte_count == value->expected_bytes;
+    return DALI_OK;
+}
+
+DaliError dali_input_value_push_frame(DaliInputValue *value, const DaliFrame *frame)
+{
+    if (frame == NULL || frame->bit_length != 8u) {
+        return DALI_ERR_INVALID;
+    }
+    return dali_input_value_push(value, (uint8_t)(frame->data & 0xFFu));
+}
+
+DaliError dali_input_value_parse_16(uint8_t msb, uint8_t lsb, uint16_t *out)
+{
+    if (out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    *out = (uint16_t)(((uint16_t)msb << 8u) | (uint16_t)lsb);
+    return DALI_OK;
+}
+
 DaliError dali_parse_by_kind(DaliResponseKind kind,
                              const DaliFrame *frame,
                              DaliParsedResponse *out)
@@ -470,6 +526,7 @@ DaliError dali_parse_by_kind(DaliResponseKind kind,
         .bitset = raw,
         .yes    = false,
         .status = {0},
+        .fade   = {0u, 0u},
     };
 
     switch (kind) {
@@ -489,6 +546,9 @@ DaliError dali_parse_by_kind(DaliResponseKind kind,
 
         case DALI_RESP_STATUS:
             return dali_parse_status(raw, &out->status);
+
+        case DALI_RESP_FADE_TIME_RATE:
+            return dali_parse_fade_time_rate(raw, &out->fade);
 
         default:
             return DALI_ERR_INVALID;

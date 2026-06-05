@@ -23,6 +23,8 @@
 #define DALI_REPLY_TIMEOUT_MS        25u    /* max wait for backward frame (ms) — 22 ms spec + 3 ms margin */
 #define DALI_MAX_RETRIES              3u    /* send attempts before offline    */
 #define DALI_SEND_TWICE_WINDOW_MS   100u    /* max gap between repeated sends  */
+#define DALI_BUS_IDLE_GUARD_US   (DALI_BIT_US * 2u) /* idle high before TX      */
+#define DALI_BUS_IDLE_TIMEOUT_US (DALI_BIT_US * 4u) /* max wait for idle before TX*/
 
 /* ---------------------------------------------------------------------------
  * Buffer sizes — power-of-2 required for ring buffer masking
@@ -80,6 +82,9 @@ typedef struct {
     volatile uint32_t unsolicited_events_routed; /* raw 24-bit RX event frames  */
     volatile uint32_t raw_malformed;    /* diagnostic raw command parse errors*/
     volatile uint32_t isr_overruns;     /* timer fired before previous ISR done*/
+    volatile uint32_t bus_idle_failures; /* TX blocked by active/stuck bus     */
+    volatile uint32_t rx_self_echo_suppressed; /* RX ignored during TX echo    */
+    volatile uint32_t rx_settle_suppressed; /* RX ignored after TX             */
 } dali_stats_t;
 
 /* Global stats instance — defined in dali_phy.c, read everywhere */

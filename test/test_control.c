@@ -143,6 +143,26 @@ void test_build_off_for_group_and_broadcast(void)
     TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
 }
 
+void test_build_recall_min_for_short_group_and_broadcast(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_build_recall_min(target(DALI_ADDR_SHORT, 5u), &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x0B06u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_build_recall_min(target(DALI_ADDR_GROUP, 2u), &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x8506u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_build_recall_min(target(DALI_ADDR_BROADCAST, 0u), &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xFF06u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+}
+
 void test_invalid_targets_and_levels_are_rejected(void)
 {
     DaliFrame frame;
@@ -220,14 +240,22 @@ void test_query_status_short_address_completes_with_reply(void)
     TEST_ASSERT_EQUAL_UINT8(8u, s_cb_reply.bit_length);
 }
 
-void test_query_status_rejects_group_broadcast_and_null_callback(void)
+void test_query_status_allows_group_broadcast_and_rejects_null_callback(void)
 {
-    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_build_query_status(target(DALI_ADDR_GROUP, 0u), &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x8190u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_build_query_status(target(DALI_ADDR_BROADCAST, 0u), &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xFF90u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
                       dali_control_query_status(target(DALI_ADDR_GROUP, 0u),
-                                                on_complete,
-                                                NULL));
-    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
-                      dali_control_query_status(target(DALI_ADDR_BROADCAST, 0u),
                                                 on_complete,
                                                 NULL));
     TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
@@ -246,11 +274,12 @@ int main(void)
     RUN_TEST(test_build_group_dapc_example);
     RUN_TEST(test_build_short_and_broadcast_dapc);
     RUN_TEST(test_build_off_for_group_and_broadcast);
+    RUN_TEST(test_build_recall_min_for_short_group_and_broadcast);
     RUN_TEST(test_invalid_targets_and_levels_are_rejected);
     RUN_TEST(test_set_brightness_group_enqueues_dapc);
     RUN_TEST(test_set_brightness_zero_enqueues_off);
     RUN_TEST(test_set_percent_group_50_enqueues_dapc_128);
     RUN_TEST(test_query_status_short_address_completes_with_reply);
-    RUN_TEST(test_query_status_rejects_group_broadcast_and_null_callback);
+    RUN_TEST(test_query_status_allows_group_broadcast_and_rejects_null_callback);
     return UNITY_END();
 }

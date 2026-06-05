@@ -39,7 +39,8 @@ Initial native CLI commands:
 
 ```text
 scan
-query <addr>
+status <addr>
+query <addr>     # compatibility alias for status
 discover
 inventory
 identify <addr>
@@ -53,9 +54,9 @@ Example:
 ```text
 > discover
 Scanning short addresses 0-63...
-05: input device, profile candidate: steinel_hf360_2
-12: control gear, groups=0,2
-14: control gear, groups=0
+05: present, status=0x80
+12: present, status=0x00
+14: present, status=0x00
 
 > identify 12
 Blinking addr 12 between min and max for 10 seconds.
@@ -129,12 +130,13 @@ Draft export shape:
 
 ## First Implementation Order
 
-1. Safe scheduler RX gating.
-2. Last-frame storage and trace output.
-3. `discover` as enriched `scan`.
-4. `inventory` print command.
-5. `identify <addr>` for lamps.
-6. Steinel profile polling.
-7. Unsolicited event queue.
-8. `find switches`.
-9. Export for ESPHome YAML.
+- [x] Safe scheduler RX gating.
+- [x] Last-frame storage and trace output.
+- [x] `discover` as enriched `scan`.
+- [x] `inventory` print command.
+- [x] `identify <addr>` for lamps.
+- [ ] Steinel profile polling. Profile helpers exist; real-bus polling is
+      pending.
+- [ ] Unsolicited event queue.
+- [ ] `find switches`.
+- [ ] Export for ESPHome YAML.

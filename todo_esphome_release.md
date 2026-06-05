@@ -95,9 +95,10 @@ dali:
 ## Implementation Order
 
 1. Keep native ESP-IDF diagnostics as the reference implementation.
-2. Add discovery/inventory APIs in `components/dali` that are not ESPHome-bound.
+2. Reuse the native discovery/inventory APIs in `components/dali`; keep them
+   ESPHome-independent.
 3. Add a simple diagnostic web/UI surface in the ESPHome-flashable firmware.
 4. Add inventory export.
-5. Add final static entity mapping.
+5. Wire final static entity mapping through the existing `dali_mapping` helpers.
 6. Migrate the component packaging from in-tree custom component to external
    component only after the flow is stable.

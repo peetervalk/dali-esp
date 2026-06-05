@@ -136,9 +136,9 @@ DaliError dali_control_build_recall_max(DaliTarget target, DaliFrame *out)
     }
 }
 
-DaliError dali_control_build_query_status(DaliTarget target, DaliFrame *out)
+DaliError dali_control_build_recall_min(DaliTarget target, DaliFrame *out)
 {
-    if (out == NULL || target.type != DALI_ADDR_SHORT) {
+    if (out == NULL) {
         return DALI_ERR_INVALID;
     }
     DaliError err = dali_control_validate_target(target);
@@ -146,8 +146,35 @@ DaliError dali_control_build_query_status(DaliTarget target, DaliFrame *out)
         return err;
     }
 
-    *out = dali_cmd_query_status(target.address);
-    return DALI_OK;
+    switch (target.type) {
+        case DALI_ADDR_SHORT:
+            *out = dali_cmd_recall_min(target.address);
+            return DALI_OK;
+
+        case DALI_ADDR_GROUP:
+            *out = dali_cmd_group_recall_min(target.address);
+            return DALI_OK;
+
+        case DALI_ADDR_BROADCAST:
+            *out = dali_cmd_broadcast_recall_min();
+            return DALI_OK;
+
+        default:
+            return DALI_ERR_INVALID;
+    }
+}
+
+DaliError dali_control_build_query_status(DaliTarget target, DaliFrame *out)
+{
+    if (out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    DaliError err = dali_control_validate_target(target);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    return dali_build_command(target.type, target.address, DALI_CMD_QUERY_STATUS, 0u, out);
 }
 
 DaliError dali_control_set_level(DaliTarget target, uint8_t level)
@@ -190,6 +217,16 @@ DaliError dali_control_recall_max(DaliTarget target)
 {
     DaliFrame frame;
     DaliError err = dali_control_build_recall_max(target, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+    return enqueue_frame(&frame, false, NULL, NULL);
+}
+
+DaliError dali_control_recall_min(DaliTarget target)
+{
+    DaliFrame frame;
+    DaliError err = dali_control_build_recall_min(target, &frame);
     if (err != DALI_OK) {
         return err;
     }

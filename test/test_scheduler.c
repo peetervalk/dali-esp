@@ -19,6 +19,7 @@ static DaliError       g_mock_tx_result;
 static DaliPhyRxCallback g_mock_rx_cb;
 static void           *g_mock_rx_ctx;
 static uint32_t        g_mock_tick_ms;
+static uint32_t        g_mock_time_us;
 
 static DaliError mock_tx(const DaliFrame *frame)
 {
@@ -38,6 +39,11 @@ static uint32_t mock_get_tick_ms(void)
     return g_mock_tick_ms;
 }
 
+static uint32_t mock_get_time_us(void)
+{
+    return g_mock_time_us;
+}
+
 /* ---------------------------------------------------------------------------
  * Completion capture
  * --------------------------------------------------------------------------*/
@@ -48,6 +54,10 @@ static DaliFrame  g_event_frame;
 static int        g_event_count;
 static void      *g_event_ctx;
 static uint8_t    g_event_marker;
+static DaliSchedTraceEvent g_trace_event;
+static int        g_trace_count;
+static void      *g_trace_ctx;
+static uint8_t    g_trace_marker;
 
 static void on_complete(DaliError result, const DaliFrame *reply, void *ctx)
 {
@@ -72,12 +82,24 @@ static void on_event(const DaliFrame *frame, void *ctx)
     g_event_count++;
 }
 
+static void on_trace(const DaliSchedTraceEvent *event, void *ctx)
+{
+    if (event != NULL) {
+        g_trace_event = *event;
+    } else {
+        memset(&g_trace_event, 0, sizeof(g_trace_event));
+    }
+    g_trace_ctx = ctx;
+    g_trace_count++;
+}
+
 /* ---------------------------------------------------------------------------
  * Helpers
  * --------------------------------------------------------------------------*/
 static void advance_past_settle(void)
 {
     g_mock_tick_ms += DALI_SETTLE_MS;
+    g_mock_time_us += (uint32_t)DALI_SETTLE_MS * 1000u;
 }
 
 static void inject_reply(uint32_t data, uint8_t bits)
@@ -99,6 +121,7 @@ void setUp(void)
     g_mock_tx_count  = 0;
     g_mock_tx_result = DALI_OK;
     g_mock_tick_ms   = 0u;
+    g_mock_time_us   = 0u;
     g_mock_rx_cb     = NULL;
     g_mock_rx_ctx    = NULL;
     memset(&g_mock_last_tx, 0, sizeof(g_mock_last_tx));
@@ -109,6 +132,9 @@ void setUp(void)
     g_event_count = 0;
     g_event_ctx   = NULL;
     memset(&g_event_frame, 0, sizeof(g_event_frame));
+    g_trace_count = 0;
+    g_trace_ctx   = NULL;
+    memset(&g_trace_event, 0, sizeof(g_trace_event));
 
     memset(&g_dali_stats, 0, sizeof(g_dali_stats));
 
@@ -116,6 +142,7 @@ void setUp(void)
         .tx              = mock_tx,
         .set_rx_callback = mock_set_rx_callback,
         .get_tick_ms     = mock_get_tick_ms,
+        .get_time_us     = mock_get_time_us,
     };
     TEST_ASSERT_EQUAL(DALI_OK, dali_sched_init(&ops));
 }
@@ -159,6 +186,63 @@ void test_simple_send(void)
     TEST_ASSERT_EQUAL(1, g_cb_count);
     TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
     TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+}
+
+void test_trace_callback_reports_tx_from_task_context(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_set_trace_callback(on_trace, &g_trace_marker));
+
+    g_mock_time_us = 123400u;
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = false,
+        .send_twice   = false,
+        .retries_left = 0u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_trace_count);
+    TEST_ASSERT_EQUAL(DALI_SCHED_TRACE_TX, g_trace_event.direction);
+    TEST_ASSERT_EQUAL_HEX32(0x0B90u, g_trace_event.frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, g_trace_event.frame.bit_length);
+    TEST_ASSERT_EQUAL_UINT32(123400u, g_trace_event.timestamp_us);
+    TEST_ASSERT_FALSE(g_trace_event.has_since_tx);
+    TEST_ASSERT_EQUAL_PTR(&g_trace_marker, g_trace_ctx);
+}
+
+void test_trace_callback_reports_rx_time_since_last_tx(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_set_trace_callback(on_trace, &g_trace_marker));
+
+    g_mock_time_us = 100000u;
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .send_twice   = false,
+        .retries_left = 0u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    g_mock_time_us = 110100u;
+    inject_reply(0xAFu, 8u);
+
+    TEST_ASSERT_EQUAL(2, g_trace_count);
+    TEST_ASSERT_EQUAL(DALI_SCHED_TRACE_RX, g_trace_event.direction);
+    TEST_ASSERT_EQUAL_HEX32(0xAFu, g_trace_event.frame.data);
+    TEST_ASSERT_EQUAL_UINT8(8u, g_trace_event.frame.bit_length);
+    TEST_ASSERT_EQUAL_UINT32(110100u, g_trace_event.timestamp_us);
+    TEST_ASSERT_TRUE(g_trace_event.has_since_tx);
+    TEST_ASSERT_EQUAL_UINT32(10100u, g_trace_event.since_tx_us);
+    TEST_ASSERT_EQUAL_PTR(&g_trace_marker, g_trace_ctx);
 }
 
 /* 2. Send-twice — frame must be transmitted exactly twice */
@@ -559,6 +643,8 @@ int main(void)
     UNITY_BEGIN();
 
     RUN_TEST(test_simple_send);
+    RUN_TEST(test_trace_callback_reports_tx_from_task_context);
+    RUN_TEST(test_trace_callback_reports_rx_time_since_last_tx);
     RUN_TEST(test_send_twice);
     RUN_TEST(test_reply_received);
     RUN_TEST(test_stray_rx_while_idle_is_ignored);

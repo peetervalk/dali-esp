@@ -44,6 +44,12 @@ static DaliFrame       s_reply_frame;
 static DaliSchedEventCb s_event_cb;
 static void            *s_event_cb_ctx;
 
+/* Diagnostic trace routing */
+static DaliSchedTraceCb s_trace_cb;
+static void            *s_trace_cb_ctx;
+static uint32_t         s_last_tx_us;
+static bool             s_have_last_tx_us;
+
 /* ---------------------------------------------------------------------------
  * Internal helpers
  * --------------------------------------------------------------------------*/
@@ -53,11 +59,43 @@ static uint32_t elapsed_ms(uint32_t since_ms)
     return s_ops.get_tick_ms() - since_ms;   /* wraps safely with uint32_t */
 }
 
+static uint32_t sched_now_us(void)
+{
+    if (s_ops.get_time_us != NULL) {
+        return s_ops.get_time_us();
+    }
+    return s_ops.get_tick_ms() * 1000u;
+}
+
 static void sched_complete(DaliError result, const DaliFrame *reply)
 {
     if (s_active.on_complete != NULL) {
         s_active.on_complete(result, reply, s_active.cb_ctx);
     }
+}
+
+static void sched_trace(DaliSchedTraceDirection direction,
+                        const DaliFrame *frame,
+                        uint32_t timestamp_us)
+{
+    if (s_trace_cb == NULL || frame == NULL) {
+        return;
+    }
+
+    DaliSchedTraceEvent event = {
+        .direction    = direction,
+        .frame        = *frame,
+        .timestamp_us = timestamp_us,
+        .since_tx_us  = 0u,
+        .has_since_tx = false,
+    };
+
+    if (direction == DALI_SCHED_TRACE_RX && s_have_last_tx_us) {
+        event.since_tx_us  = timestamp_us - s_last_tx_us;
+        event.has_since_tx = true;
+    }
+
+    s_trace_cb(&event, s_trace_cb_ctx);
 }
 
 static bool sched_is_unsolicited_event_frame(const DaliFrame *frame)
@@ -123,6 +161,10 @@ DaliError dali_sched_init(const DaliSchedOps *ops)
     s_reply_received = false;
     s_event_cb        = NULL;
     s_event_cb_ctx    = NULL;
+    s_trace_cb        = NULL;
+    s_trace_cb_ctx    = NULL;
+    s_last_tx_us      = 0u;
+    s_have_last_tx_us = false;
     s_initialized = true;
 
     s_ops.set_rx_callback(phy_rx_handler, NULL);
@@ -180,6 +222,10 @@ next:
                 s_state = SCHED_IDLE;
                 goto next;
             }
+            uint32_t tx_done_us = sched_now_us();
+            s_last_tx_us = tx_done_us;
+            s_have_last_tx_us = true;
+            sched_trace(DALI_SCHED_TRACE_TX, &s_active.frame, tx_done_us);
             s_send_count++;
             s_state_entered_ms = s_ops.get_tick_ms();
             s_state = SCHED_WAIT_SETTLE;
@@ -242,6 +288,8 @@ void dali_sched_notify_rx(const DaliFrame *frame)
         return;
     }
 
+    sched_trace(DALI_SCHED_TRACE_RX, frame, sched_now_us());
+
     if (s_state == SCHED_WAIT_REPLY &&
         s_active.needs_reply &&
         !s_reply_received &&
@@ -265,17 +313,31 @@ DaliError dali_sched_set_event_callback(DaliSchedEventCb cb, void *cb_ctx)
     return DALI_OK;
 }
 
+DaliError dali_sched_set_trace_callback(DaliSchedTraceCb cb, void *cb_ctx)
+{
+    if (!s_initialized) {
+        return DALI_ERR_INVALID;
+    }
+    s_trace_cb     = cb;
+    s_trace_cb_ctx = cb != NULL ? cb_ctx : NULL;
+    return DALI_OK;
+}
+
 DaliError dali_sched_reset(void)
 {
     SCHED_ENTER_CRITICAL();
     s_q_head  = 0u;
     s_q_tail  = 0u;
     s_q_count = 0u;
+    memset(&s_active, 0, sizeof(s_active));
+    memset(&s_reply_frame, 0, sizeof(s_reply_frame));
+    s_state            = SCHED_IDLE;
+    s_send_count       = 0u;
+    s_state_entered_ms = 0u;
+    s_reply_received   = false;
+    s_last_tx_us       = 0u;
+    s_have_last_tx_us  = false;
     SCHED_EXIT_CRITICAL();
-
-    s_state          = SCHED_IDLE;
-    s_send_count     = 0u;
-    s_reply_received = false;
     return DALI_OK;
 }
 
@@ -293,12 +355,18 @@ static uint32_t device_get_tick_ms(void)
     return (uint32_t)(esp_timer_get_time() / 1000ULL);
 }
 
+static uint32_t device_get_time_us(void)
+{
+    return (uint32_t)esp_timer_get_time();
+}
+
 DaliError dali_sched_init_device(void)
 {
     static const DaliSchedOps ops = {
         .tx              = dali_phy_tx,
         .set_rx_callback = dali_phy_set_rx_callback,
         .get_tick_ms     = device_get_tick_ms,
+        .get_time_us     = device_get_time_us,
     };
     return dali_sched_init(&ops);
 }

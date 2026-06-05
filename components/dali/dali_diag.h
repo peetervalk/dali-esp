@@ -7,12 +7,16 @@
  * Task      : lower priority than DALI processing task
  *
  * Supported commands:
+ *   help             — print command summary
  *   stats            — print all diagnostic counters
  *   trace on|off     — enable/disable per-frame bus trace logging
- *   reset            — reset PHY and scheduler state machines
+ *   read             — print the last received raw frame
+ *   reset            — reset PHY, scheduler, and diagnostic state
  *   raw <hex> len=<n> [wait] — transmit arbitrary frame, optionally wait for reply
- *   scan             — scan short addresses 0–63 (requires scheduler)
- *   query <addr>     — query device status (requires scheduler)
+ *   level/off/max/min/status helpers for addr/sN/gN/b targets
+ *   scan/discover    — scan short addresses 0–63 and update inventory
+ *   inventory        — print the last discovered inventory
+ *   identify <addr>  — blink one short-addressed lamp candidate
  */
 
 #include "dali_frame.h"

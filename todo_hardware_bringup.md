@@ -54,9 +54,10 @@ debugging.
 
 - [ ] Start with one known ballast/driver.
 - [ ] Run `scan` and confirm the expected address responds.
-- [ ] Run `query <addr>` and parse QUERY STATUS.
+- [ ] Run `status <addr>` or `query <addr>` and parse QUERY STATUS.
 - [ ] Compare the ESP frame bytes and replies with Lunatone captures.
-- [ ] Test `off`, `recall max`, and DAPC levels once TX/RX are stable.
+- [ ] Test `off`, `max`, `min`, and DAPC `level` commands once TX/RX are
+      stable.
 - [ ] Verify group commands only after single-address commands are stable.
 
 ## Stage 5 - Steinel Sensor

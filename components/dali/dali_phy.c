@@ -7,6 +7,7 @@
 #include "driver/gpio.h"
 #include "driver/gptimer.h"
 #include "esp_timer.h"
+#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #else
@@ -63,6 +64,12 @@ static uint8_t  s_tx_half_bit_idx;
 static volatile DaliPhyTxState s_tx_state;
 static volatile uint8_t        s_tx_tick_count; /* counts 0..3 per half-bit  */
 
+#define RX_TS_MASK       0x7FFFFFFFu
+#define RX_TS_HALF_RANGE 0x40000000u
+
+static volatile uint8_t  s_rx_settle_suppression_active;
+static volatile uint32_t s_rx_suppress_until_us;
+
 /* Task to notify when TX completes */
 #ifndef DALI_HOST_BUILD
 static TaskHandle_t s_tx_notify_task;
@@ -91,6 +98,65 @@ static gptimer_handle_t s_gptimer;
  * ISR guard: detect re-entry (overrun)
  * --------------------------------------------------------------------------*/
 static volatile uint8_t s_isr_active;
+
+#ifndef DALI_HOST_BUILD
+static bool IRAM_ATTR rx_ts_not_after(uint32_t now_us, uint32_t deadline_us)
+{
+    return ((deadline_us - now_us) & RX_TS_MASK) < RX_TS_HALF_RANGE;
+}
+
+static bool IRAM_ATTR rx_settle_suppression_active(uint32_t now_us)
+{
+    if (!s_rx_settle_suppression_active) {
+        return false;
+    }
+
+    if (rx_ts_not_after(now_us, s_rx_suppress_until_us)) {
+        return true;
+    }
+
+    s_rx_settle_suppression_active = 0u;
+    return false;
+}
+
+static bool IRAM_ATTR tx_rx_suppression_active(void)
+{
+    return s_tx_state != DALI_PHY_TX_IDLE;
+}
+
+static uint32_t tx_rx_timestamp_us(void)
+{
+    return (uint32_t)(esp_timer_get_time() & RX_TS_MASK);
+}
+
+static DaliError wait_for_bus_idle_before_tx(void)
+{
+    int64_t start_us      = esp_timer_get_time();
+    int64_t deadline_us   = start_us + (int64_t)DALI_BUS_IDLE_TIMEOUT_US;
+    int64_t idle_since_us = -1;
+
+    while (esp_timer_get_time() < deadline_us) {
+        int level = gpio_get_level(s_rx_gpio);
+        int64_t now_us = esp_timer_get_time();
+
+        if (level != 0) {
+            if (idle_since_us < 0) {
+                idle_since_us = now_us;
+            }
+            if ((now_us - idle_since_us) >= (int64_t)DALI_BUS_IDLE_GUARD_US) {
+                return DALI_OK;
+            }
+        } else {
+            idle_since_us = -1;
+        }
+
+        esp_rom_delay_us(50u);
+    }
+
+    g_dali_stats.bus_idle_failures++;
+    return DALI_ERR_BUS_STUCK;
+}
+#endif
 
 /* ===========================================================================
  * Manchester encode / decode — host-portable, no hardware calls
@@ -288,7 +354,18 @@ static void IRAM_ATTR dali_phy_rx_isr(void *arg)
 
     /* Pack timestamp (µs, lower 31 bits) and level into one uint32_t */
     int64_t  ts_raw   = esp_timer_get_time();
-    uint32_t ts_us    = (uint32_t)(ts_raw & 0x7FFFFFFFu);
+    uint32_t ts_us    = (uint32_t)(ts_raw & RX_TS_MASK);
+
+    if (tx_rx_suppression_active()) {
+        g_dali_stats.rx_self_echo_suppressed++;
+        return;
+    }
+
+    if (rx_settle_suppression_active(ts_us)) {
+        g_dali_stats.rx_settle_suppressed++;
+        return;
+    }
+
     uint32_t level    = (uint32_t)gpio_get_level(s_rx_gpio);
     uint32_t entry    = (ts_us << 1u) | (level & 0x01u);
 
@@ -317,6 +394,8 @@ DaliError dali_phy_init(uint8_t tx_gpio, uint8_t rx_gpio)
     s_tx_half_bit_idx   = 0u;
     s_tx_total_half_bits = 0u;
     s_isr_active        = 0u;
+    s_rx_settle_suppression_active = 0u;
+    s_rx_suppress_until_us         = 0u;
 
 #ifndef DALI_HOST_BUILD
     /* Configure TX GPIO: output, default HIGH (DALI bus idle) */
@@ -387,6 +466,12 @@ DaliError dali_phy_tx(const DaliFrame *frame)
     if (s_tx_state != DALI_PHY_TX_IDLE) {
         return DALI_ERR_BUSY;
     }
+#ifndef DALI_HOST_BUILD
+    DaliError idle_err = wait_for_bus_idle_before_tx();
+    if (idle_err != DALI_OK) {
+        return idle_err;
+    }
+#endif
 
     /* Pre-encode the frame into the half-bit buffer */
     uint8_t len = dali_phy_encode_manchester(frame, s_tx_half_bits, TX_HALF_BIT_BUF_MAX);
@@ -417,6 +502,9 @@ DaliError dali_phy_tx(const DaliFrame *frame)
     }
 
     gptimer_stop(s_gptimer);
+    s_rx_suppress_until_us = (tx_rx_timestamp_us() +
+                              (uint32_t)DALI_SETTLE_MS * 1000u) & RX_TS_MASK;
+    s_rx_settle_suppression_active = 1u;
     s_tx_state = DALI_PHY_TX_IDLE;
     ESP_LOGD(TAG, "TX done");
 #else
@@ -505,6 +593,12 @@ DaliError dali_phy_reset(void)
     s_tx_half_bit_idx    = 0u;
     s_tx_total_half_bits = 0u;
     s_tx_tick_count      = 0u;
+    s_isr_active         = 0u;
+    s_rx_settle_suppression_active = 0u;
+    s_rx_suppress_until_us         = 0u;
+#ifndef DALI_HOST_BUILD
+    s_tx_notify_task     = NULL;
+#endif
     dali_rb_clear(&s_rx_rb);
     s_rx_in_frame        = false;
     s_rx_interval_count  = 0u;
