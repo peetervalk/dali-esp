@@ -4,6 +4,7 @@ idf_component_register(
         "dali_phy.c"
         "dali_scheduler.c"
         "dali_protocol.c"
+        "dali_control.c"
         "dali_diag.c"
     INCLUDE_DIRS "."
     REQUIRES

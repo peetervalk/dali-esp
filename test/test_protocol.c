@@ -78,6 +78,178 @@ void test_parse_response_null_returns_invalid(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * Command metadata tests
+ * --------------------------------------------------------------------------*/
+
+void test_command_lookup_query_status(void)
+{
+    const DaliCommandInfo *cmd = dali_command_lookup(DALI_CMD_QUERY_STATUS);
+
+    TEST_ASSERT_NOT_NULL(cmd);
+    TEST_ASSERT_EQUAL_STRING("QUERY STATUS", cmd->name);
+    TEST_ASSERT_EQUAL_UINT8(0x90u, cmd->opcode_first);
+    TEST_ASSERT_EQUAL_UINT8(0x90u, cmd->opcode_last);
+    TEST_ASSERT_EQUAL(DALI_CMD_FRAME_16BIT, cmd->frame_kind);
+    TEST_ASSERT_EQUAL(DALI_RESP_STATUS, cmd->response_kind);
+    TEST_ASSERT_FALSE(cmd->send_twice);
+    TEST_ASSERT_TRUE(cmd->implemented);
+}
+
+void test_command_lookup_opcode_dapc_range(void)
+{
+    const DaliCommandInfo *cmd = dali_command_lookup_opcode(DALI_CMD_FRAME_DAPC, 0x80u);
+
+    TEST_ASSERT_NOT_NULL(cmd);
+    TEST_ASSERT_EQUAL(DALI_CMD_DAPC, cmd->id);
+    TEST_ASSERT_EQUAL_UINT8(0x00u, cmd->opcode_first);
+    TEST_ASSERT_EQUAL_UINT8(0xFEu, cmd->opcode_last);
+    TEST_ASSERT_EQUAL(DALI_RESP_NONE, cmd->response_kind);
+}
+
+void test_command_lookup_opcode_range_go_to_scene(void)
+{
+    const DaliCommandInfo *cmd = dali_command_lookup_opcode(DALI_CMD_FRAME_16BIT, 0x15u);
+
+    TEST_ASSERT_NOT_NULL(cmd);
+    TEST_ASSERT_EQUAL(DALI_CMD_GO_TO_SCENE, cmd->id);
+    TEST_ASSERT_EQUAL_UINT8(0x10u, cmd->opcode_first);
+    TEST_ASSERT_EQUAL_UINT8(0x1Fu, cmd->opcode_last);
+}
+
+void test_command_lookup_disambiguates_normal_and_special_opcode(void)
+{
+    const DaliCommandInfo *normal = dali_command_lookup_opcode(DALI_CMD_FRAME_16BIT, 0xA1u);
+    const DaliCommandInfo *special = dali_command_lookup_opcode(DALI_CMD_FRAME_SPECIAL, 0xA1u);
+
+    TEST_ASSERT_NOT_NULL(normal);
+    TEST_ASSERT_NOT_NULL(special);
+    TEST_ASSERT_EQUAL(DALI_CMD_QUERY_MAX_LEVEL, normal->id);
+    TEST_ASSERT_EQUAL(DALI_CMD_TERMINATE, special->id);
+}
+
+void test_command_lookup_send_twice_metadata(void)
+{
+    const DaliCommandInfo *reset = dali_command_lookup(DALI_CMD_RESET);
+    const DaliCommandInfo *initialise = dali_command_lookup(DALI_CMD_INITIALISE);
+
+    TEST_ASSERT_NOT_NULL(reset);
+    TEST_ASSERT_NOT_NULL(initialise);
+    TEST_ASSERT_TRUE(reset->send_twice);
+    TEST_ASSERT_TRUE(initialise->send_twice);
+}
+
+void test_command_lookup_dali2_input_value(void)
+{
+    const DaliCommandInfo *cmd = dali_command_lookup(DALI_CMD_QUERY_INPUT_VALUE);
+
+    TEST_ASSERT_NOT_NULL(cmd);
+    TEST_ASSERT_EQUAL_STRING("QUERY INPUT VALUE", cmd->name);
+    TEST_ASSERT_EQUAL_UINT8(0x8Cu, cmd->opcode_first);
+    TEST_ASSERT_EQUAL(DALI_CMD_FRAME_24BIT_INST, cmd->frame_kind);
+    TEST_ASSERT_EQUAL(DALI_RESP_INPUT_VALUE_MSB, cmd->response_kind);
+}
+
+void test_command_lookup_invalid_returns_null(void)
+{
+    TEST_ASSERT_NULL(dali_command_lookup((DaliCommandId)255u));
+    TEST_ASSERT_NULL(dali_command_lookup_opcode(DALI_CMD_FRAME_24BIT_INST, 0xFFu));
+}
+
+void test_build_command_short_group_broadcast_dapc(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_command(DALI_ADDR_SHORT, 5u, DALI_CMD_DAPC, 128u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x0A80u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_command(DALI_ADDR_GROUP, 0u, DALI_CMD_DAPC, 128u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x8080u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_command(DALI_ADDR_BROADCAST, 0u, DALI_CMD_DAPC, 128u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xFE80u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+}
+
+void test_build_command_fixed_opcode_and_range_opcode(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_command(DALI_ADDR_SHORT, 2u,
+                                         DALI_CMD_RECALL_MAX_LEVEL, 0u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x0505u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_command(DALI_ADDR_SHORT, 2u,
+                                         DALI_CMD_GO_TO_SCENE, 5u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x0515u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+}
+
+void test_build_command_rejects_invalid_args(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_command(DALI_ADDR_SHORT, 64u, DALI_CMD_OFF, 0u, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_command(DALI_ADDR_GROUP, 16u, DALI_CMD_OFF, 0u, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_command(DALI_ADDR_SHORT, 0u, DALI_CMD_DAPC, 255u, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_command(DALI_ADDR_SHORT, 0u,
+                                         DALI_CMD_RECALL_MAX_LEVEL, 1u, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_command(DALI_ADDR_SHORT, 0u,
+                                         DALI_CMD_GO_TO_SCENE, 16u, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_command(DALI_ADDR_SHORT, 0u,
+                                         DALI_CMD_QUERY_INPUT_VALUE, 0u, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_command(DALI_ADDR_SHORT, 0u, DALI_CMD_OFF, 0u, NULL));
+}
+
+void test_build_instance_command_query_input_value(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_instance_command(5u, 0u, DALI_CMD_QUERY_INPUT_VALUE, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x0B008Cu, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(24u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_instance_command(5u, 0xFFu,
+                                                  DALI_CMD_QUERY_RESOLUTION, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x0BFF81u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(24u, frame.bit_length);
+}
+
+void test_build_instance_command_rejects_invalid_args(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_instance_command(64u, 0u,
+                                                  DALI_CMD_QUERY_INPUT_VALUE, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_instance_command(5u, 32u,
+                                                  DALI_CMD_QUERY_INPUT_VALUE, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_instance_command(5u, 0u,
+                                                  DALI_CMD_QUERY_STATUS, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_instance_command(5u, 0u,
+                                                  DALI_CMD_QUERY_INPUT_VALUE, NULL));
+}
+
+/* ---------------------------------------------------------------------------
  * DALI-2 24-bit instance command builder tests
  * --------------------------------------------------------------------------*/
 
@@ -223,6 +395,95 @@ void test_parse_status_null_returns_invalid(void)
     TEST_ASSERT_EQUAL(DALI_ERR_INVALID, dali_parse_status(0xFFu, NULL));
 }
 
+void test_parse_by_kind_status(void)
+{
+    DaliFrame reply = { .data = 0xAFu, .bit_length = 8u };
+    DaliParsedResponse parsed;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_parse_by_kind(DALI_RESP_STATUS, &reply, &parsed));
+    TEST_ASSERT_EQUAL(DALI_RESP_STATUS, parsed.kind);
+    TEST_ASSERT_EQUAL_HEX8(0xAFu, parsed.raw);
+    TEST_ASSERT_TRUE(parsed.status.ballast_failure);
+    TEST_ASSERT_TRUE(parsed.status.lamp_failure);
+    TEST_ASSERT_TRUE(parsed.status.lamp_arc_power_on);
+    TEST_ASSERT_TRUE(parsed.status.limit_error);
+    TEST_ASSERT_FALSE(parsed.status.fade_running);
+    TEST_ASSERT_TRUE(parsed.status.reset_state);
+    TEST_ASSERT_FALSE(parsed.status.missing_short_address);
+    TEST_ASSERT_TRUE(parsed.status.power_failure);
+}
+
+void test_parse_by_kind_yes_no_and_uint8(void)
+{
+    DaliFrame yes = { .data = 0xFFu, .bit_length = 8u };
+    DaliFrame value = { .data = 0x80u, .bit_length = 8u };
+    DaliParsedResponse parsed;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_parse_by_kind(DALI_RESP_YES_NO, &yes, &parsed));
+    TEST_ASSERT_TRUE(parsed.yes);
+    TEST_ASSERT_EQUAL_HEX8(0xFFu, parsed.raw);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_parse_by_kind(DALI_RESP_UINT8, &value, &parsed));
+    TEST_ASSERT_EQUAL_UINT8(128u, parsed.value);
+    TEST_ASSERT_FALSE(parsed.yes);
+}
+
+void test_parse_command_response_uses_metadata(void)
+{
+    DaliFrame status = { .data = 0x02u, .bit_length = 8u };
+    DaliFrame level = { .data = 0x7Fu, .bit_length = 8u };
+    DaliParsedResponse parsed;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_parse_command_response(DALI_CMD_QUERY_STATUS, &status, &parsed));
+    TEST_ASSERT_EQUAL(DALI_RESP_STATUS, parsed.kind);
+    TEST_ASSERT_TRUE(parsed.status.lamp_failure);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_parse_command_response(DALI_CMD_QUERY_ACTUAL_LEVEL, &level, &parsed));
+    TEST_ASSERT_EQUAL(DALI_RESP_UINT8, parsed.kind);
+    TEST_ASSERT_EQUAL_UINT8(0x7Fu, parsed.value);
+}
+
+void test_parse_by_kind_bitset_memory_and_input_value(void)
+{
+    DaliFrame reply = { .data = 0x55u, .bit_length = 8u };
+    DaliParsedResponse parsed;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_parse_by_kind(DALI_RESP_BITSET8, &reply, &parsed));
+    TEST_ASSERT_EQUAL_HEX8(0x55u, parsed.bitset);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_parse_by_kind(DALI_RESP_MEMORY_BYTE, &reply, &parsed));
+    TEST_ASSERT_EQUAL_HEX8(0x55u, parsed.value);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_parse_by_kind(DALI_RESP_INPUT_VALUE_MSB, &reply, &parsed));
+    TEST_ASSERT_EQUAL_HEX8(0x55u, parsed.value);
+}
+
+void test_parse_rejects_invalid_args_and_none_response(void)
+{
+    DaliFrame reply = { .data = 0x00u, .bit_length = 8u };
+    DaliFrame wrong_bits = { .data = 0x00u, .bit_length = 16u };
+    DaliParsedResponse parsed;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_parse_by_kind(DALI_RESP_NONE, &reply, &parsed));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_parse_by_kind(DALI_RESP_UINT8, &wrong_bits, &parsed));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_parse_by_kind(DALI_RESP_UINT8, NULL, &parsed));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_parse_by_kind(DALI_RESP_UINT8, &reply, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_parse_command_response(DALI_CMD_OFF, &reply, &parsed));
+}
+
 /* ---------------------------------------------------------------------------
  * Main
  * --------------------------------------------------------------------------*/
@@ -238,6 +499,19 @@ int main(void)
     RUN_TEST(test_broadcast_recall_max);
     RUN_TEST(test_parse_response_returns_value);
     RUN_TEST(test_parse_response_null_returns_invalid);
+    /* Command metadata */
+    RUN_TEST(test_command_lookup_query_status);
+    RUN_TEST(test_command_lookup_opcode_dapc_range);
+    RUN_TEST(test_command_lookup_opcode_range_go_to_scene);
+    RUN_TEST(test_command_lookup_disambiguates_normal_and_special_opcode);
+    RUN_TEST(test_command_lookup_send_twice_metadata);
+    RUN_TEST(test_command_lookup_dali2_input_value);
+    RUN_TEST(test_command_lookup_invalid_returns_null);
+    RUN_TEST(test_build_command_short_group_broadcast_dapc);
+    RUN_TEST(test_build_command_fixed_opcode_and_range_opcode);
+    RUN_TEST(test_build_command_rejects_invalid_args);
+    RUN_TEST(test_build_instance_command_query_input_value);
+    RUN_TEST(test_build_instance_command_rejects_invalid_args);
     /* 24-bit instance frame builders */
     RUN_TEST(test_instance_short_addr_0_all_instances);
     RUN_TEST(test_instance_short_addr_5_instance_0);
@@ -255,5 +529,10 @@ int main(void)
     RUN_TEST(test_parse_status_lamp_failure);
     RUN_TEST(test_parse_status_power_failure);
     RUN_TEST(test_parse_status_null_returns_invalid);
+    RUN_TEST(test_parse_by_kind_status);
+    RUN_TEST(test_parse_by_kind_yes_no_and_uint8);
+    RUN_TEST(test_parse_command_response_uses_metadata);
+    RUN_TEST(test_parse_by_kind_bitset_memory_and_input_value);
+    RUN_TEST(test_parse_rejects_invalid_args_and_none_response);
     return UNITY_END();
 }

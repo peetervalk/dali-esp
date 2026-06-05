@@ -1,0 +1,219 @@
+# DALI Command Reference — Working Draft
+
+This is a working implementation reference for `dali_protocol` and parsers.
+It is not a replacement for IEC 62386. Public manufacturer/library references are
+used to build the first command database; commands marked **verify** should be
+checked against IEC 62386 before relying on them for commissioning or sensors.
+
+## Sources Used
+
+- Microchip DALI command table: https://onlinedocs.microchip.com/oxy/GUID-0CDBB4BA-5972-4F58-98B2-3F0408F3E10B-en-US-1/GUID-DA5EBBA5-6A56-4135-AF78-FB1F780EF475.html
+- Microchip TB3200 PDF: https://ww1.microchip.com/downloads/en/Appnotes/90003200A.pdf
+- Beckhoff DALI-2 Query Input Value: https://infosys.beckhoff.com/content/1033/tcplclib_tc2_dali/4346134027.html
+- Lunatone DALI-2 instance guide: https://www.lunatone.com/wp-content/uploads/2021/10/DALI-2_Instance-Guide_EN_M0024.pdf
+- Steinel DALI-2 interface description: https://www.steinel.de/out/media/interfacedoc/94546_DALI-2%20Interface%20Description_V1.5.pdf
+
+## Frame Encoding Notes
+
+### Standard 16-bit forward frame
+
+```text
+data = (address_byte << 8) | command_or_level_byte
+bit_length = 16
+```
+
+Address byte:
+
+| Target | Selector | Address byte |
+|---|---:|---|
+| Short DAPC | 0 | `(short_addr << 1) | 0` |
+| Short command | 1 | `(short_addr << 1) | 1` |
+| Group DAPC | 0 | `0x80 | (group << 1) | 0` |
+| Group command | 1 | `0x80 | (group << 1) | 1` |
+| Broadcast DAPC | 0 | `0xFE` |
+| Broadcast command | 1 | `0xFF` |
+
+`DAPC` is not a named command byte. It is selected by address selector bit `0`,
+and the second byte is the requested arc power level `0x00..0xFE`.
+
+### DALI-2 24-bit instance query frame
+
+Working layout for DALI-2 input-device queries:
+
+```text
+data = (device_address_byte << 16) | (instance_byte << 8) | command_byte
+bit_length = 24
+```
+
+For a short-addressed input device, `device_address_byte = (short_addr << 1) | 1`.
+Instance addressing modes beyond direct instance number need verification.
+
+## Response Kinds To Model
+
+| Kind | Meaning | Parser target |
+|---|---|---|
+| `NONE` | no backward frame expected | set commands |
+| `YES_NO` | `0xFF` means YES; missing/no reply means NO in many query contexts | simple presence/status queries |
+| `UINT8` | raw 8-bit value | levels, DTR values, device type |
+| `STATUS` | QUERY STATUS bitfield | `DaliStatus` |
+| `BITSET8` | 8-bit group/scene membership mask | group queries |
+| `MEMORY_BYTE` | memory location value | read memory |
+| `INPUT_VALUE_MSB` | first byte of latched DALI-2 input value | input devices |
+| `INPUT_VALUE_LATCH` | subsequent byte of latched DALI-2 input value | input devices |
+
+## Standard Control Gear Commands
+
+### Direct Arc Power Control
+
+| Code | Name | Response | Status |
+|---:|---|---|---|
+| `0x00..0xFE` | DAPC level, selected by address selector bit `0` | none | implemented for short/group/broadcast |
+
+### Output Level Instructions
+
+| Opcode | Name | Response | Status |
+|---:|---|---|---|
+| `0x00` | OFF | none | implemented for short/group/broadcast |
+| `0x01` | UP | none | planned |
+| `0x02` | DOWN | none | planned |
+| `0x03` | STEP UP | none | planned |
+| `0x04` | STEP DOWN | none | planned |
+| `0x05` | RECALL MAX LEVEL | none | implemented for short/group/broadcast |
+| `0x06` | RECALL MIN LEVEL | none | implemented for short/group |
+| `0x07` | STEP DOWN AND OFF | none | planned |
+| `0x08` | ON AND STEP UP | none | planned |
+| `0x09` | ENABLE DAPC SEQUENCE | none | planned, verify DALI-2 semantics |
+| `0x0A` | GO TO LAST ACTIVE LEVEL | none | planned, DALI-2 |
+| `0x10..0x1F` | GO TO SCENE 0..15 | none | planned |
+
+### Configuration Instructions
+
+These often need DTR setup and/or send-twice handling. Implement after normal
+control/query commands.
+
+| Opcode | Name | Response | Status |
+|---:|---|---|---|
+| `0x20` | RESET | none | planned, send twice |
+| `0x21` | STORE ACTUAL LEVEL IN DTR0 | none | planned |
+| `0x22` | SAVE PERSISTENT VARIABLES | none | planned, DALI-2, verify |
+| `0x23` | SET OPERATING MODE DTR0 | none | planned, DALI-2, verify |
+| `0x24` | RESET MEMORY BANK DTR0 | none | planned, DALI-2, verify |
+| `0x25` | IDENTIFY DEVICE | none | planned, useful for diagnostics |
+| `0x2A` | SET MAX LEVEL DTR0 | none | planned |
+| `0x2B` | SET MIN LEVEL DTR0 | none | planned |
+| `0x2C` | SET SYSTEM FAILURE LEVEL DTR0 | none | planned |
+| `0x2D` | SET POWER ON LEVEL DTR0 | none | planned |
+| `0x2E` | SET FADE TIME DTR0 | none | planned |
+| `0x2F` | SET FADE RATE DTR0 | none | planned |
+| `0x30` | SET EXTENDED FADE TIME DTR0 | none | planned, DALI-2, verify |
+| `0x40..0x4F` | SET SCENE 0..15 DTR0 | none | planned |
+| `0x50..0x5F` | REMOVE FROM SCENE 0..15 | none | planned |
+| `0x60..0x6F` | ADD TO GROUP 0..15 | none | planned |
+| `0x70..0x7F` | REMOVE FROM GROUP 0..15 | none | planned |
+| `0x80` | SET SHORT ADDRESS DTR0 | none | planned |
+| `0x81` | ENABLE WRITE MEMORY | none | planned |
+
+### Query Instructions
+
+Queries should normally target a single short address. Group/broadcast queries
+can create multiple simultaneous backward frames.
+
+| Opcode | Name | Response | Status |
+|---:|---|---|---|
+| `0x90` | QUERY STATUS | `STATUS` | parser implemented |
+| `0x91` | QUERY CONTROL GEAR PRESENT | `YES_NO` | planned |
+| `0x92` | QUERY LAMP FAILURE | `YES_NO` | planned |
+| `0x93` | QUERY LAMP POWER ON | `YES_NO` | planned |
+| `0x94` | QUERY LIMIT ERROR | `YES_NO` | planned |
+| `0x95` | QUERY RESET STATE | `YES_NO` | planned |
+| `0x96` | QUERY MISSING SHORT ADDRESS | `YES_NO` | planned |
+| `0x97` | QUERY VERSION NUMBER | `UINT8` | planned |
+| `0x98` | QUERY CONTENT DTR0 | `UINT8` | planned |
+| `0x99` | QUERY DEVICE TYPE | `UINT8` | planned |
+| `0x9A` | QUERY PHYSICAL MINIMUM | `UINT8` | planned |
+| `0x9B` | QUERY POWER FAILURE | `YES_NO` | planned |
+| `0x9C` | QUERY CONTENT DTR1 | `UINT8` | planned |
+| `0x9D` | QUERY CONTENT DTR2 | `UINT8` | planned |
+| `0x9E` | QUERY OPERATING MODE | `UINT8` | planned, DALI-2, verify |
+| `0x9F` | QUERY LIGHT SOURCE TYPE | `UINT8` | planned, DALI-2, verify |
+| `0xA0` | QUERY ACTUAL LEVEL | `UINT8` | frame builder implemented; parser generic only |
+| `0xA1` | QUERY MAX LEVEL | `UINT8` | planned |
+| `0xA2` | QUERY MIN LEVEL | `UINT8` | planned |
+| `0xA3` | QUERY POWER ON LEVEL | `UINT8` | planned |
+| `0xA4` | QUERY SYSTEM FAILURE LEVEL | `UINT8` | planned |
+| `0xA5` | QUERY FADE TIME / FADE RATE | `UINT8` packed nibbles | planned |
+| `0xA6` | QUERY MANUFACTURER SPECIFIC MODE | `YES_NO` | planned, DALI-2, verify |
+| `0xA7` | QUERY NEXT DEVICE TYPE | `UINT8` or special sequence | planned, DALI-2, verify |
+| `0xA8` | QUERY EXTENDED FADE TIME | `UINT8` packed nibbles | planned, DALI-2, verify |
+| `0xAA` | QUERY CONTROL GEAR FAILURE | `YES_NO` | planned, DALI-2, verify |
+| `0xB0..0xBF` | QUERY SCENE LEVEL 0..15 | `UINT8` | planned |
+| `0xC0` | QUERY GROUPS 0-7 | `BITSET8` | planned |
+| `0xC1` | QUERY GROUPS 8-15 | `BITSET8` | planned |
+| `0xC2` | QUERY RANDOM ADDRESS H | `UINT8` | planned for commissioning |
+| `0xC3` | QUERY RANDOM ADDRESS M | `UINT8` | planned for commissioning |
+| `0xC4` | QUERY RANDOM ADDRESS L | `UINT8` | planned for commissioning |
+| `0xC5` | READ MEMORY LOCATION | `MEMORY_BYTE` | planned |
+| `0xFF` | QUERY EXTENDED VERSION NUMBER | `UINT8` | planned |
+
+### Special Commands
+
+Special commands do not use the same normal addressed-command shape as ordinary
+16-bit gear commands. Implement these as a separate builder family.
+
+| Opcode | Name | Response | Status |
+|---:|---|---|---|
+| `0xA1` | TERMINATE | none | planned, special frame |
+| `0xA3` | DTR0 DATA | none | planned, special frame |
+| `0xA5` | INITIALISE | none | planned, special frame, send twice |
+| `0xA7` | RANDOMIZE | none | planned, special frame, send twice |
+| `0xA9` | COMPARE | `YES_NO` | planned, special frame |
+| `0xAB` | WITHDRAW | none | planned, special frame |
+| `0xAD` | PING | none | planned, DALI-2, verify |
+| `0xB1` | SEARCH ADDRH | none | planned, special frame |
+| `0xB3` | SEARCH ADDRM | none | planned, special frame |
+| `0xB5` | SEARCH ADDRL | none | planned, special frame |
+| `0xB7` | PROGRAM SHORT ADDRESS | none | planned, special frame |
+| `0xB9` | VERIFY SHORT ADDRESS | `YES_NO` | planned, special frame |
+| `0xBB` | QUERY SHORT ADDRESS | `UINT8` | planned, special frame |
+| `0xC1` | ENABLE DEVICE TYPE | none | planned, special frame |
+| `0xC3` | DTR1 DATA | none | planned, special frame |
+| `0xC5` | DTR2 DATA | none | planned, special frame |
+| `0xC7` | WRITE MEMORY LOCATION | `MEMORY_BYTE` | planned, special frame |
+| `0xC9` | WRITE MEMORY LOCATION NO REPLY | none | planned, special frame |
+
+## DALI-2 Input Device Commands
+
+These are 24-bit instance commands and are the next priority for the Steinel
+HF 360 II DALI-2 IPD sensor.
+
+| Opcode | Name | Response | Status |
+|---:|---|---|---|
+| `0x40` | QUERY VALUE MULTIPLICATOR | `UINT8` | planned for generic sensors |
+| `0x41` | QUERY VALUE DIVISOR | `UINT8` | planned for generic sensors |
+| `0x42` | QUERY OFFSET MSB | `UINT8` | planned for generic sensors |
+| `0x43` | QUERY OFFSET LSB | `UINT8` | planned for generic sensors |
+| `0x44` | QUERY OFFSET MULTIPLICATOR | `UINT8` | planned for generic sensors |
+| `0x45` | QUERY OFFSET DIVISOR | `UINT8` | planned for generic sensors |
+| `0x46` | QUERY UNIT | `UINT8` | planned for generic sensors |
+| `0x81` | QUERY RESOLUTION | `UINT8` | planned |
+| `0x8C` | QUERY INPUT VALUE | `INPUT_VALUE_MSB` | planned |
+| `0x8D` | QUERY INPUT VALUE LATCH | `INPUT_VALUE_LATCH` | planned |
+
+Known Steinel HF 360 II DALI-2 IPD instance targets:
+
+| Instance | Type | Meaning | Initial query plan |
+|---:|---:|---|---|
+| 0 | 4 | brightness | query resolution, query input value, latch if needed |
+| 1 | 3 | motion | query resolution, query input value |
+| 2 | 0 | generic temperature | query input value + latch, apply Steinel conversion |
+| 3 | 0 | generic humidity | query input value, apply Steinel conversion |
+
+## Implementation Plan
+
+- [x] Add command metadata enums/tables in `dali_protocol`.
+- [x] Add generic addressed command builders by target type.
+- [x] Add response parser functions by `ResponseKind`.
+- [x] Add DALI-2 input-device constants and short-address instance builders.
+- [ ] Add Steinel-specific value conversion helpers.
+- [x] Add initial unit tests for command metadata, generic builders, and parser dispatch.
+- [ ] Add focused unit tests for every new specialized command/parser before hardware tests.
