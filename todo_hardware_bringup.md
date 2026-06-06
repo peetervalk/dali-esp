@@ -64,6 +64,9 @@ debugging.
 
 - [ ] Confirm the Steinel HF 360 II DALI-2 IPD address in Lunatone Cockpit.
 - [ ] Query basic status and version/device information from ESP diagnostics.
+- [ ] Run `instances <addr>` and confirm advertised instance types:
+  - [ ] Type 4 light instance.
+  - [ ] Type 3 occupancy/motion instance.
 - [ ] Implement and test instance value reads.
 - [ ] Poll expected instances:
   - [ ] Instance 0 brightness.

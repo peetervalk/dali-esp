@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-06-06 (rev 14)
+**Last updated:** 2026-06-07 (rev 15)
 **Framework:** ESP-IDF v6.0.1 native CMake
 **Hardware target:** ESP32-DevKitC-VE / ESP32-WROVER-E + MikroE DALI-2 Click
 **Timer:** GPTIMER, 104 us alarm, 4x oversampling of the DALI half-bit
@@ -18,8 +18,13 @@ bring-up:
   8-bit reply gating, task-context trace hooks, raw 24-bit unsolicited event
   routing, and host mock tests.
 - Protocol builders and response parser dispatch exist for standard/common
-  16-bit commands plus draft standard DALI-2 instance commands; parser helpers
-  cover packed fade-time/rate and MSB-first multi-byte input values.
+  16-bit commands plus standard DALI-2 device/instance discovery commands;
+  parser helpers cover packed fade-time/rate and MSB-first multi-byte input
+  values.
+- Generic DALI-2 input-device helpers in `dali_input_device` classify standard
+  instance types without applying vendor profiles: type 3 occupancy/motion and
+  type 4 light are marked usable from standard type, while generic/unknown
+  values remain unverified.
 - Vendor/profile helpers are separate from the generic protocol layer:
   Lunatone-only instance scaling queries live in `dali_lunatone`, and the
   Steinel HF 360 II instance profile/conversions live in `dali_steinel`.
@@ -29,7 +34,7 @@ bring-up:
   targets and Home Assistant-style brightness values.
 - Native diagnostic CLI exists with `help`, `stats`, `trace on/off`, `read`,
   `reset`, scheduler-routed `raw`, named `level/off/max/min/status`, `scan`,
-  `discover`, `inventory`, and `identify`.
+  `discover`, `inventory`, generic `instances <addr>`, and `identify`.
 - Added `sdkconfig.defaults` for ESP32-WROVER-E bring-up: 8 MB flash,
   240 MHz CPU, 1000 Hz FreeRTOS tick, and ISR-adjacent GPIO/GPTIMER/FreeRTOS
   IRAM options; fresh generated config keeps `esp_timer_get_time()` in IRAM.
@@ -37,10 +42,10 @@ bring-up:
 
 Latest known verification:
 
-- `idf.py build` passes as of 2026-06-06.
+- `idf.py build` passes as of 2026-06-07.
 - Fresh build from `sdkconfig.defaults` passes and generates 8 MB flash image
   arguments as of 2026-06-05.
-- Host tests pass as of 2026-06-06: 8 suites, 121 `RUN_TEST` cases.
+- Host tests pass as of 2026-06-07: 9 suites, 127 `RUN_TEST` cases.
 - Real hardware flashing, timing, loopback, and device communication are still
   pending.
 
@@ -117,7 +122,7 @@ Steinel conversions available in `dali_steinel` after input-value reads work:
 | GPIO wiring for MikroE DALI-2 Click | Needs hardware confirmation. Do not use GPIO 16/17 on WROVER-E. |
 | HA brightness 0 behavior | Prefer explicit `OFF`; confirm on hardware. |
 | Scheduler RX handling | Raw 8-bit reply vs 24-bit event routing implemented; protocol-level event parsing pending. |
-| DALI-2 instance discovery | Manual/profile-driven first; automatic discovery later. |
+| DALI-2 instance discovery | Generic count/type CLI implemented; value polling and profile application pending. |
 | ESPHome component packaging | In-tree custom component first; external component later. |
 | DALI-2 firmware update / DFU | Out of scope. |
 

@@ -21,6 +21,7 @@ set(DALI_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_ringbuf.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_phy.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_protocol.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_input_device.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_lunatone.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_steinel.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_mapping.c
@@ -48,6 +49,7 @@ add_dali_test(test_ringbuf    test_ringbuf.c)
 add_dali_test(test_phy_encode test_phy_encode.c)
 add_dali_test(test_phy_decode test_phy_decode.c)
 add_dali_test(test_protocol   test_protocol.c)
+add_dali_test(test_input_device test_input_device.c)
 add_dali_test(test_vendor     test_vendor.c)
 add_dali_test(test_mapping    test_mapping.c)
 add_dali_test(test_control    test_control.c)

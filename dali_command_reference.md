@@ -57,7 +57,8 @@ bit_length = 24
 ```
 
 For a short-addressed input device, `device_address_byte = (short_addr << 1) | 1`.
-Instance addressing modes beyond direct instance number need verification.
+Instance byte `0x00..0x1F` addresses a specific instance, `0xFE` addresses the
+device-level command space, and `0xFF` addresses all instances where supported.
 
 ## Response Kinds To Model
 
@@ -195,14 +196,29 @@ Special commands do not use the same normal addressed-command shape as ordinary
 
 ## DALI-2 Input Device Commands
 
-These are 24-bit instance commands and are the next priority for the Steinel
-HF 360 II DALI-2 IPD sensor.
+These are 24-bit device/instance commands used for generic DALI-2 input-device
+discovery. They intentionally do not apply Steinel or Lunatone profiles.
 
-| Opcode | Name | Response | Status |
-|---:|---|---|---|
-| `0x81` | QUERY RESOLUTION | `UINT8` | planned |
-| `0x8C` | QUERY INPUT VALUE | `INPUT_VALUE_MSB` | planned |
-| `0x8D` | QUERY INPUT VALUE LATCH | `INPUT_VALUE_LATCH` | planned |
+| Instance byte | Opcode | Name | Response | Status |
+|---:|---:|---|---|---|
+| `0xFE` | `0x35` | QUERY NUMBER OF INSTANCES | `UINT8` | implemented in `dali_input_device` |
+| instance | `0x80` | QUERY INSTANCE TYPE | `UINT8` | implemented in `dali_input_device` |
+| instance | `0x81` | QUERY RESOLUTION | `UINT8` | implemented in `dali_input_device` |
+| instance | `0x82` | QUERY INSTANCE ERROR | `YES_NO` | implemented in `dali_input_device` |
+| instance | `0x83` | QUERY INSTANCE STATUS | `UINT8` | implemented in `dali_input_device` |
+| instance | `0x86` | QUERY INSTANCE ENABLED | `YES_NO` | implemented in `dali_input_device` |
+| instance | `0x8C` | QUERY INPUT VALUE | `INPUT_VALUE_MSB` | metadata/builder implemented; value CLI pending |
+| instance | `0x8D` | QUERY INPUT VALUE LATCH | `INPUT_VALUE_LATCH` | metadata/builder implemented; value CLI pending |
+
+Generic role classification in `dali_input_device`:
+
+| Type | Role | Usable state |
+|---:|---|---|
+| `0` | generic | unverified until self-described, profiled, or user-confirmed |
+| `1` | push-button | standard |
+| `2` | absolute | standard |
+| `3` | occupancy/motion | standard |
+| `4` | light | standard |
 
 ### Lunatone Sensor-Specific Instance Queries
 
@@ -235,6 +251,8 @@ Known Steinel HF 360 II DALI-2 IPD instance targets:
 - [x] Add generic addressed command builders by target type.
 - [x] Add response parser functions by `ResponseKind`.
 - [x] Add DALI-2 input-device constants and short-address instance builders.
+- [x] Add generic DALI-2 input-device count/type discovery helpers and CLI
+      command `instances <addr>`.
 - [x] Add Lunatone-specific query helpers outside generic `dali_protocol`.
 - [x] Add Steinel-specific value conversion helpers outside PHY/scheduler.
 - [x] Add static mapping validation helpers without entity-name assumptions.

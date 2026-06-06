@@ -93,7 +93,13 @@ static const DaliCommandInfo s_command_table[] = {
     CMD(DALI_CMD_WRITE_MEMORY_LOCATION, "WRITE MEMORY LOCATION", 0xC7u, 0xC7u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_MEMORY_BYTE, false, false),
     CMD(DALI_CMD_WRITE_MEMORY_LOCATION_NO_REPLY, "WRITE MEMORY LOCATION NO REPLY", 0xC9u, 0xC9u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, false),
 
-    CMD(DALI_CMD_QUERY_RESOLUTION, "QUERY RESOLUTION", 0x81u, 0x81u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, false),
+    CMD(DALI_CMD_QUERY_NUMBER_OF_INSTANCES, "QUERY NUMBER OF INSTANCES", 0x35u, 0x35u, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_UINT8, false, true),
+
+    CMD(DALI_CMD_QUERY_INSTANCE_TYPE, "QUERY INSTANCE TYPE", 0x80u, 0x80u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
+    CMD(DALI_CMD_QUERY_RESOLUTION, "QUERY RESOLUTION", 0x81u, 0x81u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
+    CMD(DALI_CMD_QUERY_INSTANCE_ERROR, "QUERY INSTANCE ERROR", 0x82u, 0x82u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_YES_NO, false, true),
+    CMD(DALI_CMD_QUERY_INSTANCE_STATUS, "QUERY INSTANCE STATUS", 0x83u, 0x83u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
+    CMD(DALI_CMD_QUERY_INSTANCE_ENABLED, "QUERY INSTANCE ENABLED", 0x86u, 0x86u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_YES_NO, false, true),
     CMD(DALI_CMD_QUERY_INPUT_VALUE, "QUERY INPUT VALUE", 0x8Cu, 0x8Cu, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_INPUT_VALUE_MSB, false, false),
     CMD(DALI_CMD_QUERY_INPUT_VALUE_LATCH, "QUERY INPUT VALUE LATCH", 0x8Du, 0x8Du, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_INPUT_VALUE_LATCH, false, false),
 };
@@ -292,6 +298,24 @@ DaliError dali_build_instance_command(uint8_t addr,
     return DALI_OK;
 }
 
+DaliError dali_build_device_command(uint8_t addr,
+                                    DaliCommandId id,
+                                    DaliFrame *out)
+{
+    if (out == NULL || addr >= 64u) {
+        return DALI_ERR_INVALID;
+    }
+
+    const DaliCommandInfo *cmd = dali_command_lookup(id);
+    if (cmd == NULL || cmd->frame_kind != DALI_CMD_FRAME_24BIT_DEV ||
+        cmd->opcode_first != cmd->opcode_last) {
+        return DALI_ERR_INVALID;
+    }
+
+    *out = dali_cmd_device(addr, cmd->opcode_first);
+    return DALI_OK;
+}
+
 /* ---------------------------------------------------------------------------
  * 16-bit frame builders
  * --------------------------------------------------------------------------*/
@@ -408,6 +432,11 @@ DaliFrame dali_cmd_broadcast_recall_max(void)
 DaliFrame dali_cmd_instance(uint8_t addr, uint8_t instance, uint8_t cmd)
 {
     return make_frame24(short_addr_byte(addr, 1u), instance, cmd);
+}
+
+DaliFrame dali_cmd_device(uint8_t addr, uint8_t cmd)
+{
+    return make_frame24(short_addr_byte(addr, 1u), 0xFEu, cmd);
 }
 
 DaliFrame dali_cmd_instance_group(uint8_t group, uint8_t instance, uint8_t cmd)

@@ -16,7 +16,7 @@ facts; it does not decide room names or final Home Assistant semantics.
 
 - Automatic unaddressed-device commissioning.
 - Automatic room/name inference.
-- Full DALI-2 instance auto-discovery.
+- Full DALI-2 value/profile auto-discovery.
 - Firmware update / DFU for DALI devices.
 - Dynamic Home Assistant entity creation.
 
@@ -43,6 +43,7 @@ status <addr>
 query <addr>     # compatibility alias for status
 discover
 inventory
+instances <addr>
 identify <addr>
 sensor poll <addr>
 find switches
@@ -135,6 +136,7 @@ Draft export shape:
 - [x] `discover` as enriched `scan`.
 - [x] `inventory` print command.
 - [x] `identify <addr>` for lamps.
+- [x] Generic `instances <addr>` for DALI-2 input-device count/type discovery.
 - [ ] Steinel profile polling. Profile helpers exist; real-bus polling is
       pending.
 - [ ] Unsolicited event queue.

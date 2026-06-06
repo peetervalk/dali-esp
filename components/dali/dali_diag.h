@@ -16,6 +16,7 @@
  *   level/off/max/min/status helpers for addr/sN/gN/b targets
  *   scan/discover    — scan short addresses 0–63 and update inventory
  *   inventory        — print the last discovered inventory
+ *   instances <addr> — query generic DALI-2 input-device instance types
  *   identify <addr>  — blink one short-addressed lamp candidate
  */
 

@@ -26,6 +26,7 @@ typedef enum {
     DALI_CMD_FRAME_16BIT      = 1,
     DALI_CMD_FRAME_SPECIAL    = 2,
     DALI_CMD_FRAME_24BIT_INST = 3,
+    DALI_CMD_FRAME_24BIT_DEV  = 4,
 } DaliCommandFrameKind;
 
 typedef enum {
@@ -130,7 +131,12 @@ typedef enum {
     DALI_CMD_WRITE_MEMORY_LOCATION,
     DALI_CMD_WRITE_MEMORY_LOCATION_NO_REPLY,
 
+    DALI_CMD_QUERY_NUMBER_OF_INSTANCES,
+    DALI_CMD_QUERY_INSTANCE_TYPE,
     DALI_CMD_QUERY_RESOLUTION,
+    DALI_CMD_QUERY_INSTANCE_ERROR,
+    DALI_CMD_QUERY_INSTANCE_STATUS,
+    DALI_CMD_QUERY_INSTANCE_ENABLED,
     DALI_CMD_QUERY_INPUT_VALUE,
     DALI_CMD_QUERY_INPUT_VALUE_LATCH,
 
@@ -172,6 +178,12 @@ DaliError dali_build_instance_command(uint8_t addr,
                                       uint8_t instance,
                                       DaliCommandId id,
                                       DaliFrame *out);
+
+/* Build a short-addressed DALI-2 24-bit device command from metadata.
+ * Device-level commands use instance byte 0xFE. */
+DaliError dali_build_device_command(uint8_t addr,
+                                    DaliCommandId id,
+                                    DaliFrame *out);
 
 /* ---------------------------------------------------------------------------
  * 16-bit frame builders
@@ -227,7 +239,8 @@ DaliFrame dali_cmd_broadcast_recall_max(void);
  *
  * Frame layout (MSB first, 24 bits):
  *   Byte 2 (first tx): address byte — same encoding as 16-bit DALI
- *   Byte 1 (middle):   instance byte — 0x00..0x1F specific; 0xFF = all
+ *   Byte 1 (middle):   instance byte — 0x00..0x1F specific; 0xFE = device;
+ *                      0xFF = all
  *   Byte 0 (last tx):  command byte
  *
  * Custom/vendor instance commands should be built by dedicated helper modules.
@@ -236,6 +249,9 @@ DaliFrame dali_cmd_broadcast_recall_max(void);
 /* Instance command to a single device (short address 0–63).
  * instance: 0–31 for a specific instance; 0xFF for all instances on device. */
 DaliFrame dali_cmd_instance(uint8_t addr, uint8_t instance, uint8_t cmd);
+
+/* Device-level command to a single device (short address 0-63). */
+DaliFrame dali_cmd_device(uint8_t addr, uint8_t cmd);
 
 /* Instance command to a device group (0–15).
  * instance: 0–31 for a specific instance; 0xFF for all instances. */

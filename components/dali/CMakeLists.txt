@@ -4,6 +4,7 @@ idf_component_register(
         "dali_phy.c"
         "dali_scheduler.c"
         "dali_protocol.c"
+        "dali_input_device.c"
         "dali_lunatone.c"
         "dali_steinel.c"
         "dali_mapping.c"

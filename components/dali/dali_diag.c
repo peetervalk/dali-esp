@@ -3,6 +3,7 @@
 #include "dali_scheduler.h"
 #include "dali_protocol.h"
 #include "dali_control.h"
+#include "dali_input_device.h"
 
 #ifndef DALI_HOST_BUILD
 #include "esp_log.h"
@@ -492,6 +493,17 @@ static bool diag_parse_target_arg(const char *args, DaliTarget *target)
     return diag_parse_target_token(target_text, target);
 }
 
+static bool diag_parse_short_addr_arg(const char *args, uint8_t *addr)
+{
+    char addr_text[16] = {0};
+    char extra[2] = {0};
+
+    if (sscanf(args, "%15s %1s", addr_text, extra) != 1) {
+        return false;
+    }
+    return diag_parse_uint8_token(addr_text, 63u, addr);
+}
+
 static void cmd_level(const char *args)
 {
 #ifndef DALI_HOST_BUILD
@@ -678,6 +690,168 @@ static void cmd_status(const char *args)
 #endif
 }
 
+typedef DaliError (*DiagInputQueryBuilder)(uint8_t addr,
+                                           uint8_t instance,
+                                           DaliFrame *out);
+
+static DaliError diag_query_u8(const DaliFrame *frame, uint8_t *out)
+{
+    if (frame == NULL || out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliFrame reply = {0u, 0u};
+    DaliError err = diag_sched_sync(frame, true, 1u, false, &reply);
+    if (err != DALI_OK) {
+        return err;
+    }
+    if (reply.bit_length != 8u) {
+        return DALI_ERR_MALFORMED;
+    }
+
+    *out = (uint8_t)(reply.data & 0xFFu);
+    return DALI_OK;
+}
+
+static DaliError diag_query_instance_u8(DiagInputQueryBuilder builder,
+                                        uint8_t addr,
+                                        uint8_t instance,
+                                        uint8_t *out)
+{
+    if (builder == NULL || out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliFrame frame;
+    DaliError err = builder(addr, instance, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+    return diag_query_u8(&frame, out);
+}
+
+static void diag_query_instance_optional_fields(uint8_t addr,
+                                                DaliInputInstanceInfo *info)
+{
+    if (info == NULL) {
+        return;
+    }
+
+    uint8_t raw = 0u;
+    if (diag_query_instance_u8(dali_input_build_query_instance_enabled,
+                               addr, info->instance, &raw) == DALI_OK) {
+        info->has_enabled = true;
+        info->enabled = dali_is_yes(raw);
+    }
+    if (diag_query_instance_u8(dali_input_build_query_resolution,
+                               addr, info->instance, &raw) == DALI_OK) {
+        info->has_resolution = true;
+        info->resolution = raw;
+    }
+    if (diag_query_instance_u8(dali_input_build_query_instance_status,
+                               addr, info->instance, &raw) == DALI_OK) {
+        info->has_status = true;
+        info->status = raw;
+    }
+    if (diag_query_instance_u8(dali_input_build_query_instance_error,
+                               addr, info->instance, &raw) == DALI_OK) {
+        info->has_error = true;
+        info->error = raw;
+    }
+}
+
+static void diag_print_input_instance(const DaliInputInstanceInfo *info)
+{
+    if (info == NULL) {
+        return;
+    }
+
+    printf("  %2u: type=%u %s, usable=%s, source=%s",
+           (unsigned)info->instance,
+           (unsigned)info->type,
+           dali_input_role_name(info->role),
+           dali_input_usable_name(info->usable),
+           dali_input_role_source_name(info->role_source));
+
+    if (info->has_enabled) {
+        printf(", enabled=%s", info->enabled ? "yes" : "no");
+    }
+    if (info->has_resolution) {
+        printf(", resolution=%u", (unsigned)info->resolution);
+    }
+    if (info->has_status) {
+        printf(", status=0x%02X", (unsigned)info->status);
+    }
+    if (info->has_error) {
+        printf(", error=%s", dali_is_yes(info->error) ? "yes" : "no");
+    }
+    printf("\r\n");
+}
+
+static void cmd_instances(const char *args)
+{
+#ifndef DALI_HOST_BUILD
+    uint8_t addr;
+    DaliFrame frame;
+    uint8_t count_raw = 0u;
+
+    if (!diag_parse_short_addr_arg(args, &addr)) {
+        printf("usage: instances <addr>\r\n");
+        return;
+    }
+
+    DaliError err = dali_input_build_query_number_of_instances(addr, &frame);
+    if (err == DALI_OK) {
+        err = diag_query_u8(&frame, &count_raw);
+    }
+    if (err == DALI_ERR_TIMEOUT) {
+        printf("instances: timeout querying device %u\r\n", (unsigned)addr);
+        return;
+    }
+    if (err != DALI_OK) {
+        printf("instances: ERR %d\r\n", (int)err);
+        return;
+    }
+
+    uint8_t count = count_raw;
+    printf("Input device %u:\r\n", (unsigned)addr);
+    if (count > DALI_INPUT_MAX_INSTANCES) {
+        printf("  instances: %u (showing first %u)\r\n",
+               (unsigned)count_raw,
+               (unsigned)DALI_INPUT_MAX_INSTANCES);
+        count = DALI_INPUT_MAX_INSTANCES;
+    } else {
+        printf("  instances: %u\r\n", (unsigned)count);
+    }
+
+    for (uint8_t instance = 0u; instance < count; instance++) {
+        uint8_t type = 0u;
+        err = diag_query_instance_u8(dali_input_build_query_instance_type,
+                                     addr, instance, &type);
+        if (err == DALI_ERR_TIMEOUT) {
+            printf("  %2u: type timeout\r\n", (unsigned)instance);
+            continue;
+        }
+        if (err != DALI_OK) {
+            printf("  %2u: type ERR %d\r\n", (unsigned)instance, (int)err);
+            continue;
+        }
+
+        DaliInputInstanceInfo info;
+        err = dali_input_classify_instance(instance, type, &info);
+        if (err != DALI_OK) {
+            printf("  %2u: classify ERR %d\r\n", (unsigned)instance, (int)err);
+            continue;
+        }
+
+        diag_query_instance_optional_fields(addr, &info);
+        diag_print_input_instance(&info);
+    }
+#else
+    (void)args;
+#endif
+}
+
 static uint8_t diag_discover_bus(bool detailed)
 {
     uint8_t found = 0u;
@@ -811,6 +985,7 @@ static void cmd_help(void)
     printf("  scan\r\n");
     printf("  discover\r\n");
     printf("  inventory\r\n");
+    printf("  instances <addr>\r\n");
     printf("  identify <addr>\r\n");
 #endif
 }
@@ -856,6 +1031,8 @@ static void dispatch(char *line)
         cmd_discover();
     } else if (strcmp(line, "inventory") == 0) {
         cmd_inventory();
+    } else if (strncmp(line, "instances ", 10) == 0) {
+        cmd_instances(line + 10);
     } else if (strncmp(line, "identify ", 9) == 0) {
         cmd_identify(line + 9);
     } else if (strncmp(line, "query ", 6) == 0) {
