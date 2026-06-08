@@ -2,7 +2,7 @@
 
 static bool mapping_input_instance_valid(uint8_t instance)
 {
-    return instance < 32u;
+    return instance < DALI_INSTANCE_COUNT;
 }
 
 DaliError dali_mapping_validate_entry(const DaliMappingEntry *entry)
@@ -21,7 +21,7 @@ DaliError dali_mapping_validate_entry(const DaliMappingEntry *entry)
 
         case DALI_MAPPING_INPUT_INSTANCE:
             if (entry->target.type != DALI_ADDR_SHORT ||
-                entry->target.address >= 64u ||
+                entry->target.address >= DALI_SHORT_ADDRESS_COUNT ||
                 !mapping_input_instance_valid(entry->instance)) {
                 return DALI_ERR_INVALID;
             }

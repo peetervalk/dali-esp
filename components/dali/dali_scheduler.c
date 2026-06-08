@@ -18,6 +18,9 @@ static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static const char *TAG = "DALI-SCHED";
 #endif
 
+_Static_assert((DALI_CMD_QUEUE_SIZE & (DALI_CMD_QUEUE_SIZE - 1u)) == 0u,
+               "DALI_CMD_QUEUE_SIZE must be a power of two");
+
 /* ---------------------------------------------------------------------------
  * Module state
  * --------------------------------------------------------------------------*/
@@ -100,7 +103,7 @@ static void sched_trace(DaliSchedTraceDirection direction,
 
 static bool sched_is_unsolicited_event_frame(const DaliFrame *frame)
 {
-    return frame->bit_length == 24u;
+    return frame->bit_length == DALI_EXTENDED_FRAME_BITS;
 }
 
 static bool sched_can_route_unsolicited_event(void)
@@ -293,7 +296,7 @@ void dali_sched_notify_rx(const DaliFrame *frame)
     if (s_state == SCHED_WAIT_REPLY &&
         s_active.needs_reply &&
         !s_reply_received &&
-        frame->bit_length == 8u &&
+        frame->bit_length == DALI_BACKWARD_FRAME_BITS &&
         elapsed_ms(s_state_entered_ms) < DALI_REPLY_TIMEOUT_MS) {
         s_reply_frame    = *frame;
         s_reply_received = true;

@@ -12,6 +12,10 @@ static const char *TAG = "main";
 #define DALI_TX_GPIO  18
 #define DALI_RX_GPIO  19
 
+#if DALI_TX_GPIO == 16 || DALI_TX_GPIO == 17 || DALI_RX_GPIO == 16 || DALI_RX_GPIO == 17
+#error "GPIO 16 and GPIO 17 are reserved for PSRAM on ESP32-WROVER-E"
+#endif
+
 /* DALI processing task — drives RX decode and scheduler state machine.
  * Higher priority than diag (2) and ESPHome/Wi-Fi tasks.
  * Pinning to Core 1 keeps Wi-Fi (Core 0) from causing timer jitter. */

@@ -36,7 +36,7 @@ static volatile bool s_trace_enabled;
 
 #define DIAG_SYNC_SLOT_COUNT 4u
 #define DIAG_SYNC_WAIT_MS  200u
-#define DIAG_INVENTORY_ADDR_COUNT 64u
+#define DIAG_INVENTORY_ADDR_COUNT DALI_SHORT_ADDRESS_COUNT
 #define DIAG_IDENTIFY_CYCLES 5u
 #define DIAG_IDENTIFY_STEP_MS 1000u
 
@@ -272,7 +272,7 @@ static bool diag_parse_target_token(const char *text, DaliTarget *out)
 
     if (text[0] == 'g') {
         uint8_t group;
-        if (!diag_parse_uint8_token(text + 1, 15u, &group)) {
+        if (!diag_parse_uint8_token(text + 1, DALI_MAX_GROUP, &group)) {
             return false;
         }
         *out = (DaliTarget){ .type = DALI_ADDR_GROUP, .address = group };
@@ -281,7 +281,7 @@ static bool diag_parse_target_token(const char *text, DaliTarget *out)
 
     if (text[0] == 's') {
         uint8_t addr;
-        if (!diag_parse_uint8_token(text + 1, 63u, &addr)) {
+        if (!diag_parse_uint8_token(text + 1, DALI_MAX_SHORT_ADDRESS, &addr)) {
             return false;
         }
         *out = (DaliTarget){ .type = DALI_ADDR_SHORT, .address = addr };
@@ -289,7 +289,7 @@ static bool diag_parse_target_token(const char *text, DaliTarget *out)
     }
 
     uint8_t addr;
-    if (!diag_parse_uint8_token(text, 63u, &addr)) {
+    if (!diag_parse_uint8_token(text, DALI_MAX_SHORT_ADDRESS, &addr)) {
         return false;
     }
     *out = (DaliTarget){ .type = DALI_ADDR_SHORT, .address = addr };
@@ -501,7 +501,7 @@ static bool diag_parse_short_addr_arg(const char *args, uint8_t *addr)
     if (sscanf(args, "%15s %1s", addr_text, extra) != 1) {
         return false;
     }
-    return diag_parse_uint8_token(addr_text, 63u, addr);
+    return diag_parse_uint8_token(addr_text, DALI_MAX_SHORT_ADDRESS, addr);
 }
 
 static void cmd_level(const char *args)
@@ -511,8 +511,9 @@ static void cmd_level(const char *args)
     unsigned level = 0u;
     char extra[2] = {0};
     if (sscanf(args, "%15s %u %1s", target_text, &level, extra) != 2 ||
-        level > 254u) {
-        printf("usage: level <addr|sN|gN|b> <0-254>\r\n");
+        level > DALI_DAPC_MAX_LEVEL) {
+        printf("usage: level <addr|sN|gN|b> <0-%u>\r\n",
+               (unsigned)DALI_DAPC_MAX_LEVEL);
         return;
     }
 
@@ -520,7 +521,8 @@ static void cmd_level(const char *args)
     DaliFrame frame;
     DaliError err;
     if (!diag_parse_target_token(target_text, &target)) {
-        printf("usage: level <addr|sN|gN|b> <0-254>\r\n");
+        printf("usage: level <addr|sN|gN|b> <0-%u>\r\n",
+               (unsigned)DALI_DAPC_MAX_LEVEL);
         return;
     }
 
@@ -556,6 +558,34 @@ static void cmd_off(const char *args)
 #endif
 }
 
+typedef DaliError (*DiagTargetFrameBuilder)(DaliTarget target, DaliFrame *out);
+
+static void cmd_target_frame(const char *args,
+                             const char *name,
+                             DiagTargetFrameBuilder builder)
+{
+#ifndef DALI_HOST_BUILD
+    DaliTarget target;
+    DaliFrame frame;
+    DaliError err;
+
+    if (name == NULL || builder == NULL || !diag_parse_target_arg(args, &target)) {
+        printf("usage: %s <addr|sN|gN|b>\r\n", name != NULL ? name : "cmd");
+        return;
+    }
+
+    err = builder(target, &frame);
+    if (err == DALI_OK) {
+        err = diag_send_no_reply(&frame, false);
+    }
+    diag_print_tx_result(name, err);
+#else
+    (void)args;
+    (void)name;
+    (void)builder;
+#endif
+}
+
 static void cmd_recall(const char *args, bool max_level)
 {
 #ifndef DALI_HOST_BUILD
@@ -577,6 +607,36 @@ static void cmd_recall(const char *args, bool max_level)
 #else
     (void)args;
     (void)max_level;
+#endif
+}
+
+static void cmd_scene(const char *args)
+{
+#ifndef DALI_HOST_BUILD
+    char target_text[16] = {0};
+    unsigned scene = 0u;
+    char extra[2] = {0};
+
+    if (sscanf(args, "%15s %u %1s", target_text, &scene, extra) != 2 ||
+        scene > DALI_MAX_SCENE) {
+        printf("usage: scene <addr|sN|gN|b> <0-%u>\r\n", (unsigned)DALI_MAX_SCENE);
+        return;
+    }
+
+    DaliTarget target;
+    DaliFrame frame;
+    if (!diag_parse_target_token(target_text, &target)) {
+        printf("usage: scene <addr|sN|gN|b> <0-%u>\r\n", (unsigned)DALI_MAX_SCENE);
+        return;
+    }
+
+    DaliError err = dali_control_build_go_to_scene(target, (uint8_t)scene, &frame);
+    if (err == DALI_OK) {
+        err = diag_send_no_reply(&frame, false);
+    }
+    diag_print_tx_result("scene", err);
+#else
+    (void)args;
 #endif
 }
 
@@ -690,6 +750,348 @@ static void cmd_status(const char *args)
 #endif
 }
 
+typedef struct {
+    const char   *name;
+    DaliCommandId id;
+    bool          needs_param;
+    uint8_t       max_param;
+} DiagQuerySpec;
+
+static const DiagQuerySpec s_diag_query_specs[] = {
+    { "status",            DALI_CMD_QUERY_STATUS,                     false, 0u },
+    { "present",           DALI_CMD_QUERY_CONTROL_GEAR_PRESENT,       false, 0u },
+    { "lamp-failure",      DALI_CMD_QUERY_LAMP_FAILURE,               false, 0u },
+    { "lamp-on",           DALI_CMD_QUERY_LAMP_POWER_ON,              false, 0u },
+    { "limit-error",       DALI_CMD_QUERY_LIMIT_ERROR,                false, 0u },
+    { "reset-state",       DALI_CMD_QUERY_RESET_STATE,                false, 0u },
+    { "missing-address",   DALI_CMD_QUERY_MISSING_SHORT_ADDRESS,      false, 0u },
+    { "version",           DALI_CMD_QUERY_VERSION_NUMBER,             false, 0u },
+    { "dtr0",              DALI_CMD_QUERY_CONTENT_DTR0,               false, 0u },
+    { "device-type",       DALI_CMD_QUERY_DEVICE_TYPE,                false, 0u },
+    { "physical-min",      DALI_CMD_QUERY_PHYSICAL_MINIMUM,           false, 0u },
+    { "power-failure",     DALI_CMD_QUERY_POWER_FAILURE,              false, 0u },
+    { "dtr1",              DALI_CMD_QUERY_CONTENT_DTR1,               false, 0u },
+    { "dtr2",              DALI_CMD_QUERY_CONTENT_DTR2,               false, 0u },
+    { "operating-mode",    DALI_CMD_QUERY_OPERATING_MODE,             false, 0u },
+    { "light-source",      DALI_CMD_QUERY_LIGHT_SOURCE_TYPE,          false, 0u },
+    { "actual",            DALI_CMD_QUERY_ACTUAL_LEVEL,               false, 0u },
+    { "max-level",         DALI_CMD_QUERY_MAX_LEVEL,                  false, 0u },
+    { "min-level",         DALI_CMD_QUERY_MIN_LEVEL,                  false, 0u },
+    { "power-on",          DALI_CMD_QUERY_POWER_ON_LEVEL,             false, 0u },
+    { "failure-level",     DALI_CMD_QUERY_SYSTEM_FAILURE_LEVEL,       false, 0u },
+    { "fade",              DALI_CMD_QUERY_FADE_TIME_FADE_RATE,        false, 0u },
+    { "manufacturer-mode", DALI_CMD_QUERY_MANUFACTURER_SPECIFIC_MODE, false, 0u },
+    { "next-device-type",  DALI_CMD_QUERY_NEXT_DEVICE_TYPE,           false, 0u },
+    { "extended-fade",     DALI_CMD_QUERY_EXTENDED_FADE_TIME,         false, 0u },
+    { "gear-failure",      DALI_CMD_QUERY_CONTROL_GEAR_FAILURE,       false, 0u },
+    { "scene-level",       DALI_CMD_QUERY_SCENE_LEVEL,                true,  DALI_MAX_SCENE },
+    { "groups-0-7",        DALI_CMD_QUERY_GROUPS_0_7,                 false, 0u },
+    { "groups-8-15",       DALI_CMD_QUERY_GROUPS_8_15,                false, 0u },
+    { "random-h",          DALI_CMD_QUERY_RANDOM_ADDRESS_H,           false, 0u },
+    { "random-m",          DALI_CMD_QUERY_RANDOM_ADDRESS_M,           false, 0u },
+    { "random-l",          DALI_CMD_QUERY_RANDOM_ADDRESS_L,           false, 0u },
+    { "memory",            DALI_CMD_READ_MEMORY_LOCATION,             false, 0u },
+    { "extended-version",  DALI_CMD_QUERY_EXTENDED_VERSION_NUMBER,    false, 0u },
+};
+
+static const DiagQuerySpec *diag_find_query_spec(const char *name)
+{
+    if (name == NULL) {
+        return NULL;
+    }
+
+    for (uint8_t i = 0u;
+         i < (uint8_t)(sizeof(s_diag_query_specs) / sizeof(s_diag_query_specs[0]));
+         i++) {
+        if (strcmp(name, s_diag_query_specs[i].name) == 0) {
+            return &s_diag_query_specs[i];
+        }
+    }
+    return NULL;
+}
+
+static void cmd_query_list(void)
+{
+#ifndef DALI_HOST_BUILD
+    printf("query names:\r\n");
+    for (uint8_t i = 0u;
+         i < (uint8_t)(sizeof(s_diag_query_specs) / sizeof(s_diag_query_specs[0]));
+         i++) {
+        const DiagQuerySpec *spec = &s_diag_query_specs[i];
+        printf("  %s", spec->name);
+        if (spec->needs_param) {
+            printf(" <0-%u>", (unsigned)spec->max_param);
+        }
+        printf("\r\n");
+    }
+#endif
+}
+
+static void diag_print_query_response(const DiagQuerySpec *spec,
+                                      const DaliFrame *reply)
+{
+#ifndef DALI_HOST_BUILD
+    if (spec == NULL || reply == NULL) {
+        return;
+    }
+
+    DaliParsedResponse parsed;
+    DaliError err = dali_parse_command_response(spec->id, reply, &parsed);
+    if (err != DALI_OK) {
+        printf("%s: malformed reply\r\n", spec->name);
+        return;
+    }
+
+    switch (parsed.kind) {
+        case DALI_RESP_STATUS:
+            printf("%s: 0x%02X\r\n", spec->name, (unsigned)parsed.raw);
+            diag_print_status_fields(parsed.raw);
+            break;
+
+        case DALI_RESP_YES_NO:
+            printf("%s: %s (0x%02X)\r\n",
+                   spec->name,
+                   parsed.yes ? "yes" : "no",
+                   (unsigned)parsed.raw);
+            break;
+
+        case DALI_RESP_UINT8:
+            printf("%s: %u (0x%02X)\r\n",
+                   spec->name,
+                   (unsigned)parsed.value,
+                   (unsigned)parsed.raw);
+            break;
+
+        case DALI_RESP_BITSET8:
+            printf("%s: 0x%02X\r\n", spec->name, (unsigned)parsed.bitset);
+            break;
+
+        case DALI_RESP_MEMORY_BYTE:
+            printf("%s: %u (0x%02X)\r\n",
+                   spec->name,
+                   (unsigned)parsed.value,
+                   (unsigned)parsed.raw);
+            break;
+
+        case DALI_RESP_FADE_TIME_RATE:
+            printf("%s: fade_time=%u fade_rate=%u (0x%02X)\r\n",
+                   spec->name,
+                   (unsigned)parsed.fade.fade_time,
+                   (unsigned)parsed.fade.fade_rate,
+                   (unsigned)parsed.raw);
+            break;
+
+        default:
+            printf("%s: 0x%02X\r\n", spec->name, (unsigned)parsed.raw);
+            break;
+    }
+#else
+    (void)spec;
+    (void)reply;
+#endif
+}
+
+static void cmd_query(const char *args)
+{
+#ifndef DALI_HOST_BUILD
+    char target_text[16] = {0};
+    char query_text[32] = {0};
+    char param_text[16] = {0};
+    char extra[2] = {0};
+    int parsed = sscanf(args, "%15s %31s %15s %1s",
+                        target_text,
+                        query_text,
+                        param_text,
+                        extra);
+
+    if (parsed == 1) {
+        cmd_status(args);
+        return;
+    }
+    if (parsed < 2 || parsed > 3) {
+        printf("usage: query <addr|sN|gN|b> [query-name] [param]\r\n");
+        printf("       query-list\r\n");
+        return;
+    }
+
+    DaliTarget target;
+    if (!diag_parse_target_token(target_text, &target)) {
+        printf("usage: query <addr|sN|gN|b> [query-name] [param]\r\n");
+        return;
+    }
+
+    const DiagQuerySpec *spec = diag_find_query_spec(query_text);
+    if (spec == NULL) {
+        printf("query: unknown query '%s'\r\n", query_text);
+        printf("use query-list\r\n");
+        return;
+    }
+
+    uint8_t param = 0u;
+    if (spec->needs_param) {
+        if (parsed != 3 || !diag_parse_uint8_token(param_text, spec->max_param, &param)) {
+            printf("usage: query <addr|sN|gN|b> %s <0-%u>\r\n",
+                   spec->name,
+                   (unsigned)spec->max_param);
+            return;
+        }
+    } else if (parsed != 2) {
+        printf("usage: query <addr|sN|gN|b> %s\r\n", spec->name);
+        return;
+    }
+
+    if (target.type != DALI_ADDR_SHORT) {
+        printf("query: group/broadcast replies may collide on a real bus\r\n");
+    }
+
+    DaliFrame frame;
+    DaliFrame reply = {0u, 0u};
+    DaliError err = dali_control_build_query(target, spec->id, param, &frame);
+    if (err == DALI_OK) {
+        err = diag_sched_sync(&frame, true, 1u, false, &reply);
+    }
+    if (err == DALI_OK) {
+        diag_print_query_response(spec, &reply);
+    } else if (err == DALI_ERR_TIMEOUT) {
+        printf("%s: timeout\r\n", spec->name);
+    } else {
+        printf("%s: ERR %d\r\n", spec->name, (int)err);
+    }
+#else
+    (void)args;
+#endif
+}
+
+typedef struct {
+    const char   *name;
+    DaliCommandId id;
+    bool          needs_param;
+    uint8_t       max_param;
+    bool          uses_dtr0;
+} DiagConfigSpec;
+
+static const DiagConfigSpec s_diag_config_specs[] = {
+    { "reset",                  DALI_CMD_RESET,                     false, 0u,             false },
+    { "store-actual-dtr0",      DALI_CMD_STORE_ACTUAL_LEVEL_DTR0,   false, 0u,             false },
+    { "save-persistent",        DALI_CMD_SAVE_PERSISTENT_VARIABLES, false, 0u,             false },
+    { "set-operating-mode-dtr0", DALI_CMD_SET_OPERATING_MODE_DTR0,  false, 0u,             true  },
+    { "reset-memory-dtr0",      DALI_CMD_RESET_MEMORY_BANK_DTR0,    false, 0u,             true  },
+    { "identify-device",        DALI_CMD_IDENTIFY_DEVICE,           false, 0u,             false },
+    { "set-max-dtr0",           DALI_CMD_SET_MAX_LEVEL_DTR0,        false, 0u,             true  },
+    { "set-min-dtr0",           DALI_CMD_SET_MIN_LEVEL_DTR0,        false, 0u,             true  },
+    { "set-failure-dtr0",       DALI_CMD_SET_SYSTEM_FAILURE_LEVEL_DTR0, false, 0u,         true  },
+    { "set-power-on-dtr0",      DALI_CMD_SET_POWER_ON_LEVEL_DTR0,   false, 0u,             true  },
+    { "set-fade-time-dtr0",     DALI_CMD_SET_FADE_TIME_DTR0,        false, 0u,             true  },
+    { "set-fade-rate-dtr0",     DALI_CMD_SET_FADE_RATE_DTR0,        false, 0u,             true  },
+    { "set-extended-fade-dtr0", DALI_CMD_SET_EXTENDED_FADE_TIME_DTR0, false, 0u,           true  },
+    { "set-scene",              DALI_CMD_SET_SCENE,                 true,  DALI_MAX_SCENE, true  },
+    { "remove-scene",           DALI_CMD_REMOVE_FROM_SCENE,         true,  DALI_MAX_SCENE, false },
+    { "add-group",              DALI_CMD_ADD_TO_GROUP,              true,  DALI_MAX_GROUP, false },
+    { "remove-group",           DALI_CMD_REMOVE_FROM_GROUP,         true,  DALI_MAX_GROUP, false },
+    { "set-short-address-dtr0", DALI_CMD_SET_SHORT_ADDRESS_DTR0,    false, 0u,             true  },
+    { "enable-write-memory",    DALI_CMD_ENABLE_WRITE_MEMORY,       false, 0u,             false },
+};
+
+static const DiagConfigSpec *diag_find_config_spec(const char *name)
+{
+    if (name == NULL) {
+        return NULL;
+    }
+
+    for (uint8_t i = 0u;
+         i < (uint8_t)(sizeof(s_diag_config_specs) / sizeof(s_diag_config_specs[0]));
+         i++) {
+        if (strcmp(name, s_diag_config_specs[i].name) == 0) {
+            return &s_diag_config_specs[i];
+        }
+    }
+    return NULL;
+}
+
+static void cmd_config_list(void)
+{
+#ifndef DALI_HOST_BUILD
+    printf("config names:\r\n");
+    for (uint8_t i = 0u;
+         i < (uint8_t)(sizeof(s_diag_config_specs) / sizeof(s_diag_config_specs[0]));
+         i++) {
+        const DiagConfigSpec *spec = &s_diag_config_specs[i];
+        printf("  %s", spec->name);
+        if (spec->needs_param) {
+            printf(" <0-%u>", (unsigned)spec->max_param);
+        }
+        if (spec->uses_dtr0) {
+            printf(" [uses current DTR0]");
+        }
+        printf("\r\n");
+    }
+#endif
+}
+
+static void cmd_config(const char *args)
+{
+#ifndef DALI_HOST_BUILD
+    char target_text[16] = {0};
+    char config_text[40] = {0};
+    char param_text[16] = {0};
+    char extra[2] = {0};
+    int parsed = sscanf(args, "%15s %39s %15s %1s",
+                        target_text,
+                        config_text,
+                        param_text,
+                        extra);
+
+    if (parsed < 2 || parsed > 3) {
+        printf("usage: config <addr|sN|gN|b> <config-name> [param]\r\n");
+        printf("       config-list\r\n");
+        return;
+    }
+
+    DaliTarget target;
+    if (!diag_parse_target_token(target_text, &target)) {
+        printf("usage: config <addr|sN|gN|b> <config-name> [param]\r\n");
+        return;
+    }
+
+    const DiagConfigSpec *spec = diag_find_config_spec(config_text);
+    if (spec == NULL) {
+        printf("config: unknown config '%s'\r\n", config_text);
+        printf("use config-list\r\n");
+        return;
+    }
+
+    uint8_t param = 0u;
+    if (spec->needs_param) {
+        if (parsed != 3 || !diag_parse_uint8_token(param_text, spec->max_param, &param)) {
+            printf("usage: config <addr|sN|gN|b> %s <0-%u>\r\n",
+                   spec->name,
+                   (unsigned)spec->max_param);
+            return;
+        }
+    } else if (parsed != 2) {
+        printf("usage: config <addr|sN|gN|b> %s\r\n", spec->name);
+        return;
+    }
+
+    if (target.type != DALI_ADDR_SHORT) {
+        printf("config: group/broadcast target may affect multiple devices\r\n");
+    }
+    if (spec->uses_dtr0) {
+        printf("config: using current DTR0 value\r\n");
+    }
+
+    DaliFrame frame;
+    DaliError err = dali_control_build_config(target, spec->id, param, &frame);
+    const DaliCommandInfo *cmd = dali_command_lookup(spec->id);
+    if (err == DALI_OK && cmd != NULL) {
+        err = diag_send_no_reply(&frame, cmd->send_twice);
+    }
+    diag_print_tx_result(spec->name, err);
+#else
+    (void)args;
+#endif
+}
+
 typedef DaliError (*DiagInputQueryBuilder)(uint8_t addr,
                                            uint8_t instance,
                                            DaliFrame *out);
@@ -705,7 +1107,7 @@ static DaliError diag_query_u8(const DaliFrame *frame, uint8_t *out)
     if (err != DALI_OK) {
         return err;
     }
-    if (reply.bit_length != 8u) {
+    if (reply.bit_length != DALI_BACKWARD_FRAME_BITS) {
         return DALI_ERR_MALFORMED;
     }
 
@@ -857,9 +1259,9 @@ static uint8_t diag_discover_bus(bool detailed)
     uint8_t found = 0u;
 
     diag_inventory_reset();
-    printf("Scanning short addresses 0-63...\r\n");
+    printf("Scanning short addresses 0-%u...\r\n", (unsigned)DALI_MAX_SHORT_ADDRESS);
 
-    for (uint8_t addr = 0u; addr < 64u; addr++) {
+    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         DaliTarget target = { .type = DALI_ADDR_SHORT, .address = addr };
         DaliFrame reply = {0u, 0u};
         DaliError err = diag_query_status(target, &reply);
@@ -903,7 +1305,7 @@ static void cmd_inventory(void)
 #ifndef DALI_HOST_BUILD
     uint8_t found = 0u;
 
-    for (uint8_t addr = 0u; addr < 64u; addr++) {
+    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         DiagInventoryEntry entry;
         bool valid = diag_inventory_get(addr, &entry);
         if (!valid) {
@@ -930,7 +1332,7 @@ static void cmd_identify(const char *args)
     DaliFrame max_frame;
     DaliFrame min_frame;
 
-    if (!diag_parse_uint8_token(args, 63u, &addr)) {
+    if (!diag_parse_uint8_token(args, DALI_MAX_SHORT_ADDRESS, &addr)) {
         printf("usage: identify <addr>\r\n");
         return;
     }
@@ -977,11 +1379,24 @@ static void cmd_help(void)
     printf("  read\r\n");
     printf("  reset\r\n");
     printf("  raw <hex> len=<n> [wait]\r\n");
-    printf("  level <addr|sN|gN|b> <0-254>\r\n");
+    printf("  level <addr|sN|gN|b> <0-%u>\r\n", (unsigned)DALI_DAPC_MAX_LEVEL);
     printf("  off <addr|sN|gN|b>\r\n");
+    printf("  up <addr|sN|gN|b>\r\n");
+    printf("  down <addr|sN|gN|b>\r\n");
+    printf("  step-up <addr|sN|gN|b>\r\n");
+    printf("  step-down <addr|sN|gN|b>\r\n");
+    printf("  step-off <addr|sN|gN|b>\r\n");
+    printf("  on-step <addr|sN|gN|b>\r\n");
+    printf("  dapc-seq <addr|sN|gN|b>\r\n");
+    printf("  last <addr|sN|gN|b>\r\n");
+    printf("  scene <addr|sN|gN|b> <0-%u>\r\n", (unsigned)DALI_MAX_SCENE);
     printf("  max <addr|sN|gN|b>\r\n");
     printf("  min <addr|sN|gN|b>\r\n");
     printf("  status <addr|sN|gN|b>\r\n");
+    printf("  query <addr|sN|gN|b> [query-name] [param]\r\n");
+    printf("  query-list\r\n");
+    printf("  config <addr|sN|gN|b> <config-name> [param]\r\n");
+    printf("  config-list\r\n");
     printf("  scan\r\n");
     printf("  discover\r\n");
     printf("  inventory\r\n");
@@ -1013,12 +1428,34 @@ static void dispatch(char *line)
         cmd_read();
     } else if (strcmp(line, "reset") == 0) {
         cmd_reset();
+    } else if (strcmp(line, "query-list") == 0) {
+        cmd_query_list();
+    } else if (strcmp(line, "config-list") == 0) {
+        cmd_config_list();
     } else if (strncmp(line, "raw ", 4) == 0) {
         cmd_raw(line + 4);
     } else if (strncmp(line, "level ", 6) == 0) {
         cmd_level(line + 6);
     } else if (strncmp(line, "off ", 4) == 0) {
         cmd_off(line + 4);
+    } else if (strncmp(line, "up ", 3) == 0) {
+        cmd_target_frame(line + 3, "up", dali_control_build_up);
+    } else if (strncmp(line, "down ", 5) == 0) {
+        cmd_target_frame(line + 5, "down", dali_control_build_down);
+    } else if (strncmp(line, "step-up ", 8) == 0) {
+        cmd_target_frame(line + 8, "step-up", dali_control_build_step_up);
+    } else if (strncmp(line, "step-down ", 10) == 0) {
+        cmd_target_frame(line + 10, "step-down", dali_control_build_step_down);
+    } else if (strncmp(line, "step-off ", 9) == 0) {
+        cmd_target_frame(line + 9, "step-off", dali_control_build_step_down_and_off);
+    } else if (strncmp(line, "on-step ", 8) == 0) {
+        cmd_target_frame(line + 8, "on-step", dali_control_build_on_and_step_up);
+    } else if (strncmp(line, "dapc-seq ", 9) == 0) {
+        cmd_target_frame(line + 9, "dapc-seq", dali_control_build_enable_dapc_sequence);
+    } else if (strncmp(line, "last ", 5) == 0) {
+        cmd_target_frame(line + 5, "last", dali_control_build_go_to_last_active_level);
+    } else if (strncmp(line, "scene ", 6) == 0) {
+        cmd_scene(line + 6);
     } else if (strncmp(line, "max ", 4) == 0) {
         cmd_recall(line + 4, true);
     } else if (strncmp(line, "min ", 4) == 0) {
@@ -1036,7 +1473,9 @@ static void dispatch(char *line)
     } else if (strncmp(line, "identify ", 9) == 0) {
         cmd_identify(line + 9);
     } else if (strncmp(line, "query ", 6) == 0) {
-        cmd_status(line + 6);
+        cmd_query(line + 6);
+    } else if (strncmp(line, "config ", 7) == 0) {
+        cmd_config(line + 7);
     } else {
         printf("unknown command: %s\r\n", line);
         printf("type 'help' for commands\r\n");

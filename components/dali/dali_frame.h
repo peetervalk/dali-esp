@@ -27,6 +27,30 @@
 #define DALI_BUS_IDLE_TIMEOUT_US (DALI_BIT_US * 4u) /* max wait for idle before TX*/
 
 /* ---------------------------------------------------------------------------
+ * Protocol limits
+ * --------------------------------------------------------------------------*/
+#define DALI_BACKWARD_FRAME_BITS      8u
+#define DALI_FORWARD_FRAME_BITS      16u
+#define DALI_EXTENDED_FRAME_BITS     24u
+#define DALI_MAX_FRAME_BITS          DALI_EXTENDED_FRAME_BITS
+
+#define DALI_SHORT_ADDRESS_COUNT     64u
+#define DALI_MAX_SHORT_ADDRESS      (DALI_SHORT_ADDRESS_COUNT - 1u)
+#define DALI_GROUP_COUNT             16u
+#define DALI_MAX_GROUP              (DALI_GROUP_COUNT - 1u)
+#define DALI_SCENE_COUNT             16u
+#define DALI_MAX_SCENE              (DALI_SCENE_COUNT - 1u)
+#define DALI_INSTANCE_COUNT          32u
+#define DALI_MAX_INSTANCE           (DALI_INSTANCE_COUNT - 1u)
+
+#define DALI_BROADCAST_DAPC_ADDRESS     0xFEu /* 16/24-bit address byte */
+#define DALI_BROADCAST_COMMAND_ADDRESS  0xFFu /* 16/24-bit address byte */
+#define DALI_DEVICE_INSTANCE            0xFEu /* 24-bit instance byte */
+#define DALI_ALL_INSTANCES              0xFFu /* 24-bit instance byte */
+#define DALI_YES_RESPONSE               0xFFu /* 8-bit backward frame */
+#define DALI_DAPC_MAX_LEVEL             254u
+
+/* ---------------------------------------------------------------------------
  * Buffer sizes — power-of-2 required for ring buffer masking
  * --------------------------------------------------------------------------*/
 #define DALI_RX_EDGE_BUFFER_SIZE     64u

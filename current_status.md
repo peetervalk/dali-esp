@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-06-07 (rev 15)
+**Last updated:** 2026-06-08 (rev 19)
 **Framework:** ESP-IDF v6.0.1 native CMake
 **Hardware target:** ESP32-DevKitC-VE / ESP32-WROVER-E + MikroE DALI-2 Click
 **Timer:** GPTIMER, 104 us alarm, 4x oversampling of the DALI half-bit
@@ -30,11 +30,19 @@ bring-up:
   Steinel HF 360 II instance profile/conversions live in `dali_steinel`.
 - Static mapping helpers in `dali_mapping` validate configured outputs and
   input instances without assigning room/entity semantics.
-- `dali_control` is a first command-translation layer for short/group/broadcast
-  targets and Home Assistant-style brightness values.
+- Shared protocol limits for frame lengths, address ranges, instance ranges,
+  broadcast bytes, and DAPC levels live in `dali_frame`.
+- `dali_control` translates short/group/broadcast targets and Home
+  Assistant-style brightness values through the protocol builders. It covers
+  DAPC, normal output-level instructions through `GO TO SCENE`, recall
+  min/max, `QUERY STATUS`, and generic metadata-backed addressed 16-bit
+  queries/configuration commands.
 - Native diagnostic CLI exists with `help`, `stats`, `trace on/off`, `read`,
-  `reset`, scheduler-routed `raw`, named `level/off/max/min/status`, `scan`,
-  `discover`, `inventory`, generic `instances <addr>`, and `identify`.
+  `reset`, scheduler-routed `raw`, named output helpers
+  `level/off/up/down/step-up/step-down/step-off/on-step/dapc-seq/last/scene`,
+  `max/min/status`, generic `query <target> <name> [param]`, `query-list`,
+  generic `config <target> <name> [param]`, `config-list`, `scan`, `discover`,
+  `inventory`, generic `instances <addr>`, and `identify`.
 - Added `sdkconfig.defaults` for ESP32-WROVER-E bring-up: 8 MB flash,
   240 MHz CPU, 1000 Hz FreeRTOS tick, and ISR-adjacent GPIO/GPTIMER/FreeRTOS
   IRAM options; fresh generated config keeps `esp_timer_get_time()` in IRAM.
@@ -42,10 +50,10 @@ bring-up:
 
 Latest known verification:
 
-- `idf.py build` passes as of 2026-06-07.
+- `idf.py build` passes as of 2026-06-08.
 - Fresh build from `sdkconfig.defaults` passes and generates 8 MB flash image
   arguments as of 2026-06-05.
-- Host tests pass as of 2026-06-07: 9 suites, 127 `RUN_TEST` cases.
+- Host tests pass as of 2026-06-08: 9 suites, 141 `RUN_TEST` cases.
 - Real hardware flashing, timing, loopback, and device communication are still
   pending.
 
@@ -144,3 +152,9 @@ C:\Espressif\tools\cmake\4.0.3\bin\cmake.exe -B build -G "MinGW Makefiles"
 C:\Espressif\tools\cmake\4.0.3\bin\cmake.exe --build build
 C:\Espressif\tools\cmake\4.0.3\bin\ctest.exe --test-dir build --output-on-failure
 ```
+
+IDE compile database:
+
+- Native ESP-IDF configure/build generates `build/compile_commands.json`.
+- Host-test configure with `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` generates
+  `test/build/compile_commands.json`.

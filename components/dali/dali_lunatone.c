@@ -26,7 +26,7 @@ static const DaliLunatoneCommandInfo s_lunatone_commands[] = {
 
 static bool lunatone_instance_valid(uint8_t instance)
 {
-    return instance < 32u || instance == 0xFFu;
+    return instance < DALI_INSTANCE_COUNT || instance == DALI_ALL_INSTANCES;
 }
 
 const DaliLunatoneCommandInfo *dali_lunatone_command_lookup(DaliLunatoneCommandId id)
@@ -59,7 +59,8 @@ DaliError dali_lunatone_build_instance_command(uint8_t addr,
                                                DaliLunatoneCommandId id,
                                                DaliFrame *out)
 {
-    if (out == NULL || addr >= 64u || !lunatone_instance_valid(instance)) {
+    if (out == NULL || addr >= DALI_SHORT_ADDRESS_COUNT ||
+        !lunatone_instance_valid(instance)) {
         return DALI_ERR_INVALID;
     }
 

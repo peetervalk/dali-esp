@@ -35,16 +35,38 @@ transaction.
 
 ## CLI Workflow
 
-Initial native CLI commands:
+Implemented native CLI commands:
 
 ```text
 scan
+level <addr|sN|gN|b> <0-254>
+off <addr|sN|gN|b>
+up <addr|sN|gN|b>
+down <addr|sN|gN|b>
+step-up <addr|sN|gN|b>
+step-down <addr|sN|gN|b>
+step-off <addr|sN|gN|b>
+on-step <addr|sN|gN|b>
+dapc-seq <addr|sN|gN|b>
+last <addr|sN|gN|b>
+scene <addr|sN|gN|b> <0-15>
+max <addr|sN|gN|b>
+min <addr|sN|gN|b>
 status <addr>
 query <addr>     # compatibility alias for status
+query <addr|sN|gN|b> <query-name> [param]
+query-list
+config <addr|sN|gN|b> <config-name> [param]
+config-list
 discover
 inventory
 instances <addr>
 identify <addr>
+```
+
+Planned native CLI commands:
+
+```text
 sensor poll <addr>
 find switches
 export inventory
@@ -61,11 +83,6 @@ Scanning short addresses 0-63...
 
 > identify 12
 Blinking addr 12 between min and max for 10 seconds.
-
-> find switches
-Listening for 90 seconds. Double press each switch now.
-1: addr=8 instance=0 event=double_press
-2: addr=8 instance=1 event=double_press
 ```
 
 ## Discovery Steps
@@ -73,7 +90,7 @@ Listening for 90 seconds. Double press each switch now.
 1. Scan short addresses 0..63 with one scheduler transaction at a time.
 2. Mark responders as present; mark timeouts as absent/unknown.
 3. Query status for each responder.
-4. Query basic capability information when command support is ready:
+4. Query basic capability information using the generic control-gear query path:
    - version number
    - device type
    - actual level for control gear
@@ -111,10 +128,10 @@ Draft export shape:
       "kind": "input_device",
       "profile": "steinel_hf360_2",
       "instances": [
-        { "instance": 0, "type": 4, "suggested_entity": "illuminance" },
-        { "instance": 1, "type": 3, "suggested_entity": "motion" },
-        { "instance": 2, "type": 0, "suggested_entity": "temperature" },
-        { "instance": 3, "type": 0, "suggested_entity": "humidity" }
+        { "instance": 0, "type": 4, "role": "light", "source": "standard" },
+        { "instance": 1, "type": 3, "role": "occupancy", "source": "standard" },
+        { "instance": 2, "type": 0, "role": "temperature", "source": "vendor_profile" },
+        { "instance": 3, "type": 0, "role": "humidity", "source": "vendor_profile" }
       ]
     },
     {

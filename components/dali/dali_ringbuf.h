@@ -10,7 +10,7 @@
  *   Neither side holds a mutex; safety relies on a single shared index
  *   accessed with compiler barriers / atomics.
  *
- * Capacity must be a power of 2 (enforced by static assert in .c).
+ * Capacity must be a power of 2 (checked by assert at init).
  * Elements are uint32_t (used to store packed edge timestamps or TX bits).
  *
  * Host-portable: no ESP-IDF headers included here or in the .c file

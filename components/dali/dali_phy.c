@@ -25,6 +25,11 @@
 
 static const char *TAG = "DALI-PHY";
 
+_Static_assert((DALI_RX_EDGE_BUFFER_SIZE & (DALI_RX_EDGE_BUFFER_SIZE - 1u)) == 0u,
+               "DALI_RX_EDGE_BUFFER_SIZE must be a power of two");
+_Static_assert(DALI_TX_HALF_BIT_BUFFER_SIZE >= ((1u + DALI_MAX_FRAME_BITS + 2u) * 2u),
+               "DALI_TX_HALF_BIT_BUFFER_SIZE must hold the largest encoded frame");
+
 /* ---------------------------------------------------------------------------
  * Global stats (declared extern in dali_frame.h)
  * --------------------------------------------------------------------------*/
@@ -53,8 +58,7 @@ static bool     s_rx_in_frame;           /* currently accumulating edges */
  * TX half-bit buffer: one byte per half-bit (1 = HIGH, 0 = LOW)
  * Max frame: 1 start + 24 data + 2 stop = 27 bits → 54 half-bits
  * --------------------------------------------------------------------------*/
-#define TX_HALF_BIT_BUF_MAX 64u
-static uint8_t  s_tx_half_bits[TX_HALF_BIT_BUF_MAX];
+static uint8_t  s_tx_half_bits[DALI_TX_HALF_BIT_BUFFER_SIZE];
 static uint8_t  s_tx_total_half_bits;
 static uint8_t  s_tx_half_bit_idx;
 
@@ -262,7 +266,7 @@ DaliError dali_phy_decode_manchester(const uint32_t *intervals,
                  * Consecutive bits share the same first-half level so the
                  * boundary transition did not occur. */
                 level ^= 1u;
-                if (num_bits >= 24u) { return DALI_ERR_MALFORMED; }
+                if (num_bits >= DALI_MAX_FRAME_BITS) { return DALI_ERR_MALFORMED; }
                 data = (data << 1u) | (level == 0u ? 1u : 0u);
                 num_bits++;
                 /* at_mid remains 1 */
@@ -277,14 +281,16 @@ DaliError dali_phy_decode_manchester(const uint32_t *intervals,
                 return DALI_ERR_MALFORMED;
             }
             level ^= 1u;
-            if (num_bits >= 24u) { return DALI_ERR_MALFORMED; }
+            if (num_bits >= DALI_MAX_FRAME_BITS) { return DALI_ERR_MALFORMED; }
             data = (data << 1u) | (level == 0u ? 1u : 0u);
             num_bits++;
             at_mid = 1u;
         }
     }
 
-    if (num_bits != 8u && num_bits != 16u && num_bits != 24u) {
+    if (num_bits != DALI_BACKWARD_FRAME_BITS &&
+        num_bits != DALI_FORWARD_FRAME_BITS &&
+        num_bits != DALI_EXTENDED_FRAME_BITS) {
         return DALI_ERR_MALFORMED;
     }
 
@@ -460,7 +466,8 @@ void dali_phy_set_rx_callback(DaliPhyRxCallback cb, void *ctx)
 
 DaliError dali_phy_tx(const DaliFrame *frame)
 {
-    if (frame == NULL || frame->bit_length == 0u || frame->bit_length > 24u) {
+    if (frame == NULL || frame->bit_length == 0u ||
+        frame->bit_length > DALI_MAX_FRAME_BITS) {
         return DALI_ERR_INVALID;
     }
     if (s_tx_state != DALI_PHY_TX_IDLE) {
@@ -474,7 +481,8 @@ DaliError dali_phy_tx(const DaliFrame *frame)
 #endif
 
     /* Pre-encode the frame into the half-bit buffer */
-    uint8_t len = dali_phy_encode_manchester(frame, s_tx_half_bits, TX_HALF_BIT_BUF_MAX);
+    uint8_t len = dali_phy_encode_manchester(frame, s_tx_half_bits,
+                                             DALI_TX_HALF_BIT_BUFFER_SIZE);
     if (len == 0u) {
         return DALI_ERR_INVALID;
     }

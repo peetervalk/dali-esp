@@ -121,6 +121,7 @@ void test_command_lookup_opcode_range_go_to_scene(void)
     TEST_ASSERT_EQUAL(DALI_CMD_GO_TO_SCENE, cmd->id);
     TEST_ASSERT_EQUAL_UINT8(0x10u, cmd->opcode_first);
     TEST_ASSERT_EQUAL_UINT8(0x1Fu, cmd->opcode_last);
+    TEST_ASSERT_TRUE(cmd->implemented);
 }
 
 void test_command_lookup_disambiguates_normal_and_special_opcode(void)
@@ -177,6 +178,121 @@ void test_command_lookup_send_twice_metadata(void)
     const DaliCommandInfo *query_status = dali_command_lookup(DALI_CMD_QUERY_STATUS);
     TEST_ASSERT_NOT_NULL(query_status);
     TEST_ASSERT_FALSE(query_status->send_twice);
+}
+
+void test_command_lookup_output_level_helpers_are_implemented(void)
+{
+    const DaliCommandId output_commands[] = {
+        DALI_CMD_UP,
+        DALI_CMD_DOWN,
+        DALI_CMD_STEP_UP,
+        DALI_CMD_STEP_DOWN,
+        DALI_CMD_STEP_DOWN_AND_OFF,
+        DALI_CMD_ON_AND_STEP_UP,
+        DALI_CMD_ENABLE_DAPC_SEQUENCE,
+        DALI_CMD_GO_TO_LAST_ACTIVE_LEVEL,
+        DALI_CMD_GO_TO_SCENE,
+    };
+
+    for (uint8_t i = 0u;
+         i < (uint8_t)(sizeof(output_commands) / sizeof(output_commands[0]));
+         i++) {
+        const DaliCommandInfo *cmd = dali_command_lookup(output_commands[i]);
+
+        TEST_ASSERT_NOT_NULL(cmd);
+        TEST_ASSERT_EQUAL(DALI_RESP_NONE, cmd->response_kind);
+        TEST_ASSERT_FALSE(cmd->send_twice);
+        TEST_ASSERT_TRUE(cmd->implemented);
+    }
+}
+
+void test_command_lookup_addressed_queries_are_implemented(void)
+{
+    const DaliCommandId query_commands[] = {
+        DALI_CMD_QUERY_STATUS,
+        DALI_CMD_QUERY_CONTROL_GEAR_PRESENT,
+        DALI_CMD_QUERY_LAMP_FAILURE,
+        DALI_CMD_QUERY_LAMP_POWER_ON,
+        DALI_CMD_QUERY_LIMIT_ERROR,
+        DALI_CMD_QUERY_RESET_STATE,
+        DALI_CMD_QUERY_MISSING_SHORT_ADDRESS,
+        DALI_CMD_QUERY_VERSION_NUMBER,
+        DALI_CMD_QUERY_CONTENT_DTR0,
+        DALI_CMD_QUERY_DEVICE_TYPE,
+        DALI_CMD_QUERY_PHYSICAL_MINIMUM,
+        DALI_CMD_QUERY_POWER_FAILURE,
+        DALI_CMD_QUERY_CONTENT_DTR1,
+        DALI_CMD_QUERY_CONTENT_DTR2,
+        DALI_CMD_QUERY_OPERATING_MODE,
+        DALI_CMD_QUERY_LIGHT_SOURCE_TYPE,
+        DALI_CMD_QUERY_ACTUAL_LEVEL,
+        DALI_CMD_QUERY_MAX_LEVEL,
+        DALI_CMD_QUERY_MIN_LEVEL,
+        DALI_CMD_QUERY_POWER_ON_LEVEL,
+        DALI_CMD_QUERY_SYSTEM_FAILURE_LEVEL,
+        DALI_CMD_QUERY_FADE_TIME_FADE_RATE,
+        DALI_CMD_QUERY_MANUFACTURER_SPECIFIC_MODE,
+        DALI_CMD_QUERY_NEXT_DEVICE_TYPE,
+        DALI_CMD_QUERY_EXTENDED_FADE_TIME,
+        DALI_CMD_QUERY_CONTROL_GEAR_FAILURE,
+        DALI_CMD_QUERY_SCENE_LEVEL,
+        DALI_CMD_QUERY_GROUPS_0_7,
+        DALI_CMD_QUERY_GROUPS_8_15,
+        DALI_CMD_QUERY_RANDOM_ADDRESS_H,
+        DALI_CMD_QUERY_RANDOM_ADDRESS_M,
+        DALI_CMD_QUERY_RANDOM_ADDRESS_L,
+        DALI_CMD_READ_MEMORY_LOCATION,
+        DALI_CMD_QUERY_EXTENDED_VERSION_NUMBER,
+    };
+
+    for (uint8_t i = 0u;
+         i < (uint8_t)(sizeof(query_commands) / sizeof(query_commands[0]));
+         i++) {
+        const DaliCommandInfo *cmd = dali_command_lookup(query_commands[i]);
+
+        TEST_ASSERT_NOT_NULL(cmd);
+        TEST_ASSERT_EQUAL(DALI_CMD_FRAME_16BIT, cmd->frame_kind);
+        TEST_ASSERT_NOT_EQUAL(DALI_RESP_NONE, cmd->response_kind);
+        TEST_ASSERT_FALSE(cmd->send_twice);
+        TEST_ASSERT_TRUE(cmd->implemented);
+    }
+}
+
+void test_command_lookup_config_commands_are_implemented(void)
+{
+    const DaliCommandId config_commands[] = {
+        DALI_CMD_RESET,
+        DALI_CMD_STORE_ACTUAL_LEVEL_DTR0,
+        DALI_CMD_SAVE_PERSISTENT_VARIABLES,
+        DALI_CMD_SET_OPERATING_MODE_DTR0,
+        DALI_CMD_RESET_MEMORY_BANK_DTR0,
+        DALI_CMD_IDENTIFY_DEVICE,
+        DALI_CMD_SET_MAX_LEVEL_DTR0,
+        DALI_CMD_SET_MIN_LEVEL_DTR0,
+        DALI_CMD_SET_SYSTEM_FAILURE_LEVEL_DTR0,
+        DALI_CMD_SET_POWER_ON_LEVEL_DTR0,
+        DALI_CMD_SET_FADE_TIME_DTR0,
+        DALI_CMD_SET_FADE_RATE_DTR0,
+        DALI_CMD_SET_EXTENDED_FADE_TIME_DTR0,
+        DALI_CMD_SET_SCENE,
+        DALI_CMD_REMOVE_FROM_SCENE,
+        DALI_CMD_ADD_TO_GROUP,
+        DALI_CMD_REMOVE_FROM_GROUP,
+        DALI_CMD_SET_SHORT_ADDRESS_DTR0,
+        DALI_CMD_ENABLE_WRITE_MEMORY,
+    };
+
+    for (uint8_t i = 0u;
+         i < (uint8_t)(sizeof(config_commands) / sizeof(config_commands[0]));
+         i++) {
+        const DaliCommandInfo *cmd = dali_command_lookup(config_commands[i]);
+
+        TEST_ASSERT_NOT_NULL(cmd);
+        TEST_ASSERT_EQUAL(DALI_CMD_FRAME_16BIT, cmd->frame_kind);
+        TEST_ASSERT_EQUAL(DALI_RESP_NONE, cmd->response_kind);
+        TEST_ASSERT_TRUE(cmd->send_twice);
+        TEST_ASSERT_TRUE(cmd->implemented);
+    }
 }
 
 void test_command_lookup_dali2_input_value(void)
@@ -506,6 +622,44 @@ void test_parse_command_response_uses_metadata(void)
     TEST_ASSERT_EQUAL_UINT8(0x7Fu, parsed.value);
 }
 
+void test_parse_command_response_query_kinds(void)
+{
+    DaliFrame yes = { .data = DALI_YES_RESPONSE, .bit_length = DALI_BACKWARD_FRAME_BITS };
+    DaliFrame bitset = { .data = 0xA5u, .bit_length = DALI_BACKWARD_FRAME_BITS };
+    DaliFrame fade = { .data = 0x34u, .bit_length = DALI_BACKWARD_FRAME_BITS };
+    DaliFrame memory = { .data = 0x5Au, .bit_length = DALI_BACKWARD_FRAME_BITS };
+    DaliParsedResponse parsed;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_parse_command_response(DALI_CMD_QUERY_CONTROL_GEAR_PRESENT,
+                                                  &yes,
+                                                  &parsed));
+    TEST_ASSERT_EQUAL(DALI_RESP_YES_NO, parsed.kind);
+    TEST_ASSERT_TRUE(parsed.yes);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_parse_command_response(DALI_CMD_QUERY_GROUPS_0_7,
+                                                  &bitset,
+                                                  &parsed));
+    TEST_ASSERT_EQUAL(DALI_RESP_BITSET8, parsed.kind);
+    TEST_ASSERT_EQUAL_HEX8(0xA5u, parsed.bitset);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_parse_command_response(DALI_CMD_QUERY_FADE_TIME_FADE_RATE,
+                                                  &fade,
+                                                  &parsed));
+    TEST_ASSERT_EQUAL(DALI_RESP_FADE_TIME_RATE, parsed.kind);
+    TEST_ASSERT_EQUAL_UINT8(0x03u, parsed.fade.fade_time);
+    TEST_ASSERT_EQUAL_UINT8(0x04u, parsed.fade.fade_rate);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_parse_command_response(DALI_CMD_READ_MEMORY_LOCATION,
+                                                  &memory,
+                                                  &parsed));
+    TEST_ASSERT_EQUAL(DALI_RESP_MEMORY_BYTE, parsed.kind);
+    TEST_ASSERT_EQUAL_HEX8(0x5Au, parsed.value);
+}
+
 void test_parse_by_kind_bitset_memory_and_input_value(void)
 {
     DaliFrame reply = { .data = 0x55u, .bit_length = 8u };
@@ -636,6 +790,9 @@ int main(void)
     RUN_TEST(test_command_lookup_opcode_range_go_to_scene);
     RUN_TEST(test_command_lookup_disambiguates_normal_and_special_opcode);
     RUN_TEST(test_command_lookup_send_twice_metadata);
+    RUN_TEST(test_command_lookup_output_level_helpers_are_implemented);
+    RUN_TEST(test_command_lookup_addressed_queries_are_implemented);
+    RUN_TEST(test_command_lookup_config_commands_are_implemented);
     RUN_TEST(test_command_lookup_dali2_input_value);
     RUN_TEST(test_command_metadata_table_covers_all_standard_ids);
     RUN_TEST(test_command_lookup_keeps_vendor_specific_opcodes_out_of_standard_table);
@@ -665,6 +822,7 @@ int main(void)
     RUN_TEST(test_parse_by_kind_status);
     RUN_TEST(test_parse_by_kind_yes_no_and_uint8);
     RUN_TEST(test_parse_command_response_uses_metadata);
+    RUN_TEST(test_parse_command_response_query_kinds);
     RUN_TEST(test_parse_by_kind_bitset_memory_and_input_value);
     RUN_TEST(test_parse_fade_time_rate_helper_and_response_kind);
     RUN_TEST(test_input_value_accumulator_combines_16bit_and_multibyte_values);

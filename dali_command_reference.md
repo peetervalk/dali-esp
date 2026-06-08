@@ -1,10 +1,10 @@
-# DALI Command Reference — Working Draft
+# DALI Command Reference - Working Draft
 
 This is a working implementation reference for `dali_protocol`, parsers, and
 dedicated vendor/profile helpers. It is not a replacement for IEC 62386. Public
 manufacturer/library references are used to build the first command database.
 
-Verification status as of 2026-06-06:
+Verification status as of 2026-06-08:
 
 - Standard control-gear opcodes, response kind assignments, and special command
   opcodes are source-checked against the Microchip/IEC references.
@@ -14,6 +14,18 @@ Verification status as of 2026-06-06:
   queries implemented in `dali_lunatone`; they are intentionally excluded from
   generic `dali_protocol` metadata because they are sensor-specific extensions
   rather than generic IEC 62386-103 commands.
+- Frame length, address range, instance range, broadcast-byte, and DAPC-level
+  limits are centralized in `dali_frame` and reused by protocol/control helpers.
+- Output-level helpers now cover the normal short/group/broadcast control
+  commands through `GO TO SCENE`.
+- Addressed 16-bit configuration instructions are available through the generic
+  `dali_control_build_config` / `dali_control_config` path and the diagnostic
+  `config` CLI. They use command metadata for opcode ranges and send-twice
+  scheduling. Special DTR data frames remain separate planned work.
+- Addressed 16-bit control-gear queries are available through the generic
+  `dali_control_build_query` / `dali_control_query` path and the diagnostic
+  `query` CLI. Higher-level flows that prepare DTR state or perform
+  commissioning searches remain separate planned work.
 
 ## Sources Used
 
@@ -87,44 +99,46 @@ device-level command space, and `0xFF` addresses all instances where supported.
 | Opcode | Name | Response | Status |
 |---:|---|---|---|
 | `0x00` | OFF | none | implemented for short/group/broadcast |
-| `0x01` | UP | none | planned |
-| `0x02` | DOWN | none | planned |
-| `0x03` | STEP UP | none | planned |
-| `0x04` | STEP DOWN | none | planned |
+| `0x01` | UP | none | implemented for short/group/broadcast |
+| `0x02` | DOWN | none | implemented for short/group/broadcast |
+| `0x03` | STEP UP | none | implemented for short/group/broadcast |
+| `0x04` | STEP DOWN | none | implemented for short/group/broadcast |
 | `0x05` | RECALL MAX LEVEL | none | implemented for short/group/broadcast |
-| `0x06` | RECALL MIN LEVEL | none | implemented for short/group |
-| `0x07` | STEP DOWN AND OFF | none | planned |
-| `0x08` | ON AND STEP UP | none | planned |
-| `0x09` | ENABLE DAPC SEQUENCE | none | planned, DALI-2 |
-| `0x0A` | GO TO LAST ACTIVE LEVEL | none | planned, DALI-2 |
-| `0x10..0x1F` | GO TO SCENE 0..15 | none | planned |
+| `0x06` | RECALL MIN LEVEL | none | implemented for short/group/broadcast |
+| `0x07` | STEP DOWN AND OFF | none | implemented for short/group/broadcast |
+| `0x08` | ON AND STEP UP | none | implemented for short/group/broadcast |
+| `0x09` | ENABLE DAPC SEQUENCE | none | implemented for short/group/broadcast, DALI-2 |
+| `0x0A` | GO TO LAST ACTIVE LEVEL | none | implemented for short/group/broadcast, DALI-2 |
+| `0x10..0x1F` | GO TO SCENE 0..15 | none | implemented for short/group/broadcast |
 
 ### Configuration Instructions
 
-These often need DTR setup and/or send-twice handling. Implement after normal
-control/query commands.
+These are normal addressed 16-bit configuration instructions. The generic
+control/config path builds them and schedules their required send-twice
+transmission. Commands whose names end in `DTR0` use the current DTR0 value;
+loading DTR0 via special command frames is still planned separately.
 
 | Opcode | Name | Response | Status |
 |---:|---|---|---|
-| `0x20` | RESET | none | planned, send twice |
-| `0x21` | STORE ACTUAL LEVEL IN DTR0 | none | planned |
-| `0x22` | SAVE PERSISTENT VARIABLES | none | planned, DALI-2 |
-| `0x23` | SET OPERATING MODE DTR0 | none | planned, DALI-2 |
-| `0x24` | RESET MEMORY BANK DTR0 | none | planned, DALI-2 |
-| `0x25` | IDENTIFY DEVICE | none | planned, useful for diagnostics |
-| `0x2A` | SET MAX LEVEL DTR0 | none | planned |
-| `0x2B` | SET MIN LEVEL DTR0 | none | planned |
-| `0x2C` | SET SYSTEM FAILURE LEVEL DTR0 | none | planned |
-| `0x2D` | SET POWER ON LEVEL DTR0 | none | planned |
-| `0x2E` | SET FADE TIME DTR0 | none | planned |
-| `0x2F` | SET FADE RATE DTR0 | none | planned |
-| `0x30` | SET EXTENDED FADE TIME DTR0 | none | planned, DALI-2 |
-| `0x40..0x4F` | SET SCENE 0..15 DTR0 | none | planned |
-| `0x50..0x5F` | REMOVE FROM SCENE 0..15 | none | planned |
-| `0x60..0x6F` | ADD TO GROUP 0..15 | none | planned |
-| `0x70..0x7F` | REMOVE FROM GROUP 0..15 | none | planned |
-| `0x80` | SET SHORT ADDRESS DTR0 | none | planned |
-| `0x81` | ENABLE WRITE MEMORY | none | planned |
+| `0x20` | RESET | none | generic config/CLI implemented, send twice |
+| `0x21` | STORE ACTUAL LEVEL IN DTR0 | none | generic config/CLI implemented, send twice |
+| `0x22` | SAVE PERSISTENT VARIABLES | none | generic config/CLI implemented, send twice, DALI-2 |
+| `0x23` | SET OPERATING MODE DTR0 | none | generic config/CLI implemented, send twice, DALI-2; DTR0 load pending |
+| `0x24` | RESET MEMORY BANK DTR0 | none | generic config/CLI implemented, send twice, DALI-2; DTR0 load pending |
+| `0x25` | IDENTIFY DEVICE | none | generic config/CLI implemented, send twice |
+| `0x2A` | SET MAX LEVEL DTR0 | none | generic config/CLI implemented, send twice; DTR0 load pending |
+| `0x2B` | SET MIN LEVEL DTR0 | none | generic config/CLI implemented, send twice; DTR0 load pending |
+| `0x2C` | SET SYSTEM FAILURE LEVEL DTR0 | none | generic config/CLI implemented, send twice; DTR0 load pending |
+| `0x2D` | SET POWER ON LEVEL DTR0 | none | generic config/CLI implemented, send twice; DTR0 load pending |
+| `0x2E` | SET FADE TIME DTR0 | none | generic config/CLI implemented, send twice; DTR0 load pending |
+| `0x2F` | SET FADE RATE DTR0 | none | generic config/CLI implemented, send twice; DTR0 load pending |
+| `0x30` | SET EXTENDED FADE TIME DTR0 | none | generic config/CLI implemented, send twice, DALI-2; DTR0 load pending |
+| `0x40..0x4F` | SET SCENE 0..15 DTR0 | none | generic config/CLI implemented, send twice; DTR0 load pending |
+| `0x50..0x5F` | REMOVE FROM SCENE 0..15 | none | generic config/CLI implemented, send twice |
+| `0x60..0x6F` | ADD TO GROUP 0..15 | none | generic config/CLI implemented, send twice |
+| `0x70..0x7F` | REMOVE FROM GROUP 0..15 | none | generic config/CLI implemented, send twice |
+| `0x80` | SET SHORT ADDRESS DTR0 | none | generic config/CLI implemented, send twice; DTR0 load pending |
+| `0x81` | ENABLE WRITE MEMORY | none | generic config/CLI implemented, send twice |
 
 ### Query Instructions
 
@@ -133,40 +147,40 @@ can create multiple simultaneous backward frames.
 
 | Opcode | Name | Response | Status |
 |---:|---|---|---|
-| `0x90` | QUERY STATUS | `STATUS` | parser implemented |
-| `0x91` | QUERY CONTROL GEAR PRESENT | `YES_NO` | planned |
-| `0x92` | QUERY LAMP FAILURE | `YES_NO` | planned |
-| `0x93` | QUERY LAMP POWER ON | `YES_NO` | planned |
-| `0x94` | QUERY LIMIT ERROR | `YES_NO` | planned |
-| `0x95` | QUERY RESET STATE | `YES_NO` | planned |
-| `0x96` | QUERY MISSING SHORT ADDRESS | `YES_NO` | planned |
-| `0x97` | QUERY VERSION NUMBER | `UINT8` | planned |
-| `0x98` | QUERY CONTENT DTR0 | `UINT8` | planned |
-| `0x99` | QUERY DEVICE TYPE | `UINT8` | planned |
-| `0x9A` | QUERY PHYSICAL MINIMUM | `UINT8` | planned |
-| `0x9B` | QUERY POWER FAILURE | `YES_NO` | planned |
-| `0x9C` | QUERY CONTENT DTR1 | `UINT8` | planned |
-| `0x9D` | QUERY CONTENT DTR2 | `UINT8` | planned |
-| `0x9E` | QUERY OPERATING MODE | `UINT8` | planned, DALI-2 |
-| `0x9F` | QUERY LIGHT SOURCE TYPE | `UINT8` | planned, DALI-2 |
-| `0xA0` | QUERY ACTUAL LEVEL | `UINT8` | frame builder implemented; parser generic only |
-| `0xA1` | QUERY MAX LEVEL | `UINT8` | planned |
-| `0xA2` | QUERY MIN LEVEL | `UINT8` | planned |
-| `0xA3` | QUERY POWER ON LEVEL | `UINT8` | planned |
-| `0xA4` | QUERY SYSTEM FAILURE LEVEL | `UINT8` | planned |
-| `0xA5` | QUERY FADE TIME / FADE RATE | `FADE_TIME_RATE` | parser implemented |
-| `0xA6` | QUERY MANUFACTURER SPECIFIC MODE | `YES_NO` | planned, DALI-2 |
-| `0xA7` | QUERY NEXT DEVICE TYPE | `UINT8` or special sequence | planned, DALI-2 |
-| `0xA8` | QUERY EXTENDED FADE TIME | `UINT8` packed nibbles | planned, DALI-2 |
-| `0xAA` | QUERY CONTROL GEAR FAILURE | `YES_NO` | planned, DALI-2 |
-| `0xB0..0xBF` | QUERY SCENE LEVEL 0..15 | `UINT8` | planned |
-| `0xC0` | QUERY GROUPS 0-7 | `BITSET8` | planned |
-| `0xC1` | QUERY GROUPS 8-15 | `BITSET8` | planned |
-| `0xC2` | QUERY RANDOM ADDRESS H | `UINT8` | planned for commissioning |
-| `0xC3` | QUERY RANDOM ADDRESS M | `UINT8` | planned for commissioning |
-| `0xC4` | QUERY RANDOM ADDRESS L | `UINT8` | planned for commissioning |
-| `0xC5` | READ MEMORY LOCATION | `MEMORY_BYTE` | planned |
-| `0xFF` | QUERY EXTENDED VERSION NUMBER | `UINT8` | planned |
+| `0x90` | QUERY STATUS | `STATUS` | generic query plus named diagnostic CLI implemented |
+| `0x91` | QUERY CONTROL GEAR PRESENT | `YES_NO` | generic query/parse/CLI implemented |
+| `0x92` | QUERY LAMP FAILURE | `YES_NO` | generic query/parse/CLI implemented |
+| `0x93` | QUERY LAMP POWER ON | `YES_NO` | generic query/parse/CLI implemented |
+| `0x94` | QUERY LIMIT ERROR | `YES_NO` | generic query/parse/CLI implemented |
+| `0x95` | QUERY RESET STATE | `YES_NO` | generic query/parse/CLI implemented |
+| `0x96` | QUERY MISSING SHORT ADDRESS | `YES_NO` | generic query/parse/CLI implemented |
+| `0x97` | QUERY VERSION NUMBER | `UINT8` | generic query/parse/CLI implemented |
+| `0x98` | QUERY CONTENT DTR0 | `UINT8` | generic query/parse/CLI implemented |
+| `0x99` | QUERY DEVICE TYPE | `UINT8` | generic query/parse/CLI implemented |
+| `0x9A` | QUERY PHYSICAL MINIMUM | `UINT8` | generic query/parse/CLI implemented |
+| `0x9B` | QUERY POWER FAILURE | `YES_NO` | generic query/parse/CLI implemented |
+| `0x9C` | QUERY CONTENT DTR1 | `UINT8` | generic query/parse/CLI implemented |
+| `0x9D` | QUERY CONTENT DTR2 | `UINT8` | generic query/parse/CLI implemented |
+| `0x9E` | QUERY OPERATING MODE | `UINT8` | generic query/parse/CLI implemented, DALI-2 |
+| `0x9F` | QUERY LIGHT SOURCE TYPE | `UINT8` | generic query/parse/CLI implemented, DALI-2 |
+| `0xA0` | QUERY ACTUAL LEVEL | `UINT8` | generic query/parse/CLI implemented |
+| `0xA1` | QUERY MAX LEVEL | `UINT8` | generic query/parse/CLI implemented |
+| `0xA2` | QUERY MIN LEVEL | `UINT8` | generic query/parse/CLI implemented |
+| `0xA3` | QUERY POWER ON LEVEL | `UINT8` | generic query/parse/CLI implemented |
+| `0xA4` | QUERY SYSTEM FAILURE LEVEL | `UINT8` | generic query/parse/CLI implemented |
+| `0xA5` | QUERY FADE TIME / FADE RATE | `FADE_TIME_RATE` | generic query/parse/CLI implemented |
+| `0xA6` | QUERY MANUFACTURER SPECIFIC MODE | `YES_NO` | generic query/parse/CLI implemented, DALI-2 |
+| `0xA7` | QUERY NEXT DEVICE TYPE | `UINT8` or special sequence | generic query/parse/CLI implemented; sequence interpretation pending |
+| `0xA8` | QUERY EXTENDED FADE TIME | `UINT8` packed nibbles | generic query/parse/CLI implemented, DALI-2 |
+| `0xAA` | QUERY CONTROL GEAR FAILURE | `YES_NO` | generic query/parse/CLI implemented, DALI-2 |
+| `0xB0..0xBF` | QUERY SCENE LEVEL 0..15 | `UINT8` | generic query/parse/CLI implemented |
+| `0xC0` | QUERY GROUPS 0-7 | `BITSET8` | generic query/parse/CLI implemented |
+| `0xC1` | QUERY GROUPS 8-15 | `BITSET8` | generic query/parse/CLI implemented |
+| `0xC2` | QUERY RANDOM ADDRESS H | `UINT8` | generic query/parse/CLI implemented; commissioning flow pending |
+| `0xC3` | QUERY RANDOM ADDRESS M | `UINT8` | generic query/parse/CLI implemented; commissioning flow pending |
+| `0xC4` | QUERY RANDOM ADDRESS L | `UINT8` | generic query/parse/CLI implemented; commissioning flow pending |
+| `0xC5` | READ MEMORY LOCATION | `MEMORY_BYTE` | generic query/parse/CLI implemented; memory-address setup pending |
+| `0xFF` | QUERY EXTENDED VERSION NUMBER | `UINT8` | generic query/parse/CLI implemented |
 
 ### Special Commands
 
@@ -258,3 +272,8 @@ Known Steinel HF 360 II DALI-2 IPD instance targets:
 - [x] Add static mapping validation helpers without entity-name assumptions.
 - [x] Add initial unit tests for command metadata, generic builders, and parser dispatch.
 - [x] Add focused unit tests for every new specialized command/parser before hardware tests.
+- [x] Centralize shared protocol limits used by protocol, control, PHY,
+      scheduler, mapping, and vendor helpers.
+- [x] Add generic addressed control-gear query API, diagnostic CLI, and tests.
+- [x] Add generic addressed configuration API, diagnostic CLI, send-twice
+      scheduling, and tests.
