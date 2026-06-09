@@ -403,6 +403,26 @@ void test_build_config_commands(void)
     TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
 }
 
+void test_build_dtr_frames(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_control_build_dtr(DALI_DTR0, 0x44u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xA344u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_control_build_dtr(DALI_DTR1, 0x55u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xC355u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_control_build_dtr(DALI_DTR2, 0x66u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xC566u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_control_build_dtr((DaliDtrRegister)3, 0x44u, &frame));
+}
+
 void test_config_rejects_invalid_command_classes(void)
 {
     DaliFrame frame;
@@ -434,6 +454,18 @@ void test_config_rejects_invalid_command_classes(void)
                                                 NULL));
 }
 
+void test_config_uses_dtr0_predicate(void)
+{
+    TEST_ASSERT_TRUE(dali_control_config_uses_dtr0(DALI_CMD_SET_MAX_LEVEL_DTR0));
+    TEST_ASSERT_TRUE(dali_control_config_uses_dtr0(DALI_CMD_SET_SCENE));
+    TEST_ASSERT_TRUE(dali_control_config_uses_dtr0(DALI_CMD_SET_SHORT_ADDRESS_DTR0));
+
+    TEST_ASSERT_FALSE(dali_control_config_uses_dtr0(DALI_CMD_RESET));
+    TEST_ASSERT_FALSE(dali_control_config_uses_dtr0(DALI_CMD_STORE_ACTUAL_LEVEL_DTR0));
+    TEST_ASSERT_FALSE(dali_control_config_uses_dtr0(DALI_CMD_ADD_TO_GROUP));
+    TEST_ASSERT_FALSE(dali_control_config_uses_dtr0(DALI_CMD_QUERY_STATUS));
+}
+
 void test_config_enqueue_sends_twice(void)
 {
     TEST_ASSERT_EQUAL(DALI_OK,
@@ -458,6 +490,66 @@ void test_config_enqueue_sends_twice(void)
     dali_sched_run();
     TEST_ASSERT_EQUAL_UINT8(2u, s_tx_count);
     TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+}
+
+void test_set_dtr_enqueues_special_frame(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK, dali_control_set_dtr(DALI_DTR2, 0x7Fu));
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_UINT8(1u, s_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0xC57Fu, s_last_tx.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, s_last_tx.bit_length);
+    TEST_ASSERT_EQUAL(SCHED_WAIT_SETTLE, dali_sched_state());
+
+    s_tick_ms += DALI_SETTLE_MS;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_UINT8(1u, s_tx_count);
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+}
+
+void test_config_with_dtr0_sequences_load_before_send_twice_config(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_config_with_dtr0(target(DALI_ADDR_SHORT, 5u),
+                                                    DALI_CMD_SET_MAX_LEVEL_DTR0,
+                                                    200u,
+                                                    0u));
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_UINT8(1u, s_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0xA3C8u, s_last_tx.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, s_last_tx.bit_length);
+
+    s_tick_ms += DALI_SETTLE_MS;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_UINT8(2u, s_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x0B2Au, s_last_tx.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, s_last_tx.bit_length);
+
+    s_tick_ms += DALI_SETTLE_MS;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_UINT8(3u, s_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x0B2Au, s_last_tx.data);
+
+    s_tick_ms += DALI_SETTLE_MS;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_UINT8(3u, s_tx_count);
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+}
+
+void test_config_with_dtr0_rejects_non_dtr0_configs(void)
+{
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_control_config_with_dtr0(target(DALI_ADDR_SHORT, 5u),
+                                                    DALI_CMD_RESET,
+                                                    1u,
+                                                    0u));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_control_config_with_dtr0(target(DALI_ADDR_SHORT, 5u),
+                                                    DALI_CMD_SET_SCENE,
+                                                    1u,
+                                                    DALI_SCENE_COUNT));
 }
 
 void test_set_brightness_group_enqueues_dapc(void)
@@ -567,8 +659,13 @@ int main(void)
     RUN_TEST(test_generic_query_rejects_invalid_command_classes);
     RUN_TEST(test_generic_query_enqueues_and_completes_with_reply);
     RUN_TEST(test_build_config_commands);
+    RUN_TEST(test_build_dtr_frames);
     RUN_TEST(test_config_rejects_invalid_command_classes);
+    RUN_TEST(test_config_uses_dtr0_predicate);
     RUN_TEST(test_config_enqueue_sends_twice);
+    RUN_TEST(test_set_dtr_enqueues_special_frame);
+    RUN_TEST(test_config_with_dtr0_sequences_load_before_send_twice_config);
+    RUN_TEST(test_config_with_dtr0_rejects_non_dtr0_configs);
     RUN_TEST(test_set_brightness_group_enqueues_dapc);
     RUN_TEST(test_set_brightness_zero_enqueues_off);
     RUN_TEST(test_set_percent_group_50_enqueues_dapc_128);

@@ -48,8 +48,11 @@ DaliError dali_control_build_query(DaliTarget target,
                                    uint8_t param,
                                    DaliFrame *out);
 DaliError dali_control_build_query_status(DaliTarget target, DaliFrame *out);
+DaliError dali_control_build_dtr(DaliDtrRegister reg, uint8_t value, DaliFrame *out);
+bool dali_control_config_uses_dtr0(DaliCommandId id);
 
 /* Build and enqueue common transactions. */
+DaliError dali_control_set_dtr(DaliDtrRegister reg, uint8_t value);
 DaliError dali_control_set_level(DaliTarget target, uint8_t level);
 DaliError dali_control_set_brightness(DaliTarget target, uint8_t brightness);
 DaliError dali_control_set_percent(DaliTarget target, uint8_t percent);
@@ -66,6 +69,10 @@ DaliError dali_control_enable_dapc_sequence(DaliTarget target);
 DaliError dali_control_go_to_last_active_level(DaliTarget target);
 DaliError dali_control_go_to_scene(DaliTarget target, uint8_t scene);
 DaliError dali_control_config(DaliTarget target, DaliCommandId id, uint8_t param);
+DaliError dali_control_config_with_dtr0(DaliTarget target,
+                                        DaliCommandId id,
+                                        uint8_t dtr0_value,
+                                        uint8_t param);
 DaliError dali_control_query(DaliTarget target,
                              DaliCommandId id,
                              uint8_t param,

@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-06-08 (rev 19)
+**Last updated:** 2026-06-09 (rev 22)
 **Framework:** ESP-IDF v6.0.1 native CMake
 **Hardware target:** ESP32-DevKitC-VE / ESP32-WROVER-E + MikroE DALI-2 Click
 **Timer:** GPTIMER, 104 us alarm, 4x oversampling of the DALI half-bit
@@ -15,16 +15,21 @@ bring-up:
 - PHY TX encode path and RX Manchester decode path exist and are host-tested;
   TX now guards for bus idle and suppresses RX self-echo / settle-period edges.
 - Scheduler queue/state machine exists with retry, reply timeout, send-twice,
-  8-bit reply gating, task-context trace hooks, raw 24-bit unsolicited event
-  routing, and host mock tests.
+  fixed-size sequences, 8-bit reply gating, task-context trace hooks, raw
+  24-bit unsolicited event routing, and host mock tests.
 - Protocol builders and response parser dispatch exist for standard/common
   16-bit commands plus standard DALI-2 device/instance discovery commands;
-  parser helpers cover packed fade-time/rate and MSB-first multi-byte input
-  values.
+  single-frame special command builders exist for commissioning, DTR,
+  enable-device-type, and memory opcodes; parser helpers cover packed
+  fade-time/rate and MSB-first multi-byte input values.
 - Generic DALI-2 input-device helpers in `dali_input_device` classify standard
   instance types without applying vendor profiles: type 3 occupancy/motion and
   type 4 light are marked usable from standard type, while generic/unknown
   values remain unverified.
+- Reusable `dali_discovery` helpers provide scheduler-agnostic short-address
+  scan/inventory storage and generic DALI-2 input-device instance discovery;
+  native diagnostic `scan`, `discover`, `inventory`, and `instances` use this
+  layer through a thin scheduler adapter.
 - Vendor/profile helpers are separate from the generic protocol layer:
   Lunatone-only instance scaling queries live in `dali_lunatone`, and the
   Steinel HF 360 II instance profile/conversions live in `dali_steinel`.
@@ -38,11 +43,13 @@ bring-up:
   min/max, `QUERY STATUS`, and generic metadata-backed addressed 16-bit
   queries/configuration commands.
 - Native diagnostic CLI exists with `help`, `stats`, `trace on/off`, `read`,
-  `reset`, scheduler-routed `raw`, named output helpers
+  `reset`, scheduler-routed `raw`, `dtr`, `special`, `special-list`,
+  named output helpers
   `level/off/up/down/step-up/step-down/step-off/on-step/dapc-seq/last/scene`,
   `max/min/status`, generic `query <target> <name> [param]`, `query-list`,
-  generic `config <target> <name> [param]`, `config-list`, `scan`, `discover`,
-  `inventory`, generic `instances <addr>`, and `identify`.
+  generic `config <target> <name> [param]`, sequenced
+  `config-dtr0 <target> <name> <value> [param]`, `config-list`, `scan`,
+  `discover`, `inventory`, generic `instances <addr>`, and `identify`.
 - Added `sdkconfig.defaults` for ESP32-WROVER-E bring-up: 8 MB flash,
   240 MHz CPU, 1000 Hz FreeRTOS tick, and ISR-adjacent GPIO/GPTIMER/FreeRTOS
   IRAM options; fresh generated config keeps `esp_timer_get_time()` in IRAM.
@@ -50,10 +57,10 @@ bring-up:
 
 Latest known verification:
 
-- `idf.py build` passes as of 2026-06-08.
+- `idf.py build` passes as of 2026-06-09.
 - Fresh build from `sdkconfig.defaults` passes and generates 8 MB flash image
   arguments as of 2026-06-05.
-- Host tests pass as of 2026-06-08: 9 suites, 141 `RUN_TEST` cases.
+- Host tests pass as of 2026-06-09: 10 suites, 173 `RUN_TEST` cases.
 - Real hardware flashing, timing, loopback, and device communication are still
   pending.
 
@@ -83,6 +90,7 @@ There are two distinct workflows:
 ```text
 ESPHome / Home Assistant integration      (stub)
 DALI entity mapping / release integration (mapping helpers ready, release future)
+DALI discovery / inventory helpers        (implemented, host-tested)
 DaliControl                               (draft implemented)
 DaliProtocol                              (core implemented, hardware sensor polling pending)
 DaliScheduler                             (implemented, host-tested)

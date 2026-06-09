@@ -74,24 +74,24 @@ static const DaliCommandInfo s_command_table[] = {
     CMD(DALI_CMD_READ_MEMORY_LOCATION, "READ MEMORY LOCATION", 0xC5u, 0xC5u, DALI_CMD_FRAME_16BIT, DALI_RESP_MEMORY_BYTE, false, true),
     CMD(DALI_CMD_QUERY_EXTENDED_VERSION_NUMBER, "QUERY EXTENDED VERSION NUMBER", 0xFFu, 0xFFu, DALI_CMD_FRAME_16BIT, DALI_RESP_UINT8, false, true),
 
-    CMD(DALI_CMD_TERMINATE, "TERMINATE", 0xA1u, 0xA1u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_DTR0_DATA, "DTR0 DATA", 0xA3u, 0xA3u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_INITIALISE, "INITIALISE", 0xA5u, 0xA5u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, true, false),
-    CMD(DALI_CMD_RANDOMIZE, "RANDOMIZE", 0xA7u, 0xA7u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, true, false),
-    CMD(DALI_CMD_COMPARE, "COMPARE", 0xA9u, 0xA9u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_YES_NO, false, false),
-    CMD(DALI_CMD_WITHDRAW, "WITHDRAW", 0xABu, 0xABu, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_PING, "PING", 0xADu, 0xADu, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_SEARCH_ADDRH, "SEARCH ADDRH", 0xB1u, 0xB1u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_SEARCH_ADDRM, "SEARCH ADDRM", 0xB3u, 0xB3u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_SEARCH_ADDRL, "SEARCH ADDRL", 0xB5u, 0xB5u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_PROGRAM_SHORT_ADDRESS, "PROGRAM SHORT ADDRESS", 0xB7u, 0xB7u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_VERIFY_SHORT_ADDRESS, "VERIFY SHORT ADDRESS", 0xB9u, 0xB9u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_YES_NO, false, false),
-    CMD(DALI_CMD_QUERY_SHORT_ADDRESS, "QUERY SHORT ADDRESS", 0xBBu, 0xBBu, DALI_CMD_FRAME_SPECIAL, DALI_RESP_UINT8, false, false),
-    CMD(DALI_CMD_ENABLE_DEVICE_TYPE, "ENABLE DEVICE TYPE", 0xC1u, 0xC1u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_DTR1_DATA, "DTR1 DATA", 0xC3u, 0xC3u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_DTR2_DATA, "DTR2 DATA", 0xC5u, 0xC5u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, false),
-    CMD(DALI_CMD_WRITE_MEMORY_LOCATION, "WRITE MEMORY LOCATION", 0xC7u, 0xC7u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_MEMORY_BYTE, false, false),
-    CMD(DALI_CMD_WRITE_MEMORY_LOCATION_NO_REPLY, "WRITE MEMORY LOCATION NO REPLY", 0xC9u, 0xC9u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, false),
+    CMD(DALI_CMD_TERMINATE, "TERMINATE", 0xA1u, 0xA1u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, true),
+    CMD(DALI_CMD_DTR0_DATA, "DTR0 DATA", 0xA3u, 0xA3u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, true),
+    CMD(DALI_CMD_INITIALISE, "INITIALISE", 0xA5u, 0xA5u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, true, true),
+    CMD(DALI_CMD_RANDOMIZE, "RANDOMIZE", 0xA7u, 0xA7u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, true, true),
+    CMD(DALI_CMD_COMPARE, "COMPARE", 0xA9u, 0xA9u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_YES_NO, false, true),
+    CMD(DALI_CMD_WITHDRAW, "WITHDRAW", 0xABu, 0xABu, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, true),
+    CMD(DALI_CMD_PING, "PING", 0xADu, 0xADu, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, true),
+    CMD(DALI_CMD_SEARCH_ADDRH, "SEARCH ADDRH", 0xB1u, 0xB1u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, true),
+    CMD(DALI_CMD_SEARCH_ADDRM, "SEARCH ADDRM", 0xB3u, 0xB3u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, true),
+    CMD(DALI_CMD_SEARCH_ADDRL, "SEARCH ADDRL", 0xB5u, 0xB5u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, true),
+    CMD(DALI_CMD_PROGRAM_SHORT_ADDRESS, "PROGRAM SHORT ADDRESS", 0xB7u, 0xB7u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, true),
+    CMD(DALI_CMD_VERIFY_SHORT_ADDRESS, "VERIFY SHORT ADDRESS", 0xB9u, 0xB9u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_YES_NO, false, true),
+    CMD(DALI_CMD_QUERY_SHORT_ADDRESS, "QUERY SHORT ADDRESS", 0xBBu, 0xBBu, DALI_CMD_FRAME_SPECIAL, DALI_RESP_UINT8, false, true),
+    CMD(DALI_CMD_ENABLE_DEVICE_TYPE, "ENABLE DEVICE TYPE", 0xC1u, 0xC1u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, true),
+    CMD(DALI_CMD_DTR1_DATA, "DTR1 DATA", 0xC3u, 0xC3u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, true),
+    CMD(DALI_CMD_DTR2_DATA, "DTR2 DATA", 0xC5u, 0xC5u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, true),
+    CMD(DALI_CMD_WRITE_MEMORY_LOCATION, "WRITE MEMORY LOCATION", 0xC7u, 0xC7u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_MEMORY_BYTE, false, true),
+    CMD(DALI_CMD_WRITE_MEMORY_LOCATION_NO_REPLY, "WRITE MEMORY LOCATION NO REPLY", 0xC9u, 0xC9u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, true),
 
     CMD(DALI_CMD_QUERY_NUMBER_OF_INSTANCES, "QUERY NUMBER OF INSTANCES", 0x35u, 0x35u, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_UINT8, false, true),
 
@@ -317,6 +317,42 @@ DaliError dali_build_device_command(uint8_t addr,
     return DALI_OK;
 }
 
+static DaliCommandId dtr_data_command_id(DaliDtrRegister reg)
+{
+    switch (reg) {
+        case DALI_DTR0: return DALI_CMD_DTR0_DATA;
+        case DALI_DTR1: return DALI_CMD_DTR1_DATA;
+        case DALI_DTR2: return DALI_CMD_DTR2_DATA;
+        default:        return DALI_CMD_COUNT;
+    }
+}
+
+DaliError dali_build_special(DaliCommandId id,
+                             uint8_t param,
+                             DaliFrame *out)
+{
+    if (out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    const DaliCommandInfo *cmd = dali_command_lookup(id);
+    if (cmd == NULL ||
+        cmd->frame_kind != DALI_CMD_FRAME_SPECIAL ||
+        cmd->opcode_first != cmd->opcode_last) {
+        return DALI_ERR_INVALID;
+    }
+
+    *out = make_frame16(cmd->opcode_first, param);
+    return DALI_OK;
+}
+
+DaliError dali_build_dtr_data(DaliDtrRegister reg,
+                              uint8_t value,
+                              DaliFrame *out)
+{
+    return dali_build_special(dtr_data_command_id(reg), value, out);
+}
+
 /* ---------------------------------------------------------------------------
  * 16-bit frame builders
  * --------------------------------------------------------------------------*/
@@ -423,6 +459,132 @@ DaliFrame dali_cmd_broadcast_recall_max(void)
 {
     DaliFrame f = {0u, 0u};
     (void)dali_build_command(DALI_ADDR_BROADCAST, 0u, DALI_CMD_RECALL_MAX_LEVEL, 0u, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_terminate(void)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_special(DALI_CMD_TERMINATE, 0u, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_initialise(uint8_t param)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_special(DALI_CMD_INITIALISE, param, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_randomize(void)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_special(DALI_CMD_RANDOMIZE, 0u, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_compare(void)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_special(DALI_CMD_COMPARE, 0u, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_withdraw(void)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_special(DALI_CMD_WITHDRAW, 0u, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_ping(void)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_special(DALI_CMD_PING, 0u, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_search_addr_h(uint8_t value)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_special(DALI_CMD_SEARCH_ADDRH, value, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_search_addr_m(uint8_t value)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_special(DALI_CMD_SEARCH_ADDRM, value, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_search_addr_l(uint8_t value)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_special(DALI_CMD_SEARCH_ADDRL, value, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_program_short_address(uint8_t value)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_special(DALI_CMD_PROGRAM_SHORT_ADDRESS, value, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_verify_short_address(uint8_t value)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_special(DALI_CMD_VERIFY_SHORT_ADDRESS, value, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_query_short_address(void)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_special(DALI_CMD_QUERY_SHORT_ADDRESS, 0u, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_enable_device_type(uint8_t device_type)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_special(DALI_CMD_ENABLE_DEVICE_TYPE, device_type, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_dtr0_data(uint8_t value)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_dtr_data(DALI_DTR0, value, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_dtr1_data(uint8_t value)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_dtr_data(DALI_DTR1, value, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_dtr2_data(uint8_t value)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_dtr_data(DALI_DTR2, value, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_write_memory_location(uint8_t value)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_special(DALI_CMD_WRITE_MEMORY_LOCATION, value, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_write_memory_location_no_reply(uint8_t value)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_special(DALI_CMD_WRITE_MEMORY_LOCATION_NO_REPLY, value, &f);
     return f;
 }
 

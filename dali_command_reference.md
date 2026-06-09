@@ -4,7 +4,7 @@ This is a working implementation reference for `dali_protocol`, parsers, and
 dedicated vendor/profile helpers. It is not a replacement for IEC 62386. Public
 manufacturer/library references are used to build the first command database.
 
-Verification status as of 2026-06-08:
+Verification status as of 2026-06-09:
 
 - Standard control-gear opcodes, response kind assignments, and special command
   opcodes are source-checked against the Microchip/IEC references.
@@ -21,7 +21,13 @@ Verification status as of 2026-06-08:
 - Addressed 16-bit configuration instructions are available through the generic
   `dali_control_build_config` / `dali_control_config` path and the diagnostic
   `config` CLI. They use command metadata for opcode ranges and send-twice
-  scheduling. Special DTR data frames remain separate planned work.
+  scheduling. DTR0-consuming configuration can be sequenced with an explicit
+  DTR0 DATA load through `dali_control_config_with_dtr0` and diagnostic
+  `config-dtr0`.
+- Single-frame special command builders are available through
+  `dali_build_special` and the diagnostic `special` CLI. Commissioning,
+  device-type selection, and memory workflows that combine these frames remain
+  separate flow-module work.
 - Addressed 16-bit control-gear queries are available through the generic
   `dali_control_build_query` / `dali_control_query` path and the diagnostic
   `query` CLI. Higher-level flows that prepare DTR state or perform
@@ -115,29 +121,30 @@ device-level command space, and `0xFF` addresses all instances where supported.
 
 These are normal addressed 16-bit configuration instructions. The generic
 control/config path builds them and schedules their required send-twice
-transmission. Commands whose names end in `DTR0` use the current DTR0 value;
-loading DTR0 via special command frames is still planned separately.
+transmission. Commands that consume DTR0 can either use the current DTR0 value
+through `config`, or load DTR0 and run the consuming command as one scheduler
+sequence through `config-dtr0`.
 
 | Opcode | Name | Response | Status |
 |---:|---|---|---|
 | `0x20` | RESET | none | generic config/CLI implemented, send twice |
 | `0x21` | STORE ACTUAL LEVEL IN DTR0 | none | generic config/CLI implemented, send twice |
 | `0x22` | SAVE PERSISTENT VARIABLES | none | generic config/CLI implemented, send twice, DALI-2 |
-| `0x23` | SET OPERATING MODE DTR0 | none | generic config/CLI implemented, send twice, DALI-2; DTR0 load pending |
-| `0x24` | RESET MEMORY BANK DTR0 | none | generic config/CLI implemented, send twice, DALI-2; DTR0 load pending |
+| `0x23` | SET OPERATING MODE DTR0 | none | generic config/CLI implemented, send twice, DALI-2; sequenced DTR0 load available |
+| `0x24` | RESET MEMORY BANK DTR0 | none | generic config/CLI implemented, send twice, DALI-2; sequenced DTR0 load available |
 | `0x25` | IDENTIFY DEVICE | none | generic config/CLI implemented, send twice |
-| `0x2A` | SET MAX LEVEL DTR0 | none | generic config/CLI implemented, send twice; DTR0 load pending |
-| `0x2B` | SET MIN LEVEL DTR0 | none | generic config/CLI implemented, send twice; DTR0 load pending |
-| `0x2C` | SET SYSTEM FAILURE LEVEL DTR0 | none | generic config/CLI implemented, send twice; DTR0 load pending |
-| `0x2D` | SET POWER ON LEVEL DTR0 | none | generic config/CLI implemented, send twice; DTR0 load pending |
-| `0x2E` | SET FADE TIME DTR0 | none | generic config/CLI implemented, send twice; DTR0 load pending |
-| `0x2F` | SET FADE RATE DTR0 | none | generic config/CLI implemented, send twice; DTR0 load pending |
-| `0x30` | SET EXTENDED FADE TIME DTR0 | none | generic config/CLI implemented, send twice, DALI-2; DTR0 load pending |
-| `0x40..0x4F` | SET SCENE 0..15 DTR0 | none | generic config/CLI implemented, send twice; DTR0 load pending |
+| `0x2A` | SET MAX LEVEL DTR0 | none | generic config/CLI implemented, send twice; sequenced DTR0 load available |
+| `0x2B` | SET MIN LEVEL DTR0 | none | generic config/CLI implemented, send twice; sequenced DTR0 load available |
+| `0x2C` | SET SYSTEM FAILURE LEVEL DTR0 | none | generic config/CLI implemented, send twice; sequenced DTR0 load available |
+| `0x2D` | SET POWER ON LEVEL DTR0 | none | generic config/CLI implemented, send twice; sequenced DTR0 load available |
+| `0x2E` | SET FADE TIME DTR0 | none | generic config/CLI implemented, send twice; sequenced DTR0 load available |
+| `0x2F` | SET FADE RATE DTR0 | none | generic config/CLI implemented, send twice; sequenced DTR0 load available |
+| `0x30` | SET EXTENDED FADE TIME DTR0 | none | generic config/CLI implemented, send twice, DALI-2; sequenced DTR0 load available |
+| `0x40..0x4F` | SET SCENE 0..15 DTR0 | none | generic config/CLI implemented, send twice; sequenced DTR0 load available |
 | `0x50..0x5F` | REMOVE FROM SCENE 0..15 | none | generic config/CLI implemented, send twice |
 | `0x60..0x6F` | ADD TO GROUP 0..15 | none | generic config/CLI implemented, send twice |
 | `0x70..0x7F` | REMOVE FROM GROUP 0..15 | none | generic config/CLI implemented, send twice |
-| `0x80` | SET SHORT ADDRESS DTR0 | none | generic config/CLI implemented, send twice; DTR0 load pending |
+| `0x80` | SET SHORT ADDRESS DTR0 | none | generic config/CLI implemented, send twice; sequenced DTR0 load available |
 | `0x81` | ENABLE WRITE MEMORY | none | generic config/CLI implemented, send twice |
 
 ### Query Instructions
@@ -185,28 +192,29 @@ can create multiple simultaneous backward frames.
 ### Special Commands
 
 Special commands do not use the same normal addressed-command shape as ordinary
-16-bit gear commands. Implement these as a separate builder family.
+16-bit gear commands. Single-frame builders are implemented separately from
+commissioning and memory flow modules.
 
 | Opcode | Name | Response | Status |
 |---:|---|---|---|
-| `0xA1` | TERMINATE | none | planned, special frame |
-| `0xA3` | DTR0 DATA | none | planned, special frame |
-| `0xA5` | INITIALISE | none | planned, special frame, send twice |
-| `0xA7` | RANDOMIZE | none | planned, special frame, send twice |
-| `0xA9` | COMPARE | `YES_NO` | planned, special frame |
-| `0xAB` | WITHDRAW | none | planned, special frame |
-| `0xAD` | PING | none | planned, DALI-2 |
-| `0xB1` | SEARCH ADDRH | none | planned, special frame |
-| `0xB3` | SEARCH ADDRM | none | planned, special frame |
-| `0xB5` | SEARCH ADDRL | none | planned, special frame |
-| `0xB7` | PROGRAM SHORT ADDRESS | none | planned, special frame |
-| `0xB9` | VERIFY SHORT ADDRESS | `YES_NO` | planned, special frame |
-| `0xBB` | QUERY SHORT ADDRESS | `UINT8` | planned, special frame |
-| `0xC1` | ENABLE DEVICE TYPE | none | planned, special frame |
-| `0xC3` | DTR1 DATA | none | planned, special frame |
-| `0xC5` | DTR2 DATA | none | planned, special frame |
-| `0xC7` | WRITE MEMORY LOCATION | `MEMORY_BYTE` | planned, special frame |
-| `0xC9` | WRITE MEMORY LOCATION NO REPLY | none | planned, special frame |
+| `0xA1` | TERMINATE | none | special frame builder/CLI implemented |
+| `0xA3` | DTR0 DATA | none | special frame builder/control/CLI implemented |
+| `0xA5` | INITIALISE | none | special frame builder/CLI implemented, send twice; commissioning flow pending |
+| `0xA7` | RANDOMIZE | none | special frame builder/CLI implemented, send twice; commissioning flow pending |
+| `0xA9` | COMPARE | `YES_NO` | special frame builder/CLI implemented; commissioning flow pending |
+| `0xAB` | WITHDRAW | none | special frame builder/CLI implemented; commissioning flow pending |
+| `0xAD` | PING | none | special frame builder/CLI implemented, DALI-2 |
+| `0xB1` | SEARCH ADDRH | none | special frame builder/CLI implemented; commissioning flow pending |
+| `0xB3` | SEARCH ADDRM | none | special frame builder/CLI implemented; commissioning flow pending |
+| `0xB5` | SEARCH ADDRL | none | special frame builder/CLI implemented; commissioning flow pending |
+| `0xB7` | PROGRAM SHORT ADDRESS | none | special frame builder/CLI implemented; commissioning flow pending |
+| `0xB9` | VERIFY SHORT ADDRESS | `YES_NO` | special frame builder/CLI implemented; commissioning flow pending |
+| `0xBB` | QUERY SHORT ADDRESS | `UINT8` | special frame builder/CLI implemented; commissioning flow pending |
+| `0xC1` | ENABLE DEVICE TYPE | none | special frame builder/CLI implemented; device-type flow pending |
+| `0xC3` | DTR1 DATA | none | special frame builder/control/CLI implemented |
+| `0xC5` | DTR2 DATA | none | special frame builder/control/CLI implemented |
+| `0xC7` | WRITE MEMORY LOCATION | `MEMORY_BYTE` | special frame builder/CLI implemented; memory flow pending |
+| `0xC9` | WRITE MEMORY LOCATION NO REPLY | none | special frame builder/CLI implemented; memory flow pending |
 
 ## DALI-2 Input Device Commands
 
@@ -277,3 +285,6 @@ Known Steinel HF 360 II DALI-2 IPD instance targets:
 - [x] Add generic addressed control-gear query API, diagnostic CLI, and tests.
 - [x] Add generic addressed configuration API, diagnostic CLI, send-twice
       scheduling, and tests.
+- [x] Add DTR0/DTR1/DTR2 DATA builders plus fixed scheduler sequences for
+      DTR0-consuming configuration commands.
+- [x] Add generic single-frame special command builders and diagnostic CLI.

@@ -5,6 +5,7 @@
  *
  * Responsibilities:
  *   - Transaction queue (DALI_CMD_QUEUE_SIZE entries)
+ *   - Fixed-size transaction sequences for DTR setup and dependent commands
  *   - Send-twice enforcement (DALI_SEND_TWICE_WINDOW_MS)
  *   - Reply timeout (DALI_REPLY_TIMEOUT_MS) and retry (retries_left)
  *   - TX/RX handoff with DaliPhy via injected ops
@@ -19,6 +20,9 @@
 
 #include "dali_frame.h"
 #include "dali_phy.h"   /* for DaliPhyRxCallback */
+
+#define DALI_SEQUENCE_MAX_STEPS      4u
+#define DALI_SEQUENCE_NO_FAILED_STEP 0xFFu
 
 /* ---------------------------------------------------------------------------
  * Scheduler state machine states
@@ -77,6 +81,25 @@ typedef struct {
     void                 *cb_ctx;        /* forwarded to on_complete           */
 } DaliTransaction;
 
+typedef struct {
+    DaliFrame frame;
+    bool      needs_reply;
+    bool      send_twice;
+    uint8_t   retries_left;
+} DaliSequenceStep;
+
+typedef void (*DaliSequenceCompletionCb)(DaliError result,
+                                         uint8_t failed_step,
+                                         const DaliFrame *last_reply,
+                                         void *cb_ctx);
+
+typedef struct {
+    DaliSequenceStep        steps[DALI_SEQUENCE_MAX_STEPS];
+    uint8_t                 step_count;
+    DaliSequenceCompletionCb on_complete;
+    void                   *cb_ctx;
+} DaliSequence;
+
 /* ---------------------------------------------------------------------------
  * Injected ops — PHY interface + time source.
  * Provide real implementations on device; provide mocks in host tests.
@@ -97,6 +120,14 @@ DaliError dali_sched_init(const DaliSchedOps *ops);
 
 /* Enqueue a transaction.  Thread-safe between tasks (not ISR-safe). */
 DaliError dali_sched_enqueue(const DaliTransaction *txn);
+
+/*
+ * Enqueue a fixed sequence. The scheduler copies the sequence and runs all
+ * steps contiguously before popping the next queue entry. If a step fails,
+ * later steps are skipped and failed_step is the zero-based step index. On
+ * success, failed_step is DALI_SEQUENCE_NO_FAILED_STEP.
+ */
+DaliError dali_sched_enqueue_sequence(const DaliSequence *seq);
 
 /*
  * Advance the state machine.  Call periodically from the DALI task loop.

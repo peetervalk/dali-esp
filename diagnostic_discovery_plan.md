@@ -96,7 +96,7 @@ Blinking addr 12 between min and max for 10 seconds.
    - actual level for control gear
    - group membership
    - DALI-2 input-device metadata
-5. Build an in-memory `DaliInventory`.
+5. Build an in-memory `DaliDiscoveryInventory`.
 6. Print inventory in human-readable form.
 7. Export inventory in a machine-readable form for final ESPHome configuration.
 
@@ -154,6 +154,8 @@ Draft export shape:
 - [x] `inventory` print command.
 - [x] `identify <addr>` for lamps.
 - [x] Generic `instances <addr>` for DALI-2 input-device count/type discovery.
+- [x] Reusable `dali_discovery` module for scheduler-agnostic scan,
+      inventory, and generic instance discovery.
 - [ ] Steinel profile polling. Profile helpers exist; real-bus polling is
       pending.
 - [ ] Unsolicited event queue.

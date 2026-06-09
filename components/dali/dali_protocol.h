@@ -159,6 +159,12 @@ const DaliCommandInfo *dali_command_lookup_opcode(DaliCommandFrameKind frame_kin
                                                   uint8_t opcode);
 uint8_t dali_command_count(void);
 
+typedef enum {
+    DALI_DTR0 = 0,
+    DALI_DTR1 = 1,
+    DALI_DTR2 = 2,
+} DaliDtrRegister;
+
 /*
  * Build a normal addressed 16-bit command from metadata.
  *
@@ -184,6 +190,16 @@ DaliError dali_build_instance_command(uint8_t addr,
 DaliError dali_build_device_command(uint8_t addr,
                                     DaliCommandId id,
                                     DaliFrame *out);
+
+/* Build a special command frame. */
+DaliError dali_build_special(DaliCommandId id,
+                             uint8_t param,
+                             DaliFrame *out);
+
+/* Build a DTRx DATA special frame. */
+DaliError dali_build_dtr_data(DaliDtrRegister reg,
+                              uint8_t value,
+                              DaliFrame *out);
 
 /* ---------------------------------------------------------------------------
  * 16-bit frame builders
@@ -233,6 +249,26 @@ DaliFrame dali_cmd_broadcast_off(void);
 
 /* Broadcast: recall max all devices */
 DaliFrame dali_cmd_broadcast_recall_max(void);
+
+/* Special command frame convenience builders. */
+DaliFrame dali_cmd_terminate(void);
+DaliFrame dali_cmd_initialise(uint8_t param);
+DaliFrame dali_cmd_randomize(void);
+DaliFrame dali_cmd_compare(void);
+DaliFrame dali_cmd_withdraw(void);
+DaliFrame dali_cmd_ping(void);
+DaliFrame dali_cmd_search_addr_h(uint8_t value);
+DaliFrame dali_cmd_search_addr_m(uint8_t value);
+DaliFrame dali_cmd_search_addr_l(uint8_t value);
+DaliFrame dali_cmd_program_short_address(uint8_t value);
+DaliFrame dali_cmd_verify_short_address(uint8_t value);
+DaliFrame dali_cmd_query_short_address(void);
+DaliFrame dali_cmd_enable_device_type(uint8_t device_type);
+DaliFrame dali_cmd_dtr0_data(uint8_t value);
+DaliFrame dali_cmd_dtr1_data(uint8_t value);
+DaliFrame dali_cmd_dtr2_data(uint8_t value);
+DaliFrame dali_cmd_write_memory_location(uint8_t value);
+DaliFrame dali_cmd_write_memory_location_no_reply(uint8_t value);
 
 /* ---------------------------------------------------------------------------
  * DALI-2 24-bit instance command builders  (IEC 62386-103 §9.1.3)

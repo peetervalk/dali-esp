@@ -24,11 +24,24 @@ _Static_assert((DALI_CMD_QUEUE_SIZE & (DALI_CMD_QUEUE_SIZE - 1u)) == 0u,
 /* ---------------------------------------------------------------------------
  * Module state
  * --------------------------------------------------------------------------*/
+typedef enum {
+    SCHED_QUEUE_TRANSACTION = 0,
+    SCHED_QUEUE_SEQUENCE    = 1,
+} SchedQueueEntryKind;
+
+typedef struct {
+    SchedQueueEntryKind kind;
+    union {
+        DaliTransaction txn;
+        DaliSequence    sequence;
+    } item;
+} SchedQueueEntry;
+
 static DaliSchedOps    s_ops;
 static bool            s_initialized;
 
 /* Queue — circular buffer of transactions */
-static DaliTransaction s_queue[DALI_CMD_QUEUE_SIZE];
+static SchedQueueEntry s_queue[DALI_CMD_QUEUE_SIZE];
 static uint8_t         s_q_head;    /* consumer index (dali_sched_run)    */
 static uint8_t         s_q_tail;    /* producer index (dali_sched_enqueue)*/
 static uint8_t         s_q_count;   /* number of items currently queued   */
@@ -38,6 +51,11 @@ static DaliSchedState  s_state;
 static DaliTransaction s_active;          /* copy of the current transaction */
 static uint8_t         s_send_count;      /* 1 = first TX done, 2 = both done */
 static uint32_t        s_state_entered_ms;
+static bool            s_active_is_sequence;
+static DaliSequence    s_active_sequence;
+static uint8_t         s_active_sequence_step;
+static bool            s_sequence_has_reply;
+static DaliFrame       s_sequence_last_reply;
 
 /* Reply notification — written by notify_rx, read by dali_sched_run */
 static volatile bool   s_reply_received;
@@ -70,11 +88,68 @@ static uint32_t sched_now_us(void)
     return s_ops.get_tick_ms() * 1000u;
 }
 
-static void sched_complete(DaliError result, const DaliFrame *reply)
+static void sched_complete_transaction(DaliError result, const DaliFrame *reply)
 {
     if (s_active.on_complete != NULL) {
         s_active.on_complete(result, reply, s_active.cb_ctx);
     }
+}
+
+static void sched_load_sequence_step(uint8_t step)
+{
+    const DaliSequenceStep *src = &s_active_sequence.steps[step];
+    s_active = (DaliTransaction){
+        .frame        = src->frame,
+        .needs_reply  = src->needs_reply,
+        .send_twice   = src->send_twice,
+        .retries_left = src->retries_left,
+        .on_complete  = NULL,
+        .cb_ctx       = NULL,
+    };
+}
+
+static void sched_complete_sequence(DaliError result, uint8_t failed_step)
+{
+    DaliSequenceCompletionCb cb = s_active_sequence.on_complete;
+    void *cb_ctx = s_active_sequence.cb_ctx;
+    const DaliFrame *reply = s_sequence_has_reply ? &s_sequence_last_reply : NULL;
+
+    s_active_is_sequence = false;
+    s_active_sequence_step = 0u;
+    s_sequence_has_reply = false;
+
+    if (cb != NULL) {
+        cb(result, failed_step, reply, cb_ctx);
+    }
+}
+
+static bool sched_finish_active_step(DaliError result, const DaliFrame *reply)
+{
+    if (!s_active_is_sequence) {
+        sched_complete_transaction(result, reply);
+        return false;
+    }
+
+    if (reply != NULL) {
+        s_sequence_last_reply = *reply;
+        s_sequence_has_reply = true;
+    }
+
+    if (result != DALI_OK) {
+        sched_complete_sequence(result, s_active_sequence_step);
+        return false;
+    }
+
+    s_active_sequence_step++;
+    if (s_active_sequence_step >= s_active_sequence.step_count) {
+        sched_complete_sequence(DALI_OK, DALI_SEQUENCE_NO_FAILED_STEP);
+        return false;
+    }
+
+    sched_load_sequence_step(s_active_sequence_step);
+    s_send_count = 0u;
+    s_reply_received = false;
+    return true;
 }
 
 static void sched_trace(DaliSchedTraceDirection direction,
@@ -123,13 +198,51 @@ static void sched_route_unsolicited_or_ignore(const DaliFrame *frame)
     g_dali_stats.rx_ignored_outside_reply++;
 }
 
-/* Dequeue one item into s_active.  Caller must hold critical section. */
-static bool queue_pop_locked(void)
+static DaliError queue_push(const SchedQueueEntry *entry)
 {
-    if (s_q_count == 0u) {
+    if (entry == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliError result;
+    SCHED_ENTER_CRITICAL();
+    if (s_q_count >= DALI_CMD_QUEUE_SIZE) {
+        result = DALI_ERR_QUEUE_FULL;
+    } else {
+        s_queue[s_q_tail] = *entry;
+        s_q_tail  = (uint8_t)((s_q_tail + 1u) & (DALI_CMD_QUEUE_SIZE - 1u));
+        s_q_count++;
+        result = DALI_OK;
+    }
+    SCHED_EXIT_CRITICAL();
+    return result;
+}
+
+static bool sequence_valid(const DaliSequence *seq)
+{
+    if (seq == NULL ||
+        seq->step_count == 0u ||
+        seq->step_count > DALI_SEQUENCE_MAX_STEPS) {
         return false;
     }
-    s_active = s_queue[s_q_head];
+
+    for (uint8_t i = 0u; i < seq->step_count; i++) {
+        const DaliFrame *frame = &seq->steps[i].frame;
+        if (frame->bit_length == 0u ||
+            frame->bit_length > DALI_MAX_FRAME_BITS) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Dequeue one item. Caller must hold critical section. */
+static bool queue_pop_locked(SchedQueueEntry *entry)
+{
+    if (entry == NULL || s_q_count == 0u) {
+        return false;
+    }
+    *entry = s_queue[s_q_head];
     s_q_head = (uint8_t)((s_q_head + 1u) & (DALI_CMD_QUEUE_SIZE - 1u));
     s_q_count--;
     return true;
@@ -162,6 +275,11 @@ DaliError dali_sched_init(const DaliSchedOps *ops)
     s_state       = SCHED_IDLE;
     s_send_count  = 0u;
     s_reply_received = false;
+    s_active_is_sequence = false;
+    s_active_sequence_step = 0u;
+    s_sequence_has_reply = false;
+    memset(&s_active_sequence, 0, sizeof(s_active_sequence));
+    memset(&s_sequence_last_reply, 0, sizeof(s_sequence_last_reply));
     s_event_cb        = NULL;
     s_event_cb_ctx    = NULL;
     s_trace_cb        = NULL;
@@ -180,18 +298,24 @@ DaliError dali_sched_enqueue(const DaliTransaction *txn)
         return DALI_ERR_INVALID;
     }
 
-    DaliError result;
-    SCHED_ENTER_CRITICAL();
-    if (s_q_count >= DALI_CMD_QUEUE_SIZE) {
-        result = DALI_ERR_QUEUE_FULL;
-    } else {
-        s_queue[s_q_tail] = *txn;
-        s_q_tail  = (uint8_t)((s_q_tail + 1u) & (DALI_CMD_QUEUE_SIZE - 1u));
-        s_q_count++;
-        result = DALI_OK;
+    SchedQueueEntry entry = {
+        .kind = SCHED_QUEUE_TRANSACTION,
+        .item.txn = *txn,
+    };
+    return queue_push(&entry);
+}
+
+DaliError dali_sched_enqueue_sequence(const DaliSequence *seq)
+{
+    if (!s_initialized || !sequence_valid(seq)) {
+        return DALI_ERR_INVALID;
     }
-    SCHED_EXIT_CRITICAL();
-    return result;
+
+    SchedQueueEntry entry = {
+        .kind = SCHED_QUEUE_SEQUENCE,
+        .item.sequence = *seq,
+    };
+    return queue_push(&entry);
 }
 
 void dali_sched_run(void)
@@ -204,12 +328,24 @@ next:
     switch (s_state) {
 
         case SCHED_IDLE: {
+            SchedQueueEntry entry;
             bool got_item;
             SCHED_ENTER_CRITICAL();
-            got_item = queue_pop_locked();
+            got_item = queue_pop_locked(&entry);
             SCHED_EXIT_CRITICAL();
             if (!got_item) {
                 return;
+            }
+            if (entry.kind == SCHED_QUEUE_SEQUENCE) {
+                s_active_sequence = entry.item.sequence;
+                s_active_is_sequence = true;
+                s_active_sequence_step = 0u;
+                s_sequence_has_reply = false;
+                memset(&s_sequence_last_reply, 0, sizeof(s_sequence_last_reply));
+                sched_load_sequence_step(0u);
+            } else {
+                s_active = entry.item.txn;
+                s_active_is_sequence = false;
             }
             s_send_count = 0u;
             s_reply_received = false;
@@ -221,8 +357,11 @@ next:
             DaliError err = s_ops.tx(&s_active.frame);
             if (err != DALI_OK) {
                 ESP_LOGE(TAG, "phy_tx failed: %d", (int)err);
-                sched_complete(err, NULL);
-                s_state = SCHED_IDLE;
+                if (sched_finish_active_step(err, NULL)) {
+                    s_state = SCHED_TX;
+                } else {
+                    s_state = SCHED_IDLE;
+                }
                 goto next;
             }
             uint32_t tx_done_us = sched_now_us();
@@ -251,16 +390,23 @@ next:
                 return;
             }
             /* No reply needed — transaction complete */
-            sched_complete(DALI_OK, NULL);
-            s_state = SCHED_IDLE;
+            if (sched_finish_active_step(DALI_OK, NULL)) {
+                s_state = SCHED_TX;
+            } else {
+                s_state = SCHED_IDLE;
+            }
             goto next;
         }
 
         case SCHED_WAIT_REPLY: {
             if (s_reply_received) {
-                sched_complete(DALI_OK, &s_reply_frame);
+                DaliFrame reply = s_reply_frame;
                 s_reply_received = false;
-                s_state = SCHED_IDLE;
+                if (sched_finish_active_step(DALI_OK, &reply)) {
+                    s_state = SCHED_TX;
+                } else {
+                    s_state = SCHED_IDLE;
+                }
                 goto next;
             }
             if (elapsed_ms(s_state_entered_ms) >= DALI_REPLY_TIMEOUT_MS) {
@@ -272,8 +418,11 @@ next:
                     s_state = SCHED_TX;
                     goto next;
                 }
-                sched_complete(DALI_ERR_TIMEOUT, NULL);
-                s_state = SCHED_IDLE;
+                if (sched_finish_active_step(DALI_ERR_TIMEOUT, NULL)) {
+                    s_state = SCHED_TX;
+                } else {
+                    s_state = SCHED_IDLE;
+                }
                 goto next;
             }
             return;   /* still waiting for reply */
@@ -333,11 +482,16 @@ DaliError dali_sched_reset(void)
     s_q_tail  = 0u;
     s_q_count = 0u;
     memset(&s_active, 0, sizeof(s_active));
+    memset(&s_active_sequence, 0, sizeof(s_active_sequence));
+    memset(&s_sequence_last_reply, 0, sizeof(s_sequence_last_reply));
     memset(&s_reply_frame, 0, sizeof(s_reply_frame));
     s_state            = SCHED_IDLE;
     s_send_count       = 0u;
     s_state_entered_ms = 0u;
     s_reply_received   = false;
+    s_active_is_sequence = false;
+    s_active_sequence_step = 0u;
+    s_sequence_has_reply = false;
     s_last_tx_us       = 0u;
     s_have_last_tx_us  = false;
     SCHED_EXIT_CRITICAL();

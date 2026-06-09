@@ -92,6 +92,27 @@ static DaliError validate_addressed_config_command(DaliCommandId id)
     return DALI_OK;
 }
 
+bool dali_control_config_uses_dtr0(DaliCommandId id)
+{
+    switch (id) {
+        case DALI_CMD_SET_OPERATING_MODE_DTR0:
+        case DALI_CMD_RESET_MEMORY_BANK_DTR0:
+        case DALI_CMD_SET_MAX_LEVEL_DTR0:
+        case DALI_CMD_SET_MIN_LEVEL_DTR0:
+        case DALI_CMD_SET_SYSTEM_FAILURE_LEVEL_DTR0:
+        case DALI_CMD_SET_POWER_ON_LEVEL_DTR0:
+        case DALI_CMD_SET_FADE_TIME_DTR0:
+        case DALI_CMD_SET_FADE_RATE_DTR0:
+        case DALI_CMD_SET_EXTENDED_FADE_TIME_DTR0:
+        case DALI_CMD_SET_SCENE:
+        case DALI_CMD_SET_SHORT_ADDRESS_DTR0:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
 DaliError dali_control_validate_target(DaliTarget target)
 {
     switch (target.type) {
@@ -221,6 +242,21 @@ DaliError dali_control_build_query_status(DaliTarget target, DaliFrame *out)
     return dali_control_build_query(target, DALI_CMD_QUERY_STATUS, 0u, out);
 }
 
+DaliError dali_control_build_dtr(DaliDtrRegister reg, uint8_t value, DaliFrame *out)
+{
+    return dali_build_dtr_data(reg, value, out);
+}
+
+DaliError dali_control_set_dtr(DaliDtrRegister reg, uint8_t value)
+{
+    DaliFrame frame;
+    DaliError err = dali_control_build_dtr(reg, value, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+    return enqueue_frame(&frame, false, false, NULL, NULL);
+}
+
 DaliError dali_control_set_level(DaliTarget target, uint8_t level)
 {
     DaliFrame frame;
@@ -310,6 +346,53 @@ DaliError dali_control_go_to_scene(DaliTarget target, uint8_t scene)
 DaliError dali_control_config(DaliTarget target, DaliCommandId id, uint8_t param)
 {
     return enqueue_config_command(target, id, param);
+}
+
+DaliError dali_control_config_with_dtr0(DaliTarget target,
+                                        DaliCommandId id,
+                                        uint8_t dtr0_value,
+                                        uint8_t param)
+{
+    if (!dali_control_config_uses_dtr0(id)) {
+        return DALI_ERR_INVALID;
+    }
+
+    const DaliCommandInfo *cmd = dali_command_lookup(id);
+    if (cmd == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliFrame dtr_frame;
+    DaliFrame config_frame;
+    DaliError err = dali_control_build_dtr(DALI_DTR0, dtr0_value, &dtr_frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+    err = dali_control_build_config(target, id, param, &config_frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    DaliSequence seq = {
+        .steps = {
+            {
+                .frame        = dtr_frame,
+                .needs_reply  = false,
+                .send_twice   = false,
+                .retries_left = 0u,
+            },
+            {
+                .frame        = config_frame,
+                .needs_reply  = false,
+                .send_twice   = cmd->send_twice,
+                .retries_left = 0u,
+            },
+        },
+        .step_count  = 2u,
+        .on_complete = NULL,
+        .cb_ctx      = NULL,
+    };
+    return dali_sched_enqueue_sequence(&seq);
 }
 
 DaliError dali_control_query(DaliTarget target,

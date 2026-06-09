@@ -306,6 +306,40 @@ void test_command_lookup_dali2_input_value(void)
     TEST_ASSERT_EQUAL(DALI_RESP_INPUT_VALUE_MSB, cmd->response_kind);
 }
 
+void test_command_lookup_special_commands_are_builder_implemented(void)
+{
+    const DaliCommandId special_commands[] = {
+        DALI_CMD_TERMINATE,
+        DALI_CMD_DTR0_DATA,
+        DALI_CMD_INITIALISE,
+        DALI_CMD_RANDOMIZE,
+        DALI_CMD_COMPARE,
+        DALI_CMD_WITHDRAW,
+        DALI_CMD_PING,
+        DALI_CMD_SEARCH_ADDRH,
+        DALI_CMD_SEARCH_ADDRM,
+        DALI_CMD_SEARCH_ADDRL,
+        DALI_CMD_PROGRAM_SHORT_ADDRESS,
+        DALI_CMD_VERIFY_SHORT_ADDRESS,
+        DALI_CMD_QUERY_SHORT_ADDRESS,
+        DALI_CMD_ENABLE_DEVICE_TYPE,
+        DALI_CMD_DTR1_DATA,
+        DALI_CMD_DTR2_DATA,
+        DALI_CMD_WRITE_MEMORY_LOCATION,
+        DALI_CMD_WRITE_MEMORY_LOCATION_NO_REPLY,
+    };
+
+    for (uint8_t i = 0u;
+         i < (uint8_t)(sizeof(special_commands) / sizeof(special_commands[0]));
+         i++) {
+        const DaliCommandInfo *cmd = dali_command_lookup(special_commands[i]);
+
+        TEST_ASSERT_NOT_NULL(cmd);
+        TEST_ASSERT_EQUAL(DALI_CMD_FRAME_SPECIAL, cmd->frame_kind);
+        TEST_ASSERT_TRUE(cmd->implemented);
+    }
+}
+
 void test_command_metadata_table_covers_all_standard_ids(void)
 {
     TEST_ASSERT_EQUAL_UINT8((uint8_t)DALI_CMD_COUNT, dali_command_count());
@@ -387,6 +421,120 @@ void test_build_command_rejects_invalid_args(void)
                                          DALI_CMD_QUERY_INPUT_VALUE, 0u, &frame));
     TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
                       dali_build_command(DALI_ADDR_SHORT, 0u, DALI_CMD_OFF, 0u, NULL));
+}
+
+void test_build_special_commands(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_special(DALI_CMD_TERMINATE, 0u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xA100u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_special(DALI_CMD_INITIALISE, 0xFFu, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xA5FFu, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_special(DALI_CMD_SEARCH_ADDRM, 0x34u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xB334u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_special(DALI_CMD_WRITE_MEMORY_LOCATION, 0x7Eu, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xC77Eu, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+}
+
+void test_build_special_rejects_invalid_args(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_special(DALI_CMD_QUERY_STATUS, 0u, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_special((DaliCommandId)255u, 0u, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_special(DALI_CMD_TERMINATE, 0u, NULL));
+}
+
+void test_build_dtr_data_special_frames(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_dtr_data(DALI_DTR0, 0x12u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xA312u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_dtr_data(DALI_DTR1, 0x00u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xC300u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_dtr_data(DALI_DTR2, 0xFFu, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xC5FFu, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+}
+
+void test_build_dtr_data_rejects_invalid_args(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_dtr_data((DaliDtrRegister)3, 0x12u, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_dtr_data(DALI_DTR0, 0x12u, NULL));
+}
+
+void test_dtr_data_convenience_builders(void)
+{
+    DaliFrame frame = dali_cmd_dtr0_data(0x34u);
+    TEST_ASSERT_EQUAL_HEX32(0xA334u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    frame = dali_cmd_dtr1_data(0x56u);
+    TEST_ASSERT_EQUAL_HEX32(0xC356u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    frame = dali_cmd_dtr2_data(0x78u);
+    TEST_ASSERT_EQUAL_HEX32(0xC578u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+}
+
+void test_special_convenience_builders(void)
+{
+    DaliFrame frame = dali_cmd_compare();
+    TEST_ASSERT_EQUAL_HEX32(0xA900u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    frame = dali_cmd_search_addr_h(0x12u);
+    TEST_ASSERT_EQUAL_HEX32(0xB112u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    frame = dali_cmd_search_addr_l(0x56u);
+    TEST_ASSERT_EQUAL_HEX32(0xB556u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    frame = dali_cmd_program_short_address(0x2Bu);
+    TEST_ASSERT_EQUAL_HEX32(0xB72Bu, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    frame = dali_cmd_verify_short_address(0x2Bu);
+    TEST_ASSERT_EQUAL_HEX32(0xB92Bu, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    frame = dali_cmd_query_short_address();
+    TEST_ASSERT_EQUAL_HEX32(0xBB00u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    frame = dali_cmd_enable_device_type(0x06u);
+    TEST_ASSERT_EQUAL_HEX32(0xC106u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
+
+    frame = dali_cmd_write_memory_location_no_reply(0x99u);
+    TEST_ASSERT_EQUAL_HEX32(0xC999u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
 }
 
 void test_build_instance_command_query_input_value(void)
@@ -794,12 +942,19 @@ int main(void)
     RUN_TEST(test_command_lookup_addressed_queries_are_implemented);
     RUN_TEST(test_command_lookup_config_commands_are_implemented);
     RUN_TEST(test_command_lookup_dali2_input_value);
+    RUN_TEST(test_command_lookup_special_commands_are_builder_implemented);
     RUN_TEST(test_command_metadata_table_covers_all_standard_ids);
     RUN_TEST(test_command_lookup_keeps_vendor_specific_opcodes_out_of_standard_table);
     RUN_TEST(test_command_lookup_invalid_returns_null);
     RUN_TEST(test_build_command_short_group_broadcast_dapc);
     RUN_TEST(test_build_command_fixed_opcode_and_range_opcode);
     RUN_TEST(test_build_command_rejects_invalid_args);
+    RUN_TEST(test_build_special_commands);
+    RUN_TEST(test_build_special_rejects_invalid_args);
+    RUN_TEST(test_build_dtr_data_special_frames);
+    RUN_TEST(test_build_dtr_data_rejects_invalid_args);
+    RUN_TEST(test_dtr_data_convenience_builders);
+    RUN_TEST(test_special_convenience_builders);
     RUN_TEST(test_build_instance_command_query_input_value);
     RUN_TEST(test_build_instance_command_rejects_invalid_args);
     /* 24-bit instance frame builders */
