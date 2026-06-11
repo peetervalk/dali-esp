@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-06-11 (rev 23)
+**Last updated:** 2026-06-11 (rev 24)
 **Framework:** ESP-IDF v6.0.1 native CMake
 **Hardware target:** ESP32-DevKitC-VE / ESP32-WROVER-E + MikroE DALI-2 Click
 **Timer:** GPTIMER, 104 us alarm, 4x oversampling of the DALI half-bit
@@ -78,14 +78,12 @@ bring-up:
 
 Latest known verification:
 
-- `idf.py build` passes as of 2026-06-09.
+- `idf.py build` passes as of 2026-06-11.
 - Fresh build from `sdkconfig.defaults` passes and generates 8 MB flash image
   arguments as of 2026-06-05.
 - Host tests pass as of 2026-06-11: 13 suites.
-- Direct ESP32 compile checks for the changed DALI component files pass as of
-  2026-06-11, including `dali_commissioning.c` and `dali_diag.c`. Full
-  `idf.py build` timed out in the sandbox after bootloader/configure work with
-  no compiler diagnostic; rerun outside the sandbox before flashing.
+- Native ESP32 build includes `dali_commissioning.c` and `dali_diag.c` and
+  generates `build/dali_esp.bin` as of 2026-06-11.
 - Real hardware flashing, timing, loopback, and device communication are still
   pending.
 

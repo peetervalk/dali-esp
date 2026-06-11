@@ -304,6 +304,15 @@ void test_command_lookup_dali2_input_value(void)
     TEST_ASSERT_EQUAL_UINT8(0x8Cu, cmd->opcode_first);
     TEST_ASSERT_EQUAL(DALI_CMD_FRAME_24BIT_INST, cmd->frame_kind);
     TEST_ASSERT_EQUAL(DALI_RESP_INPUT_VALUE_MSB, cmd->response_kind);
+    TEST_ASSERT_TRUE(cmd->implemented);
+
+    cmd = dali_command_lookup(DALI_CMD_QUERY_INPUT_VALUE_LATCH);
+    TEST_ASSERT_NOT_NULL(cmd);
+    TEST_ASSERT_EQUAL_STRING("QUERY INPUT VALUE LATCH", cmd->name);
+    TEST_ASSERT_EQUAL_UINT8(0x8Du, cmd->opcode_first);
+    TEST_ASSERT_EQUAL(DALI_CMD_FRAME_24BIT_INST, cmd->frame_kind);
+    TEST_ASSERT_EQUAL(DALI_RESP_INPUT_VALUE_LATCH, cmd->response_kind);
+    TEST_ASSERT_TRUE(cmd->implemented);
 }
 
 void test_command_lookup_special_commands_are_builder_implemented(void)

@@ -67,7 +67,7 @@ debugging.
 - [ ] Run `instances <addr>` and confirm advertised instance types:
   - [ ] Type 4 light instance.
   - [ ] Type 3 occupancy/motion instance.
-- [ ] Implement and test instance value reads.
+- [ ] Validate host-tested instance value reads on real hardware.
 - [ ] Poll expected instances:
   - [ ] Instance 0 brightness.
   - [ ] Instance 1 motion.
