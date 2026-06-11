@@ -17,14 +17,16 @@ debugging.
 ## Stage 0 - Basic ESP32 Bring-Up
 
 - [ ] Flash a known-good ESP-IDF hello-world project.
-- [ ] Confirm USB serial monitor output.
+- [x] Confirm USB serial output from the DALI firmware diagnostic shell.
 - [ ] Confirm the board can be erased and reflashed reliably.
-- [ ] Confirm `idf.py build flash monitor` workflow on the target COM port.
+- [x] Confirm `idf.py -p COM6 flash` workflow on the target COM port.
+- [ ] Confirm long-running `idf.py -p COM6 monitor` workflow on the target COM port.
 
 ## Stage 1 - Wiring And Electrical Sanity
 
-- [ ] Confirm MikroE DALI-2 Click wiring to the ESP32-DevKitC-VE.
-- [ ] Update `DALI_TX_GPIO` and `DALI_RX_GPIO` in `main/main.c`.
+- [x] Confirm initial MikroE DALI-2 Click wiring to the ESP32-DevKitC-VE from
+      datasheets: GPIO18 -> pin 2 Tx/RST, GPIO19 -> pin 15 Rx/INT.
+- [x] Update `DALI_TX_GPIO` and `DALI_RX_GPIO` in `main/main.c`.
 - [ ] Do not use GPIO 16 or GPIO 17 on WROVER-E because they are connected to
       PSRAM.
 - [ ] Confirm DALI bus supply and idle voltage with a meter/scope.

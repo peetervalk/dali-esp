@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "driver/uart.h"
+#include "driver/uart_vfs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <inttypes.h>
@@ -27,6 +28,9 @@ static const char *TAG = "DALI-DIAG";
 #define DIAG_TASK_PRIORITY  2u
 #define DIAG_LINE_MAX      80u
 #define DIAG_UART_NUM       0u   /* UART0 = default serial monitor port */
+#define DIAG_UART_BAUD 115200u
+#define DIAG_UART_RX_BUFFER_SIZE 1024u
+#define DIAG_UART_TX_BUFFER_SIZE 1024u
 
 static volatile bool s_trace_enabled;
 
@@ -125,6 +129,33 @@ static uint8_t s_capture_head;
 static uint8_t s_capture_count;
 static uint32_t s_capture_dropped;
 static bool s_capture_enabled;
+
+static DaliError diag_uart_init(void)
+{
+    uart_port_t uart_num = (uart_port_t)DIAG_UART_NUM;
+
+    if (!uart_is_driver_installed(uart_num)) {
+        esp_err_t err = uart_driver_install(uart_num,
+                                            DIAG_UART_RX_BUFFER_SIZE,
+                                            DIAG_UART_TX_BUFFER_SIZE,
+                                            0,
+                                            NULL,
+                                            0);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "uart_driver_install failed: %d", (int)err);
+            return DALI_ERR_INVALID;
+        }
+    }
+
+    esp_err_t err = uart_set_baudrate(uart_num, DIAG_UART_BAUD);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "uart_set_baudrate failed: %d", (int)err);
+        return DALI_ERR_INVALID;
+    }
+
+    uart_vfs_dev_use_driver(DIAG_UART_NUM);
+    return DALI_OK;
+}
 
 static DiagSyncCtx *diag_sync_alloc_slot(TaskHandle_t waiting_task)
 {
@@ -3277,7 +3308,11 @@ static void diag_task(void *arg)
     for (;;) {
         uint8_t ch;
         int n = uart_read_bytes(DIAG_UART_NUM, &ch, 1, pdMS_TO_TICKS(10));
-        if (n <= 0) { continue; }
+        if (n < 0) {
+            vTaskDelay(pdMS_TO_TICKS(100u));
+            continue;
+        }
+        if (n == 0) { continue; }
 
         if (ch == '\n' || ch == '\r') {
             line[pos] = '\0';
@@ -3303,6 +3338,11 @@ DaliError dali_diag_init(void)
     s_trace_enabled = false;
 
 #ifndef DALI_HOST_BUILD
+    DaliError err = diag_uart_init();
+    if (err != DALI_OK) {
+        return err;
+    }
+
     diag_last_rx_reset();
     diag_inventory_reset();
     diag_events_reset();
@@ -3311,7 +3351,7 @@ DaliError dali_diag_init(void)
     diag_sensor_value_cache_reset();
     diag_capture_reset();
 
-    DaliError err = dali_sched_set_trace_callback(diag_trace_cb, NULL);
+    err = dali_sched_set_trace_callback(diag_trace_cb, NULL);
     if (err != DALI_OK) {
         return err;
     }

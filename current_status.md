@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-06-11 (rev 24)
+**Last updated:** 2026-06-11 (rev 25)
 **Framework:** ESP-IDF v6.0.1 native CMake
 **Hardware target:** ESP32-DevKitC-VE / ESP32-WROVER-E + MikroE DALI-2 Click
 **Timer:** GPTIMER, 104 us alarm, 4x oversampling of the DALI half-bit
@@ -84,8 +84,11 @@ Latest known verification:
 - Host tests pass as of 2026-06-11: 13 suites.
 - Native ESP32 build includes `dali_commissioning.c` and `dali_diag.c` and
   generates `build/dali_esp.bin` as of 2026-06-11.
+- First hardware smoke on ESP32/CP2102N serial bridge passes as of 2026-06-11:
+  firmware flashes on COM6, boot reaches the diagnostic shell, `stats` counters
+  are zero after boot, and `bus check` reports RX level high with scheduler idle.
 - Real hardware flashing, timing, loopback, and device communication are still
-  pending.
+  otherwise pending.
 
 ## Current Direction
 
@@ -158,7 +161,7 @@ Steinel conversions available in `dali_steinel` after input-value reads work:
 
 | Topic | Status |
 |---|---|
-| GPIO wiring for MikroE DALI-2 Click | Needs hardware confirmation. Do not use GPIO 16/17 on WROVER-E. |
+| GPIO wiring for MikroE DALI-2 Click | Datasheet-confirmed initial wiring: GPIO18 -> pin 2 Tx/RST, GPIO19 -> pin 15 Rx/INT. Electrical polarity/behavior still needs hardware validation. Do not use GPIO 16/17 on WROVER-E. |
 | HA brightness 0 behavior | Prefer explicit `OFF`; confirm on hardware. |
 | Scheduler RX handling | Raw 8-bit reply vs unsolicited 16/24-bit event routing implemented; 24-bit DALI-2 event and 16-bit legacy controller parsers implemented; hardware validation pending. |
 | DALI-2 instance discovery | Generic count/type and raw value polling CLI implemented; profile application pending. |

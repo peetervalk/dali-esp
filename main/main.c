@@ -8,7 +8,10 @@
 
 static const char *TAG = "main";
 
-/* GPIO assignments — update to match your mikroBUS adapter wiring */
+/* Datasheet-confirmed initial mikroBUS wiring:
+ *   GPIO18 -> DALI-2 Click pin 2  Tx/RST
+ *   GPIO19 -> DALI-2 Click pin 15 Rx/INT
+ */
 #define DALI_TX_GPIO  18
 #define DALI_RX_GPIO  19
 
