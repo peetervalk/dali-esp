@@ -14,7 +14,7 @@ facts; it does not decide room names or final Home Assistant semantics.
 
 ## Non-Goals For First Version
 
-- Automatic unaddressed-device commissioning.
+- Full-bus readdressing of already addressed devices.
 - Automatic room/name inference.
 - Full DALI-2 value/profile auto-discovery.
 - Firmware update / DFU for DALI devices.
@@ -38,6 +38,8 @@ transaction.
 Implemented native CLI commands:
 
 ```text
+bus check
+capture start|stop|clear|status|export
 scan
 level <addr|sN|gN|b> <0-254>
 off <addr|sN|gN|b>
@@ -60,16 +62,14 @@ config <addr|sN|gN|b> <config-name> [param]
 config-list
 discover
 inventory
+commission unaddressed [first-addr] [max-devices]
 instances <addr>
-identify <addr>
-```
-
-Planned native CLI commands:
-
-```text
-sensor poll <addr>
-find switches
+sensor poll <addr> [instance]
+smoke <addr>
+events
+find switches [seconds]
 export inventory
+identify <addr>
 ```
 
 Example:
@@ -100,6 +100,20 @@ Blinking addr 12 between min and max for 10 seconds.
 6. Print inventory in human-readable form.
 7. Export inventory in a machine-readable form for final ESPHome configuration.
 
+Suggested first hardware pass:
+
+```text
+bus check
+capture clear
+capture start
+smoke <known_addr>
+instances <sensor_addr>
+sensor poll <sensor_addr>
+find switches 30
+capture stop
+export inventory
+```
+
 ## Physical Identification
 
 For control gear:
@@ -111,10 +125,14 @@ For control gear:
 For switch/input couplers:
 
 - `find switches` enters a timed training mode.
-- The user physically double-presses each switch.
-- The firmware records address, instance, event type, and trigger order.
-- Double press is used as an intentional selection gesture to avoid accidental
-  event capture.
+- For DALI-2 couplers, the user physically double-presses each switch when the
+  device emits standard input-event frames.
+- For legacy/DALI-1-style couplers, the user triggers the configured action; the
+  firmware records the observed 16-bit target/action frame and trigger order.
+- DALI-1-style 16-bit frames generally do not carry source device or instance
+  identity, so export must treat them as raw target/action mappings.
+- Double press is preferred where available as an intentional selection gesture
+  to avoid accidental event capture.
 
 ## Inventory Shape
 
@@ -141,7 +159,8 @@ Draft export shape:
     }
   ],
   "switches": [
-    { "order": 1, "address": 8, "instance": 0, "event": "double_press" }
+    { "order": 1, "frame_kind": "input-24bit", "address": 8, "instance": 0, "event": "double-press" },
+    { "order": 2, "frame_kind": "legacy-16bit", "raw": "0x8B10", "action": "go-to-scene" }
   ]
 }
 ```
@@ -156,8 +175,19 @@ Draft export shape:
 - [x] Generic `instances <addr>` for DALI-2 input-device count/type discovery.
 - [x] Reusable `dali_discovery` module for scheduler-agnostic scan,
       inventory, and generic instance discovery.
-- [ ] Steinel profile polling. Profile helpers exist; real-bus polling is
-      pending.
-- [ ] Unsolicited event queue.
-- [ ] `find switches`.
-- [ ] Export for ESPHome YAML.
+- [x] Raw DALI-2 input value polling through `sensor poll <addr> [instance]`.
+- [x] Raw 24-bit DALI-2 event parser, 16-bit legacy controller-frame parser,
+      and fixed diagnostic event queue.
+- [x] `find switches [seconds]` training from parsed DALI-2 double-press events
+      and legacy 16-bit action frames.
+- [x] Richer JSON `export inventory` with cached input instances and learned
+      switch mappings.
+- [x] Rolling diagnostic capture log with JSON export.
+- [x] `bus check` health snapshot.
+- [x] Query-only `smoke <addr>` pass for one-address bring-up.
+- [x] Latest raw sensor values cached into JSON export.
+- [ ] Steinel profile polling. Profile helpers exist; raw value polling is
+      implemented, but real-bus profile application is pending.
+- [ ] Validate event frame decode and double-press event code against Lunatone
+      captures / real hardware.
+- [ ] Export final ESPHome YAML snippets.

@@ -178,7 +178,8 @@ static void sched_trace(DaliSchedTraceDirection direction,
 
 static bool sched_is_unsolicited_event_frame(const DaliFrame *frame)
 {
-    return frame->bit_length == DALI_EXTENDED_FRAME_BITS;
+    return frame->bit_length == DALI_FORWARD_FRAME_BITS ||
+           frame->bit_length == DALI_EXTENDED_FRAME_BITS;
 }
 
 static bool sched_can_route_unsolicited_event(void)

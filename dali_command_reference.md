@@ -25,13 +25,14 @@ Verification status as of 2026-06-09:
   DTR0 DATA load through `dali_control_config_with_dtr0` and diagnostic
   `config-dtr0`.
 - Single-frame special command builders are available through
-  `dali_build_special` and the diagnostic `special` CLI. Commissioning,
-  device-type selection, and memory workflows that combine these frames remain
-  separate flow-module work.
+  `dali_build_special` and the diagnostic `special` CLI. Unaddressed-device
+  commissioning search/program/verify workflows are implemented in
+  `dali_commissioning`; device-type selection and memory workflows that combine
+  special frames remain separate flow-module work.
 - Addressed 16-bit control-gear queries are available through the generic
   `dali_control_build_query` / `dali_control_query` path and the diagnostic
-  `query` CLI. Higher-level flows that prepare DTR state or perform
-  commissioning searches remain separate planned work.
+  `query` CLI. Higher-level flows that prepare DTR state remain separate
+  planned work.
 
 ## Sources Used
 
@@ -183,9 +184,9 @@ can create multiple simultaneous backward frames.
 | `0xB0..0xBF` | QUERY SCENE LEVEL 0..15 | `UINT8` | generic query/parse/CLI implemented |
 | `0xC0` | QUERY GROUPS 0-7 | `BITSET8` | generic query/parse/CLI implemented |
 | `0xC1` | QUERY GROUPS 8-15 | `BITSET8` | generic query/parse/CLI implemented |
-| `0xC2` | QUERY RANDOM ADDRESS H | `UINT8` | generic query/parse/CLI implemented; commissioning flow pending |
-| `0xC3` | QUERY RANDOM ADDRESS M | `UINT8` | generic query/parse/CLI implemented; commissioning flow pending |
-| `0xC4` | QUERY RANDOM ADDRESS L | `UINT8` | generic query/parse/CLI implemented; commissioning flow pending |
+| `0xC2` | QUERY RANDOM ADDRESS H | `UINT8` | generic query/parse/CLI implemented; separate from unaddressed commissioning search |
+| `0xC3` | QUERY RANDOM ADDRESS M | `UINT8` | generic query/parse/CLI implemented; separate from unaddressed commissioning search |
+| `0xC4` | QUERY RANDOM ADDRESS L | `UINT8` | generic query/parse/CLI implemented; separate from unaddressed commissioning search |
 | `0xC5` | READ MEMORY LOCATION | `MEMORY_BYTE` | generic query/parse/CLI implemented; memory-address setup pending |
 | `0xFF` | QUERY EXTENDED VERSION NUMBER | `UINT8` | generic query/parse/CLI implemented |
 
@@ -199,17 +200,17 @@ commissioning and memory flow modules.
 |---:|---|---|---|
 | `0xA1` | TERMINATE | none | special frame builder/CLI implemented |
 | `0xA3` | DTR0 DATA | none | special frame builder/control/CLI implemented |
-| `0xA5` | INITIALISE | none | special frame builder/CLI implemented, send twice; commissioning flow pending |
-| `0xA7` | RANDOMIZE | none | special frame builder/CLI implemented, send twice; commissioning flow pending |
-| `0xA9` | COMPARE | `YES_NO` | special frame builder/CLI implemented; commissioning flow pending |
-| `0xAB` | WITHDRAW | none | special frame builder/CLI implemented; commissioning flow pending |
+| `0xA5` | INITIALISE | none | special frame builder/CLI implemented, send twice; unaddressed commissioning workflow implemented |
+| `0xA7` | RANDOMIZE | none | special frame builder/CLI implemented, send twice; unaddressed commissioning workflow implemented |
+| `0xA9` | COMPARE | `YES_NO` | special frame builder/CLI implemented; binary search workflow implemented |
+| `0xAB` | WITHDRAW | none | special frame builder/CLI implemented; commissioning workflow implemented |
 | `0xAD` | PING | none | special frame builder/CLI implemented, DALI-2 |
-| `0xB1` | SEARCH ADDRH | none | special frame builder/CLI implemented; commissioning flow pending |
-| `0xB3` | SEARCH ADDRM | none | special frame builder/CLI implemented; commissioning flow pending |
-| `0xB5` | SEARCH ADDRL | none | special frame builder/CLI implemented; commissioning flow pending |
-| `0xB7` | PROGRAM SHORT ADDRESS | none | special frame builder/CLI implemented; commissioning flow pending |
-| `0xB9` | VERIFY SHORT ADDRESS | `YES_NO` | special frame builder/CLI implemented; commissioning flow pending |
-| `0xBB` | QUERY SHORT ADDRESS | `UINT8` | special frame builder/CLI implemented; commissioning flow pending |
+| `0xB1` | SEARCH ADDRH | none | special frame builder/CLI implemented; commissioning workflow implemented |
+| `0xB3` | SEARCH ADDRM | none | special frame builder/CLI implemented; commissioning workflow implemented |
+| `0xB5` | SEARCH ADDRL | none | special frame builder/CLI implemented; commissioning workflow implemented |
+| `0xB7` | PROGRAM SHORT ADDRESS | none | special frame builder/CLI implemented; commissioning workflow implemented |
+| `0xB9` | VERIFY SHORT ADDRESS | `YES_NO` | special frame builder/CLI implemented; commissioning workflow implemented |
+| `0xBB` | QUERY SHORT ADDRESS | `UINT8` | special frame builder/CLI implemented; commissioning workflow implemented |
 | `0xC1` | ENABLE DEVICE TYPE | none | special frame builder/CLI implemented; device-type flow pending |
 | `0xC3` | DTR1 DATA | none | special frame builder/control/CLI implemented |
 | `0xC5` | DTR2 DATA | none | special frame builder/control/CLI implemented |
@@ -229,8 +230,34 @@ discovery. They intentionally do not apply Steinel or Lunatone profiles.
 | instance | `0x82` | QUERY INSTANCE ERROR | `YES_NO` | implemented in `dali_input_device` |
 | instance | `0x83` | QUERY INSTANCE STATUS | `UINT8` | implemented in `dali_input_device` |
 | instance | `0x86` | QUERY INSTANCE ENABLED | `YES_NO` | implemented in `dali_input_device` |
-| instance | `0x8C` | QUERY INPUT VALUE | `INPUT_VALUE_MSB` | metadata/builder implemented; value CLI pending |
-| instance | `0x8D` | QUERY INPUT VALUE LATCH | `INPUT_VALUE_LATCH` | metadata/builder implemented; value CLI pending |
+| instance | `0x8C` | QUERY INPUT VALUE | `INPUT_VALUE_MSB` | metadata/builder and raw value CLI implemented |
+| instance | `0x8D` | QUERY INPUT VALUE LATCH | `INPUT_VALUE_LATCH` | metadata/builder and raw value CLI implemented |
+
+### DALI Input Event / Controller Frames
+
+The diagnostic event parser keeps frames raw-first. For DALI-2 input-event
+frames it decodes the current working 24-bit shape:
+
+```text
+data = (address_byte << 16) | (instance_byte << 8) | event_byte
+```
+
+For legacy/DALI-1-style push-button couplers, the parser also accepts normal
+16-bit DALI controller frames:
+
+```text
+data = (target_address_byte << 8) | command_or_level_byte
+```
+
+These frames generally identify the target/action, not the source coupler or
+source instance. Export therefore marks them as `legacy-16bit` mappings and
+preserves the raw frame.
+
+`dali_event` preserves the raw frame and exposes address byte, decoded
+short/group/broadcast address where applicable, optional instance byte, and
+action/event code. The first DALI-2 switch-training path treats event code
+`0x03` as a push-button double-press candidate; confirm this against Lunatone
+captures before relying on exported switch mappings.
 
 Generic role classification in `dali_input_device`:
 
@@ -280,6 +307,12 @@ Known Steinel HF 360 II DALI-2 IPD instance targets:
 - [x] Add static mapping validation helpers without entity-name assumptions.
 - [x] Add initial unit tests for command metadata, generic builders, and parser dispatch.
 - [x] Add focused unit tests for every new specialized command/parser before hardware tests.
+- [x] Add raw input-value polling helpers and diagnostic `sensor poll`.
+- [x] Add raw 24-bit DALI-2 event parser, 16-bit legacy controller-frame
+      parser, diagnostic event queue, switch training, and JSON inventory/switch
+      export.
+- [x] Add diagnostic capture log, `bus check`, query-only `smoke <addr>`, and
+      latest raw sensor values in JSON export.
 - [x] Centralize shared protocol limits used by protocol, control, PHY,
       scheduler, mapping, and vendor helpers.
 - [x] Add generic addressed control-gear query API, diagnostic CLI, and tests.

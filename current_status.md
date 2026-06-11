@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-06-09 (rev 22)
+**Last updated:** 2026-06-11 (rev 23)
 **Framework:** ESP-IDF v6.0.1 native CMake
 **Hardware target:** ESP32-DevKitC-VE / ESP32-WROVER-E + MikroE DALI-2 Click
 **Timer:** GPTIMER, 104 us alarm, 4x oversampling of the DALI half-bit
@@ -22,6 +22,12 @@ bring-up:
   single-frame special command builders exist for commissioning, DTR,
   enable-device-type, and memory opcodes; parser helpers cover packed
   fade-time/rate and MSB-first multi-byte input values.
+- Reusable `dali_commissioning` helpers provide scheduler-agnostic
+  unaddressed-device commissioning: initialise unaddressed gear, randomize,
+  binary-search random addresses, program/verify short addresses, query the
+  programmed short address, withdraw, and terminate. Native diagnostic
+  `commission unaddressed [first-addr] [max-devices]` pre-scans occupied
+  addresses and post-scans after assignment.
 - Generic DALI-2 input-device helpers in `dali_input_device` classify standard
   instance types without applying vendor profiles: type 3 occupancy/motion and
   type 4 light are marked usable from standard type, while generic/unknown
@@ -30,6 +36,14 @@ bring-up:
   scan/inventory storage and generic DALI-2 input-device instance discovery;
   native diagnostic `scan`, `discover`, `inventory`, and `instances` use this
   layer through a thin scheduler adapter.
+- Reusable `dali_input_poll` helpers read DALI-2 input values over the same
+  scheduler-agnostic transport, and native diagnostic `sensor poll <addr>
+  [instance]` exposes raw value reads.
+- Reusable `dali_event` helpers parse raw DALI-2 24-bit input-event frames into
+  address byte, decoded address, instance, and event code, and also parse
+  legacy/DALI-1-style 16-bit controller frames into target/action records
+  without inventing a source instance. A fixed diagnostic event queue feeds
+  `events`, `find switches`, and export.
 - Vendor/profile helpers are separate from the generic protocol layer:
   Lunatone-only instance scaling queries live in `dali_lunatone`, and the
   Steinel HF 360 II instance profile/conversions live in `dali_steinel`.
@@ -42,14 +56,21 @@ bring-up:
   DAPC, normal output-level instructions through `GO TO SCENE`, recall
   min/max, `QUERY STATUS`, and generic metadata-backed addressed 16-bit
   queries/configuration commands.
-- Native diagnostic CLI exists with `help`, `stats`, `trace on/off`, `read`,
-  `reset`, scheduler-routed `raw`, `dtr`, `special`, `special-list`,
+- Native diagnostic CLI exists with `help`, `stats`, `bus check`,
+  capture control/export `capture start|stop|clear|status|export`,
+  `trace on/off`, `read`, `reset`, scheduler-routed `raw`, `dtr`,
+  `special`, `special-list`,
   named output helpers
   `level/off/up/down/step-up/step-down/step-off/on-step/dapc-seq/last/scene`,
   `max/min/status`, generic `query <target> <name> [param]`, `query-list`,
   generic `config <target> <name> [param]`, sequenced
   `config-dtr0 <target> <name> <value> [param]`, `config-list`, `scan`,
-  `discover`, `inventory`, generic `instances <addr>`, and `identify`.
+  `discover`, `inventory`, generic `instances <addr>`, `sensor poll <addr>
+  [instance]`, raw event drain `events`, switch training `find switches
+  [seconds]`, query-only `smoke <addr>`, `export inventory`, and `identify`.
+- Diagnostic export now includes schema version, cached input-instance metadata,
+  latest raw sensor values, learned DALI-2/legacy switch mappings, and optional
+  rolling capture records.
 - Added `sdkconfig.defaults` for ESP32-WROVER-E bring-up: 8 MB flash,
   240 MHz CPU, 1000 Hz FreeRTOS tick, and ISR-adjacent GPIO/GPTIMER/FreeRTOS
   IRAM options; fresh generated config keeps `esp_timer_get_time()` in IRAM.
@@ -60,7 +81,11 @@ Latest known verification:
 - `idf.py build` passes as of 2026-06-09.
 - Fresh build from `sdkconfig.defaults` passes and generates 8 MB flash image
   arguments as of 2026-06-05.
-- Host tests pass as of 2026-06-09: 10 suites, 173 `RUN_TEST` cases.
+- Host tests pass as of 2026-06-11: 13 suites.
+- Direct ESP32 compile checks for the changed DALI component files pass as of
+  2026-06-11, including `dali_commissioning.c` and `dali_diag.c`. Full
+  `idf.py build` timed out in the sandbox after bootloader/configure work with
+  no compiler diagnostic; rerun outside the sandbox before flashing.
 - Real hardware flashing, timing, loopback, and device communication are still
   pending.
 
@@ -137,8 +162,8 @@ Steinel conversions available in `dali_steinel` after input-value reads work:
 |---|---|
 | GPIO wiring for MikroE DALI-2 Click | Needs hardware confirmation. Do not use GPIO 16/17 on WROVER-E. |
 | HA brightness 0 behavior | Prefer explicit `OFF`; confirm on hardware. |
-| Scheduler RX handling | Raw 8-bit reply vs 24-bit event routing implemented; protocol-level event parsing pending. |
-| DALI-2 instance discovery | Generic count/type CLI implemented; value polling and profile application pending. |
+| Scheduler RX handling | Raw 8-bit reply vs unsolicited 16/24-bit event routing implemented; 24-bit DALI-2 event and 16-bit legacy controller parsers implemented; hardware validation pending. |
+| DALI-2 instance discovery | Generic count/type and raw value polling CLI implemented; profile application pending. |
 | ESPHome component packaging | In-tree custom component first; external component later. |
 | DALI-2 firmware update / DFU | Out of scope. |
 

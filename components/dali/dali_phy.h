@@ -86,6 +86,12 @@ void dali_phy_rx_process(void);
  */
 DaliError dali_phy_reset(void);
 
+/*
+ * Read the current RX-side logic level, if available.
+ * Returns DALI_OK with *level_out set to 0/1 on device builds.
+ */
+DaliError dali_phy_read_rx_level(uint8_t *level_out);
+
 /* ---------------------------------------------------------------------------
  * Host-testable Manchester encode / decode helpers
  * These are separated from hardware so they can be unit-tested without ESP-IDF.

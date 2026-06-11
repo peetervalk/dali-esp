@@ -613,3 +613,18 @@ DaliError dali_phy_reset(void)
     ESP_LOGD(TAG, "PHY reset");
     return DALI_OK;
 }
+
+DaliError dali_phy_read_rx_level(uint8_t *level_out)
+{
+    if (level_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+#ifndef DALI_HOST_BUILD
+    *level_out = gpio_get_level(s_rx_gpio) != 0 ? 1u : 0u;
+    return DALI_OK;
+#else
+    *level_out = 0u;
+    return DALI_ERR_INVALID;
+#endif
+}

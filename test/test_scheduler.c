@@ -141,6 +141,11 @@ static void inject_event(uint32_t data)
     inject_reply(data, 24u);
 }
 
+static void inject_legacy_event(uint32_t data)
+{
+    inject_reply(data, 16u);
+}
+
 /* ---------------------------------------------------------------------------
  * setUp / tearDown
  * --------------------------------------------------------------------------*/
@@ -437,6 +442,21 @@ void test_unsolicited_24bit_idle_routes_event(void)
     TEST_ASSERT_EQUAL(1, g_event_count);
     TEST_ASSERT_EQUAL_HEX32(0x123456u, g_event_frame.data);
     TEST_ASSERT_EQUAL_UINT8(24u, g_event_frame.bit_length);
+    TEST_ASSERT_EQUAL_PTR(&g_event_marker, g_event_ctx);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.unsolicited_events_routed);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_outside_reply);
+}
+
+void test_unsolicited_16bit_idle_routes_event(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_set_event_callback(on_event, &g_event_marker));
+
+    inject_legacy_event(0x8B10u);
+
+    TEST_ASSERT_EQUAL(1, g_event_count);
+    TEST_ASSERT_EQUAL_HEX32(0x8B10u, g_event_frame.data);
+    TEST_ASSERT_EQUAL_UINT8(16u, g_event_frame.bit_length);
     TEST_ASSERT_EQUAL_PTR(&g_event_marker, g_event_ctx);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.unsolicited_events_routed);
     TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_outside_reply);
@@ -864,6 +884,7 @@ int main(void)
     RUN_TEST(test_stale_duplicate_rx_does_not_overwrite_latched_reply);
     RUN_TEST(test_late_rx_after_reply_timeout_is_ignored);
     RUN_TEST(test_unsolicited_24bit_idle_routes_event);
+    RUN_TEST(test_unsolicited_16bit_idle_routes_event);
     RUN_TEST(test_24bit_rx_during_settle_is_ignored_not_routed);
     RUN_TEST(test_unsolicited_24bit_during_reply_window_routes_without_completing);
     RUN_TEST(test_16bit_frame_during_reply_window_is_ignored_not_reply);

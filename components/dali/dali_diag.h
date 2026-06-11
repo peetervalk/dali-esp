@@ -22,6 +22,8 @@
  *   config-list      - print supported generic config names
  *   scan/discover    - scan short addresses and update inventory
  *   inventory        - print the last discovered inventory
+ *   commission unaddressed [first-addr] [max-devices]
+ *                    - assign short addresses to currently unaddressed gear
  *   instances <addr> - query generic DALI-2 input-device instance types
  *   identify <addr>  - blink one short-addressed lamp candidate
  */

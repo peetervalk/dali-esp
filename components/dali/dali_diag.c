@@ -4,10 +4,14 @@
 #include "dali_protocol.h"
 #include "dali_control.h"
 #include "dali_input_device.h"
+#include "dali_input_poll.h"
+#include "dali_event.h"
 #include "dali_discovery.h"
+#include "dali_commissioning.h"
 
 #ifndef DALI_HOST_BUILD
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -19,7 +23,7 @@
 
 static const char *TAG = "DALI-DIAG";
 
-#define DIAG_TASK_STACK   2048u
+#define DIAG_TASK_STACK   8192u
 #define DIAG_TASK_PRIORITY  2u
 #define DIAG_LINE_MAX      80u
 #define DIAG_UART_NUM       0u   /* UART0 = default serial monitor port */
@@ -39,6 +43,12 @@ static volatile bool s_trace_enabled;
 #define DIAG_SYNC_WAIT_MS  200u
 #define DIAG_IDENTIFY_CYCLES 5u
 #define DIAG_IDENTIFY_STEP_MS 1000u
+#define DIAG_FIND_SWITCH_DEFAULT_SECONDS 30u
+#define DIAG_FIND_SWITCH_MAX_SECONDS 300u
+#define DIAG_SWITCH_MAPPING_MAX 32u
+#define DIAG_INPUT_CACHE_MAX 16u
+#define DIAG_SENSOR_VALUE_CACHE_MAX 64u
+#define DIAG_CAPTURE_MAX 128u
 
 typedef struct {
     TaskHandle_t waiting_task;
@@ -50,6 +60,51 @@ typedef struct {
     bool         complete;
 } DiagSyncCtx;
 
+typedef struct {
+    bool           valid;
+    uint8_t        order;
+    DaliInputEvent event;
+    uint32_t       first_seen_us;
+    uint32_t       seen_count;
+} DiagSwitchMapping;
+
+typedef struct {
+    bool                     valid;
+    DaliDiscoveryInputDevice input;
+} DiagInputCacheEntry;
+
+typedef enum {
+    DIAG_CAPTURE_TX = 0,
+    DIAG_CAPTURE_RX,
+    DIAG_CAPTURE_EVENT,
+} DiagCaptureKind;
+
+typedef struct {
+    bool              valid;
+    DiagCaptureKind   kind;
+    DaliFrame         frame;
+    DaliInputEvent    event;
+    bool              has_event;
+    uint32_t          timestamp_us;
+    uint32_t          since_tx_us;
+    bool              has_since_tx;
+} DiagCaptureRecord;
+
+typedef struct {
+    bool      valid;
+    uint8_t   address;
+    uint8_t   instance;
+    bool      has_resolution;
+    uint8_t   resolution;
+    uint8_t   expected_bytes;
+    DaliError result;
+    uint32_t  timestamp_us;
+    uint32_t  value;
+    uint8_t   byte_count;
+    bool      complete;
+    DaliError byte_errors[4];
+} DiagSensorValueCacheEntry;
+
 static DiagSyncCtx s_diag_sync_slots[DIAG_SYNC_SLOT_COUNT];
 static portMUX_TYPE s_diag_sync_mux = portMUX_INITIALIZER_UNLOCKED;
 static portMUX_TYPE s_diag_state_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -59,6 +114,17 @@ static uint32_t  s_last_rx_since_tx_us;
 static bool      s_last_rx_has_since_tx;
 static bool      s_has_last_rx_frame;
 static DaliDiscoveryInventory s_inventory;
+static DaliInputEventQueue s_event_queue;
+static DiagSwitchMapping s_switch_mappings[DIAG_SWITCH_MAPPING_MAX];
+static uint8_t s_switch_mapping_count;
+static DiagInputCacheEntry s_input_cache[DIAG_INPUT_CACHE_MAX];
+static DiagSensorValueCacheEntry s_sensor_value_cache[DIAG_SENSOR_VALUE_CACHE_MAX];
+static DiagCaptureRecord s_capture[DIAG_CAPTURE_MAX];
+static DiagCaptureRecord s_capture_export[DIAG_CAPTURE_MAX];
+static uint8_t s_capture_head;
+static uint8_t s_capture_count;
+static uint32_t s_capture_dropped;
+static bool s_capture_enabled;
 
 static DiagSyncCtx *diag_sync_alloc_slot(TaskHandle_t waiting_task)
 {
@@ -454,11 +520,505 @@ static bool diag_inventory_snapshot(DaliDiscoveryInventory *out)
     return out->valid;
 }
 
+static void diag_events_reset(void)
+{
+    taskENTER_CRITICAL(&s_diag_state_mux);
+    (void)dali_event_queue_init(&s_event_queue);
+    taskEXIT_CRITICAL(&s_diag_state_mux);
+}
+
+static bool diag_event_pop(DaliInputEventRecord *out)
+{
+    bool popped;
+
+    taskENTER_CRITICAL(&s_diag_state_mux);
+    popped = dali_event_queue_pop(&s_event_queue, out);
+    taskEXIT_CRITICAL(&s_diag_state_mux);
+    return popped;
+}
+
+static uint32_t diag_event_queue_dropped_snapshot(void)
+{
+    uint32_t dropped;
+
+    taskENTER_CRITICAL(&s_diag_state_mux);
+    dropped = dali_event_queue_dropped(&s_event_queue);
+    taskEXIT_CRITICAL(&s_diag_state_mux);
+    return dropped;
+}
+
+static uint8_t diag_event_queue_count_snapshot(void)
+{
+    uint8_t count;
+
+    taskENTER_CRITICAL(&s_diag_state_mux);
+    count = dali_event_queue_count(&s_event_queue);
+    taskEXIT_CRITICAL(&s_diag_state_mux);
+    return count;
+}
+
+static void diag_switch_mappings_reset(void)
+{
+    taskENTER_CRITICAL(&s_diag_state_mux);
+    memset(s_switch_mappings, 0, sizeof(s_switch_mappings));
+    s_switch_mapping_count = 0u;
+    taskEXIT_CRITICAL(&s_diag_state_mux);
+}
+
+static void diag_input_cache_reset(void)
+{
+    taskENTER_CRITICAL(&s_diag_state_mux);
+    memset(s_input_cache, 0, sizeof(s_input_cache));
+    taskEXIT_CRITICAL(&s_diag_state_mux);
+}
+
+static void diag_sensor_value_cache_reset(void)
+{
+    taskENTER_CRITICAL(&s_diag_state_mux);
+    memset(s_sensor_value_cache, 0, sizeof(s_sensor_value_cache));
+    taskEXIT_CRITICAL(&s_diag_state_mux);
+}
+
+static void diag_sensor_value_cache_store(uint8_t addr,
+                                          const DaliInputInstanceInfo *info,
+                                          uint8_t expected_bytes,
+                                          DaliError result,
+                                          const DaliInputPollResult *poll)
+{
+    if (info == NULL || addr >= DALI_SHORT_ADDRESS_COUNT ||
+        info->instance >= DALI_INPUT_MAX_INSTANCES) {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_diag_state_mux);
+    uint8_t slot = DIAG_SENSOR_VALUE_CACHE_MAX;
+    for (uint8_t i = 0u; i < DIAG_SENSOR_VALUE_CACHE_MAX; i++) {
+        if (s_sensor_value_cache[i].valid &&
+            s_sensor_value_cache[i].address == addr &&
+            s_sensor_value_cache[i].instance == info->instance) {
+            slot = i;
+            break;
+        }
+        if (!s_sensor_value_cache[i].valid && slot == DIAG_SENSOR_VALUE_CACHE_MAX) {
+            slot = i;
+        }
+    }
+    if (slot == DIAG_SENSOR_VALUE_CACHE_MAX) {
+        slot = (uint8_t)(((uint16_t)addr + info->instance) %
+                         DIAG_SENSOR_VALUE_CACHE_MAX);
+    }
+
+    DiagSensorValueCacheEntry *entry = &s_sensor_value_cache[slot];
+    *entry = (DiagSensorValueCacheEntry){
+        .valid          = true,
+        .address        = addr,
+        .instance       = info->instance,
+        .has_resolution = info->has_resolution,
+        .resolution     = info->resolution,
+        .expected_bytes = expected_bytes,
+        .result         = result,
+        .timestamp_us   = (uint32_t)esp_timer_get_time(),
+        .value          = poll != NULL ? poll->value.value : 0u,
+        .byte_count     = poll != NULL ? poll->value.byte_count : 0u,
+        .complete       = poll != NULL ? poll->value.complete : false,
+    };
+    for (uint8_t i = 0u; i < 4u; i++) {
+        entry->byte_errors[i] = poll != NULL ? poll->byte_errors[i] : DALI_ERR_INVALID;
+    }
+    taskEXIT_CRITICAL(&s_diag_state_mux);
+}
+
+static bool diag_sensor_value_cache_lookup(uint8_t addr,
+                                           uint8_t instance,
+                                           DiagSensorValueCacheEntry *out)
+{
+    if (out == NULL || addr >= DALI_SHORT_ADDRESS_COUNT ||
+        instance >= DALI_INPUT_MAX_INSTANCES) {
+        return false;
+    }
+
+    bool found = false;
+    taskENTER_CRITICAL(&s_diag_state_mux);
+    for (uint8_t i = 0u; i < DIAG_SENSOR_VALUE_CACHE_MAX; i++) {
+        if (s_sensor_value_cache[i].valid &&
+            s_sensor_value_cache[i].address == addr &&
+            s_sensor_value_cache[i].instance == instance) {
+            *out = s_sensor_value_cache[i];
+            found = true;
+            break;
+        }
+    }
+    taskEXIT_CRITICAL(&s_diag_state_mux);
+    return found;
+}
+
+static void diag_input_cache_store(const DaliDiscoveryInputDevice *input)
+{
+    if (input == NULL || input->device.address >= DALI_SHORT_ADDRESS_COUNT) {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_diag_state_mux);
+    uint8_t slot = DIAG_INPUT_CACHE_MAX;
+    for (uint8_t i = 0u; i < DIAG_INPUT_CACHE_MAX; i++) {
+        if (s_input_cache[i].valid &&
+            s_input_cache[i].input.device.address == input->device.address) {
+            slot = i;
+            break;
+        }
+        if (!s_input_cache[i].valid && slot == DIAG_INPUT_CACHE_MAX) {
+            slot = i;
+        }
+    }
+    if (slot == DIAG_INPUT_CACHE_MAX) {
+        slot = (uint8_t)(input->device.address % DIAG_INPUT_CACHE_MAX);
+    }
+    s_input_cache[slot] = (DiagInputCacheEntry){
+        .valid = true,
+        .input = *input,
+    };
+    taskEXIT_CRITICAL(&s_diag_state_mux);
+}
+
+static bool diag_input_cache_lookup(uint8_t addr, DaliDiscoveryInputDevice *out)
+{
+    if (out == NULL || addr >= DALI_SHORT_ADDRESS_COUNT) {
+        return false;
+    }
+
+    bool found = false;
+
+    taskENTER_CRITICAL(&s_diag_state_mux);
+    for (uint8_t i = 0u; i < DIAG_INPUT_CACHE_MAX; i++) {
+        if (s_input_cache[i].valid &&
+            s_input_cache[i].input.device.address == addr) {
+            *out = s_input_cache[i].input;
+            found = true;
+            break;
+        }
+    }
+    taskEXIT_CRITICAL(&s_diag_state_mux);
+    return found;
+}
+
+static bool diag_event_same_source(const DaliInputEvent *a, const DaliInputEvent *b)
+{
+    return a != NULL && b != NULL &&
+           a->frame_kind == b->frame_kind &&
+           a->raw.bit_length == b->raw.bit_length &&
+           a->raw.data == b->raw.data;
+}
+
+static bool diag_record_switch_mapping(const DaliInputEventRecord *record)
+{
+    if (record == NULL) {
+        return false;
+    }
+
+    bool recorded = false;
+
+    taskENTER_CRITICAL(&s_diag_state_mux);
+    for (uint8_t i = 0u; i < s_switch_mapping_count; i++) {
+        if (diag_event_same_source(&s_switch_mappings[i].event, &record->event)) {
+            s_switch_mappings[i].seen_count++;
+            taskEXIT_CRITICAL(&s_diag_state_mux);
+            return false;
+        }
+    }
+
+    if (s_switch_mapping_count < DIAG_SWITCH_MAPPING_MAX) {
+        DiagSwitchMapping *mapping = &s_switch_mappings[s_switch_mapping_count];
+        *mapping = (DiagSwitchMapping){
+            .valid         = true,
+            .order         = (uint8_t)(s_switch_mapping_count + 1u),
+            .event         = record->event,
+            .first_seen_us = record->timestamp_us,
+            .seen_count    = 1u,
+        };
+        s_switch_mapping_count++;
+        recorded = true;
+    }
+    taskEXIT_CRITICAL(&s_diag_state_mux);
+    return recorded;
+}
+
+static uint8_t diag_switch_mappings_snapshot(DiagSwitchMapping *out,
+                                             uint8_t capacity)
+{
+    uint8_t total;
+    uint8_t count;
+
+    taskENTER_CRITICAL(&s_diag_state_mux);
+    total = s_switch_mapping_count;
+    count = total;
+    if (out != NULL && count > 0u) {
+        if (count > capacity) {
+            count = capacity;
+        }
+        memcpy(out, s_switch_mappings, sizeof(out[0]) * count);
+    }
+    taskEXIT_CRITICAL(&s_diag_state_mux);
+    return total;
+}
+
+static const char *diag_capture_kind_name(DiagCaptureKind kind)
+{
+    switch (kind) {
+        case DIAG_CAPTURE_TX:
+            return "tx";
+        case DIAG_CAPTURE_RX:
+            return "rx";
+        case DIAG_CAPTURE_EVENT:
+            return "event";
+        default:
+            return "unknown";
+    }
+}
+
+static const char *diag_sched_state_name(DaliSchedState state)
+{
+    switch (state) {
+        case SCHED_IDLE:
+            return "idle";
+        case SCHED_TX:
+            return "tx";
+        case SCHED_WAIT_SETTLE:
+            return "wait-settle";
+        case SCHED_WAIT_REPLY:
+            return "wait-reply";
+        case SCHED_DONE:
+            return "done";
+        default:
+            return "unknown";
+    }
+}
+
+static void diag_capture_reset(void)
+{
+    taskENTER_CRITICAL(&s_diag_state_mux);
+    memset(s_capture, 0, sizeof(s_capture));
+    s_capture_head = 0u;
+    s_capture_count = 0u;
+    s_capture_dropped = 0u;
+    taskEXIT_CRITICAL(&s_diag_state_mux);
+}
+
+static void diag_capture_set_enabled(bool enabled)
+{
+    taskENTER_CRITICAL(&s_diag_state_mux);
+    s_capture_enabled = enabled;
+    taskEXIT_CRITICAL(&s_diag_state_mux);
+}
+
+static void diag_capture_push(const DiagCaptureRecord *record)
+{
+    if (record == NULL) {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_diag_state_mux);
+    if (!s_capture_enabled) {
+        taskEXIT_CRITICAL(&s_diag_state_mux);
+        return;
+    }
+
+    uint8_t index;
+    if (s_capture_count < DIAG_CAPTURE_MAX) {
+        index = (uint8_t)((s_capture_head + s_capture_count) % DIAG_CAPTURE_MAX);
+        s_capture_count++;
+    } else {
+        index = s_capture_head;
+        s_capture_head = (uint8_t)((s_capture_head + 1u) % DIAG_CAPTURE_MAX);
+        s_capture_dropped++;
+    }
+    s_capture[index] = *record;
+    s_capture[index].valid = true;
+    taskEXIT_CRITICAL(&s_diag_state_mux);
+}
+
+static void diag_capture_push_trace(const DaliSchedTraceEvent *event)
+{
+    if (event == NULL) {
+        return;
+    }
+
+    DiagCaptureRecord record = {
+        .valid        = true,
+        .kind         = event->direction == DALI_SCHED_TRACE_TX
+                      ? DIAG_CAPTURE_TX
+                      : DIAG_CAPTURE_RX,
+        .frame        = event->frame,
+        .timestamp_us = event->timestamp_us,
+        .since_tx_us  = event->since_tx_us,
+        .has_since_tx = event->has_since_tx,
+    };
+    diag_capture_push(&record);
+}
+
+static void diag_capture_push_event(const DaliInputEventRecord *event_record)
+{
+    if (event_record == NULL) {
+        return;
+    }
+
+    DiagCaptureRecord record = {
+        .valid        = true,
+        .kind         = DIAG_CAPTURE_EVENT,
+        .frame        = event_record->event.raw,
+        .event        = event_record->event,
+        .has_event    = true,
+        .timestamp_us = event_record->timestamp_us,
+    };
+    diag_capture_push(&record);
+}
+
+static uint8_t diag_capture_snapshot(DiagCaptureRecord *out,
+                                     uint8_t capacity,
+                                     uint32_t *dropped_out,
+                                     bool *enabled_out)
+{
+    uint8_t count;
+
+    taskENTER_CRITICAL(&s_diag_state_mux);
+    count = s_capture_count;
+    if (out != NULL && capacity > 0u) {
+        uint8_t copy_count = count > capacity ? capacity : count;
+        for (uint8_t i = 0u; i < copy_count; i++) {
+            uint8_t index = (uint8_t)((s_capture_head + i) % DIAG_CAPTURE_MAX);
+            out[i] = s_capture[index];
+        }
+    }
+    if (dropped_out != NULL) {
+        *dropped_out = s_capture_dropped;
+    }
+    if (enabled_out != NULL) {
+        *enabled_out = s_capture_enabled;
+    }
+    taskEXIT_CRITICAL(&s_diag_state_mux);
+    return count;
+}
+
+static void diag_print_event_json_fields(const DaliInputEvent *event)
+{
+    if (event == NULL) {
+        return;
+    }
+
+    printf(", \"frame_kind\": \"%s\"",
+           dali_event_frame_kind_name(event->frame_kind));
+    printf(", \"address_byte\": %u, \"address_byte_hex\": \"0x%02X\"",
+           (unsigned)event->address_byte,
+           (unsigned)event->address_byte);
+    printf(", \"address_kind\": \"%s\"",
+           dali_event_address_kind_name(event->address_kind));
+    if (event->address_kind == DALI_EVENT_ADDRESS_SHORT ||
+        event->address_kind == DALI_EVENT_ADDRESS_GROUP) {
+        printf(", \"address\": %u", (unsigned)event->address);
+    }
+    printf(", \"selector\": %s",
+           event->address_selector ? "true" : "false");
+    if (event->has_instance) {
+        printf(", \"instance\": %u", (unsigned)event->instance);
+    }
+    printf(", \"action_code\": %u", (unsigned)event->event_code);
+    printf(", \"action_hex\": \"0x%02X\"", (unsigned)event->event_code);
+    printf(", \"action\": \"%s\"", dali_event_action_name(event));
+}
+
+static void diag_print_capture_json(void)
+{
+    uint32_t dropped = 0u;
+    bool enabled = false;
+    uint8_t count = diag_capture_snapshot(s_capture_export,
+                                          DIAG_CAPTURE_MAX,
+                                          &dropped,
+                                          &enabled);
+
+    printf("  \"capture\": {\r\n");
+    printf("    \"enabled\": %s,\r\n", enabled ? "true" : "false");
+    printf("    \"count\": %u,\r\n", (unsigned)count);
+    printf("    \"dropped\": %" PRIu32 ",\r\n", dropped);
+    printf("    \"records\": [\r\n");
+    for (uint8_t i = 0u; i < count; i++) {
+        const DiagCaptureRecord *record = &s_capture_export[i];
+        if (i > 0u) {
+            printf(",\r\n");
+        }
+        printf("      { \"kind\": \"%s\", \"timestamp_us\": %" PRIu32,
+               diag_capture_kind_name(record->kind),
+               record->timestamp_us);
+        printf(", \"raw\": \"0x%0*" PRIX32 "\"",
+               diag_frame_hex_width(&record->frame),
+               record->frame.data);
+        printf(", \"raw_bits\": %u", (unsigned)record->frame.bit_length);
+        if (record->has_since_tx) {
+            printf(", \"since_tx_us\": %" PRIu32, record->since_tx_us);
+        }
+        if (record->has_event) {
+            diag_print_event_json_fields(&record->event);
+        }
+        printf(" }");
+    }
+    printf("\r\n    ]\r\n");
+    printf("  }");
+}
+
+static void diag_print_event_record(const char *prefix,
+                                    const DaliInputEventRecord *record)
+{
+    if (record == NULL) {
+        return;
+    }
+
+    const DaliInputEvent *event = &record->event;
+    printf("%sraw=0x%0*" PRIX32 " frame=%s addr_byte=0x%02X kind=%s",
+           prefix,
+           diag_frame_hex_width(&event->raw),
+           event->raw.data,
+           dali_event_frame_kind_name(event->frame_kind),
+           (unsigned)event->address_byte,
+           dali_event_address_kind_name(event->address_kind));
+
+    if (event->address_kind == DALI_EVENT_ADDRESS_SHORT ||
+        event->address_kind == DALI_EVENT_ADDRESS_GROUP) {
+        printf(" addr=%u", (unsigned)event->address);
+    }
+
+    printf(" selector=%u", event->address_selector ? 1u : 0u);
+    if (event->has_instance) {
+        printf(" inst=%u", (unsigned)event->instance);
+    }
+
+    printf(" action=0x%02X %s time=%" PRIu32 "us\r\n",
+           (unsigned)event->event_code,
+           dali_event_action_name(event),
+           record->timestamp_us);
+}
+
+static void diag_event_cb(const DaliFrame *frame, void *cb_ctx)
+{
+    (void)cb_ctx;
+
+    DaliInputEventRecord record = {
+        .timestamp_us = (uint32_t)esp_timer_get_time(),
+    };
+    if (dali_event_parse_frame(frame, &record.event) != DALI_OK) {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_diag_state_mux);
+    (void)dali_event_queue_push(&s_event_queue, &record);
+    taskEXIT_CRITICAL(&s_diag_state_mux);
+
+    diag_capture_push_event(&record);
+}
+
 static void diag_trace_cb(const DaliSchedTraceEvent *event, void *cb_ctx)
 {
     (void)cb_ctx;
 
     diag_store_last_rx(event);
+    diag_capture_push_trace(event);
 
     if (!s_trace_enabled || event == NULL) {
         return;
@@ -498,6 +1058,11 @@ static void diag_trace_cb(const DaliSchedTraceEvent *event, void *cb_ctx)
 static void cmd_stats(void)
 {
 #ifndef DALI_HOST_BUILD
+    uint32_t capture_dropped = 0u;
+    bool capture_enabled = false;
+    uint8_t capture_count =
+        diag_capture_snapshot(NULL, 0u, &capture_dropped, &capture_enabled);
+
     printf("RX overflow:      %" PRIu32 "\r\n", g_dali_stats.rx_overflow);
     printf("TX retries:       %" PRIu32 "\r\n", g_dali_stats.tx_retries);
     printf("Malformed frames: %" PRIu32 "\r\n", g_dali_stats.malformed_frames);
@@ -509,6 +1074,12 @@ static void cmd_stats(void)
     printf("Bus idle fails:   %" PRIu32 "\r\n", g_dali_stats.bus_idle_failures);
     printf("RX TX echo drop:  %" PRIu32 "\r\n", g_dali_stats.rx_self_echo_suppressed);
     printf("RX settle drop:   %" PRIu32 "\r\n", g_dali_stats.rx_settle_suppressed);
+    printf("Event queued:     %u\r\n", (unsigned)diag_event_queue_count_snapshot());
+    printf("Event dropped:    %" PRIu32 "\r\n", diag_event_queue_dropped_snapshot());
+    printf("Capture:          %s, %u queued, %" PRIu32 " dropped\r\n",
+           capture_enabled ? "on" : "off",
+           (unsigned)capture_count,
+           capture_dropped);
 #endif
 }
 
@@ -536,6 +1107,11 @@ static void cmd_reset(void)
 #ifndef DALI_HOST_BUILD
     diag_last_rx_reset();
     diag_inventory_reset();
+    diag_events_reset();
+    diag_switch_mappings_reset();
+    diag_input_cache_reset();
+    diag_sensor_value_cache_reset();
+    diag_capture_reset();
     printf("reset OK\r\n");
 #endif
 }
@@ -849,6 +1425,34 @@ static DaliError diag_query_status(DaliTarget target, DaliFrame *reply)
         return err;
     }
     return diag_sched_sync(&frame, true, 1u, false, reply);
+}
+
+static DaliError diag_query_u8(DaliTarget target,
+                               DaliCommandId id,
+                               uint8_t param,
+                               uint8_t *out)
+{
+    if (out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliFrame frame;
+    DaliFrame reply = {0u, 0u};
+    DaliError err = dali_control_build_query(target, id, param, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    err = diag_sched_sync(&frame, true, 1u, false, &reply);
+    if (err != DALI_OK) {
+        return err;
+    }
+    if (reply.bit_length != DALI_BACKWARD_FRAME_BITS) {
+        return DALI_ERR_MALFORMED;
+    }
+
+    *out = (uint8_t)(reply.data & 0xFFu);
+    return DALI_OK;
 }
 
 static void cmd_status(const char *args)
@@ -1565,6 +2169,7 @@ static void cmd_instances(const char *args)
         printf("instances: ERR %d\r\n", (int)err);
         return;
     }
+    diag_input_cache_store(&input);
 
     DaliDiscoveryInventory inventory;
     if (diag_inventory_snapshot(&inventory)) {
@@ -1597,6 +2202,268 @@ static void cmd_instances(const char *args)
 
         diag_print_input_instance(info);
     }
+#else
+    (void)args;
+#endif
+}
+
+static void diag_print_poll_value(const DaliInputPollResult *poll)
+{
+    if (poll == NULL) {
+        return;
+    }
+
+    int width = (int)(poll->value.byte_count * 2u);
+    if (width <= 0) {
+        width = 2;
+    }
+
+    printf(" raw=0x%0*" PRIX32 " bytes=%u",
+           width,
+           poll->value.value,
+           (unsigned)poll->value.byte_count);
+}
+
+static void diag_sensor_poll_instance(uint8_t addr,
+                                      const DaliInputInstanceInfo *info)
+{
+    if (info == NULL) {
+        return;
+    }
+
+    uint8_t expected_bytes = info->has_resolution
+                           ? dali_input_poll_bytes_for_resolution(info->resolution)
+                           : 1u;
+    DaliDiscoveryTransport transport = diag_discovery_transport();
+    DaliInputPollResult poll;
+    DaliError err = dali_input_poll_value(&transport,
+                                          addr,
+                                          info->instance,
+                                          expected_bytes,
+                                          &poll);
+    diag_sensor_value_cache_store(addr, info, expected_bytes, err, &poll);
+
+    printf("  %2u: type=%u %s",
+           (unsigned)info->instance,
+           (unsigned)info->type,
+           dali_input_role_name(info->role));
+
+    if (info->has_enabled) {
+        printf(", enabled=%s", info->enabled ? "yes" : "no");
+    }
+    if (info->has_resolution) {
+        printf(", resolution=%u", (unsigned)info->resolution);
+    } else {
+        printf(", resolution=unknown");
+    }
+
+    if (err == DALI_OK) {
+        diag_print_poll_value(&poll);
+        printf("\r\n");
+    } else if (err == DALI_ERR_TIMEOUT) {
+        printf(" poll=timeout\r\n");
+    } else {
+        printf(" poll=ERR %d\r\n", (int)err);
+    }
+}
+
+static void cmd_sensor(const char *args)
+{
+#ifndef DALI_HOST_BUILD
+    char subcommand[16] = {0};
+    char addr_text[16] = {0};
+    char instance_text[16] = {0};
+    char extra[2] = {0};
+    int parsed = sscanf(args, "%15s %15s %15s %1s",
+                        subcommand,
+                        addr_text,
+                        instance_text,
+                        extra);
+    uint8_t addr;
+    uint8_t selected_instance = 0u;
+    bool has_selected_instance = false;
+
+    if ((parsed != 2 && parsed != 3) || strcmp(subcommand, "poll") != 0 ||
+        !diag_parse_uint8_token(addr_text, DALI_MAX_SHORT_ADDRESS, &addr)) {
+        printf("usage: sensor poll <addr> [instance]\r\n");
+        return;
+    }
+    if (parsed == 3) {
+        if (!diag_parse_uint8_token(instance_text,
+                                    DALI_MAX_INSTANCE,
+                                    &selected_instance)) {
+            printf("usage: sensor poll <addr> [instance]\r\n");
+            return;
+        }
+        has_selected_instance = true;
+    }
+
+    DaliDiscoveryTransport transport = diag_discovery_transport();
+    DaliDiscoveryInputDevice input;
+    DaliError err = dali_discovery_query_input_device(&transport, addr, &input);
+    if (err == DALI_ERR_TIMEOUT) {
+        printf("sensor poll: timeout querying device %u\r\n", (unsigned)addr);
+        return;
+    }
+    if (err != DALI_OK) {
+        printf("sensor poll: ERR %d\r\n", (int)err);
+        return;
+    }
+    diag_input_cache_store(&input);
+
+    DaliDiscoveryInventory inventory;
+    if (diag_inventory_snapshot(&inventory)) {
+        if (dali_discovery_inventory_update_input_device(&inventory, &input) == DALI_OK) {
+            diag_inventory_replace(&inventory);
+        }
+    }
+
+    uint8_t count = dali_discovery_input_visible_instance_count(&input);
+    printf("Sensor poll %u:\r\n", (unsigned)addr);
+
+    if (has_selected_instance) {
+        if (selected_instance >= count) {
+            printf("  instance %u not visible; discovered count=%u\r\n",
+                   (unsigned)selected_instance,
+                   (unsigned)input.device.instance_count);
+            return;
+        }
+        diag_sensor_poll_instance(addr, &input.device.instances[selected_instance]);
+        return;
+    }
+
+    for (uint8_t instance = 0u; instance < count; instance++) {
+        DaliError type_err = input.instance_type_errors[instance];
+        if (type_err == DALI_ERR_TIMEOUT) {
+            printf("  %2u: type timeout\r\n", (unsigned)instance);
+            continue;
+        }
+        if (type_err != DALI_OK) {
+            printf("  %2u: type ERR %d\r\n", (unsigned)instance, (int)type_err);
+            continue;
+        }
+        diag_sensor_poll_instance(addr, &input.device.instances[instance]);
+    }
+#else
+    (void)args;
+#endif
+}
+
+static void cmd_events(void)
+{
+#ifndef DALI_HOST_BUILD
+    DaliInputEventRecord record;
+    uint8_t count = 0u;
+
+    while (diag_event_pop(&record)) {
+        diag_print_event_record("event: ", &record);
+        count++;
+    }
+
+    if (count == 0u) {
+        printf("events: none queued\r\n");
+    }
+    printf("events: drained=%u dropped=%" PRIu32 "\r\n",
+           (unsigned)count,
+           diag_event_queue_dropped_snapshot());
+#endif
+}
+
+static void cmd_capture(const char *args)
+{
+#ifndef DALI_HOST_BUILD
+    char action[16] = {0};
+    char extra[2] = {0};
+    if (sscanf(args, "%15s %1s", action, extra) != 1) {
+        printf("usage: capture start|stop|clear|status|export\r\n");
+        return;
+    }
+
+    if (strcmp(action, "start") == 0) {
+        diag_capture_set_enabled(true);
+        printf("capture: started\r\n");
+    } else if (strcmp(action, "stop") == 0) {
+        diag_capture_set_enabled(false);
+        printf("capture: stopped\r\n");
+    } else if (strcmp(action, "clear") == 0) {
+        diag_capture_reset();
+        printf("capture: cleared\r\n");
+    } else if (strcmp(action, "status") == 0) {
+        uint32_t dropped = 0u;
+        bool enabled = false;
+        uint8_t count = diag_capture_snapshot(NULL, 0u, &dropped, &enabled);
+        printf("capture: %s, count=%u, dropped=%" PRIu32 "\r\n",
+               enabled ? "on" : "off",
+               (unsigned)count,
+               dropped);
+    } else if (strcmp(action, "export") == 0) {
+        printf("{\r\n");
+        diag_print_capture_json();
+        printf("\r\n}\r\n");
+    } else {
+        printf("usage: capture start|stop|clear|status|export\r\n");
+    }
+#else
+    (void)args;
+#endif
+}
+
+static void cmd_find(const char *args)
+{
+#ifndef DALI_HOST_BUILD
+    char subcommand[16] = {0};
+    unsigned seconds = DIAG_FIND_SWITCH_DEFAULT_SECONDS;
+    char extra[2] = {0};
+    int parsed = sscanf(args, "%15s %u %1s", subcommand, &seconds, extra);
+
+    if ((parsed != 1 && parsed != 2) ||
+        strcmp(subcommand, "switches") != 0 ||
+        seconds == 0u ||
+        seconds > DIAG_FIND_SWITCH_MAX_SECONDS) {
+        printf("usage: find switches [1-%u seconds]\r\n",
+               (unsigned)DIAG_FIND_SWITCH_MAX_SECONDS);
+        return;
+    }
+
+    diag_events_reset();
+    diag_switch_mappings_reset();
+
+    printf("find switches: listening for %u seconds; double-press DALI-2 switches or trigger legacy coupler actions.\r\n",
+           seconds);
+
+    TickType_t start = xTaskGetTickCount();
+    TickType_t duration = pdMS_TO_TICKS(seconds * 1000u);
+    DaliInputEventRecord record;
+
+    while ((xTaskGetTickCount() - start) < duration) {
+        while (diag_event_pop(&record)) {
+            diag_print_event_record("event: ", &record);
+            if (dali_event_is_switch_mapping_candidate(&record.event)) {
+                bool recorded = diag_record_switch_mapping(&record);
+                if (recorded) {
+                    uint8_t order = diag_switch_mappings_snapshot(NULL, 0u);
+                    printf("  mapped switch %u\r\n", (unsigned)order);
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(50u));
+    }
+
+    while (diag_event_pop(&record)) {
+        diag_print_event_record("event: ", &record);
+        if (dali_event_is_switch_mapping_candidate(&record.event)) {
+            bool recorded = diag_record_switch_mapping(&record);
+            if (recorded) {
+                uint8_t order = diag_switch_mappings_snapshot(NULL, 0u);
+                printf("  mapped switch %u\r\n", (unsigned)order);
+            }
+        }
+    }
+
+    uint8_t mapped = diag_switch_mappings_snapshot(NULL, 0u);
+    printf("find switches: mapped=%u dropped=%" PRIu32 "\r\n",
+           (unsigned)mapped,
+           diag_event_queue_dropped_snapshot());
 #else
     (void)args;
 #endif
@@ -1691,6 +2558,511 @@ static void cmd_inventory(void)
 #endif
 }
 
+static void diag_commission_progress_cb(const DaliCommissioningEvent *event,
+                                        void *ctx)
+{
+#ifndef DALI_HOST_BUILD
+    (void)ctx;
+    if (event == NULL) {
+        return;
+    }
+
+    switch (event->kind) {
+        case DALI_COMMISSIONING_EVENT_INITIALISED:
+            printf("commission: initialise unaddressed\r\n");
+            break;
+
+        case DALI_COMMISSIONING_EVENT_RANDOMISED:
+            printf("commission: randomize\r\n");
+            break;
+
+        case DALI_COMMISSIONING_EVENT_SEARCH_FOUND:
+            printf("commission: found random=0x%06" PRIX32
+                   " -> short %u\r\n",
+                   event->random_address,
+                   (unsigned)event->short_address);
+            break;
+
+        case DALI_COMMISSIONING_EVENT_ASSIGNED:
+            printf("commission: assigned short %u"
+                   " (count=%u)\r\n",
+                   (unsigned)event->short_address,
+                   (unsigned)event->assigned_count);
+            break;
+
+        case DALI_COMMISSIONING_EVENT_NO_MORE_DEVICES:
+            printf("commission: no more unaddressed devices\r\n");
+            break;
+
+        case DALI_COMMISSIONING_EVENT_ADDRESS_SPACE_FULL:
+            printf("commission: no free short addresses\r\n");
+            break;
+
+        case DALI_COMMISSIONING_EVENT_TERMINATED:
+            printf("commission: terminate\r\n");
+            break;
+
+        default:
+            break;
+    }
+#else
+    (void)event;
+    (void)ctx;
+#endif
+}
+
+static void cmd_commission(const char *args)
+{
+#ifndef DALI_HOST_BUILD
+    char mode[16] = {0};
+    char first_text[16] = {0};
+    char max_text[16] = {0};
+    char extra[2] = {0};
+    int parsed = sscanf(args, "%15s %15s %15s %1s",
+                        mode,
+                        first_text,
+                        max_text,
+                        extra);
+
+    if (parsed < 1 || parsed > 3 || strcmp(mode, "unaddressed") != 0) {
+        printf("usage: commission unaddressed [first-addr] [max-devices]\r\n");
+        return;
+    }
+
+    uint8_t first_address = 0u;
+    uint8_t max_devices = 0u;
+    if (parsed >= 2 &&
+        !diag_parse_uint8_token(first_text, DALI_MAX_SHORT_ADDRESS, &first_address)) {
+        printf("usage: commission unaddressed [0-%u] [0-%u]\r\n",
+               (unsigned)DALI_MAX_SHORT_ADDRESS,
+               (unsigned)DALI_SHORT_ADDRESS_COUNT);
+        return;
+    }
+    if (parsed == 3 &&
+        !diag_parse_uint8_token(max_text, DALI_SHORT_ADDRESS_COUNT, &max_devices)) {
+        printf("usage: commission unaddressed [0-%u] [0-%u]\r\n",
+               (unsigned)DALI_MAX_SHORT_ADDRESS,
+               (unsigned)DALI_SHORT_ADDRESS_COUNT);
+        return;
+    }
+
+    DaliDiscoveryTransport transport = diag_discovery_transport();
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+
+    printf("commission: pre-scan occupied short addresses\r\n");
+    DaliError err = dali_discovery_scan(&inventory,
+                                        &transport,
+                                        NULL,
+                                        NULL,
+                                        &found);
+    if (err != DALI_OK) {
+        diag_inventory_reset();
+        printf("commission: pre-scan ERR %d\r\n", (int)err);
+        return;
+    }
+    diag_inventory_replace(&inventory);
+    printf("commission: occupied=%u\r\n", (unsigned)found);
+
+    DaliCommissioningOptions options = {
+        .first_short_address = first_address,
+        .max_devices = max_devices,
+        .used_address_mask =
+            dali_commissioning_used_mask_from_inventory(&inventory),
+        .query_short_address = true,
+    };
+    DaliCommissioningResult result;
+    err = dali_commissioning_commission_unaddressed(
+        &transport,
+        &options,
+        &result,
+        diag_commission_progress_cb,
+        NULL);
+
+    if (err != DALI_OK) {
+        printf("commission: ERR %d after %u assignment(s)\r\n",
+               (int)err,
+               (unsigned)result.assigned_count);
+        return;
+    }
+
+    printf("commission: complete assigned=%u",
+           (unsigned)result.assigned_count);
+    if (result.no_more_devices) {
+        printf(" no-more-devices=yes");
+    }
+    if (result.address_space_full) {
+        printf(" address-space-full=yes");
+    }
+    printf("\r\n");
+
+    for (uint8_t i = 0u; i < result.assigned_count; i++) {
+        const DaliCommissioningAssignment *assignment =
+            &result.assignments[i];
+        printf("  short %u <= random 0x%06" PRIX32,
+               (unsigned)assignment->short_address,
+               assignment->random_address);
+        if (assignment->has_query_short) {
+            printf(" query=0x%02X",
+                   (unsigned)assignment->query_short_raw);
+        }
+        printf("\r\n");
+    }
+
+    if (result.assigned_count > 0u) {
+        printf("commission: verifying with post-scan\r\n");
+        found = 0u;
+        err = dali_discovery_scan(&inventory,
+                                  &transport,
+                                  NULL,
+                                  NULL,
+                                  &found);
+        if (err != DALI_OK) {
+            diag_inventory_reset();
+            printf("commission: post-scan ERR %d\r\n", (int)err);
+            return;
+        }
+        diag_inventory_replace(&inventory);
+        printf("commission: post-scan found=%u\r\n", (unsigned)found);
+    }
+#else
+    (void)args;
+#endif
+}
+
+static void cmd_export(const char *args)
+{
+#ifndef DALI_HOST_BUILD
+    char what[16] = {0};
+    char extra[2] = {0};
+    DaliDiscoveryInventory inventory;
+    bool has_inventory;
+    DiagSwitchMapping mappings[DIAG_SWITCH_MAPPING_MAX];
+    uint8_t mapping_count;
+
+    if (sscanf(args, "%15s %1s", what, extra) != 1 ||
+        strcmp(what, "inventory") != 0) {
+        printf("usage: export inventory\r\n");
+        return;
+    }
+
+    has_inventory = diag_inventory_snapshot(&inventory);
+    mapping_count = diag_switch_mappings_snapshot(mappings, DIAG_SWITCH_MAPPING_MAX);
+
+    printf("{\r\n");
+    printf("  \"schema_version\": 1,\r\n");
+    printf("  \"devices\": [\r\n");
+    bool first_device = true;
+    if (has_inventory) {
+        for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+            const DaliDiscoveryDeviceInfo *entry =
+                dali_discovery_inventory_get(&inventory, addr);
+            if (entry == NULL || !entry->present) {
+                continue;
+            }
+
+            if (!first_device) {
+                printf(",\r\n");
+            }
+            first_device = false;
+
+            DaliDiscoveryInputDevice cached_input;
+            bool has_input_cache = diag_input_cache_lookup(addr, &cached_input);
+
+            printf("    { \"address\": %u, \"present\": true",
+                   (unsigned)addr);
+            if (entry->has_status) {
+                printf(", \"status\": %u, \"status_hex\": \"0x%02X\"",
+                       (unsigned)entry->status,
+                       (unsigned)entry->status);
+            }
+            if (entry->has_input_device) {
+                printf(", \"kind\": \"input_device\"");
+                if (entry->has_instance_count) {
+                    printf(", \"instance_count\": %u",
+                           (unsigned)entry->instance_count);
+                }
+            } else {
+                printf(", \"kind\": \"control_gear_candidate\"");
+            }
+
+            if (has_input_cache) {
+                uint8_t count =
+                    dali_discovery_input_visible_instance_count(&cached_input);
+                printf(", \"instances\": [");
+                for (uint8_t instance = 0u; instance < count; instance++) {
+                    const DaliInputInstanceInfo *info =
+                        &cached_input.device.instances[instance];
+                    DaliError type_err = cached_input.instance_type_errors[instance];
+
+                    if (instance > 0u) {
+                        printf(", ");
+                    }
+
+                    printf("{ \"instance\": %u", (unsigned)instance);
+                    if (type_err == DALI_OK && info->has_type) {
+                        printf(", \"type\": %u", (unsigned)info->type);
+                        printf(", \"type_name\": \"%s\"",
+                               dali_input_type_name(info->type));
+                        printf(", \"role\": \"%s\"",
+                               dali_input_role_name(info->role));
+                        printf(", \"usable\": \"%s\"",
+                               dali_input_usable_name(info->usable));
+                        printf(", \"source\": \"%s\"",
+                               dali_input_role_source_name(info->role_source));
+                        if (info->has_enabled) {
+                            printf(", \"enabled\": %s",
+                                   info->enabled ? "true" : "false");
+                        }
+                        if (info->has_resolution) {
+                            printf(", \"resolution\": %u",
+                                   (unsigned)info->resolution);
+                        }
+                        if (info->has_status) {
+                            printf(", \"status\": %u, \"status_hex\": \"0x%02X\"",
+                                   (unsigned)info->status,
+                                   (unsigned)info->status);
+                        }
+                        if (info->has_error) {
+                            printf(", \"error\": %s",
+                                   dali_is_yes(info->error) ? "true" : "false");
+                        }
+                    } else {
+                        printf(", \"query_error\": %d", (int)type_err);
+                    }
+
+                    DiagSensorValueCacheEntry cached_value;
+                    if (diag_sensor_value_cache_lookup(addr,
+                                                       instance,
+                                                       &cached_value)) {
+                        int value_width = (int)(cached_value.byte_count * 2u);
+                        if (value_width <= 0) {
+                            value_width = 2;
+                        }
+                        printf(", \"latest_value\": {");
+                        printf(" \"result\": %d", (int)cached_value.result);
+                        printf(", \"timestamp_us\": %" PRIu32,
+                               cached_value.timestamp_us);
+                        printf(", \"expected_bytes\": %u",
+                               (unsigned)cached_value.expected_bytes);
+                        printf(", \"byte_count\": %u",
+                               (unsigned)cached_value.byte_count);
+                        printf(", \"complete\": %s",
+                               cached_value.complete ? "true" : "false");
+                        printf(", \"raw\": \"0x%0*" PRIX32 "\"",
+                               value_width,
+                               cached_value.value);
+                        printf(", \"raw_value\": %" PRIu32,
+                               cached_value.value);
+                        if (cached_value.has_resolution) {
+                            printf(", \"resolution\": %u",
+                                   (unsigned)cached_value.resolution);
+                        }
+                        printf(", \"byte_errors\": [%d, %d, %d, %d]",
+                               (int)cached_value.byte_errors[0],
+                               (int)cached_value.byte_errors[1],
+                               (int)cached_value.byte_errors[2],
+                               (int)cached_value.byte_errors[3]);
+                        printf(" }");
+                    }
+                    printf(" }");
+                }
+                printf("]");
+            }
+            printf(" }");
+        }
+    }
+    printf("\r\n  ],\r\n");
+
+    printf("  \"switches\": [\r\n");
+    for (uint8_t i = 0u; i < mapping_count; i++) {
+        const DiagSwitchMapping *mapping = &mappings[i];
+        const DaliInputEvent *event = &mapping->event;
+        if (!mapping->valid) {
+            continue;
+        }
+
+        if (i > 0u) {
+            printf(",\r\n");
+        }
+
+        printf("    { \"order\": %u", (unsigned)mapping->order);
+        diag_print_event_json_fields(event);
+        printf(", \"raw\": \"0x%0*" PRIX32 "\"",
+               diag_frame_hex_width(&event->raw),
+               event->raw.data);
+        printf(", \"raw_bits\": %u", (unsigned)event->raw.bit_length);
+        printf(", \"first_seen_us\": %" PRIu32, mapping->first_seen_us);
+        printf(", \"seen_count\": %" PRIu32, mapping->seen_count);
+        printf(" }");
+    }
+    printf("\r\n  ],\r\n");
+    diag_print_capture_json();
+    printf("\r\n");
+    printf("}\r\n");
+#else
+    (void)args;
+#endif
+}
+
+static void cmd_bus(const char *args)
+{
+#ifndef DALI_HOST_BUILD
+    char action[16] = {0};
+    char extra[2] = {0};
+    if (sscanf(args, "%15s %1s", action, extra) != 1 ||
+        strcmp(action, "check") != 0) {
+        printf("usage: bus check\r\n");
+        return;
+    }
+
+    uint8_t rx_level = 0u;
+    DaliError rx_err = dali_phy_read_rx_level(&rx_level);
+    printf("bus check:\r\n");
+    if (rx_err == DALI_OK) {
+        printf("  RX level: %u (%s)\r\n",
+               (unsigned)rx_level,
+               rx_level != 0u ? "idle-high candidate" : "active-low/stuck-low candidate");
+    } else {
+        printf("  RX level: unavailable (ERR %d)\r\n", (int)rx_err);
+    }
+    printf("  scheduler: %s\r\n",
+           diag_sched_state_name(dali_sched_state()));
+    printf("  last RX: %s\r\n", s_has_last_rx_frame ? "yes" : "none");
+    if (s_has_last_rx_frame) {
+        diag_print_frame("    ", &s_last_rx_frame);
+    }
+    printf("  event queue: %u queued, %" PRIu32 " dropped\r\n",
+           (unsigned)diag_event_queue_count_snapshot(),
+           diag_event_queue_dropped_snapshot());
+
+    uint32_t capture_dropped = 0u;
+    bool capture_enabled = false;
+    uint8_t capture_count =
+        diag_capture_snapshot(NULL, 0u, &capture_dropped, &capture_enabled);
+    printf("  capture: %s, %u records, %" PRIu32 " dropped\r\n",
+           capture_enabled ? "on" : "off",
+           (unsigned)capture_count,
+           capture_dropped);
+    printf("  stats: malformed=%" PRIu32 ", timeouts=%" PRIu32
+           ", ignored=%" PRIu32 ", bus_idle_failures=%" PRIu32 "\r\n",
+           g_dali_stats.malformed_frames,
+           g_dali_stats.reply_timeouts,
+           g_dali_stats.rx_ignored_outside_reply,
+           g_dali_stats.bus_idle_failures);
+#else
+    (void)args;
+#endif
+}
+
+static void cmd_smoke(const char *args)
+{
+#ifndef DALI_HOST_BUILD
+    uint8_t addr;
+    if (!diag_parse_short_addr_arg(args, &addr)) {
+        printf("usage: smoke <addr>\r\n");
+        return;
+    }
+
+    DaliTarget target = {
+        .type = DALI_ADDR_SHORT,
+        .address = addr,
+    };
+    uint8_t pass = 0u;
+    uint8_t fail = 0u;
+    uint8_t skip = 0u;
+
+    printf("smoke %u: query-only diagnostic pass\r\n", (unsigned)addr);
+
+    DaliFrame status_reply = {0u, 0u};
+    DaliError err = diag_query_status(target, &status_reply);
+    if (err == DALI_OK) {
+        uint8_t status = (uint8_t)(status_reply.data & 0xFFu);
+        printf("  status: PASS 0x%02X\r\n", (unsigned)status);
+        pass++;
+
+        DaliDiscoveryInventory inventory;
+        if (!diag_inventory_snapshot(&inventory)) {
+            (void)dali_discovery_inventory_reset(&inventory);
+            inventory.valid = true;
+        }
+        if (dali_discovery_inventory_store_status(&inventory, addr, status) == DALI_OK) {
+            diag_inventory_replace(&inventory);
+        }
+    } else {
+        printf("  status: ERR %d\r\n", (int)err);
+        fail++;
+    }
+
+    struct {
+        const char   *name;
+        DaliCommandId id;
+    } queries[] = {
+        { "version",      DALI_CMD_QUERY_VERSION_NUMBER },
+        { "device-type",  DALI_CMD_QUERY_DEVICE_TYPE },
+        { "actual-level", DALI_CMD_QUERY_ACTUAL_LEVEL },
+    };
+
+    for (uint8_t i = 0u; i < (uint8_t)(sizeof(queries) / sizeof(queries[0])); i++) {
+        uint8_t value = 0u;
+        err = diag_query_u8(target, queries[i].id, 0u, &value);
+        if (err == DALI_OK) {
+            printf("  %s: PASS %u (0x%02X)\r\n",
+                   queries[i].name,
+                   (unsigned)value,
+                   (unsigned)value);
+            pass++;
+        } else if (err == DALI_ERR_TIMEOUT) {
+            printf("  %s: timeout/skip\r\n", queries[i].name);
+            skip++;
+        } else {
+            printf("  %s: ERR %d\r\n", queries[i].name, (int)err);
+            fail++;
+        }
+    }
+
+    DaliDiscoveryTransport transport = diag_discovery_transport();
+    DaliDiscoveryInputDevice input;
+    err = dali_discovery_query_input_device(&transport, addr, &input);
+    if (err == DALI_OK) {
+        printf("  input instances: PASS %u\r\n",
+               (unsigned)input.device.instance_count);
+        pass++;
+        diag_input_cache_store(&input);
+
+        DaliDiscoveryInventory inventory;
+        if (!diag_inventory_snapshot(&inventory)) {
+            (void)dali_discovery_inventory_reset(&inventory);
+            inventory.valid = true;
+        }
+        if (dali_discovery_inventory_update_input_device(&inventory, &input) == DALI_OK) {
+            diag_inventory_replace(&inventory);
+        }
+
+        uint8_t count = dali_discovery_input_visible_instance_count(&input);
+        for (uint8_t instance = 0u; instance < count; instance++) {
+            if (input.instance_type_errors[instance] == DALI_OK) {
+                diag_sensor_poll_instance(addr, &input.device.instances[instance]);
+            }
+        }
+    } else if (err == DALI_ERR_TIMEOUT) {
+        printf("  input instances: timeout/skip\r\n");
+        skip++;
+    } else {
+        printf("  input instances: ERR %d\r\n", (int)err);
+        fail++;
+    }
+
+    printf("smoke %u: pass=%u fail=%u skip=%u\r\n",
+           (unsigned)addr,
+           (unsigned)pass,
+           (unsigned)fail,
+           (unsigned)skip);
+#else
+    (void)args;
+#endif
+}
+
 static void cmd_identify(const char *args)
 {
 #ifndef DALI_HOST_BUILD
@@ -1742,6 +3114,8 @@ static void cmd_help(void)
 #ifndef DALI_HOST_BUILD
     printf("commands:\r\n");
     printf("  stats\r\n");
+    printf("  bus check\r\n");
+    printf("  capture start|stop|clear|status|export\r\n");
     printf("  trace on|off\r\n");
     printf("  read\r\n");
     printf("  reset\r\n");
@@ -1771,7 +3145,13 @@ static void cmd_help(void)
     printf("  scan\r\n");
     printf("  discover\r\n");
     printf("  inventory\r\n");
+    printf("  commission unaddressed [first-addr] [max-devices]\r\n");
     printf("  instances <addr>\r\n");
+    printf("  sensor poll <addr> [instance]\r\n");
+    printf("  smoke <addr>\r\n");
+    printf("  events\r\n");
+    printf("  find switches [seconds]\r\n");
+    printf("  export inventory\r\n");
     printf("  identify <addr>\r\n");
 #endif
 }
@@ -1793,6 +3173,10 @@ static void dispatch(char *line)
         cmd_help();
     } else if (strcmp(line, "stats") == 0) {
         cmd_stats();
+    } else if (strncmp(line, "bus ", 4) == 0) {
+        cmd_bus(line + 4);
+    } else if (strncmp(line, "capture ", 8) == 0) {
+        cmd_capture(line + 8);
     } else if (strncmp(line, "trace ", 6) == 0) {
         cmd_trace(line + 6);
     } else if (strcmp(line, "read") == 0) {
@@ -1843,8 +3227,20 @@ static void dispatch(char *line)
         cmd_discover();
     } else if (strcmp(line, "inventory") == 0) {
         cmd_inventory();
+    } else if (strncmp(line, "commission ", 11) == 0) {
+        cmd_commission(line + 11);
     } else if (strncmp(line, "instances ", 10) == 0) {
         cmd_instances(line + 10);
+    } else if (strncmp(line, "sensor ", 7) == 0) {
+        cmd_sensor(line + 7);
+    } else if (strncmp(line, "smoke ", 6) == 0) {
+        cmd_smoke(line + 6);
+    } else if (strcmp(line, "events") == 0) {
+        cmd_events();
+    } else if (strncmp(line, "find ", 5) == 0) {
+        cmd_find(line + 5);
+    } else if (strncmp(line, "export ", 7) == 0) {
+        cmd_export(line + 7);
     } else if (strncmp(line, "identify ", 9) == 0) {
         cmd_identify(line + 9);
     } else if (strncmp(line, "query ", 6) == 0) {
@@ -1909,8 +3305,17 @@ DaliError dali_diag_init(void)
 #ifndef DALI_HOST_BUILD
     diag_last_rx_reset();
     diag_inventory_reset();
+    diag_events_reset();
+    diag_switch_mappings_reset();
+    diag_input_cache_reset();
+    diag_sensor_value_cache_reset();
+    diag_capture_reset();
 
     DaliError err = dali_sched_set_trace_callback(diag_trace_cb, NULL);
+    if (err != DALI_OK) {
+        return err;
+    }
+    err = dali_sched_set_event_callback(diag_event_cb, NULL);
     if (err != DALI_OK) {
         return err;
     }
