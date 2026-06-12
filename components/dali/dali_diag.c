@@ -1105,6 +1105,7 @@ static void cmd_stats(void)
     printf("Bus idle fails:   %" PRIu32 "\r\n", g_dali_stats.bus_idle_failures);
     printf("RX TX echo drop:  %" PRIu32 "\r\n", g_dali_stats.rx_self_echo_suppressed);
     printf("RX settle drop:   %" PRIu32 "\r\n", g_dali_stats.rx_settle_suppressed);
+    printf("RX glitch drop:   %" PRIu32 "\r\n", g_dali_stats.rx_glitch_drops);
     printf("Event queued:     %u\r\n", (unsigned)diag_event_queue_count_snapshot());
     printf("Event dropped:    %" PRIu32 "\r\n", diag_event_queue_dropped_snapshot());
     printf("Capture:          %s, %u queued, %" PRIu32 " dropped\r\n",
@@ -1177,6 +1178,65 @@ static void cmd_read(void)
                tenths_ms / 10u,
                tenths_ms % 10u);
     }
+#endif
+}
+
+static char diag_rxdebug_bucket(uint32_t interval_us)
+{
+    const uint32_t half_min = (DALI_HALF_BIT_US * 3u) / 4u;
+    const uint32_t half_max = (DALI_HALF_BIT_US * 5u) / 4u;
+    const uint32_t full_min = (DALI_BIT_US * 3u) / 4u;
+    const uint32_t full_max = (DALI_BIT_US * 5u) / 4u;
+
+    if (interval_us >= half_min && interval_us <= half_max) {
+        return 'H';
+    }
+    if (interval_us >= full_min && interval_us <= full_max) {
+        return 'F';
+    }
+    if (interval_us < half_min) {
+        return '<';
+    }
+    if (interval_us > full_max) {
+        return '>';
+    }
+    return '?';
+}
+
+static void cmd_rxdebug(void)
+{
+#ifndef DALI_HOST_BUILD
+    DaliPhyRxDebugSnapshot snapshot;
+    DaliError err = dali_phy_get_rx_debug(&snapshot);
+    if (err != DALI_OK) {
+        printf("rxdebug: ERR %d\r\n", (int)err);
+        return;
+    }
+    if (!snapshot.valid) {
+        printf("rxdebug: no malformed RX snapshot\r\n");
+        return;
+    }
+
+    printf("rxdebug: err=%d, intervals=%u, edges=%u\r\n",
+           (int)snapshot.error,
+           (unsigned)snapshot.interval_count,
+           (unsigned)snapshot.edge_count);
+
+    printf("  edge levels:");
+    for (uint8_t i = 0u; i < snapshot.edge_count; i++) {
+        printf(" %u", (unsigned)snapshot.edge_levels[i]);
+    }
+    printf("\r\n");
+
+    printf("  intervals us (H=half, F=full):");
+    for (uint8_t i = 0u; i < snapshot.interval_count; i++) {
+        if ((i % 8u) == 0u) {
+            printf("\r\n    ");
+        }
+        printf("%" PRIu32 "%c ", snapshot.intervals_us[i],
+               diag_rxdebug_bucket(snapshot.intervals_us[i]));
+    }
+    printf("\r\n");
 #endif
 }
 
@@ -3149,6 +3209,7 @@ static void cmd_help(void)
     printf("  capture start|stop|clear|status|export\r\n");
     printf("  trace on|off\r\n");
     printf("  read\r\n");
+    printf("  rxdebug\r\n");
     printf("  reset\r\n");
     printf("  raw <hex> len=<n> [wait]\r\n");
     printf("  dtr <0|1|2> <0-255>\r\n");
@@ -3212,6 +3273,8 @@ static void dispatch(char *line)
         cmd_trace(line + 6);
     } else if (strcmp(line, "read") == 0) {
         cmd_read();
+    } else if (strcmp(line, "rxdebug") == 0) {
+        cmd_rxdebug();
     } else if (strcmp(line, "reset") == 0) {
         cmd_reset();
     } else if (strcmp(line, "query-list") == 0) {

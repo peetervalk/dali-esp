@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-06-11 (rev 25)
+**Last updated:** 2026-06-12 (rev 31)
 **Framework:** ESP-IDF v6.0.1 native CMake
 **Hardware target:** ESP32-DevKitC-VE / ESP32-WROVER-E + MikroE DALI-2 Click
 **Timer:** GPTIMER, 104 us alarm, 4x oversampling of the DALI half-bit
@@ -58,7 +58,7 @@ bring-up:
   queries/configuration commands.
 - Native diagnostic CLI exists with `help`, `stats`, `bus check`,
   capture control/export `capture start|stop|clear|status|export`,
-  `trace on/off`, `read`, `reset`, scheduler-routed `raw`, `dtr`,
+  `trace on/off`, `read`, `rxdebug`, `reset`, scheduler-routed `raw`, `dtr`,
   `special`, `special-list`,
   named output helpers
   `level/off/up/down/step-up/step-down/step-off/on-step/dapc-seq/last/scene`,
@@ -78,17 +78,28 @@ bring-up:
 
 Latest known verification:
 
-- `idf.py build` passes as of 2026-06-11.
+- `idf.py build` passes as of 2026-06-12.
 - Fresh build from `sdkconfig.defaults` passes and generates 8 MB flash image
   arguments as of 2026-06-05.
-- Host tests pass as of 2026-06-11: 13 suites.
+- Host tests pass as of 2026-06-12: 13 suites.
 - Native ESP32 build includes `dali_commissioning.c` and `dali_diag.c` and
   generates `build/dali_esp.bin` as of 2026-06-11.
 - First hardware smoke on ESP32/CP2102N serial bridge passes as of 2026-06-11:
   firmware flashes on COM6, boot reaches the diagnostic shell, `stats` counters
   are zero after boot, and `bus check` reports RX level high with scheduler idle.
-- Real hardware flashing, timing, loopback, and device communication are still
-  otherwise pending.
+- DALI 2 Click optocoupler inversion is handled in PHY. RX task now splits
+  buffered edge streams on overlong inter-frame gaps before Manchester decode.
+  The RX completion/gap threshold is now above the legal full-bit interval, and
+  task-context RX filtering drops duplicate-level or sub-150 us glitch edges
+  before Manchester decode. Diagnostic `rxdebug` reports the last malformed RX
+  interval/edge-level snapshot for Lunatone comparison. Manchester polarity now
+  matches observed Lunatone traffic: logical `1` is low-high, logical `0` is
+  high-low, and hardware RX decodes from captured edge levels.
+- First real-bus baseline passes with only Lunatone DALI USB and MikroE DALI-2
+  Click on the bus: Lunatone `Broadcast OFF` (`0xFF00`) and `Recall Max`
+  passive frames decode on ESP with zero malformed frames, event routing works,
+  and Lunatone confirms ESP-originated `Broadcast OFF` TX. Device replies and
+  end-device discovery are still pending.
 
 ## Current Direction
 
@@ -101,6 +112,11 @@ There are two distinct workflows:
    - Lunatone DALI USB / DALI Cockpit as the main reference tool.
    - This path validates PHY timing, scheduler behavior, protocol frames, and
      real DALI bus behavior before ESPHome is involved.
+
+   Current collaboration rule for this project: documentation updates may be
+   made directly. Software-stack changes and any COM-port access should be
+   suggested first and performed only after explicit go-ahead. Use COM6 only;
+   if COM6 is unavailable, stop and notify.
 
 2. **End-user discovery and release**
    - A prebuilt ESPHome-flashable diagnostic/discovery firmware is the first
@@ -128,10 +144,12 @@ DALI bus
 
 ## Immediate Priorities
 
-1. Validate native firmware on the ESP32 with serial CLI and logic analyzer.
-2. Compare real DALI traffic against Lunatone DALI Cockpit captures.
-3. Bring up known control gear first, then the Steinel HF 360 II DALI-2 sensor.
-4. Only after native diagnostics are reliable, build the ESPHome-flashable
+1. Finish the no-end-device Lunatone/ESP baseline with a small TX pattern sweep.
+2. Add one known DALI control gear and validate scan/status 8-bit replies.
+3. Compare real DALI traffic against Lunatone DALI Cockpit captures.
+4. Bring up the Steinel HF 360 II DALI-2 sensor after control gear replies are
+   stable.
+5. Only after native diagnostics are reliable, build the ESPHome-flashable
    diagnostic/discovery firmware described in `todo_esphome_release.md`.
 
 ## Known Target Sensor
@@ -161,7 +179,7 @@ Steinel conversions available in `dali_steinel` after input-value reads work:
 
 | Topic | Status |
 |---|---|
-| GPIO wiring for MikroE DALI-2 Click | Datasheet-confirmed initial wiring: GPIO18 -> pin 2 Tx/RST, GPIO19 -> pin 15 Rx/INT. Electrical polarity/behavior still needs hardware validation. Do not use GPIO 16/17 on WROVER-E. |
+| GPIO wiring for MikroE DALI-2 Click | Datasheet-confirmed initial wiring: GPIO18 -> pin 2 Tx/RST, GPIO19 -> pin 15 Rx/INT. PHY now handles DALI 2 Click optocoupler inversion: GPIO18 low is bus idle/released; GPIO19 raw low is logical bus idle/high. Do not use GPIO 16/17 on WROVER-E. |
 | HA brightness 0 behavior | Prefer explicit `OFF`; confirm on hardware. |
 | Scheduler RX handling | Raw 8-bit reply vs unsolicited 16/24-bit event routing implemented; 24-bit DALI-2 event and 16-bit legacy controller parsers implemented; hardware validation pending. |
 | DALI-2 instance discovery | Generic count/type and raw value polling CLI implemented; profile application pending. |

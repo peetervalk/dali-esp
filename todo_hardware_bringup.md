@@ -29,6 +29,12 @@ debugging.
 - [x] Update `DALI_TX_GPIO` and `DALI_RX_GPIO` in `main/main.c`.
 - [ ] Do not use GPIO 16 or GPIO 17 on WROVER-E because they are connected to
       PSRAM.
+- [x] Account for DALI 2 Click optocoupler inversion in PHY GPIO handling.
+- [x] Add `rxdebug` malformed-frame timing snapshots for real-bus RX bring-up.
+- [x] Filter duplicate/sub-150 us RX glitch edges observed on MikroE/Lunatone
+      passive receive captures.
+- [x] Correct Manchester polarity and use captured edge levels for RX decode
+      after Lunatone `0xFF00` passive-capture comparison.
 - [ ] Confirm DALI bus supply and idle voltage with a meter/scope.
 - [ ] Confirm ESP-side RX/TX polarity at the Click board logic pins.
 
@@ -40,12 +46,23 @@ debugging.
 - [ ] Verify generated Manchester half-bit timing is about 416.7 us.
 - [ ] Wire ESP-side TX to RX for loopback if safe for the adapter wiring.
 - [ ] Run `raw 0x0080 len=16` and verify received frame integrity.
-- [ ] Check `stats` for zero RX overflow, malformed frames, and ISR overruns.
+- [x] Check `stats` for zero RX overflow, malformed frames, and ISR overruns
+      during Lunatone passive RX baseline.
 
 ## Stage 3 - Lunatone Reference Baseline
 
-- [ ] Use Lunatone DALI Cockpit to scan/address the DALI line.
-- [ ] Use DALI Monitor to capture known-good commands and replies.
+- [x] Decode Lunatone DALI Monitor `Broadcast OFF` (`0xFF00`) on ESP passive RX.
+- [x] Decode Lunatone DALI Monitor `Recall Max` on ESP passive RX.
+- [x] Confirm Lunatone sees ESP-originated `Broadcast OFF` TX.
+- [ ] Run a small ESP TX pattern sweep while watching Lunatone:
+  - [ ] `max b`
+  - [ ] `min b`
+  - [ ] `raw 0xFE80 len=16`
+  - [ ] `raw 0xFF05 len=16`
+- [ ] Use Lunatone DALI Cockpit to scan/address the DALI line once a real
+      DALI device is connected.
+- [ ] Use DALI Monitor to capture known-good commands and replies with a real
+      DALI device connected.
 - [ ] Save useful monitor logs for later comparison.
 - [ ] Record known addresses, groups, device types, and sensor/control-device
       configuration.

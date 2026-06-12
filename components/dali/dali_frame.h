@@ -109,6 +109,7 @@ typedef struct {
     volatile uint32_t bus_idle_failures; /* TX blocked by active/stuck bus     */
     volatile uint32_t rx_self_echo_suppressed; /* RX ignored during TX echo    */
     volatile uint32_t rx_settle_suppressed; /* RX ignored after TX             */
+    volatile uint32_t rx_glitch_drops;  /* RX task dropped duplicate/short edge*/
 } dali_stats_t;
 
 /* Global stats instance — defined in dali_phy.c, read everywhere */

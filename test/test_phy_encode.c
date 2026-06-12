@@ -7,10 +7,10 @@ void tearDown(void) {}
 /* ---------------------------------------------------------------------------
  * Manchester encode tests
  *
- * IEC 62386 rule:
- *   Bit '1': HIGH first half, LOW  second half  → {1, 0}
- *   Bit '0': LOW  first half, HIGH second half  → {0, 1}
- *   Start bit (always '1'):                     → {1, 0}
+ * DALI Manchester rule:
+ *   Bit '1': LOW  first half, HIGH second half  → {0, 1}
+ *   Bit '0': HIGH first half, LOW  second half  → {1, 0}
+ *   Start bit:                                  → {0, 1}
  *   Stop bits (2× full HIGH):                   → {1, 1, 1, 1}
  * --------------------------------------------------------------------------*/
 
@@ -24,13 +24,13 @@ void test_encode_single_zero_bit(void)
     /* (1 start + 1 data + 2 stop) * 2 = 8 half-bits */
     TEST_ASSERT_EQUAL_UINT8(8u, len);
 
-    /* start bit: {1, 0} */
-    TEST_ASSERT_EQUAL_UINT8(1u, buf[0]);
-    TEST_ASSERT_EQUAL_UINT8(0u, buf[1]);
+    /* start bit: {0, 1} */
+    TEST_ASSERT_EQUAL_UINT8(0u, buf[0]);
+    TEST_ASSERT_EQUAL_UINT8(1u, buf[1]);
 
-    /* data bit '0': {0, 1} */
-    TEST_ASSERT_EQUAL_UINT8(0u, buf[2]);
-    TEST_ASSERT_EQUAL_UINT8(1u, buf[3]);
+    /* data bit '0': {1, 0} */
+    TEST_ASSERT_EQUAL_UINT8(1u, buf[2]);
+    TEST_ASSERT_EQUAL_UINT8(0u, buf[3]);
 
     /* stop bits: {1, 1, 1, 1} */
     TEST_ASSERT_EQUAL_UINT8(1u, buf[4]);
@@ -47,13 +47,13 @@ void test_encode_single_one_bit(void)
 
     TEST_ASSERT_EQUAL_UINT8(8u, len);
 
-    /* start: {1, 0} */
-    TEST_ASSERT_EQUAL_UINT8(1u, buf[0]);
-    TEST_ASSERT_EQUAL_UINT8(0u, buf[1]);
+    /* start: {0, 1} */
+    TEST_ASSERT_EQUAL_UINT8(0u, buf[0]);
+    TEST_ASSERT_EQUAL_UINT8(1u, buf[1]);
 
-    /* data bit '1': {1, 0} */
-    TEST_ASSERT_EQUAL_UINT8(1u, buf[2]);
-    TEST_ASSERT_EQUAL_UINT8(0u, buf[3]);
+    /* data bit '1': {0, 1} */
+    TEST_ASSERT_EQUAL_UINT8(0u, buf[2]);
+    TEST_ASSERT_EQUAL_UINT8(1u, buf[3]);
 }
 
 void test_encode_16bit_dapc_frame(void)
@@ -69,8 +69,8 @@ void test_encode_16bit_dapc_frame(void)
     TEST_ASSERT_EQUAL_UINT8(38u, len);
 
     /* Verify start bit */
-    TEST_ASSERT_EQUAL_UINT8(1u, buf[0]);
-    TEST_ASSERT_EQUAL_UINT8(0u, buf[1]);
+    TEST_ASSERT_EQUAL_UINT8(0u, buf[0]);
+    TEST_ASSERT_EQUAL_UINT8(1u, buf[1]);
 
     /* Verify last two stop bit half-pairs are all HIGH */
     TEST_ASSERT_EQUAL_UINT8(1u, buf[34]);
@@ -93,19 +93,19 @@ void test_encode_msb_first(void)
 {
     /*
      * Frame: 0b10 (2-bit) — MSB is '1', LSB is '0'.
-     * Half-bits after start: [1,0] (bit '1') then [0,1] (bit '0')
+     * Half-bits after start: [0,1] (bit '1') then [1,0] (bit '0')
      */
     DaliFrame f = { .data = 0x02u, .bit_length = 2u };
     uint8_t buf[16];
     dali_phy_encode_manchester(&f, buf, sizeof(buf));
 
-    /* start: {1,0} at [0,1] */
-    /* MSB bit 1 → {1,0} at [2,3] */
-    TEST_ASSERT_EQUAL_UINT8(1u, buf[2]);
-    TEST_ASSERT_EQUAL_UINT8(0u, buf[3]);
-    /* LSB bit 0 → {0,1} at [4,5] */
-    TEST_ASSERT_EQUAL_UINT8(0u, buf[4]);
-    TEST_ASSERT_EQUAL_UINT8(1u, buf[5]);
+    /* start: {0,1} at [0,1] */
+    /* MSB bit 1 → {0,1} at [2,3] */
+    TEST_ASSERT_EQUAL_UINT8(0u, buf[2]);
+    TEST_ASSERT_EQUAL_UINT8(1u, buf[3]);
+    /* LSB bit 0 → {1,0} at [4,5] */
+    TEST_ASSERT_EQUAL_UINT8(1u, buf[4]);
+    TEST_ASSERT_EQUAL_UINT8(0u, buf[5]);
 }
 
 void test_encode_null_frame_returns_zero(void)

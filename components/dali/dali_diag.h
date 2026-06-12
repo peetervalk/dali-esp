@@ -11,6 +11,7 @@
  *   stats            - print all diagnostic counters
  *   trace on|off     - enable/disable per-frame bus trace logging
  *   read             - print the last received raw frame
+ *   rxdebug          - print the last malformed RX timing snapshot
  *   reset            - reset PHY, scheduler, and diagnostic state
  *   raw <hex> len=<n> [wait] - transmit arbitrary frame, optionally wait for reply
  *   level/off/up/down/step-up/step-down/step-off/on-step/dapc-seq/last/scene

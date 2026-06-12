@@ -83,6 +83,14 @@ ISR -> fixed ring buffer -> task-context frame decoder -> scheduler/protocol
 - Use Lunatone DALI USB / DALI Cockpit as the main external reference tool for
   real-bus behavior.
 
+## Collaboration And Hardware Rules
+
+- Documentation-only updates may be made directly.
+- Suggest software-stack changes first and implement them only after explicit
+  go-ahead.
+- Touch hardware/serial only after explicit go-ahead.
+- Use COM6 only. If COM6 is unavailable, stop and notify.
+
 ## Build And Test
 
 Native firmware:

@@ -8,8 +8,8 @@ void tearDown(void) {}
 /* ---------------------------------------------------------------------------
  * Helper: derive edge-interval sequence from a Manchester half-bit buffer.
  *
- * hb[0] is the first half of the start bit (always HIGH).
- * The first edge is at index 1 (start bit mid-bit falling edge).
+ * hb[0] is the first half of the start bit (always LOW).
+ * The first edge is at index 0 (idle HIGH into start LOW).
  * An edge occurs wherever hb[i] != hb[i-1].
  * Each interval is (number of half-bit periods) × DALI_HALF_BIT_US µs.
  *
@@ -19,9 +19,9 @@ static uint8_t half_bits_to_intervals(const uint8_t *hb, uint8_t hb_len,
                                        uint32_t *out, uint8_t out_max)
 {
     uint8_t n        = 0u;
-    uint8_t last_idx = 1u;   /* index of the first edge (start bit mid-bit) */
+    uint8_t last_idx = 0u;   /* index of the first edge (leading start edge) */
 
-    for (uint8_t i = 2u; i < hb_len; i++) {
+    for (uint8_t i = 1u; i < hb_len; i++) {
         if (hb[i] != hb[i - 1u]) {
             if (n >= out_max) { return 0u; }
             out[n++] = (uint32_t)(i - last_idx) * (uint32_t)DALI_HALF_BIT_US;
@@ -51,6 +51,33 @@ static void assert_round_trip(uint32_t data_val, uint8_t bit_length)
     TEST_ASSERT_EQUAL_INT(DALI_OK, err);
     TEST_ASSERT_EQUAL_UINT8(bit_length, dec.bit_length);
     TEST_ASSERT_EQUAL_UINT32(data_val, dec.data);
+}
+
+void test_decode_lunatone_broadcast_off_capture(void)
+{
+    const uint32_t ivs[] = {
+        379u, 454u, 378u, 455u, 378u, 455u, 379u, 455u,
+        378u, 455u, 378u, 455u, 378u, 455u, 378u, 455u,
+        378u, 872u, 378u, 455u, 378u, 455u, 378u, 455u,
+        378u, 455u, 378u, 455u, 379u, 454u, 379u, 455u,
+        378u,
+    };
+    const uint8_t levels[] = {
+        0u, 1u, 0u, 1u, 0u, 1u, 0u, 1u,
+        0u, 1u, 0u, 1u, 0u, 1u, 0u, 1u,
+        0u, 1u, 0u, 1u, 0u, 1u, 0u, 1u,
+        0u, 1u, 0u, 1u, 0u, 1u, 0u, 1u,
+        0u, 1u,
+    };
+    DaliFrame dec;
+    DaliError err = dali_phy_decode_manchester_edges(
+        ivs, (uint8_t)(sizeof(ivs) / sizeof(ivs[0])),
+        levels, (uint8_t)(sizeof(levels) / sizeof(levels[0])),
+        &dec);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK, err);
+    TEST_ASSERT_EQUAL_UINT8(16u, dec.bit_length);
+    TEST_ASSERT_EQUAL_UINT32(0xFF00u, dec.data);
 }
 
 /* ---------------------------------------------------------------------------
@@ -126,6 +153,7 @@ void test_decode_8bit_response_0xAF(void)    { assert_round_trip(0xAFu, 8u); }
 
 void test_decode_16bit_dapc_addr0_lvl128(void)  { assert_round_trip(0x0080u, 16u); }
 void test_decode_16bit_query_status_addr5(void) { assert_round_trip(0x0B90u, 16u); }
+void test_decode_16bit_broadcast_off(void)      { assert_round_trip(0xFF00u, 16u); }
 void test_decode_16bit_all_zeros(void)          { assert_round_trip(0x0000u, 16u); }
 void test_decode_16bit_all_ones(void)           { assert_round_trip(0xFFFFu, 16u); }
 void test_decode_16bit_alternating_AAAA(void)   { assert_round_trip(0xAAAAu, 16u); }
@@ -154,6 +182,7 @@ int main(void)
     RUN_TEST(test_decode_interval_too_short_returns_malformed);
     RUN_TEST(test_decode_interval_between_windows_returns_malformed);
     RUN_TEST(test_decode_interval_too_long_returns_malformed);
+    RUN_TEST(test_decode_lunatone_broadcast_off_capture);
 
     RUN_TEST(test_decode_8bit_all_zeros);
     RUN_TEST(test_decode_8bit_all_ones);
@@ -163,6 +192,7 @@ int main(void)
 
     RUN_TEST(test_decode_16bit_dapc_addr0_lvl128);
     RUN_TEST(test_decode_16bit_query_status_addr5);
+    RUN_TEST(test_decode_16bit_broadcast_off);
     RUN_TEST(test_decode_16bit_all_zeros);
     RUN_TEST(test_decode_16bit_all_ones);
     RUN_TEST(test_decode_16bit_alternating_AAAA);

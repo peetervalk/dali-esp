@@ -14,6 +14,7 @@
  * ESPHome entities.  It only speaks bits and frames.
  */
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "dali_frame.h"
 
@@ -22,8 +23,8 @@
  * --------------------------------------------------------------------------*/
 typedef enum {
     DALI_PHY_TX_IDLE       = 0,
-    DALI_PHY_TX_START_H    = 1,   /* start bit — first half (HIGH)            */
-    DALI_PHY_TX_START_L    = 2,   /* start bit — second half (LOW)            */
+    DALI_PHY_TX_START_H    = 1,   /* legacy name: start bit first half (LOW)  */
+    DALI_PHY_TX_START_L    = 2,   /* legacy name: start bit second half (HIGH)*/
     DALI_PHY_TX_BIT_FIRST  = 3,   /* data bit — first half                    */
     DALI_PHY_TX_BIT_SECOND = 4,   /* data bit — second half                   */
     DALI_PHY_TX_STOP1      = 5,   /* stop bit 1 (HIGH, full bit period)        */
@@ -41,6 +42,18 @@ typedef enum {
     DALI_PHY_RX_ERROR      = 3,
 } DaliPhyRxState;
 
+#define DALI_PHY_RXDEBUG_MAX_INTERVALS 56u
+#define DALI_PHY_RXDEBUG_MAX_EDGES     (DALI_PHY_RXDEBUG_MAX_INTERVALS + 1u)
+
+typedef struct {
+    bool      valid;
+    DaliError error;
+    uint8_t   interval_count;
+    uint8_t   edge_count;
+    uint32_t  intervals_us[DALI_PHY_RXDEBUG_MAX_INTERVALS];
+    uint8_t   edge_levels[DALI_PHY_RXDEBUG_MAX_EDGES];
+} DaliPhyRxDebugSnapshot;
+
 /* ---------------------------------------------------------------------------
  * Callback invoked from task context when a complete frame is received.
  * frame is valid only for the duration of the call.
@@ -53,8 +66,11 @@ typedef void (*DaliPhyRxCallback)(const DaliFrame *frame, void *ctx);
 
 /*
  * Initialise the PHY layer.
- * tx_gpio: GPIO number connected to DALI-2 Click RST pin (TX output)
- * rx_gpio: GPIO number connected to DALI-2 Click INT pin (RX input)
+ * tx_gpio: GPIO number connected to DALI-2 Click RST / DALI_TX pin.
+ *          The Click transmit optocoupler is active-high; the PHY maps
+ *          logical DALI idle/high to the inactive physical GPIO level.
+ * rx_gpio: GPIO number connected to DALI-2 Click INT / DALI_RX pin.
+ *          The Click receive optocoupler output is inverted by the PHY.
  *
  * Must be called once before any other dali_phy_* function.
  */
@@ -92,6 +108,13 @@ DaliError dali_phy_reset(void);
  */
 DaliError dali_phy_read_rx_level(uint8_t *level_out);
 
+/*
+ * Copy the last malformed RX frame snapshot.  edge_levels[] contains logical
+ * DALI bus levels after each captured edge: 1 = idle/high, 0 = active/low.
+ * edge_count is normally interval_count + 1.
+ */
+DaliError dali_phy_get_rx_debug(DaliPhyRxDebugSnapshot *snapshot_out);
+
 /* ---------------------------------------------------------------------------
  * Host-testable Manchester encode / decode helpers
  * These are separated from hardware so they can be unit-tested without ESP-IDF.
@@ -100,10 +123,10 @@ DaliError dali_phy_read_rx_level(uint8_t *level_out);
 /*
  * Encode a DaliFrame into a half-bit buffer.
  *
- * Manchester rule (IEC 62386):
- *   Bit '1': HIGH first half, LOW second half
- *   Bit '0': LOW first half, HIGH second half
- *   Start bit is always '1' (HIGH → LOW).
+ * DALI Manchester rule:
+ *   Bit '1': LOW first half, HIGH second half
+ *   Bit '0': HIGH first half, LOW second half
+ *   Start bit is LOW then HIGH.
  *   Two stop bits: both halves HIGH (4 half-bits total).
  *
  * out_buf      : caller-supplied buffer; must be >= (1 + bit_length + 2) * 2 bytes
@@ -117,7 +140,28 @@ uint8_t dali_phy_encode_manchester(const DaliFrame *frame,
                                    uint8_t  out_buf_len);
 
 /*
- * Decode a sequence of edge intervals (in µs) into a DaliFrame.
+ * Decode a sequence of edge intervals and logical edge levels into a DaliFrame.
+ *
+ * intervals    : array of time intervals between consecutive edges (µs)
+ * num_intervals: number of entries in intervals[]
+ * edge_levels  : logical DALI bus level after each captured edge
+ * edge_count   : must be num_intervals + 1
+ * frame_out    : output frame on success
+ * Returns DALI_OK or DALI_ERR_MALFORMED.
+ *
+ * Tolerance: ±25% of the nominal half-bit period (IEC 62386 Annex A).
+ */
+DaliError dali_phy_decode_manchester_edges(const uint32_t *intervals,
+                                           uint8_t         num_intervals,
+                                           const uint8_t  *edge_levels,
+                                           uint8_t         edge_count,
+                                           DaliFrame      *frame_out);
+
+/*
+ * Decode a sequence of edge intervals (in µs) into a DaliFrame.  This helper
+ * assumes the first edge is the leading start edge into logical LOW and
+ * reconstructs alternating edge levels.  Hardware RX should prefer
+ * dali_phy_decode_manchester_edges() so captured levels are validated.
  *
  * intervals    : array of time intervals between consecutive edges (µs)
  * num_intervals: number of entries in intervals[]
