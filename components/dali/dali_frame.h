@@ -10,8 +10,6 @@
  *   Half-bit period: 416.7 µs  (Manchester encoding unit)
  *   Timer tick     : 104   µs  (4× oversampling — 4 ticks per half-bit)
  *
- * TX-to-RX settle and reply timeout are marked TBD; update from IEC 62386
- * part 1 section 8 once confirmed.
  * --------------------------------------------------------------------------*/
 #define DALI_TIMER_TICK_US          104u    /* hardware timer alarm period     */
 #define DALI_TICKS_PER_HALF_BIT       4u    /* ticks to count before toggling  */
@@ -53,7 +51,7 @@
 /* ---------------------------------------------------------------------------
  * Buffer sizes — power-of-2 required for ring buffer masking
  * --------------------------------------------------------------------------*/
-#define DALI_RX_EDGE_BUFFER_SIZE     64u
+#define DALI_RX_EDGE_BUFFER_SIZE    256u
 #define DALI_TX_HALF_BIT_BUFFER_SIZE 64u    /* pre-encoded half-bits for TX    */
 #define DALI_CMD_QUEUE_SIZE          16u
 #define DALI_RESPONSE_BUFFER_SIZE     8u

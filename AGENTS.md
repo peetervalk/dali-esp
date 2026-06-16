@@ -105,7 +105,6 @@ Host tests:
 
 ```powershell
 cd test
-C:\Espressif\tools\cmake\4.0.3\bin\cmake.exe -B build -G "MinGW Makefiles"
-C:\Espressif\tools\cmake\4.0.3\bin\cmake.exe --build build
-C:\Espressif\tools\cmake\4.0.3\bin\ctest.exe --test-dir build --output-on-failure
+C:\msys64\ucrt64\bin\mingw32-make.exe --directory build
+C:\msys64\ucrt64\bin\mingw32-make.exe --directory build test CTEST_OUTPUT_ON_FAILURE=1
 ```

@@ -137,6 +137,21 @@ void test_decode_interval_too_long_returns_malformed(void)
                           dali_phy_decode_manchester(ivs, 1u, &f));
 }
 
+void test_decode_edges_non_alternating_levels_returns_malformed(void)
+{
+    /* Two consecutive edges with the same level indicate a physical glitch.
+     * This path is unique to dali_phy_decode_manchester_edges() — the wrapper
+     * always generates strictly alternating synthetic levels and cannot hit it. */
+    uint32_t ivs[]    = { 400u };
+    uint8_t  levels[] = { 0u, 0u };   /* both LOW — no real level change */
+    DaliFrame f;
+    DaliError err = dali_phy_decode_manchester_edges(
+        ivs, (uint8_t)(sizeof(ivs) / sizeof(ivs[0])),
+        levels, (uint8_t)(sizeof(levels) / sizeof(levels[0])),
+        &f);
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_MALFORMED, err);
+}
+
 /* ---------------------------------------------------------------------------
  * Round-trip decode tests — 8-bit backward / response frames
  * --------------------------------------------------------------------------*/
@@ -182,6 +197,7 @@ int main(void)
     RUN_TEST(test_decode_interval_too_short_returns_malformed);
     RUN_TEST(test_decode_interval_between_windows_returns_malformed);
     RUN_TEST(test_decode_interval_too_long_returns_malformed);
+    RUN_TEST(test_decode_edges_non_alternating_levels_returns_malformed);
     RUN_TEST(test_decode_lunatone_broadcast_off_capture);
 
     RUN_TEST(test_decode_8bit_all_zeros);

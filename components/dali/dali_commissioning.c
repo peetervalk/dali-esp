@@ -2,6 +2,11 @@
 
 #include <string.h>
 
+#ifndef DALI_HOST_BUILD
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#endif
+
 #define DALI_RANDOM_ADDRESS_LIMIT (DALI_RANDOM_ADDRESS_MAX + 1u)
 
 static bool transport_valid(const DaliDiscoveryTransport *transport)
@@ -342,7 +347,14 @@ static DaliError commissioning_start_unaddressed(
         return err;
     }
 
-    return send_special_no_reply(transport, DALI_CMD_RANDOMIZE, 0u, true);
+    err = send_special_no_reply(transport, DALI_CMD_RANDOMIZE, 0u, true);
+    if (err != DALI_OK) {
+        return err;
+    }
+#ifndef DALI_HOST_BUILD
+    vTaskDelay(pdMS_TO_TICKS(15u));
+#endif
+    return DALI_OK;
 }
 
 static DaliError commissioning_finish(const DaliDiscoveryTransport *transport)

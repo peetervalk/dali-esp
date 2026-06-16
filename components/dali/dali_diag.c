@@ -817,8 +817,6 @@ static const char *diag_sched_state_name(DaliSchedState state)
             return "wait-settle";
         case SCHED_WAIT_REPLY:
             return "wait-reply";
-        case SCHED_DONE:
-            return "done";
         default:
             return "unknown";
     }

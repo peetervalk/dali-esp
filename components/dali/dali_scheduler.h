@@ -32,7 +32,6 @@ typedef enum {
     SCHED_TX          = 1,
     SCHED_WAIT_SETTLE = 2,
     SCHED_WAIT_REPLY  = 3,
-    SCHED_DONE        = 4,
 } DaliSchedState;
 
 /* ---------------------------------------------------------------------------

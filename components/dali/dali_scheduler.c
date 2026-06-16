@@ -429,7 +429,6 @@ next:
             return;   /* still waiting for reply */
         }
 
-        case SCHED_DONE:
         default:
             return;
     }
@@ -446,8 +445,7 @@ void dali_sched_notify_rx(const DaliFrame *frame)
     if (s_state == SCHED_WAIT_REPLY &&
         s_active.needs_reply &&
         !s_reply_received &&
-        frame->bit_length == DALI_BACKWARD_FRAME_BITS &&
-        elapsed_ms(s_state_entered_ms) < DALI_REPLY_TIMEOUT_MS) {
+        frame->bit_length == DALI_BACKWARD_FRAME_BITS) {
         s_reply_frame    = *frame;
         s_reply_received = true;
         return;

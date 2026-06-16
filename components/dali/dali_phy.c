@@ -589,7 +589,11 @@ DaliError dali_phy_init(uint8_t tx_gpio, uint8_t rx_gpio)
         .intr_type    = GPIO_INTR_ANYEDGE,
     };
     gpio_config(&rx_cfg);
-    gpio_install_isr_service(0);
+    esp_err_t isr_ret = gpio_install_isr_service(0);
+    if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "gpio_install_isr_service failed: %d", isr_ret);
+        return DALI_ERR_INVALID;
+    }
     gpio_isr_handler_add(rx_gpio, dali_phy_rx_isr, NULL);
 
     /* Configure GPTIMER: 1 MHz resolution, alarm every 104 µs */
@@ -655,13 +659,14 @@ DaliError dali_phy_tx(const DaliFrame *frame)
     s_tx_total_half_bits = len;
     s_tx_half_bit_idx    = 0u;
     s_tx_tick_count      = 0u;
-    s_tx_state           = DALI_PHY_TX_START_H;
+    s_tx_state           = DALI_PHY_TX_BUSY;
 
     ESP_LOGD(TAG, "TX start: 0x%0*" PRIx32 " (%d-bit)",
              (frame->bit_length + 3) / 4, frame->data, (int)frame->bit_length);
 
 #ifndef DALI_HOST_BUILD
     s_tx_notify_task = xTaskGetCurrentTaskHandle();
+    gptimer_set_raw_count(s_gptimer, 0);
     gptimer_start(s_gptimer);
 
     /* Wait for TX_DONE notification from ISR, with generous timeout */
@@ -678,6 +683,7 @@ DaliError dali_phy_tx(const DaliFrame *frame)
     gptimer_stop(s_gptimer);
     s_rx_suppress_until_us = (tx_rx_timestamp_us() +
                               (uint32_t)DALI_SETTLE_MS * 1000u) & RX_TS_MASK;
+    __asm__ __volatile__("" ::: "memory");
     s_rx_settle_suppression_active = 1u;
     s_tx_state = DALI_PHY_TX_IDLE;
     ESP_LOGD(TAG, "TX done");
@@ -789,12 +795,16 @@ DaliError dali_phy_reset(void)
     s_rx_suppress_until_us         = 0u;
 #ifndef DALI_HOST_BUILD
     s_tx_notify_task     = NULL;
+    gpio_intr_disable(s_rx_gpio);
 #endif
     dali_rb_clear(&s_rx_rb);
     s_rx_in_frame        = false;
     s_rx_interval_count  = 0u;
     s_rx_edge_count      = 0u;
     s_rx_last_edge_level = 0u;
+#ifndef DALI_HOST_BUILD
+    gpio_intr_enable(s_rx_gpio);
+#endif
     rx_debug_clear();
     ESP_LOGD(TAG, "PHY reset");
     return DALI_OK;

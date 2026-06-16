@@ -22,14 +22,9 @@
  * PHY TX state machine states
  * --------------------------------------------------------------------------*/
 typedef enum {
-    DALI_PHY_TX_IDLE       = 0,
-    DALI_PHY_TX_START_H    = 1,   /* legacy name: start bit first half (LOW)  */
-    DALI_PHY_TX_START_L    = 2,   /* legacy name: start bit second half (HIGH)*/
-    DALI_PHY_TX_BIT_FIRST  = 3,   /* data bit — first half                    */
-    DALI_PHY_TX_BIT_SECOND = 4,   /* data bit — second half                   */
-    DALI_PHY_TX_STOP1      = 5,   /* stop bit 1 (HIGH, full bit period)        */
-    DALI_PHY_TX_STOP2      = 6,   /* stop bit 2 (HIGH, full bit period)        */
-    DALI_PHY_TX_DONE       = 7,   /* frame complete; timer will be stopped     */
+    DALI_PHY_TX_IDLE = 0,   /* not transmitting                              */
+    DALI_PHY_TX_BUSY = 1,   /* transmission in progress                      */
+    DALI_PHY_TX_DONE = 2,   /* frame complete; awaiting task notification    */
 } DaliPhyTxState;
 
 /* ---------------------------------------------------------------------------
@@ -158,17 +153,10 @@ DaliError dali_phy_decode_manchester_edges(const uint32_t *intervals,
                                            DaliFrame      *frame_out);
 
 /*
- * Decode a sequence of edge intervals (in µs) into a DaliFrame.  This helper
- * assumes the first edge is the leading start edge into logical LOW and
- * reconstructs alternating edge levels.  Hardware RX should prefer
- * dali_phy_decode_manchester_edges() so captured levels are validated.
- *
- * intervals    : array of time intervals between consecutive edges (µs)
- * num_intervals: number of entries in intervals[]
- * frame_out    : output frame on success
- * Returns DALI_OK or DALI_ERR_MALFORMED.
- *
- * Tolerance: ±25% of the nominal half-bit period (IEC 62386 Annex A).
+ * Thin wrapper around dali_phy_decode_manchester_edges() for host unit tests.
+ * Synthesises alternating edge levels starting at LOW — valid for clean
+ * encoded signals but skips the level-validation path of the real decoder.
+ * Do not call from production RX paths; use dali_phy_decode_manchester_edges().
  */
 DaliError dali_phy_decode_manchester(const uint32_t *intervals,
                                      uint8_t         num_intervals,

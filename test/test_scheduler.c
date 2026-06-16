@@ -404,7 +404,38 @@ void test_stale_duplicate_rx_does_not_overwrite_latched_reply(void)
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
 }
 
-/* 6. RX arriving after the reply window must time out, not complete OK */
+/* 6a. Regression: reply received before run() is called must be accepted
+ *     even if the scheduler tick has crossed the timeout boundary by the
+ *     time run() executes (this was the original 1ms-sleep bug). */
+void test_reply_accepted_when_run_delayed_past_window(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .send_twice   = false,
+        .retries_left = 0u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+
+    /* PHY delivers reply while scheduler is still in WAIT_REPLY */
+    inject_reply(0xAFu, 8u);
+    /* Simulated task sleep: run() is called past the timeout boundary */
+    g_mock_tick_ms += DALI_REPLY_TIMEOUT_MS;
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+    TEST_ASSERT_EQUAL_HEX32(0xAFu, g_cb_reply.data);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_timeouts);
+}
+
+/* 6b. RX arriving after run() has already fired the timeout must be ignored */
 void test_late_rx_after_reply_timeout_is_ignored(void)
 {
     DaliTransaction txn = {
@@ -421,14 +452,18 @@ void test_late_rx_after_reply_timeout_is_ignored(void)
     dali_sched_run();
     TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
 
+    /* Tick crosses boundary and run() fires the timeout — no reply injected */
     g_mock_tick_ms += DALI_REPLY_TIMEOUT_MS;
-    inject_reply(0xAFu, 8u);
     dali_sched_run();
-
     TEST_ASSERT_EQUAL(1, g_cb_count);
     TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT, g_cb_result);
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+
+    /* Late reply from device arrives after timeout — must be ignored */
+    inject_reply(0xAFu, 8u);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.reply_timeouts);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+    TEST_ASSERT_EQUAL(1, g_cb_count);   /* no additional callback */
 }
 
 /* 7. Unsolicited 24-bit frames are routed to the raw event path */
@@ -882,6 +917,7 @@ int main(void)
     RUN_TEST(test_reply_received);
     RUN_TEST(test_stray_rx_while_idle_is_ignored);
     RUN_TEST(test_stale_duplicate_rx_does_not_overwrite_latched_reply);
+    RUN_TEST(test_reply_accepted_when_run_delayed_past_window);
     RUN_TEST(test_late_rx_after_reply_timeout_is_ignored);
     RUN_TEST(test_unsolicited_24bit_idle_routes_event);
     RUN_TEST(test_unsolicited_16bit_idle_routes_event);
