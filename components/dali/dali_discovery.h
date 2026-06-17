@@ -31,6 +31,14 @@ typedef struct {
     bool                     present;
     bool                     has_status;
     uint8_t                  status;
+    bool                     has_groups;
+    uint16_t                 groups;        /* bitmask: bit N set means member of group N */
+    bool                     has_device_type;
+    uint8_t                  device_type;
+    bool                     has_version;
+    uint8_t                  version;
+    bool                     has_actual_level;
+    uint8_t                  actual_level;
     bool                     has_input_device;
     bool                     has_instance_count;
     uint8_t                  instance_count;
@@ -54,6 +62,9 @@ const DaliDiscoveryDeviceInfo *dali_discovery_inventory_get(
 DaliError dali_discovery_inventory_store_status(DaliDiscoveryInventory *inventory,
                                                 uint8_t addr,
                                                 uint8_t status);
+DaliError dali_discovery_inventory_store_groups(DaliDiscoveryInventory *inventory,
+                                                uint8_t addr,
+                                                uint16_t groups);
 DaliError dali_discovery_inventory_update_input_device(
     DaliDiscoveryInventory *inventory,
     const DaliDiscoveryInputDevice *input_device);
@@ -64,6 +75,19 @@ DaliError dali_discovery_query_u8(const DaliDiscoveryTransport *transport,
 DaliError dali_discovery_query_status(const DaliDiscoveryTransport *transport,
                                       uint8_t addr,
                                       uint8_t *status_out);
+DaliError dali_discovery_query_groups(const DaliDiscoveryTransport *transport,
+                                      uint8_t addr,
+                                      uint16_t *groups_out);
+DaliError dali_discovery_query_device_type(const DaliDiscoveryTransport *transport,
+                                           uint8_t addr,
+                                           uint8_t *type_out);
+DaliError dali_discovery_query_version(const DaliDiscoveryTransport *transport,
+                                       uint8_t addr,
+                                       uint8_t *version_out);
+DaliError dali_discovery_query_actual_level(const DaliDiscoveryTransport *transport,
+                                            uint8_t addr,
+                                            uint8_t *level_out);
+const char *dali_discovery_device_type_name(uint8_t type);
 DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
                               const DaliDiscoveryTransport *transport,
                               DaliDiscoveryFoundCb found_cb,

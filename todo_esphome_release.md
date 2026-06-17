@@ -32,7 +32,7 @@ Ship two user-facing firmware modes:
    - [ ] Device discovery.
    - [ ] Lamp identify.
    - [ ] Sensor poll.
-   - [ ] Find switches.
+   - [ ] Find couplers.
 6. User exports or copies the discovered inventory.
 7. User fills final ESPHome YAML with friendly names and chosen semantics.
 8. User flashes final firmware by OTA or browser upload.
@@ -46,7 +46,7 @@ Minimum controls:
 - [ ] `inventory`.
 - [ ] `identify <addr>`.
 - [ ] `sensor poll <addr>`.
-- [ ] `find switches`.
+- [ ] `find couplers`.
 - [ ] Advanced raw command panel.
 - [ ] Export inventory JSON/YAML snippet.
 - [ ] OTA upload for final firmware.
@@ -76,7 +76,7 @@ dali:
       profile: steinel_hf360_2
       instance: 1
 
-  switches:
+  couplers:
     - id: hallway_left
       device_address: 8
       instance: 0

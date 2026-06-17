@@ -56,6 +56,20 @@ DaliError dali_discovery_inventory_store_status(DaliDiscoveryInventory *inventor
     return DALI_OK;
 }
 
+DaliError dali_discovery_inventory_store_groups(DaliDiscoveryInventory *inventory,
+                                                uint8_t addr,
+                                                uint16_t groups)
+{
+    if (inventory == NULL || addr >= DALI_SHORT_ADDRESS_COUNT) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliDiscoveryDeviceInfo *device = &inventory->devices[addr];
+    device->has_groups = true;
+    device->groups = groups;
+    return DALI_OK;
+}
+
 DaliError dali_discovery_inventory_update_input_device(
     DaliDiscoveryInventory *inventory,
     const DaliDiscoveryInputDevice *input_device)
@@ -124,6 +138,141 @@ DaliError dali_discovery_query_status(const DaliDiscoveryTransport *transport,
     return dali_discovery_query_u8(transport, &frame, status_out);
 }
 
+static DaliError discovery_query_simple(const DaliDiscoveryTransport *transport,
+                                        uint8_t addr,
+                                        DaliCommandId id,
+                                        uint8_t *out)
+{
+    DaliFrame frame;
+    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = addr };
+    DaliError err = dali_control_build_query(target, id, 0u, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+    return dali_discovery_query_u8(transport, &frame, out);
+}
+
+DaliError dali_discovery_query_groups(const DaliDiscoveryTransport *transport,
+                                      uint8_t addr,
+                                      uint16_t *groups_out)
+{
+    if (!transport_valid(transport) || groups_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliFrame frame;
+    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = addr };
+
+    DaliError err = dali_control_build_query(target, DALI_CMD_QUERY_GROUPS_0_7, 0u, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+    uint8_t low = 0u;
+    err = dali_discovery_query_u8(transport, &frame, &low);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    err = dali_control_build_query(target, DALI_CMD_QUERY_GROUPS_8_15, 0u, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+    uint8_t high = 0u;
+    err = dali_discovery_query_u8(transport, &frame, &high);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    *groups_out = (uint16_t)low | ((uint16_t)high << 8u);
+    return DALI_OK;
+}
+
+DaliError dali_discovery_query_device_type(const DaliDiscoveryTransport *transport,
+                                           uint8_t addr,
+                                           uint8_t *type_out)
+{
+    if (!transport_valid(transport) || type_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    return discovery_query_simple(transport, addr, DALI_CMD_QUERY_DEVICE_TYPE, type_out);
+}
+
+DaliError dali_discovery_query_version(const DaliDiscoveryTransport *transport,
+                                       uint8_t addr,
+                                       uint8_t *version_out)
+{
+    if (!transport_valid(transport) || version_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    return discovery_query_simple(transport, addr, DALI_CMD_QUERY_VERSION_NUMBER, version_out);
+}
+
+DaliError dali_discovery_query_actual_level(const DaliDiscoveryTransport *transport,
+                                            uint8_t addr,
+                                            uint8_t *level_out)
+{
+    if (!transport_valid(transport) || level_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    return discovery_query_simple(transport, addr, DALI_CMD_QUERY_ACTUAL_LEVEL, level_out);
+}
+
+const char *dali_discovery_device_type_name(uint8_t type)
+{
+    switch (type) {
+    case 0:   return "fluorescent";
+    case 1:   return "emergency";
+    case 2:   return "HID";
+    case 3:   return "halogen-LV";
+    case 4:   return "incandescent";
+    case 5:   return "DC-controlled";
+    case 6:   return "LED";
+    case 7:   return "switching";
+    case 8:   return "colour";
+    default:  return "unknown";
+    }
+}
+
+static void discovery_enrich_device(const DaliDiscoveryTransport *transport,
+                                    uint8_t addr,
+                                    DaliDiscoveryDeviceInfo *device)
+{
+    uint16_t groups = 0u;
+    if (dali_discovery_query_groups(transport, addr, &groups) == DALI_OK) {
+        device->has_groups = true;
+        device->groups = groups;
+    }
+
+    uint8_t type = 0u;
+    if (dali_discovery_query_device_type(transport, addr, &type) == DALI_OK) {
+        device->has_device_type = true;
+        device->device_type = type;
+    }
+
+    uint8_t version = 0u;
+    if (dali_discovery_query_version(transport, addr, &version) == DALI_OK) {
+        device->has_version = true;
+        device->version = version;
+    }
+
+    uint8_t level = 0u;
+    if (dali_discovery_query_actual_level(transport, addr, &level) == DALI_OK) {
+        device->has_actual_level = true;
+        device->actual_level = level;
+    }
+
+    DaliFrame instances_frame;
+    if (dali_input_build_query_number_of_instances(addr, &instances_frame) == DALI_OK) {
+        uint8_t count = 0u;
+        if (dali_discovery_query_u8(transport, &instances_frame, &count) == DALI_OK &&
+            count > 0u) {
+            device->has_input_device = true;
+            device->has_instance_count = true;
+            device->instance_count = count;
+        }
+    }
+}
+
 DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
                               const DaliDiscoveryTransport *transport,
                               DaliDiscoveryFoundCb found_cb,
@@ -147,6 +296,7 @@ DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
             if (err != DALI_OK) {
                 return err;
             }
+            discovery_enrich_device(transport, addr, &inventory->devices[addr]);
             if (found_cb != NULL) {
                 found_cb(addr, &inventory->devices[addr], found_ctx);
             }

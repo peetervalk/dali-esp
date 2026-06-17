@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-06-16
+**Last updated:** 2026-06-17
 **Framework:** ESP-IDF v6.0.1 native CMake
 **Hardware target:** ESP32-DevKitC-VE / ESP32-WROVER-E + MikroE DALI-2 Click
 
@@ -8,7 +8,15 @@
 
 The software stack is complete through the first real-bus baseline. PHY,
 scheduler, protocol, commissioning, discovery, and control layers are all
-implemented and covered by 13 host test suites.
+implemented and covered by 13 host test suites (16 in the discovery suite).
+
+`discover` is now a full one-shot command: per found device it queries status,
+group membership (16-bit bitmask), device type, DALI version, actual level, and
+number of input instances. If a device responds to the instance count query,
+`discover` automatically enumerates its instances and caches them — no separate
+`instances <addr>` step needed. The JSON export includes all these fields;
+`kind` is now `control_gear`, `input_device`, or `unknown` instead of the
+previous `control_gear_candidate`.
 
 On hardware, the ESP32 boots cleanly, the diagnostic shell is reachable over
 COM6, and bidirectional DALI communication with Lunatone is confirmed: passive
@@ -20,6 +28,13 @@ are all working on real hardware.
 **The next milestone is 8-bit device replies.** This requires a real DALI
 control gear on the bus. Once reply RX is solid, the Steinel HF 360 II sensor
 and DALI-2 instance discovery follow.
+
+### Terminology note
+"Pushbutton coupler" is the correct term for devices that inject DALI bus
+commands when a physical button is pressed (both DALI-1 legacy controllers and
+DALI-2 push-button input devices). The word "switch" is avoided in code and
+documentation because Home Assistant uses "switch" for a binary on/off toggle
+entity, which is a different concept.
 
 ## Immediate Priorities
 

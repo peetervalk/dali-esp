@@ -9,7 +9,7 @@ facts; it does not decide room names or final Home Assistant semantics.
 - Find addressed DALI devices on the bus.
 - Identify basic role and capabilities.
 - Poll known DALI-2 input-device instances.
-- Help the user locate lamps and switches physically.
+- Help the user locate lamps and pushbutton couplers physically.
 - Export enough mapping information for final ESPHome YAML.
 
 ## Non-Goals For First Version
@@ -91,11 +91,12 @@ Blinking addr 12 between min and max for 10 seconds.
 2. Mark responders as present; mark timeouts as absent/unknown.
 3. Query status for each responder.
 4. Query basic capability information using the generic control-gear query path:
-   - version number
-   - device type
-   - actual level for control gear
-   - group membership
-   - DALI-2 input-device metadata
+   - version number ✓
+   - device type ✓
+   - actual level for control gear ✓
+   - group membership (16-bit bitmask) ✓
+   - DALI-2 input-device metadata (auto-detected via QUERY NUMBER OF INSTANCES,
+     full instance enumeration cached automatically) ✓
 5. Build an in-memory `DaliDiscoveryInventory`.
 6. Print inventory in human-readable form.
 7. Export inventory in a machine-readable form for final ESPHome configuration.
@@ -107,9 +108,9 @@ bus check
 capture clear
 capture start
 smoke <known_addr>
-instances <sensor_addr>
+discover
 sensor poll <sensor_addr>
-find switches 30
+find couplers 30
 capture stop
 export inventory
 ```
@@ -122,16 +123,31 @@ For control gear:
   `RECALL MAX LEVEL` and `RECALL MIN LEVEL` or another safe test pattern.
 - The user can then assign a friendly name outside the protocol stack.
 
-For switch/input couplers:
+For pushbutton couplers:
 
-- `find switches` enters a timed training mode.
-- For DALI-2 couplers, the user physically double-presses each switch when the
-  device emits standard input-event frames.
-- For legacy/DALI-1-style couplers, the user triggers the configured action; the
+"Pushbutton coupler" is the term used throughout this project for any DALI device
+that injects bus commands when a physical button is pressed. Two kinds exist:
+
+- **DALI-2 push-button input devices** (IEC 62386-301): have a short address,
+  respond to `discover`, emit 24-bit event frames. `find couplers` captures
+  double-press events from these.
+- **Legacy DALI-1 controllers**: act as bus masters, have no short address, are
+  not discoverable by scan. They are only detectable by passively observing the
+  16-bit commands they inject. `find couplers` captures these as raw
+  target/action mappings.
+
+The word "switch" is not used for these devices because Home Assistant uses
+"switch" for a binary on/off toggle entity, which is a different concept.
+
+- `find couplers` enters a timed training mode.
+- For DALI-2 push-button input devices, the user physically double-presses each
+  button; the firmware records the observed 24-bit event frame, address, and
+  instance.
+- For DALI-1 legacy controllers, the user triggers the configured action; the
   firmware records the observed 16-bit target/action frame and trigger order.
-- DALI-1-style 16-bit frames generally do not carry source device or instance
-  identity, so export must treat them as raw target/action mappings.
-- Double press is preferred where available as an intentional selection gesture
+- DALI-1 16-bit frames do not carry source device or instance identity, so the
+  export treats them as raw target/action mappings.
+- Double-press is preferred where available as an intentional selection gesture
   to avoid accidental event capture.
 
 ## Inventory Shape
@@ -158,7 +174,7 @@ Draft export shape:
       "groups": [0, 2]
     }
   ],
-  "switches": [
+  "couplers": [
     { "order": 1, "frame_kind": "input-24bit", "address": 8, "instance": 0, "event": "double-press" },
     { "order": 2, "frame_kind": "legacy-16bit", "raw": "0x8B10", "action": "go-to-scene" }
   ]
@@ -178,10 +194,11 @@ Draft export shape:
 - [x] Raw DALI-2 input value polling through `sensor poll <addr> [instance]`.
 - [x] Raw 24-bit DALI-2 event parser, 16-bit legacy controller-frame parser,
       and fixed diagnostic event queue.
-- [x] `find switches [seconds]` training from parsed DALI-2 double-press events
-      and legacy 16-bit action frames.
+- [x] `find couplers [seconds]` training from parsed DALI-2 double-press events
+      and legacy 16-bit action frames (CLI currently named `find switches` —
+      rename pending).
 - [x] Richer JSON `export inventory` with cached input instances and learned
-      switch mappings.
+      coupler mappings.
 - [x] Rolling diagnostic capture log with JSON export.
 - [x] `bus check` health snapshot.
 - [x] Query-only `smoke <addr>` pass for one-address bring-up.
