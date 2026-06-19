@@ -1,4 +1,7 @@
 #include "dali_discovery.h"
+#include "dali_memory.h"
+#include "dali_gear_dt6.h"
+#include "dali_gear_dt8.h"
 
 #include <string.h>
 
@@ -8,9 +11,58 @@ typedef DaliError (*DaliDiscoveryInputQueryBuilder)(uint8_t addr,
                                                     uint8_t instance,
                                                     DaliFrame *out);
 
+/* Bridge to DaliMemoryTransport — signatures are identical so the cast is safe. */
+static DaliMemoryTransport to_memory_transport(const DaliDiscoveryTransport *dt)
+{
+    DaliMemoryTransport mt;
+    mt.transact = (DaliMemoryTransactionFn)dt->transact;
+    mt.ctx      = dt->ctx;
+    return mt;
+}
+
+/* Send ENABLE DEVICE TYPE N (no reply) then a query, return the byte. */
+static DaliError discovery_query_dt_typed(const DaliDiscoveryTransport *transport,
+                                          DaliFrame enable,
+                                          const DaliFrame *query,
+                                          uint8_t *out)
+{
+    DaliError err = transport->transact(&enable, false, 0u, false, NULL, transport->ctx);
+    if (err != DALI_OK) {
+        return err;
+    }
+    return dali_discovery_query_u8(transport, query, out);
+}
+
+static DaliError discovery_query_dt6(const DaliDiscoveryTransport *transport,
+                                     const DaliFrame *query,
+                                     uint8_t *out)
+{
+    return discovery_query_dt_typed(transport, dali_dt6_enable(), query, out);
+}
+
+static DaliError discovery_query_dt8(const DaliDiscoveryTransport *transport,
+                                     const DaliFrame *query,
+                                     uint8_t *out)
+{
+    return discovery_query_dt_typed(transport, dali_dt8_enable(), query, out);
+}
+
 static bool transport_valid(const DaliDiscoveryTransport *transport)
 {
     return transport != NULL && transport->transact != NULL;
+}
+
+bool dali_discovery_has_device_type(const DaliDiscoveryDeviceInfo *device, uint8_t type)
+{
+    if (device == NULL || !device->has_device_type) {
+        return false;
+    }
+    for (uint8_t i = 0u; i < device->device_type_count; i++) {
+        if (device->device_types[i] == type) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool scan_error_is_absent(DaliError err)
@@ -237,16 +289,35 @@ static void discovery_enrich_device(const DaliDiscoveryTransport *transport,
                                     uint8_t addr,
                                     DaliDiscoveryDeviceInfo *device)
 {
+    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = addr };
+
     uint16_t groups = 0u;
     if (dali_discovery_query_groups(transport, addr, &groups) == DALI_OK) {
         device->has_groups = true;
         device->groups = groups;
     }
 
+    /* Device type — query primary then loop for additional types. */
     uint8_t type = 0u;
     if (dali_discovery_query_device_type(transport, addr, &type) == DALI_OK) {
         device->has_device_type = true;
         device->device_type = type;
+        device->device_type_count = 1u;
+        device->device_types[0] = type;
+
+        DaliFrame next_q;
+        while (device->device_type_count < DALI_DISCOVERY_MAX_DEVICE_TYPES) {
+            if (dali_control_build_query(target, DALI_CMD_QUERY_NEXT_DEVICE_TYPE,
+                                         0u, &next_q) != DALI_OK) {
+                break;
+            }
+            uint8_t next_type = 0u;
+            if (dali_discovery_query_u8(transport, &next_q, &next_type) != DALI_OK ||
+                next_type == 0xFFu) {
+                break;
+            }
+            device->device_types[device->device_type_count++] = next_type;
+        }
     }
 
     uint8_t version = 0u;
@@ -269,6 +340,70 @@ static void discovery_enrich_device(const DaliDiscoveryTransport *transport,
             device->has_input_device = true;
             device->has_instance_count = true;
             device->instance_count = count;
+        }
+    }
+
+    DaliMemoryTransport mem = to_memory_transport(transport);
+
+    DaliMemoryBank0Identity identity;
+    if (dali_memory_read_bank0_identity(&mem, addr, &identity) == DALI_OK) {
+        device->has_identity = true;
+        device->identity = identity;
+    }
+
+    DaliMemoryBank1Identity bank1;
+    if (dali_memory_read_bank1_identity(&mem, addr, &bank1) == DALI_OK) {
+        device->has_bank1 = true;
+        device->bank1 = bank1;
+    }
+
+    /* Scene levels — 0xFF means scene not configured ("MASK"). */
+    for (uint8_t scene = 0u; scene < DALI_SCENE_COUNT; scene++) {
+        DaliFrame scene_q;
+        if (dali_control_build_query(target, DALI_CMD_QUERY_SCENE_LEVEL,
+                                      scene, &scene_q) != DALI_OK) {
+            continue;
+        }
+        uint8_t scene_level = 0u;
+        if (dali_discovery_query_u8(transport, &scene_q, &scene_level) == DALI_OK) {
+            device->scene_levels[scene] = scene_level;
+            device->has_scene_levels = true;
+        }
+    }
+
+    if (dali_discovery_has_device_type(device, 6u)) {
+        uint8_t failure = 0u;
+        DaliFrame fail_q = dali_dt6_query_failure_status(addr);
+        if (discovery_query_dt6(transport, &fail_q, &failure) == DALI_OK) {
+            device->has_dt6 = true;
+            device->dt6_failure_status = failure;
+        }
+
+        uint8_t features = 0u;
+        DaliFrame feat_q = dali_dt6_query_features(addr);
+        if (discovery_query_dt6(transport, &feat_q, &features) == DALI_OK) {
+            device->dt6_features = features;
+        }
+    }
+
+    if (dali_discovery_has_device_type(device, 8u)) {
+        uint8_t gear_features = 0u;
+        DaliFrame gf_q = dali_dt8_query_gear_features_status(addr);
+        if (discovery_query_dt8(transport, &gf_q, &gear_features) == DALI_OK) {
+            device->has_dt8 = true;
+            device->dt8_gear_features = gear_features;
+        }
+
+        uint8_t colour_status = 0u;
+        DaliFrame cs_q = dali_dt8_query_colour_status(addr);
+        if (discovery_query_dt8(transport, &cs_q, &colour_status) == DALI_OK) {
+            device->dt8_colour_status = colour_status;
+        }
+
+        uint8_t type_features = 0u;
+        DaliFrame tf_q = dali_dt8_query_colour_type_features(addr);
+        if (discovery_query_dt8(transport, &tf_q, &type_features) == DALI_OK) {
+            device->dt8_colour_type_features = type_features;
         }
     }
 }

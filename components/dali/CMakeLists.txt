@@ -12,8 +12,12 @@ idf_component_register(
         "dali_lunatone.c"
         "dali_steinel.c"
         "dali_mapping.c"
+        "dali_memory.c"
+        "dali_gear_dt6.c"
+        "dali_gear_dt8.c"
+        "dali_input_config.c"
         "dali_control.c"
-        "dali_diag.c"
+       
     INCLUDE_DIRS "."
     REQUIRES
         driver

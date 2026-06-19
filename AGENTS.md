@@ -42,11 +42,34 @@ DALI bus
 
 `components/dali` is the reusable protocol, scheduler, and PHY stack.
 `main/main.c` is the native ESP-IDF diagnostic entry point.
+`main/dali_diag.c/.h` is the diagnostic serial CLI — app-specific, deliberately
+not in `components/dali` because nothing in the reusable stack depends on it.
 `esphome/dali_esphome.h` is a stub until hardware validation is complete.
 
 Do not put protocol, timing, sensor, or addressing logic into ESPHome entities.
 The ESPHome layer should map configured entities to `DaliTarget` values and call
 the control/protocol APIs.
+
+### What lives where
+
+| Module | Location | Reason |
+|---|---|---|
+| Protocol, PHY, scheduler, discovery, memory, DT6, DT8, input config | `components/dali` | Reusable, no app dependencies |
+| `dali_mapping` | `components/dali` | Generic enough to stay; move to `main/` if the component is published separately |
+| `dali_diag` | `main/` | App-specific CLI; no component depends on it |
+| `main.c` | `main/` | App entry point |
+
+### Device type coverage
+
+| DT | Standard | Status |
+|---:|---|---|
+| DT6 | IEC 62386-207 | Implemented (`dali_gear_dt6`) |
+| DT8 | IEC 62386-209 | Implemented (`dali_gear_dt8`) |
+| DT1 | IEC 62386-202 | **Not implemented** — fluorescent gear, limited new-install relevance; add when needed following the DT6/DT8 pattern |
+
+Input device instance types DT301 (push button), DT303 (occupancy), and DT304
+(light sensor) are covered by `dali_input_config` for configuration commands.
+Query commands for all instance types are in `dali_input_device`.
 
 ## Timing And ISR Rules
 

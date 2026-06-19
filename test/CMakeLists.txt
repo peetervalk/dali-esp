@@ -29,6 +29,10 @@ set(DALI_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_lunatone.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_steinel.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_mapping.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_memory.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_gear_dt6.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_gear_dt8.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_input_config.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_control.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_scheduler.c
 )
@@ -60,5 +64,9 @@ add_dali_test(test_discovery test_discovery.c)
 add_dali_test(test_commissioning test_commissioning.c)
 add_dali_test(test_vendor     test_vendor.c)
 add_dali_test(test_mapping    test_mapping.c)
+add_dali_test(test_memory     test_memory.c)
+add_dali_test(test_gear_dt6    test_gear_dt6.c)
+add_dali_test(test_gear_dt8    test_gear_dt8.c)
+add_dali_test(test_input_config test_input_config.c)
 add_dali_test(test_control    test_control.c)
 add_dali_test(test_scheduler  test_scheduler.c)

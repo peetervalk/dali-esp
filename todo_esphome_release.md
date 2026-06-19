@@ -83,6 +83,96 @@ dali:
       event: double_press
 ```
 
+## ESPHome Integration Design Notes
+
+Notes from reviewing jorticus/esphome-dali and general ESPHome patterns.
+Capture these before starting so we don't rediscover them the hard way.
+
+### Entity types needed
+
+| HA domain | DALI concept | Notes |
+|---|---|---|
+| `light` | Control gear (DT6, DT8) | Brightness + colour temp for DT8 Tc gear |
+| `sensor` | Input device instance values | Brightness lux, temperature, humidity |
+| `binary_sensor` | Occupancy/motion instance | DT303 presence output |
+| `button` | Scene recall | "Recall scene N" on a DALI target |
+| `output` | Raw DALI level (broadcast) | Simpler than a full light for broadcast-only |
+
+### Dynamic entity creation
+
+For the discovery firmware, auto-create entities from scan results rather than
+requiring fully static YAML. Approach: run `dali_discovery_scan` at boot with
+`discovery: true`, then register one `light` per found control gear device.
+
+This is the same pattern jorticus uses and is the right UX — users shouldn't
+have to know short addresses in advance.
+
+### Addressing in YAML
+
+Expose the full `DaliTarget` model in entity config:
+
+```yaml
+target:
+  type: short   # or group, broadcast
+  address: 12
+```
+
+Groups and broadcast must be first-class options, not special-cased values.
+Capability queries (device type, DT8 features) are only possible with short
+addresses — document this clearly.
+
+### Commissioning flag
+
+Expose `initialize_addresses: true` as a one-shot YAML option that calls
+`dali_commissioning_run()` at first boot (or when no assigned devices are
+found). This avoids requiring users to run the serial `commission` command.
+
+### Colour temperature slider range
+
+For DT8 Tc devices, expose the physical limits from discovery (QueryColourValue
+Tc_min/Tc_max) as the slider bounds. Also accept user-override in YAML:
+
+```yaml
+cold_white_color_temperature: 4000K
+warm_white_color_temperature: 2700K
+```
+
+Without this, the Home Assistant UI defaults to a nonsense 153–500 Mirek range
+that doesn't match the gear's actual capability.
+
+### Restore-on-boot mode
+
+ESPHome light entities need an explicit restore policy or they come up in unknown
+state. Default to `RESTORE_DEFAULT_ON` for control gear lights. Add a YAML
+override for installations that require lights to stay off after a power cycle
+(e.g. safety-critical environments).
+
+### Scene recall button entity
+
+We query and store scene levels during discovery — wire that up as ESPHome
+`button` entities ("Recall scene 3 on group 0"). This is a real use case for
+zone-level preset control (e.g. "presentation mode", "evening dim") that plain
+brightness sliders don't cover.
+
+### ESPHome version compatibility
+
+ESPHome breaks external component APIs regularly between major releases. The
+jorticus project needed a fix for ESPHome 2026.4 and ESPHome 2026.6 was also
+a significant change. Mitigate this by:
+- Keeping the ESPHome layer as thin as possible (entity wrappers only, no
+  protocol logic).
+- Pinning the minimum compatible ESPHome version in `manifest.json`.
+- Not starting full ESPHome integration until the native firmware is hardware-
+  proven — the protocol layer cannot be re-tested if ESPHome breakage occupies
+  the debug cycle.
+
+### What NOT to put in ESPHome entities
+
+- Frame building or raw DALI opcodes — use the `DaliControl` API.
+- Timing constants or retry logic — belongs in the scheduler.
+- Any awareness of DT6/DT8 opcode specifics.
+- Discovery logic — run that at boot and hand results to the entity layer.
+
 ## Boundaries
 
 - Do not require the end user to install ESP-IDF.

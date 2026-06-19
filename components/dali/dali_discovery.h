@@ -9,6 +9,9 @@
 
 #include "dali_control.h"
 #include "dali_input_device.h"
+#include "dali_memory.h"
+
+#define DALI_DISCOVERY_MAX_DEVICE_TYPES  4u
 
 typedef DaliError (*DaliDiscoveryTransactionFn)(const DaliFrame *frame,
                                                 bool needs_reply,
@@ -34,7 +37,9 @@ typedef struct {
     bool                     has_groups;
     uint16_t                 groups;        /* bitmask: bit N set means member of group N */
     bool                     has_device_type;
-    uint8_t                  device_type;
+    uint8_t                  device_type;           /* primary — same as device_types[0] */
+    uint8_t                  device_type_count;
+    uint8_t                  device_types[DALI_DISCOVERY_MAX_DEVICE_TYPES];
     bool                     has_version;
     uint8_t                  version;
     bool                     has_actual_level;
@@ -42,6 +47,19 @@ typedef struct {
     bool                     has_input_device;
     bool                     has_instance_count;
     uint8_t                  instance_count;
+    bool                     has_identity;
+    DaliMemoryBank0Identity  identity;
+    bool                     has_bank1;
+    DaliMemoryBank1Identity  bank1;
+    bool                     has_scene_levels;
+    uint8_t                  scene_levels[DALI_SCENE_COUNT];
+    bool                     has_dt6;
+    uint8_t                  dt6_failure_status;
+    uint8_t                  dt6_features;
+    bool                     has_dt8;
+    uint8_t                  dt8_gear_features;
+    uint8_t                  dt8_colour_status;
+    uint8_t                  dt8_colour_type_features;
 } DaliDiscoveryDeviceInfo;
 
 typedef struct {
@@ -53,6 +71,9 @@ typedef struct {
 typedef void (*DaliDiscoveryFoundCb)(uint8_t addr,
                                      const DaliDiscoveryDeviceInfo *device,
                                      void *ctx);
+
+/* Return true if device has the given device type in its type list. */
+bool dali_discovery_has_device_type(const DaliDiscoveryDeviceInfo *device, uint8_t type);
 
 DaliError dali_discovery_inventory_reset(DaliDiscoveryInventory *inventory);
 const DaliDiscoveryDeviceInfo *dali_discovery_inventory_get(
