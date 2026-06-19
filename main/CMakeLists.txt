@@ -1,5 +1,9 @@
 idf_component_register(
-    SRCS "dali_diag.c" "main.c"
+    SRCS
+        "main.c"
+        "dali_diag.c"
     INCLUDE_DIRS "."
-    REQUIRES dali
+    REQUIRES
+        dali
+        esp_driver_uart
 )

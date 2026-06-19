@@ -23,7 +23,6 @@ idf_component_register(
         driver
         esp_driver_gpio
         esp_driver_gptimer
-        esp_driver_uart
         esp_timer
         freertos
 )
