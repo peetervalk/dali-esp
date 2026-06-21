@@ -28,3 +28,7 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# ESPHome
+secrets.yaml
+.esphome/

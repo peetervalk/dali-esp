@@ -37,8 +37,107 @@ Struct: replace flat `DiagSwitchMapping[]` with `DiagSwitchZone[]` (zone key = k
 up to 4 action frames per zone). JSON export nests actions under zones.
 See conversation from 2026-06-21 for full sketch.
 
+## Quiescent mode
+
+The Tridonic DALI MC datasheet lists compliance as "IEC 60929 (DALI V0) and IEC 62386
+(DALI V1)". QUIESCENT MODE is a DALI-2 Part 103 (input device) command — these devices
+are not Part 103 compliant on paper. The Lunatone software sends it, but likely targets
+DALI-2 devices elsewhere on the same bus, not the MC couplers specifically.
+Worth sending anyway (a 24-bit frame is ignored by DALI-1 gear, harmless). Test
+experimentally: send QUIESCENT MODE, press a button, check if frames still appear.
+
+## Potential option: ESPHome integration via non-actionable phantom frames
+
+"MC" = Multi-Controller — these couplers send DALI commands directly to the bus, making
+them autonomous controllers. To integrate cleanly with ESPHome (where the ESP32 decides
+what to do on a button press), the couplers need to send frames that are IDENTIFIABLE
+but NOT ACTIONABLE. This would in essence make them not a controller — buttons would
+have no effect if the ESP32 is offline.
+
+### Approach A — GO TO SCENE on MASK scenes
+
+DALI devices default to MASK (0xFF) for unprogrammed scene slots. RECALL SCENE N where
+all fixtures have scene N = MASK → devices receive the frame, do nothing, ESP32 gets
+a clean trigger.
+
+- Assign each button a unique scene number (e.g. ON buttons → scenes 8–14,
+  or encode zone via group address + scene number)
+- First verify: `query s0 scene-level 8` through `scene-level 15` on several fixtures
+  to confirm those slots are MASK
+- 16 scenes × possible group targeting gives enough encoding space for 14 buttons
+
+### Approach B — Commands to unused short addresses (recommended)
+
+Scan confirmed addresses 0–15 occupied, 16–63 free. Assign each zone a phantom address:
+
+```
+Zone (group 6):  RECALL MAX → short addr 16   (ON button)
+                 OFF        → short addr 16   (OFF button)
+Zone (group 7):  RECALL MAX → short addr 17
+                 OFF        → short addr 17
+... (7 zones → short addrs 16–22)
+```
+
+No fixtures at those addresses → completely inert on the bus. ESP32 decodes: address =
+zone, command = action. Unambiguous, no scene audit needed.
+
+### Implementation
+
+Both approaches require reprogramming the couplers via **Macro 8** (Tridonic DALI MC:
+user-defined COT file, up to 10 commands per button) using masterCONFIGURATOR software.
+
+### Trade-off and failure modes
+
+With current BF6: the bus works with zero masters — lamps respond to buttons even if
+the ESP32 is unplugged. Phantom frames break this.
+
+Three scenarios to decide on before committing:
+
+| Scenario | Current BF6 | Phantom frames |
+|---|---|---|
+| ESP32 up, ESPHome connected | Lights respond immediately; ESPHome informed after the fact | ESPHome owns the action; clean |
+| ESP32 up, ESPHome disconnected | Lights still respond (coupler is master) | **Nothing happens** unless ESP32 firmware applies fallback translation |
+| ESP32 dead, bus PSU live | Lights respond (coupler is master) | **Nothing happens** — no translation possible |
+
+**Firmware failsafe for scenario 2:** The ESP32 can detect ESPHome connection loss and
+apply a local mapping table (phantom short addr 16 → RECALL MAX to group 6, etc.).
+Switches still control lights without smart logic. This should be implemented if phantom
+frames are adopted.
+
+**Scenario 3 is an accepted risk for this installation.** The DALI-1 PB couplers are
+aging hardware well past their early-life period and are statistically more likely to
+fail than a new ESP32 devkit. In a single-owner home installation where the only person
+changing the system is the owner, scenario 3 (ESP32 dead) is an acceptable dependency.
+
+> **Caveat for anyone reusing this codebase in a different context:** if the installation
+> requires physical switches to work without any DALI master present (e.g. rental
+> property, commercial space, or safety-critical lighting), phantom frames are the wrong
+> approach. Keep the couplers in BF6 or equivalent direct-control mode and use the ESP32
+> purely as an observer/recorder.
+
+### Power-on level and system failure level
+
+Currently lamps go to MAX after a power cut (POWER ON LEVEL = MASK → device default).
+First button press after power cut with BF6 may send `recall-max` (no visible change)
+or `off` — this is the expected DALI-1 toggle behavior.
+
+With phantom frames, the power-on level decision becomes independent:
+- Set `POWER ON LEVEL = 0` → lamps off after power cut → need ESP32 to turn on
+- Set `POWER ON LEVEL = 254` → lamps at max → buttons only work if ESP32 is up (scenario 3)
+- Keeping POWER ON LEVEL at MASK/max + firmware failsafe (scenario 2 fix) is probably
+  the most robust combination.
+
+**Diag shell already supports:** `config b set-power-on-dtr0 <0-255>` (broadcast to all gear).
+**Gap:** `DALI_CMD_SET_SYSTEM_FAILURE_LEVEL_DTR0` exists in the protocol but is not
+exposed in the diag config spec table — add it alongside set-power-on-dtr0.
+
 ## Open questions
 
 - For HA: one entity per zone (7) or one per action (14)?
 - How to handle button holds, double-press, or scene recalls from the same coupler?
-- QUIESCENT MODE during `scan` — worth sending even if DALI-1 devices ignore it?
+- Confirm masterCONFIGURATOR COT file format for Macro 8 before reprogramming
+- Decide on phantom-frame approach before reprogramming (can't easily undo without
+  the software and cable on-site again)
+- Add set-system-failure-dtr0 to diag config spec table (small gap, one line)
+- Implement ESP32 firmware failsafe: when ESPHome disconnects, translate phantom frames
+  to real DALI group commands using the stored zone mapping

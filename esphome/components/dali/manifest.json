@@ -1,0 +1,11 @@
+{
+  "name": "dali",
+  "description": "DALI-2 control gear and input device integration for Home Assistant via ESPHome",
+  "url": "https://github.com/peetervalk/dali-esp",
+  "codeowners": ["@peetervalk"],
+  "config_flow": false,
+  "dependencies": [],
+  "multi_conf": false,
+  "requires_idf": true,
+  "esphome_version": ">=2024.6.0"
+}

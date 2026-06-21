@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-06-21
+**Last updated:** 2026-06-22
 **Framework:** ESP-IDF v6.0.1 native CMake
 **Hardware target:** ESP32-DevKitC-VE / ESP32-WROVER-E + MikroE DALI-2 Click
 
@@ -91,6 +91,31 @@ full bidirectional DALI communication is confirmed on a live installation bus.
 controller has been removed. Run `scan`; expect the sensor at a new address with
 `kind: "input_device"` and 4 instances (brightness, motion, temperature, humidity).
 
+**Session 2026-06-22 — ESPHome component scaffold created:**
+
+- **`esphome/components/dali/`** — external ESPHome component created with:
+  - `__init__.py` — component schema (tx_pin, rx_pin integers)
+  - `CMakeLists.txt` — IDF registration; uses `file(GLOB)` to compile the protocol
+    `.c` files from `components/dali/` as C (not C++) with correct IDF REQUIRES
+  - `dali_component.h/.cpp` — `DaliComponent` ESPHome class; `setup()` calls
+    `dali_phy_init()` + `dali_sched_init_device()` then starts the DALI FreeRTOS
+    task pinned to Core 1 (App CPU) at priority 10
+  - `dali_protocol_unity.cpp` — fallback unity build (inactive by default); use
+    if ESPHome ignores the CMakeLists and the build fails with missing symbols
+  - `manifest.json` — version pin >= 2024.6.0
+  - `light/__init__.py` — light platform schema (target_type: group/short/broadcast,
+    target_address)
+  - `light/dali_light_output.h/.cpp` — `DaliLightOutput` maps ESPHome brightness
+    float 0–1 to DALI arc level 1–254; off → `dali_control_off()`
+- **`dali_bus1.yaml`** — test config for the first bus; 7 group entities (groups
+  0/2/3/4/5/6/7) matching the live scan; uses IDF framework, references the local
+  component via `external_components`
+- **`secrets.yaml`** — placeholder template (gitignored)
+
+Thread-safety prerequisite confirmed in previous session: `dali_sched_enqueue()`
+uses a `portMUX_TYPE` spinlock → safe to call from ESPHome loop task (Core 0)
+while DALI task runs on Core 1.
+
 ### Terminology note
 
 "Pushbutton coupler" is the correct term for devices that inject DALI bus
@@ -99,18 +124,21 @@ Home Assistant uses "switch" for a binary on/off toggle entity.
 
 ## Immediate Priorities
 
-1. Bring up the Steinel HF 360 II: connect to a bus without an existing master,
+1. **First ESPHome build test.** Fill in `secrets.yaml`, run
+   `esphome compile dali_bus1.yaml` on the free ESP32 (not the one running diag
+   firmware). If CMakeLists.txt is not picked up → link error on `dali_phy_init`
+   → activate unity build fallback (add `dali_protocol_unity.cpp` to CMakeLists
+   SRCS or wait for ESPHome auto-discovery to find it in the component dir).
+2. Exercise control gear via ESPHome: toggle groups via HA, confirm lamp response.
+3. Bring up the Steinel HF 360 II: connect to a bus without an existing master,
    run `scan`, confirm 4 instances decode correctly.
-2. Exercise control gear: `max`, `min`, `off`, `level` commands against the live
-   16-device bus; confirm lamp response matches DALI commands.
-3. Only after native diagnostics are reliable: ESPHome-flashable diagnostic
-   firmware (`todo_esphome_release.md`).
-4. Legacy pushbutton coupler zone grouping — see `todo_pb_couplers.md`.
+4. Add `set-system-failure-dtr0` to diag config spec table (small gap, one line).
+5. Legacy pushbutton coupler zone grouping — see `todo_pb_couplers.md`.
 
 ## Architecture
 
 ```text
-ESPHome / Home Assistant integration      (stub)
+ESPHome / Home Assistant integration      (component scaffold + test YAML ✓)
 DALI entity mapping / release integration (mapping helpers ready, release future)
 DALI discovery / inventory helpers        (implemented, hardware-verified ✓)
 DaliControl                               (implemented)

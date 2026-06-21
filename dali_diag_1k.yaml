@@ -1,0 +1,57 @@
+# DALI diagnostic firmware — first floor bus
+# Flash this to discover the bus, then use the logged YAML snippet to build dali_1k.yaml.
+#
+# Workflow:
+#   1. esphome run dali_diag_1k.yaml
+#   2. Press "Scan DALI Bus" button in Home Assistant (or ESPHome device page)
+#   3. Watch the log output in HA → ESPHome → dali-diag-1k → Logs
+#      (or: esphome logs dali_diag_1k.yaml)
+#   4. Copy the "Draft ESPHome YAML" block from the logs into dali_1k.yaml
+#   5. Replace "Group N" with real room names, then flash dali_1k.yaml
+
+esphome:
+  name: dali-diag
+  friendly_name: "DALI Diagnostic"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: esphome/components
+
+wifi:
+  ssid: !secret wifi_ssid2
+  password: !secret wifi_password
+  ap:
+    ssid: "dali-diag-1k-ap"
+    password: !secret ap_password
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+  level: INFO  # scan output is at INFO — increase to DEBUG for PHY-level tracing
+
+# ── DALI bus ──────────────────────────────────────────────────────────────────
+dali:
+  id: dali_bus
+  tx_pin: 18
+  rx_pin: 19
+  scan_status:
+    name: "Scan Status"
+
+# ── Discovery button ──────────────────────────────────────────────────────────
+button:
+  - platform: dali
+    dali_id: dali_bus
+    name: "Scan DALI Bus"
+    icon: "mdi:magnify-scan"
