@@ -2671,7 +2671,7 @@ static void cmd_inventory(void)
 {
 #ifndef DALI_HOST_BUILD
     uint8_t found = 0u;
-    DaliDiscoveryInventory inventory;
+    static DaliDiscoveryInventory inventory;
 
     if (!diag_inventory_snapshot(&inventory)) {
         printf("inventory: empty; run discover first\r\n");
@@ -2894,9 +2894,9 @@ static void cmd_export(const char *args)
 #ifndef DALI_HOST_BUILD
     char what[16] = {0};
     char extra[2] = {0};
-    DaliDiscoveryInventory inventory;
+    static DaliDiscoveryInventory inventory;
     bool has_inventory;
-    DiagSwitchMapping mappings[DIAG_SWITCH_MAPPING_MAX];
+    static DiagSwitchMapping mappings[DIAG_SWITCH_MAPPING_MAX];
     uint8_t mapping_count;
 
     if (sscanf(args, "%15s %1s", what, extra) != 1 ||

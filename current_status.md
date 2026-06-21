@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-06-19
+**Last updated:** 2026-06-21
 **Framework:** ESP-IDF v6.0.1 native CMake
 **Hardware target:** ESP32-DevKitC-VE / ESP32-WROVER-E + MikroE DALI-2 Click
 
@@ -58,12 +58,38 @@ discovery mock asserts `send_twice = false` on all frames.
 ### On hardware
 
 The ESP32 boots cleanly, the diagnostic shell is reachable over COM6, and
-bidirectional DALI communication with Lunatone is confirmed: passive RX decodes
-correctly and Lunatone confirms ESP-originated TX. The MikroE DALI-2 Click
-optocoupler inversion is handled in the PHY.
+full bidirectional DALI communication is confirmed on a live installation bus.
 
-**The next milestone is 8-bit device replies.** Once reply RX is solid, the
-Steinel HF 360 II sensor and DALI-2 instance discovery follow.
+**Session 2026-06-21 — major hardware milestones reached:**
+
+- **8-bit reply RX working.** Root cause of 0-device scan was `DALI_SETTLE_MS = 7`
+  (equal to the DALI spec minimum answer time). The PHY suppress window was armed
+  in task context, adding FreeRTOS scheduling latency and pushing the deadline past
+  the 7 ms boundary. Fix: reduced to 2 ms and moved suppress-window setup into the
+  TX ISR for precise timing. `rx_settle_suppressed` counter now stays at 0.
+
+- **Full bus scan confirmed.** `scan` + `export inventory` enumerated 16 control
+  gear on a live installation (addresses 0–15). Address 0 = DT6 LED driver;
+  addresses 1–15 = generic DALI-1 gear (device type 0xFF, no DT classification).
+  Six devices lit at level 254 (status 0x04 = lamp arc on), remainder off. Reply
+  timing clean at ~13–14 ms.
+
+- **`export inventory` stack overflow fixed.** `DaliDiscoveryInventory` (~5–6 KB)
+  was stack-allocated in `cmd_export` and `cmd_inventory`, overflowing the 8 KB
+  diag task stack. Fixed by making both locals `static`.
+
+- **Legacy pushbutton couplers detected.** `find switches` passive-listen found
+  7 physical switches (14 unique frames) from two Lunatone/Tridonic DALI MC PB
+  couplers with BF6 function. Each switch targets a DALI group with a `recall-max`
+  (on) and `off` frame. Groups in use: 0, 2, 3, 4, 5, 6, 7. Improvement backlog
+  in `todo_pb_couplers.md`.
+
+- **Multi-master note.** The ESP32 has no collision detection and must be the sole
+  master on any bus it controls. Remove existing controllers before connecting.
+
+**Next milestone: Steinel HF 360 II.** Connect to a bus where the existing
+controller has been removed. Run `scan`; expect the sensor at a new address with
+`kind: "input_device"` and 4 instances (brightness, motion, temperature, humidity).
 
 ### Terminology note
 
@@ -73,24 +99,24 @@ Home Assistant uses "switch" for a binary on/off toggle entity.
 
 ## Immediate Priorities
 
-1. TX pattern sweep with Lunatone only: `max b`, `min b`, `raw 0xFE80 len=16`,
-   `raw 0xFF05 len=16`.
-2. Add one known DALI control gear; run `scan` and confirm 8-bit replies decode.
-3. Compare ESP frames and replies against Lunatone DALI Cockpit captures.
-4. Bring up the Steinel HF 360 II after control gear replies are stable.
-5. Only after native diagnostics are reliable: ESPHome-flashable diagnostic
+1. Bring up the Steinel HF 360 II: connect to a bus without an existing master,
+   run `scan`, confirm 4 instances decode correctly.
+2. Exercise control gear: `max`, `min`, `off`, `level` commands against the live
+   16-device bus; confirm lamp response matches DALI commands.
+3. Only after native diagnostics are reliable: ESPHome-flashable diagnostic
    firmware (`todo_esphome_release.md`).
+4. Legacy pushbutton coupler zone grouping — see `todo_pb_couplers.md`.
 
 ## Architecture
 
 ```text
 ESPHome / Home Assistant integration      (stub)
 DALI entity mapping / release integration (mapping helpers ready, release future)
-DALI discovery / inventory helpers        (implemented, host-tested)
+DALI discovery / inventory helpers        (implemented, hardware-verified ✓)
 DaliControl                               (implemented)
 DaliProtocol                              (implemented, hardware sensor polling pending)
 DaliScheduler                             (implemented, host-tested)
-DaliPhy                                   (implemented, hardware-verified for TX/RX baseline)
+DaliPhy                                   (implemented, hardware-verified TX+RX ✓)
 DaliRingBuf                               (implemented, host-tested)
 DALI-2 Click
 DALI bus

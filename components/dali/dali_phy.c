@@ -491,8 +491,17 @@ static bool IRAM_ATTR dali_phy_tx_isr(gptimer_handle_t timer,
     s_tx_tick_count = 0u;
 
     if (s_tx_half_bit_idx >= s_tx_total_half_bits) {
-        /* All half-bits sent */
+        /* All half-bits sent — bus released to idle. */
         gpio_set_level(s_tx_gpio, tx_pin_level_for_bus_level(1u));
+
+        /* Arm the settle-suppression window from the ISR so the deadline is
+         * precise (no FreeRTOS scheduling jitter).  The window must expire
+         * well before the 7 ms DALI minimum answer time. */
+        uint32_t ts_us = (uint32_t)(esp_timer_get_time() & RX_TS_MASK);
+        s_rx_suppress_until_us = (ts_us + (uint32_t)DALI_SETTLE_MS * 1000u) & RX_TS_MASK;
+        __asm__ __volatile__("" ::: "memory");
+        s_rx_settle_suppression_active = 1u;
+
         s_tx_state = DALI_PHY_TX_DONE;
         BaseType_t higher_prio_woken = pdFALSE;
         if (s_tx_notify_task != NULL) {
@@ -681,11 +690,8 @@ DaliError dali_phy_tx(const DaliFrame *frame)
     }
 
     gptimer_stop(s_gptimer);
-    s_rx_suppress_until_us = (tx_rx_timestamp_us() +
-                              (uint32_t)DALI_SETTLE_MS * 1000u) & RX_TS_MASK;
-    __asm__ __volatile__("" ::: "memory");
-    s_rx_settle_suppression_active = 1u;
     s_tx_state = DALI_PHY_TX_IDLE;
+    /* Settle suppression was armed in the TX ISR at the precise TX-done moment. */
     ESP_LOGD(TAG, "TX done");
 #else
     /* On host: simulate instant completion */
