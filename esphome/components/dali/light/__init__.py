@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import light
-from esphome.const import CONF_OUTPUT_ID
+from esphome.components.light import LightType
 
 from .. import DaliComponent, dali_ns
 
@@ -20,9 +20,8 @@ TARGET_TYPES = {
     "broadcast": 2,   # DALI_ADDR_BROADCAST
 }
 
-CONFIG_SCHEMA = light.BRIGHTNESS_ONLY_LIGHT_SCHEMA.extend(
+CONFIG_SCHEMA = light.light_schema(DaliLightOutput, LightType.BRIGHTNESS_ONLY).extend(
     {
-        cv.GenerateID(CONF_OUTPUT_ID): cv.declare_id(DaliLightOutput),
         cv.GenerateID(CONF_DALI_ID): cv.use_id(DaliComponent),
         cv.Required(CONF_TARGET_TYPE): cv.enum(TARGET_TYPES, lower=True),
         cv.Optional(CONF_TARGET_ADDRESS, default=0): cv.int_range(min=0, max=63),
@@ -31,10 +30,9 @@ CONFIG_SCHEMA = light.BRIGHTNESS_ONLY_LIGHT_SCHEMA.extend(
 
 
 async def to_code(config):
-    output = cg.new_Pvariable(config[CONF_OUTPUT_ID])
-    await light.register_light(output, config)
+    var = await light.new_light(config)
 
-    # Ensure the parent DaliComponent is registered (creates the include dep)
+    # Ensure the parent DaliComponent is a build dependency
     await cg.get_variable(config[CONF_DALI_ID])
 
-    cg.add(output.set_target(config[CONF_TARGET_TYPE], config[CONF_TARGET_ADDRESS]))
+    cg.add(var.set_target(config[CONF_TARGET_TYPE], config[CONF_TARGET_ADDRESS]))

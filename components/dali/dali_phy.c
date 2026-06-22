@@ -98,8 +98,8 @@ static void             *s_rx_callback_ctx;
 /* ---------------------------------------------------------------------------
  * GPIO configuration
  * --------------------------------------------------------------------------*/
-static uint8_t s_tx_gpio;
-static uint8_t s_rx_gpio;
+static gpio_num_t s_tx_gpio;
+static gpio_num_t s_rx_gpio;
 
 /* ---------------------------------------------------------------------------
  * GPTIMER handle
@@ -557,8 +557,8 @@ static void IRAM_ATTR dali_phy_rx_isr(void *arg)
 
 DaliError dali_phy_init(uint8_t tx_gpio, uint8_t rx_gpio)
 {
-    s_tx_gpio = tx_gpio;
-    s_rx_gpio = rx_gpio;
+    s_tx_gpio = (gpio_num_t)tx_gpio;
+    s_rx_gpio = (gpio_num_t)rx_gpio;
 
     memset(&g_dali_stats, 0, sizeof(g_dali_stats));
 

@@ -2,15 +2,11 @@
 
 #include <stdint.h>
 
-// Forward declaration — avoids pulling DaliComponent into the scan task headers
-namespace esphome { namespace dali { class DaliComponent; } }
+namespace esphome {
+namespace dali {
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+class DaliComponent;
+void dali_scan_start(DaliComponent *component);
 
-void dali_scan_start(esphome::dali::DaliComponent *component);
-
-#ifdef __cplusplus
-}
-#endif
+}  // namespace dali
+}  // namespace esphome

@@ -9,7 +9,7 @@
 
 #define DALI_RANDOM_ADDRESS_LIMIT (DALI_RANDOM_ADDRESS_MAX + 1u)
 
-static bool transport_valid(const DaliDiscoveryTransport *transport)
+static bool comm_transport_valid(const DaliDiscoveryTransport *transport)
 {
     return transport != NULL && transport->transact != NULL;
 }
@@ -21,7 +21,7 @@ static DaliError transact_frame(const DaliDiscoveryTransport *transport,
                                 bool send_twice,
                                 DaliFrame *reply_out)
 {
-    if (!transport_valid(transport) || frame == NULL) {
+    if (!comm_transport_valid(transport) || frame == NULL) {
         return DALI_ERR_INVALID;
     }
 
@@ -122,7 +122,7 @@ DaliError dali_commissioning_set_search_address(
     const DaliDiscoveryTransport *transport,
     uint32_t random_address)
 {
-    if (!transport_valid(transport) || random_address > DALI_RANDOM_ADDRESS_MAX) {
+    if (!comm_transport_valid(transport) || random_address > DALI_RANDOM_ADDRESS_MAX) {
         return DALI_ERR_INVALID;
     }
 
@@ -151,7 +151,7 @@ DaliError dali_commissioning_set_search_address(
 DaliError dali_commissioning_compare(const DaliDiscoveryTransport *transport,
                                      bool *yes_out)
 {
-    if (!transport_valid(transport) || yes_out == NULL) {
+    if (!comm_transport_valid(transport) || yes_out == NULL) {
         return DALI_ERR_INVALID;
     }
 
@@ -174,7 +174,7 @@ DaliError dali_commissioning_find_next_random_address(
     uint32_t *random_address_out,
     bool *found_out)
 {
-    if (!transport_valid(transport) ||
+    if (!comm_transport_valid(transport) ||
         random_address_out == NULL ||
         found_out == NULL) {
         return DALI_ERR_INVALID;
@@ -223,7 +223,7 @@ DaliError dali_commissioning_program_short_address(
     const DaliDiscoveryTransport *transport,
     uint8_t short_address)
 {
-    if (!transport_valid(transport) || short_address >= DALI_SHORT_ADDRESS_COUNT) {
+    if (!comm_transport_valid(transport) || short_address >= DALI_SHORT_ADDRESS_COUNT) {
         return DALI_ERR_INVALID;
     }
 
@@ -238,7 +238,7 @@ DaliError dali_commissioning_verify_short_address(
     uint8_t short_address,
     bool *verified_out)
 {
-    if (!transport_valid(transport) ||
+    if (!comm_transport_valid(transport) ||
         short_address >= DALI_SHORT_ADDRESS_COUNT ||
         verified_out == NULL) {
         return DALI_ERR_INVALID;
@@ -266,7 +266,7 @@ DaliError dali_commissioning_query_short_address(
     const DaliDiscoveryTransport *transport,
     uint8_t *encoded_out)
 {
-    if (!transport_valid(transport) || encoded_out == NULL) {
+    if (!comm_transport_valid(transport) || encoded_out == NULL) {
         return DALI_ERR_INVALID;
     }
 
@@ -369,7 +369,7 @@ DaliError dali_commissioning_commission_unaddressed(
     DaliCommissioningProgressCb progress_cb,
     void *progress_ctx)
 {
-    if (!transport_valid(transport) || options == NULL || out == NULL ||
+    if (!comm_transport_valid(transport) || options == NULL || out == NULL ||
         options->first_short_address >= DALI_SHORT_ADDRESS_COUNT) {
         return DALI_ERR_INVALID;
     }

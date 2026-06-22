@@ -19,7 +19,7 @@ DaliFrame dali_memory_build_read(uint8_t short_addr)
     return frame;
 }
 
-static bool transport_valid(const DaliMemoryTransport *transport)
+static bool mem_transport_valid(const DaliMemoryTransport *transport)
 {
     return transport != NULL && transport->transact != NULL;
 }
@@ -53,7 +53,7 @@ DaliError dali_memory_read_byte(const DaliMemoryTransport *transport,
                                 uint8_t offset,
                                 uint8_t *out)
 {
-    if (!transport_valid(transport) || out == NULL) {
+    if (!mem_transport_valid(transport) || out == NULL) {
         return DALI_ERR_INVALID;
     }
 
@@ -80,7 +80,7 @@ DaliError dali_memory_read_bytes(const DaliMemoryTransport *transport,
                                  uint8_t *buf,
                                  uint8_t count)
 {
-    if (!transport_valid(transport) || buf == NULL) {
+    if (!mem_transport_valid(transport) || buf == NULL) {
         return DALI_ERR_INVALID;
     }
     if (count == 0u) {
@@ -113,7 +113,7 @@ DaliError dali_memory_read_bank0_identity(const DaliMemoryTransport *transport,
                                           uint8_t short_addr,
                                           DaliMemoryBank0Identity *out)
 {
-    if (!transport_valid(transport) || out == NULL) {
+    if (!mem_transport_valid(transport) || out == NULL) {
         return DALI_ERR_INVALID;
     }
 
@@ -142,7 +142,7 @@ DaliError dali_memory_read_bank1_identity(const DaliMemoryTransport *transport,
                                           uint8_t short_addr,
                                           DaliMemoryBank1Identity *out)
 {
-    if (!transport_valid(transport) || out == NULL) {
+    if (!mem_transport_valid(transport) || out == NULL) {
         return DALI_ERR_INVALID;
     }
 

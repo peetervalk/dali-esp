@@ -1,9 +1,15 @@
 #include "dali_component.h"
 #include "dali_scan.h"
 #include "esphome/core/log.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+extern "C" {
+#include "../../../components/dali/dali_phy.h"
+#include "../../../components/dali/dali_scheduler.h"
+}
 
 namespace esphome {
 namespace dali {

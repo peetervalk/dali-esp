@@ -1,14 +1,12 @@
 #pragma once
 
 #include "esphome/core/component.h"
-#include "esphome/components/text_sensor/text_sensor.h"
 
 #include <atomic>
 
-extern "C" {
-#include "dali_phy.h"
-#include "dali_scheduler.h"
-}
+// Forward declaration — avoids pulling in the full text_sensor component header
+// here. dali_component.cpp does the real include.
+namespace esphome { namespace text_sensor { class TextSensor; } }
 
 namespace esphome {
 namespace dali {

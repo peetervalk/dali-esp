@@ -10,8 +10,8 @@
 #include <cstring>
 
 extern "C" {
-#include "dali_discovery.h"
-#include "dali_scheduler.h"
+#include "../../../components/dali/dali_discovery.h"
+#include "../../../components/dali/dali_scheduler.h"
 }
 
 namespace esphome {
