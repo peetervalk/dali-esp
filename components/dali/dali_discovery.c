@@ -440,6 +440,26 @@ DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
         if (!scan_error_is_absent(err)) {
             return err;
         }
+        /* No gear status reply — try QUERY NUMBER OF INSTANCES to detect a
+         * pure DALI-2 input device that has no control gear (Part 303). */
+        DaliFrame inst_q;
+        uint8_t count = 0u;
+        if (dali_input_build_query_number_of_instances(addr, &inst_q) == DALI_OK &&
+            dali_discovery_query_u8(transport, &inst_q, &count) == DALI_OK &&
+            count > 0u) {
+            DaliDiscoveryDeviceInfo *device = &inventory->devices[addr];
+            if (!device->present) {
+                inventory->found_count++;
+            }
+            device->present          = true;
+            device->has_input_device = true;
+            device->has_instance_count = true;
+            device->instance_count   = count;
+            discovery_enrich_device(transport, addr, device);
+            if (found_cb != NULL) {
+                found_cb(addr, device, found_ctx);
+            }
+        }
     }
 
     inventory->valid = true;

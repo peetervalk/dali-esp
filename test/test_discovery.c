@@ -179,8 +179,9 @@ void test_scan_records_responders_and_callback(void)
      *  groups-0-7(1), device_type(1), version(1), actual_level(1), num_instances(1),
      *  bank0: DTR1(1)+DTR0(1)+READ(1),
      *  bank1: DTR1(1)+DTR0(1)+READ(1),
-     *  scene-levels: QUERY_SCENE_LEVEL 0-15(16) */
-    TEST_ASSERT_EQUAL_UINT32(DALI_SHORT_ADDRESS_COUNT + 2u * 27u, s_bus.tx_count);
+     *  scene-levels: QUERY_SCENE_LEVEL 0-15(16)
+     * + 62 QUERY_NUMBER_OF_INSTANCES probes for the 62 absent addresses */
+    TEST_ASSERT_EQUAL_UINT32(2u * DALI_SHORT_ADDRESS_COUNT + 2u * 27u - 2u, s_bus.tx_count);
     TEST_ASSERT_EQUAL_UINT32(2u, s_bus.found_cb_count);
     TEST_ASSERT_EQUAL_UINT8(12u, s_bus.found_cb_last_addr);
 
@@ -225,7 +226,9 @@ void test_scan_aborts_on_bus_error(void)
 
     TEST_ASSERT_FALSE(inventory.valid);
     TEST_ASSERT_EQUAL_UINT8(99u, found);
-    TEST_ASSERT_EQUAL_UINT32(5u, s_bus.tx_count);
+    /* 5 status queries (0..4) + 4 instance probes for absent addresses 0..3
+     * before the bus-error at address 4 terminates the scan. */
+    TEST_ASSERT_EQUAL_UINT32(9u, s_bus.tx_count);
 }
 
 void test_query_status_rejects_bad_reply_width(void)
@@ -480,6 +483,33 @@ void test_scan_detects_input_device_by_instance_count(void)
     TEST_ASSERT_TRUE(device->has_input_device);
     TEST_ASSERT_TRUE(device->has_instance_count);
     TEST_ASSERT_EQUAL_UINT8(2u, device->instance_count);
+}
+
+/* Pure input device: does NOT answer QUERY STATUS (no gear), but does answer
+ * QUERY NUMBER OF INSTANCES. Covers the Steinel-style pure control device. */
+void test_scan_detects_pure_input_device_without_gear_status(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+
+    /* addr 3 is NOT in s_bus.present[], so QUERY STATUS returns DALI_ERR_TIMEOUT. */
+
+    /* addr 3: address byte = (3<<1)|1 = 0x07
+     * QUERY NUMBER OF INSTANCES: data = (0x07 << 16) | (0xFE << 8) | 0x35 = 0x07FE35 */
+    add_reply(0x07FE35u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 3u, DALI_BACKWARD_FRAME_BITS);
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    TEST_ASSERT_EQUAL_UINT8(1u, found);
+    const DaliDiscoveryDeviceInfo *device = dali_discovery_inventory_get(&inventory, 3u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_TRUE(device->present);
+    TEST_ASSERT_FALSE(device->has_status);  /* no gear status */
+    TEST_ASSERT_TRUE(device->has_input_device);
+    TEST_ASSERT_TRUE(device->has_instance_count);
+    TEST_ASSERT_EQUAL_UINT8(3u, device->instance_count);
 }
 
 void test_scan_tolerates_group_query_timeout(void)
@@ -828,6 +858,7 @@ int main(void)
     RUN_TEST(test_query_groups_returns_bitmask);
     RUN_TEST(test_scan_stores_group_membership);
     RUN_TEST(test_scan_detects_input_device_by_instance_count);
+    RUN_TEST(test_scan_detects_pure_input_device_without_gear_status);
     RUN_TEST(test_scan_tolerates_group_query_timeout);
     RUN_TEST(test_scan_enriches_dt6_device);
     RUN_TEST(test_scan_skips_dt6_enrichment_for_non_dt6_devices);

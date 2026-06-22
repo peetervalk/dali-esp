@@ -20,12 +20,26 @@ TARGET_TYPES = {
     "broadcast": 2,   # DALI_ADDR_BROADCAST
 }
 
-CONFIG_SCHEMA = light.light_schema(DaliLightOutput, LightType.BRIGHTNESS_ONLY).extend(
-    {
-        cv.GenerateID(CONF_DALI_ID): cv.use_id(DaliComponent),
-        cv.Required(CONF_TARGET_TYPE): cv.enum(TARGET_TYPES, lower=True),
-        cv.Optional(CONF_TARGET_ADDRESS, default=0): cv.int_range(min=0, max=63),
-    }
+def _validate_target_address(config):
+    if config.get(CONF_TARGET_TYPE) == TARGET_TYPES["group"]:
+        addr = config.get(CONF_TARGET_ADDRESS, 0)
+        if addr > 15:
+            raise cv.Invalid(
+                f"target_address for group must be 0-15, got {addr}",
+                [CONF_TARGET_ADDRESS],
+            )
+    return config
+
+
+CONFIG_SCHEMA = cv.All(
+    light.light_schema(DaliLightOutput, LightType.BRIGHTNESS_ONLY).extend(
+        {
+            cv.GenerateID(CONF_DALI_ID): cv.use_id(DaliComponent),
+            cv.Required(CONF_TARGET_TYPE): cv.enum(TARGET_TYPES, lower=True),
+            cv.Optional(CONF_TARGET_ADDRESS, default=0): cv.int_range(min=0, max=63),
+        }
+    ),
+    _validate_target_address,
 )
 
 

@@ -21,8 +21,19 @@ static const char *TAG = "dali.scan";
 
 // ---------------------------------------------------------------------------
 // Sync transport — mirrors diag_sched_sync() in dali_diag.c.
-// Enqueues a frame and blocks the calling task until the scheduler completes it.
-// Safe to call from any task; one call at a time per task (local stack ctx).
+//
+// Two-phase slot release prevents use-after-timeout corruption:
+//   • On timeout the caller clears waiting_task (under the spinlock) but
+//     leaves in_use = true so the slot cannot be reused.
+//   • The callback checks waiting_task under the spinlock: if it is null the
+//     caller already timed out, so the callback just clears in_use and returns
+//     without calling xTaskNotifyGive.
+//   • Only when both sides agree (callback sets complete = true while
+//     waiting_task is still set) does the caller read the result and clear
+//     in_use on its own.
+//
+// This guarantees the callback never writes into a slot that a new transaction
+// is already using.
 // ---------------------------------------------------------------------------
 
 struct ScanSyncCtx {
@@ -30,15 +41,39 @@ struct ScanSyncCtx {
     DaliError    result;
     DaliFrame    reply;
     bool         has_reply;
+    bool         in_use;
+    bool         complete;
 };
+
+static portMUX_TYPE  s_scan_mux  = portMUX_INITIALIZER_UNLOCKED;
+static ScanSyncCtx   s_scan_slot = {};
 
 static void scan_sync_cb(DaliError result, const DaliFrame *reply, void *raw_ctx) {
     ScanSyncCtx *ctx = static_cast<ScanSyncCtx *>(raw_ctx);
+    TaskHandle_t notify_task = nullptr;
+
+    taskENTER_CRITICAL(&s_scan_mux);
     ctx->result    = result;
     ctx->has_reply = (reply != nullptr);
     if (reply) ctx->reply = *reply;
-    // Notify AFTER writing result so the unblocked task sees valid data.
-    xTaskNotifyGive(ctx->waiting_task);
+    ctx->complete  = true;
+    if (ctx->waiting_task != nullptr) {
+        notify_task = ctx->waiting_task;
+    } else {
+        // Caller timed out and cleared waiting_task; release slot here.
+        ctx->in_use = false;
+    }
+    taskEXIT_CRITICAL(&s_scan_mux);
+
+    if (notify_task) xTaskNotifyGive(notify_task);
+}
+
+static bool scan_sync_complete() {
+    bool done;
+    taskENTER_CRITICAL(&s_scan_mux);
+    done = s_scan_slot.complete;
+    taskEXIT_CRITICAL(&s_scan_mux);
+    return done;
 }
 
 static DaliError scan_sync_transact(const DaliFrame *frame,
@@ -47,14 +82,23 @@ static DaliError scan_sync_transact(const DaliFrame *frame,
                                     bool             send_twice,
                                     DaliFrame       *reply_out,
                                     void *           /*transport_ctx*/) {
-    // Flush any stale notification that arrived before this call.
-    ulTaskNotifyTake(pdTRUE, 0);
+    // Guard against a previous transaction's callback not having fired yet.
+    // Under normal conditions in_use clears within microseconds of a timeout.
+    taskENTER_CRITICAL(&s_scan_mux);
+    if (s_scan_slot.in_use) {
+        taskEXIT_CRITICAL(&s_scan_mux);
+        return DALI_ERR_BUSY;
+    }
+    s_scan_slot.waiting_task = xTaskGetCurrentTaskHandle();
+    s_scan_slot.result       = DALI_ERR_TIMEOUT;
+    s_scan_slot.reply        = {};
+    s_scan_slot.has_reply    = false;
+    s_scan_slot.in_use       = true;
+    s_scan_slot.complete     = false;
+    taskEXIT_CRITICAL(&s_scan_mux);
 
-    ScanSyncCtx sync = {
-        .waiting_task = xTaskGetCurrentTaskHandle(),
-        .result       = DALI_ERR_TIMEOUT,
-        .has_reply    = false,
-    };
+    // Flush any stale task notification before we start waiting.
+    ulTaskNotifyTake(pdTRUE, 0);
 
     DaliTransaction txn = {
         .frame        = *frame,
@@ -62,20 +106,51 @@ static DaliError scan_sync_transact(const DaliFrame *frame,
         .send_twice   = send_twice,
         .retries_left = retries_left,
         .on_complete  = scan_sync_cb,
-        .cb_ctx       = &sync,
+        .cb_ctx       = &s_scan_slot,
     };
 
-    DaliError err = dali_sched_enqueue(&txn);
-    if (err != DALI_OK) return err;
-
-    // Block until the scheduler's completion callback wakes us.
-    // 500 ms is generous — longest DALI query round-trip is ~50 ms.
-    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500)) == 0) {
-        return DALI_ERR_TIMEOUT;
+    DaliError enq = dali_sched_enqueue(&txn);
+    if (enq != DALI_OK) {
+        taskENTER_CRITICAL(&s_scan_mux);
+        s_scan_slot.in_use = false;
+        taskEXIT_CRITICAL(&s_scan_mux);
+        return enq;
     }
 
-    if (reply_out && sync.has_reply) *reply_out = sync.reply;
-    return sync.result;
+    // Wait up to 500 ms. Re-check complete after each wakeup to handle
+    // spurious notifications. 500 ms >> longest DALI round-trip (~50 ms).
+    const TickType_t wait_ticks = pdMS_TO_TICKS(500);
+    const TickType_t start      = xTaskGetTickCount();
+    while (!scan_sync_complete()) {
+        TickType_t elapsed = xTaskGetTickCount() - start;
+        if (elapsed >= wait_ticks) break;
+        ulTaskNotifyTake(pdTRUE, wait_ticks - elapsed);
+    }
+
+    // Read result and perform two-phase release under the spinlock.
+    DaliError result = DALI_ERR_TIMEOUT;
+    DaliFrame reply  = {};
+    bool      has_reply = false;
+    bool      completed = false;
+
+    taskENTER_CRITICAL(&s_scan_mux);
+    completed = s_scan_slot.complete;
+    if (completed) {
+        result    = s_scan_slot.result;
+        has_reply = s_scan_slot.has_reply;
+        reply     = s_scan_slot.reply;
+        s_scan_slot.waiting_task = nullptr;
+        s_scan_slot.in_use       = false;
+        s_scan_slot.complete     = false;
+    } else {
+        // Timed out. Clear waiting_task so the callback knows not to notify us
+        // and will clear in_use itself when it eventually fires.
+        s_scan_slot.waiting_task = nullptr;
+    }
+    taskEXIT_CRITICAL(&s_scan_mux);
+
+    if (completed && reply_out && has_reply) *reply_out = reply;
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,13 +185,10 @@ static void log_inventory_json(const DaliDiscoveryInventory *inv) {
 
         ESP_LOGI(TAG, "  %s{ \"address\": %u, \"groups\": %s, \"kind\": \"%s\","
                       " \"device_type\": %u, \"actual_level\": %u }",
-                 first ? "" : "",
+                 first ? "" : ",",
                  (unsigned)addr, groups_str, kind,
                  (unsigned)(d->has_device_type ? d->device_type : 0xFFu),
                  (unsigned)(d->has_actual_level ? d->actual_level : 0u));
-        if (!first) {
-            // Trailing comma note: not strictly valid JSON but readable in logs
-        }
         first = false;
     }
     ESP_LOGI(TAG, "] }");

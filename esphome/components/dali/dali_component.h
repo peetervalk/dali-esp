@@ -42,8 +42,8 @@ class DaliComponent : public Component {
 
   std::atomic<bool>    scan_done_{false};
   std::atomic<bool>    scan_running_{false};
-  uint8_t              scan_count_{0};
-  bool                 scan_success_{false};
+  std::atomic<uint8_t> scan_count_{0};
+  std::atomic<bool>    scan_success_{false};
 };
 
 }  // namespace dali
