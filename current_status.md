@@ -91,26 +91,46 @@ full bidirectional DALI communication is confirmed on a live installation bus.
 controller has been removed. Run `scan`; expect the sensor at a new address with
 `kind: "input_device"` and 4 instances (brightness, motion, temperature, humidity).
 
-**Session 2026-06-22 — ESPHome component scaffold created:**
+**Session 2026-06-22 — ESPHome component built and both firmwares compile:**
 
-- **`esphome/components/dali/`** — external ESPHome component created with:
-  - `__init__.py` — component schema (tx_pin, rx_pin integers)
-  - `CMakeLists.txt` — IDF registration; uses `file(GLOB)` to compile the protocol
-    `.c` files from `components/dali/` as C (not C++) with correct IDF REQUIRES
+- **`esphome/components/dali/`** — external ESPHome component:
+  - `__init__.py` — component schema (tx_pin, rx_pin, optional scan_status text
+    sensor); `AUTO_LOAD = ["text_sensor"]`
+  - `CMakeLists.txt` — IDF registration for native builds; `file(GLOB)` compiles
+    protocol `.c` files as C with correct REQUIRES. **Not used by ESPHome's
+    PlatformIO build** (ESPHome 2026.6 ignores it and auto-discovers sources).
+  - `proto_dali_*.c` — 17 thin one-line wrapper `.c` files (one per protocol
+    source file). PlatformIO picks these up automatically and compiles each `.c`
+    file as C in its own translation unit — avoiding the static-name clashes and
+    C99/C++ incompatibilities that made a unity `.cpp` build unworkable.
   - `dali_component.h/.cpp` — `DaliComponent` ESPHome class; `setup()` calls
     `dali_phy_init()` + `dali_sched_init_device()` then starts the DALI FreeRTOS
     task pinned to Core 1 (App CPU) at priority 10
-  - `dali_protocol_unity.cpp` — fallback unity build (inactive by default); use
-    if ESPHome ignores the CMakeLists and the build fails with missing symbols
-  - `manifest.json` — version pin >= 2024.6.0
-  - `light/__init__.py` — light platform schema (target_type: group/short/broadcast,
-    target_address)
+  - `dali_scan.h/.cpp` — scan task spawned on demand (Core 1, priority 9);
+    synchronous transport via `ulTaskNotifyTake`; logs full JSON inventory and a
+    draft ESPHome YAML snippet
+  - `button/__init__.py` + `button/dali_scan_button.h` — "Scan DALI Bus" button
+  - `light/__init__.py` — light platform schema; `LightType.BRIGHTNESS_ONLY`
+    (required in ESPHome 2026.6)
   - `light/dali_light_output.h/.cpp` — `DaliLightOutput` maps ESPHome brightness
     float 0–1 to DALI arc level 1–254; off → `dali_control_off()`
-- **`dali_bus1.yaml`** — test config for the first bus; 7 group entities (groups
-  0/2/3/4/5/6/7) matching the live scan; uses IDF framework, references the local
-  component via `external_components`
-- **`secrets.yaml`** — placeholder template (gitignored)
+- **`dali_diag.yaml`** — diagnostic/discovery firmware; scan_status text sensor +
+  "Scan DALI Bus" button; WiFi AP + captive portal for field access without
+  pre-configured Wi-Fi
+- **`dali_1k.yaml`** — first-floor control firmware; 7 group light entities
+  (groups 0/2/3/4/5/6/7) matching the live scan; WiFi AP + captive portal fallback
+- **`secrets.yaml`** — gitignored; contains Wi-Fi credentials, API key, OTA and
+  AP passwords
+
+**Both `dali_diag.yaml` and `dali_1k.yaml` compile successfully** against
+ESPHome 2026.6.2 / IDF 5.5.4 (PlatformIO wrapper).
+
+Notable ESPHome 2026.6 API fixes applied during this session:
+- `text_sensor.TEXT_SENSOR_SCHEMA` → `text_sensor.text_sensor_schema()`
+- `button.BUTTON_SCHEMA` → `button.button_schema(Cls)` + `button.new_button()`
+- `light.light_schema(Cls)` → `light.light_schema(Cls, LightType.BRIGHTNESS_ONLY)`
+- `cg.add_global_arg()` removed — include paths handled by per-file relative paths
+- `LightTraits.set_supports_brightness()` removed → `set_supported_color_modes({ColorMode::BRIGHTNESS})`
 
 Thread-safety prerequisite confirmed in previous session: `dali_sched_enqueue()`
 uses a `portMUX_TYPE` spinlock → safe to call from ESPHome loop task (Core 0)
@@ -124,12 +144,10 @@ Home Assistant uses "switch" for a binary on/off toggle entity.
 
 ## Immediate Priorities
 
-1. **First ESPHome build test.** Fill in `secrets.yaml`, run
-   `esphome compile dali_bus1.yaml` on the free ESP32 (not the one running diag
-   firmware). If CMakeLists.txt is not picked up → link error on `dali_phy_init`
-   → activate unity build fallback (add `dali_protocol_unity.cpp` to CMakeLists
-   SRCS or wait for ESPHome auto-discovery to find it in the component dir).
-2. Exercise control gear via ESPHome: toggle groups via HA, confirm lamp response.
+1. **Flash and test `dali_diag.yaml`.** Press "Scan DALI Bus" in HA; verify JSON
+   inventory and draft YAML appear in logs. Confirm scan_status sensor updates.
+2. **Flash and test `dali_1k.yaml`.** Toggle each of the 7 group lights from HA;
+   confirm lamp response. Verify brightness slider maps correctly (arc level 1–254).
 3. Bring up the Steinel HF 360 II: connect to a bus without an existing master,
    run `scan`, confirm 4 instances decode correctly.
 4. Add `set-system-failure-dtr0` to diag config spec table (small gap, one line).
@@ -230,6 +248,16 @@ Expected instances:
 | DALI-2 firmware update / DFU | Out of scope. |
 
 ## Build Commands
+
+ESPHome (from project root, `secrets.yaml` must be filled):
+
+```powershell
+esphome compile dali_diag.yaml   # diagnostic/discovery firmware
+esphome compile dali_1k.yaml     # first-floor control firmware
+
+esphome run dali_diag.yaml       # compile + flash + open log
+esphome logs dali_diag.yaml      # attach to running device log
+```
 
 Native ESP-IDF:
 

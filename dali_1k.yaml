@@ -19,11 +19,10 @@ external_components:
 wifi:
   ssid: !secret wifi_ssid2
   password: !secret wifi_password
-  # Static IP optional — set if DHCP reservation not available
-  # manual_ip:
-  #   static_ip: 192.168.1.xx
-  #   gateway: 192.168.1.1
-  #   subnet: 255.255.255.0
+  ap:
+    ssid: "dali-1k-ap"
+    password: !secret ap_password
+captive_portal:
 
 api:
   encryption:
