@@ -1,12 +1,14 @@
 #include "dali_component.h"
 #include "dali_scan.h"
-#include "light/dali_light_output.h"
 #include "esphome/core/log.h"
-#include "esphome/core/hal.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+#include <cstdio>
+#include <cstring>
+#include <string>
 
 extern "C" {
 #include "../../../components/dali/dali_phy.h"
@@ -24,10 +26,6 @@ static const char *TAG = "dali";
 
 /* ── Headless dispatch state ─────────────────────────────────────────────── */
 
-/*
- * Weak default: no dispatch table.  dali_headless.cpp provides the strong
- * override with the installation-specific mapping entries.
- */
 extern "C" __attribute__((weak))
 const DaliDispatchEntry *dali_headless_get_table(uint8_t *out_count)
 {
@@ -38,22 +36,18 @@ const DaliDispatchEntry *dali_headless_get_table(uint8_t *out_count)
 static const DaliDispatchEntry *s_dispatch_table = nullptr;
 static uint8_t                  s_dispatch_count  = 0;
 static DaliDispatchToggleState  s_toggle_state    = {};
+static DaliInputEventQueue      s_event_queue;
 
-/*
- * Raw input-event queue — populated by the unsolicited-RX callback (still in
- * the DALI task) and drained after dali_sched_run() each tick.  Both sides
- * run on the same task (Core 1), so no mutex is needed.
- */
-static DaliInputEventQueue s_event_queue;
+static std::atomic<bool> s_deferred_query_pending_{false};
 
 /* ── Light registry ──────────────────────────────────────────────────────── */
 
 static constexpr uint8_t MAX_LIGHT_ENTITIES = 32u;
 
 struct LightEntry {
-    uint8_t          target_type;    /* DaliAddressType cast to uint8_t */
-    uint8_t          target_address;
-    DaliLightOutput *light;
+    uint8_t       target_type;
+    uint8_t       target_address;
+    DaliBusLight *light;
 };
 
 static LightEntry s_light_registry[MAX_LIGHT_ENTITIES];
@@ -61,7 +55,11 @@ static uint8_t    s_light_count = 0u;
 
 static void notify_lights(const DaliDispatchResult *res)
 {
-    if (!res->has_state) return;
+    if (!res->has_state) {
+        if (res->matched)
+            s_deferred_query_pending_.store(true, std::memory_order_release);
+        return;
+    }
     for (uint8_t i = 0u; i < s_light_count; i++) {
         LightEntry &e = s_light_registry[i];
         bool match = (e.target_type == (uint8_t)res->target.type) &&
@@ -74,22 +72,114 @@ static void notify_lights(const DaliDispatchResult *res)
 static void on_level_query_reply(DaliError result, const DaliFrame *reply, void *ctx)
 {
     if (result != DALI_OK || reply == nullptr) return;
-    uint8_t level = (uint8_t)(reply->data & 0xFFu);
-    static_cast<DaliLightOutput *>(ctx)->mark_state_from_bus(level != 0u, level);
+    LightEntry *e     = static_cast<LightEntry *>(ctx);
+    uint8_t     level = (uint8_t)(reply->data & 0xFFu);
+    bool        is_on = (level != 0u);
+    e->light->mark_state_from_bus(is_on, level);
+    DaliTarget output;
+    output.type    = static_cast<DaliAddressType>(e->target_type);
+    output.address = e->target_address;
+    dali_dispatch_seed_toggle(&s_toggle_state, output, is_on);
 }
+
+/* ── Bus monitor (Core 1 → Core 0) ──────────────────────────────────────── */
+
+static char              s_bus_monitor_str[48] = {};
+static std::atomic<bool> s_bus_monitor_dirty_{false};
+
+/* ── Find-couplers recording (Core 1 writes, Core 0 reads) ──────────────── */
+
+struct CouplerFrame {
+    uint8_t frame_kind;
+    uint8_t addr_kind;
+    uint8_t address;
+    uint8_t event_code;
+};
+static constexpr uint8_t    MAX_COUPLER_FRAMES = 32u;
+static CouplerFrame          s_coupler_frames[MAX_COUPLER_FRAMES];
+static std::atomic<uint8_t>  s_coupler_count_{0};
+static std::atomic<bool>     s_find_couplers_active_{false};
+
+/* ── Scan result pending (Core 1 → Core 0 via scan_done_ gate) ──────────── */
+
+static char s_scan_result_str[128] = {};
+
+/* ── Helpers ─────────────────────────────────────────────────────────────── */
+
+static const char *opcode_name(uint8_t op)
+{
+    switch (op) {
+        case 0x00u: return "off";
+        case 0x01u: return "up";
+        case 0x02u: return "down";
+        case 0x03u: return "step-up";
+        case 0x04u: return "step-down";
+        case 0x05u: return "max";
+        case 0x06u: return "min";
+        case 0x07u: return "step-off";
+        case 0x08u: return "on-step";
+        case 0x0Au: return "go-last";
+        default:
+            if (op >= 0x10u && op <= 0x1Fu) return "scene";
+            return "cmd";
+    }
+}
+
+static void format_event(char *buf, size_t len, const DaliInputEvent *e)
+{
+    const char *pfx = (e->address_kind == DALI_EVENT_ADDRESS_GROUP)     ? "g"
+                    : (e->address_kind == DALI_EVENT_ADDRESS_BROADCAST)  ? "bc"
+                                                                         : "a";
+    if (e->address_kind == DALI_EVENT_ADDRESS_BROADCAST) {
+        snprintf(buf, len, "bc %s", opcode_name(e->event_code));
+    } else {
+        snprintf(buf, len, "%s%u %s", pfx, (unsigned)e->address,
+                 opcode_name(e->event_code));
+    }
+}
+
+/* ── Unsolicited-RX callback (runs on Core 1, in the DALI task) ─────────── */
 
 static void on_dali_unsolicited(const DaliFrame *frame, void * /*ctx*/)
 {
     DaliInputEvent event;
     if (dali_event_parse_frame(frame, &event) != DALI_OK) return;
 
+    /* Bus monitor: format and signal Core 0. */
+    format_event(s_bus_monitor_str, sizeof(s_bus_monitor_str), &event);
+    s_bus_monitor_dirty_.store(true, std::memory_order_release);
+
+    /* Find-couplers: record unique frames while the window is open. */
+    if (s_find_couplers_active_.load(std::memory_order_relaxed)) {
+        uint8_t cnt = s_coupler_count_.load(std::memory_order_relaxed);
+        bool dup = false;
+        for (uint8_t i = 0u; i < cnt; i++) {
+            if (s_coupler_frames[i].frame_kind == (uint8_t)event.frame_kind &&
+                s_coupler_frames[i].addr_kind  == (uint8_t)event.address_kind &&
+                s_coupler_frames[i].address    == event.address &&
+                s_coupler_frames[i].event_code == event.event_code) {
+                dup = true;
+                break;
+            }
+        }
+        if (!dup && cnt < MAX_COUPLER_FRAMES) {
+            s_coupler_frames[cnt].frame_kind  = (uint8_t)event.frame_kind;
+            s_coupler_frames[cnt].addr_kind   = (uint8_t)event.address_kind;
+            s_coupler_frames[cnt].address     = event.address;
+            s_coupler_frames[cnt].event_code  = event.event_code;
+            /* Release ensures all field writes are visible before the count. */
+            s_coupler_count_.store(cnt + 1u, std::memory_order_release);
+        }
+    }
+
+    /* Push to event queue for headless dispatch. */
     DaliInputEventRecord rec;
     rec.event        = event;
-    rec.timestamp_us = 0; /* timestamp not critical for dispatch */
+    rec.timestamp_us = 0u;
     dali_event_queue_push(&s_event_queue, &rec);
 }
 
-/* ── DALI task ───────────────────────────────────────────────────────────── */
+/* ── DALI task (Core 1) ──────────────────────────────────────────────────── */
 
 static void dali_task(void *)
 {
@@ -98,16 +188,16 @@ static void dali_task(void *)
         dali_phy_rx_process();
         dali_sched_run();
 
-        /* Drain event queue and dispatch — runs after dali_sched_run() so we
-         * never call dali_sched_enqueue() re-entrantly from inside it. */
-        if (s_dispatch_table != nullptr) {
-            DaliInputEventRecord rec;
-            while (dali_event_queue_pop(&s_event_queue, &rec)) {
+        /* Always drain the event queue to prevent overflow.
+         * Only dispatch if a headless table is loaded. */
+        DaliInputEventRecord rec;
+        while (dali_event_queue_pop(&s_event_queue, &rec)) {
+            if (s_dispatch_table != nullptr && s_dispatch_count > 0u) {
                 DaliDispatchResult result = {};
                 DaliError err = dali_dispatch(s_dispatch_table, s_dispatch_count,
                                               &rec.event, &s_toggle_state, &result);
                 if (err != DALI_OK) {
-                    ESP_LOGD(TAG, "dispatch err %d (frame_kind=%d addr_kind=%d addr=%d op=0x%02x)",
+                    ESP_LOGD(TAG, "dispatch err %d (fk=%d ak=%d a=%d op=0x%02x)",
                              (int)err,
                              (int)rec.event.frame_kind,
                              (int)rec.event.address_kind,
@@ -148,8 +238,6 @@ void DaliComponent::setup()
         ESP_LOGI(TAG, "headless dispatch: %u entries loaded", (unsigned)s_dispatch_count);
     }
 
-    // Pin to Core 1 (APP_CPU) so Wi-Fi / network stack on Core 0 doesn't
-    // create scheduling pressure on the DALI bit-timing task.
     xTaskCreatePinnedToCore(dali_task, "dali", 4096, nullptr, 10, nullptr, 1);
 
     if (scan_status_) scan_status_->publish_state("Idle");
@@ -159,18 +247,17 @@ void DaliComponent::setup()
 
 void DaliComponent::loop()
 {
-    /* Drain bus state updates from dispatch / query callbacks (Core 1 → Core 0). */
-    for (uint8_t i = 0u; i < s_light_count; i++) {
+    /* ── Bus state from snooping / query replies ── */
+    for (uint8_t i = 0u; i < s_light_count; i++)
         s_light_registry[i].light->apply_bus_state();
-    }
 
-    /* Issue boot queries once, after all entity setup has completed. */
+    /* ── Boot query ── */
     if (!boot_query_done_) {
         boot_query_done_ = true;
         start_refresh();
     }
 
-    /* Periodic state poll. */
+    /* ── Periodic poll ── */
     if (poll_interval_s_ > 0u) {
         uint32_t now = millis();
         if ((uint32_t)(now - last_poll_ms_) >= poll_interval_s_ * 1000u) {
@@ -179,20 +266,98 @@ void DaliComponent::loop()
         }
     }
 
+    /* ── Deferred query after dim/scene ── */
+    if (s_deferred_query_pending_.load(std::memory_order_acquire)) {
+        s_deferred_query_pending_.store(false, std::memory_order_relaxed);
+        deferred_query_armed_  = true;
+        deferred_query_arm_ms_ = millis();
+    }
+    if (deferred_query_armed_ &&
+        (uint32_t)(millis() - deferred_query_arm_ms_) >= 600u) {
+        deferred_query_armed_ = false;
+        start_refresh();
+    }
+
+    /* ── Bus monitor ── */
+    if (bus_monitor_ && s_bus_monitor_dirty_.load(std::memory_order_acquire)) {
+        s_bus_monitor_dirty_.store(false, std::memory_order_relaxed);
+        bus_monitor_->publish_state(s_bus_monitor_str);
+    }
+
+    /* ── Identify blink ── */
+    if (identify_active_) {
+        uint32_t now = millis();
+        if ((uint32_t)(now - identify_last_ms_) >= 500u) {
+            identify_last_ms_ = now;
+            identify_phase_   = !identify_phase_;
+            DaliTarget t;
+            t.type    = DALI_ADDR_SHORT;
+            t.address = diag_address_;
+            if (identify_phase_) dali_control_recall_max(t);
+            else                 dali_control_recall_min(t);
+        }
+        if ((uint32_t)(millis() - identify_start_ms_) >= 10000u)
+            identify_active_ = false;
+    }
+
+    /* ── Find-couplers timer ── */
+    if (s_find_couplers_active_.load(std::memory_order_relaxed) &&
+        (uint32_t)(millis() - find_couplers_end_ms_) < 0x80000000u) {
+        /* Timer elapsed: stop recording, arm one-tick drain. */
+        s_find_couplers_active_.store(false, std::memory_order_release);
+        find_couplers_collect_ = true;
+        if (scan_status_) scan_status_->publish_state("Coupler scan done");
+    } else if (find_couplers_collect_) {
+        /* One tick after clearing active — Core 1 has definitely seen the flag. */
+        find_couplers_collect_ = false;
+        if (couplers_result_) {
+            uint8_t cnt = s_coupler_count_.load(std::memory_order_acquire);
+            if (cnt == 0u) {
+                couplers_result_->publish_state("None");
+            } else {
+                char buf[128] = {};
+                for (uint8_t i = 0u; i < cnt; i++) {
+                    const CouplerFrame &cf = s_coupler_frames[i];
+                    char entry[24];
+                    const char *pfx = (cf.addr_kind == (uint8_t)DALI_EVENT_ADDRESS_GROUP) ? "g"
+                                    : (cf.addr_kind == (uint8_t)DALI_EVENT_ADDRESS_BROADCAST) ? "bc"
+                                                                                               : "a";
+                    if (cf.addr_kind == (uint8_t)DALI_EVENT_ADDRESS_BROADCAST)
+                        snprintf(entry, sizeof(entry), "bc/%s ", opcode_name(cf.event_code));
+                    else
+                        snprintf(entry, sizeof(entry), "%s%u/%s ", pfx,
+                                 (unsigned)cf.address, opcode_name(cf.event_code));
+                    strncat(buf, entry, sizeof(buf) - strlen(buf) - 1u);
+                }
+                couplers_result_->publish_state(buf);
+            }
+        }
+    }
+
+    /* ── Scan complete ── */
     if (!scan_done_.load()) return;
     scan_done_.store(false);
     scan_running_.store(false);
 
+    /* Scan result summary (written from Core 1 before scan_done_ release). */
+    if (scan_result_ && s_scan_result_str[0]) {
+        scan_result_->publish_state(s_scan_result_str);
+        s_scan_result_str[0] = '\0';
+    }
+
     if (scan_status_) {
         if (scan_success_) {
-            scan_status_->publish_state("Found " + std::to_string(scan_count_) + " devices");
+            scan_status_->publish_state(
+                "Found " + std::to_string(scan_count_.load()) + " devices");
         } else {
             scan_status_->publish_state("Scan error");
         }
     }
 }
 
-void DaliComponent::register_light(uint8_t type, uint8_t address, DaliLightOutput *light)
+/* ── Public methods ──────────────────────────────────────────────────────── */
+
+void DaliComponent::register_light(uint8_t type, uint8_t address, DaliBusLight *light)
 {
     if (s_light_count < MAX_LIGHT_ENTITIES) {
         s_light_registry[s_light_count++] = { type, address, light };
@@ -204,13 +369,13 @@ void DaliComponent::register_light(uint8_t type, uint8_t address, DaliLightOutpu
 void DaliComponent::start_refresh()
 {
     for (uint8_t i = 0u; i < s_light_count; i++) {
-        DaliLightOutput *light = s_light_registry[i].light;
-        uint8_t qa = light->get_query_address();
+        LightEntry *e  = &s_light_registry[i];
+        uint8_t     qa = e->light->get_query_address();
         if (qa == 0xFFu) continue;
         DaliTarget qt;
         qt.type    = DALI_ADDR_SHORT;
         qt.address = qa;
-        dali_control_query(qt, DALI_CMD_QUERY_ACTUAL_LEVEL, 0u, on_level_query_reply, light);
+        dali_control_query(qt, DALI_CMD_QUERY_ACTUAL_LEVEL, 0u, on_level_query_reply, e);
     }
 }
 
@@ -224,11 +389,65 @@ void DaliComponent::start_scan()
     dali_scan_start(this);
 }
 
+void DaliComponent::start_identify()
+{
+    if (identify_active_) return;
+    ESP_LOGI(TAG, "Identify: short address %u (10 s)", (unsigned)diag_address_);
+    identify_active_   = true;
+    identify_phase_    = true;
+    identify_start_ms_ = millis();
+    identify_last_ms_  = millis() - 500u;  // fire immediately on first loop tick
+}
+
+void DaliComponent::start_find_couplers()
+{
+    if (s_find_couplers_active_.load()) {
+        ESP_LOGW(TAG, "Coupler scan already running");
+        return;
+    }
+    ESP_LOGI(TAG, "Find couplers: listening for 30 s");
+    s_coupler_count_.store(0u, std::memory_order_relaxed);
+    find_couplers_collect_  = false;
+    find_couplers_end_ms_   = millis() + 30000u;
+    s_find_couplers_active_.store(true, std::memory_order_release);
+    if (scan_status_) scan_status_->publish_state("Listening...");
+}
+
+void DaliComponent::send_diag_on()
+{
+    DaliTarget t{ static_cast<DaliAddressType>(DALI_ADDR_SHORT), diag_address_ };
+    dali_control_recall_max(t);
+}
+
+void DaliComponent::send_diag_off()
+{
+    DaliTarget t{ static_cast<DaliAddressType>(DALI_ADDR_SHORT), diag_address_ };
+    dali_control_off(t);
+}
+
+void DaliComponent::send_diag_max()
+{
+    DaliTarget t{ static_cast<DaliAddressType>(DALI_ADDR_SHORT), diag_address_ };
+    dali_control_recall_max(t);
+}
+
+void DaliComponent::send_diag_min()
+{
+    DaliTarget t{ static_cast<DaliAddressType>(DALI_ADDR_SHORT), diag_address_ };
+    dali_control_recall_min(t);
+}
+
+void DaliComponent::set_scan_result_pending(const char *summary)
+{
+    strncpy(s_scan_result_str, summary, sizeof(s_scan_result_str) - 1u);
+    s_scan_result_str[sizeof(s_scan_result_str) - 1u] = '\0';
+}
+
 void DaliComponent::on_scan_complete(uint8_t count, bool success)
 {
     scan_count_   = count;
     scan_success_ = success;
-    scan_done_.store(true); // loop() picks this up on the next ESPHome tick
+    scan_done_.store(true, std::memory_order_release);
 }
 
 }  // namespace dali

@@ -5,13 +5,16 @@ from esphome.const import CONF_ID
 
 CODEOWNERS = ["@peetervalk"]
 DEPENDENCIES = ["esp32"]
-# Always bundle text_sensor C++ files — we use TextSensor in dali_component.cpp.
 AUTO_LOAD = ["text_sensor"]
 
-CONF_TX_PIN       = "tx_pin"
-CONF_RX_PIN       = "rx_pin"
-CONF_SCAN_STATUS  = "scan_status"
-CONF_POLL_INTERVAL = "poll_interval"
+CONF_TX_PIN          = "tx_pin"
+CONF_RX_PIN          = "rx_pin"
+CONF_SCAN_STATUS     = "scan_status"
+CONF_SCAN_RESULT     = "scan_result"
+CONF_COUPLERS_RESULT = "couplers_result"
+CONF_BUS_MONITOR     = "bus_monitor"
+CONF_POLL_INTERVAL   = "poll_interval"
+CONF_HEADLESS_DISPATCH = "headless_dispatch"
 
 dali_ns = cg.esphome_ns.namespace("dali")
 DaliComponent = dali_ns.class_("DaliComponent", cg.Component)
@@ -21,11 +24,18 @@ CONFIG_SCHEMA = cv.Schema(
         cv.GenerateID(): cv.declare_id(DaliComponent),
         cv.Required(CONF_TX_PIN): cv.int_range(min=0, max=39),
         cv.Required(CONF_RX_PIN): cv.int_range(min=0, max=39),
-        # Optional: shows "Idle" / "Scanning..." / "Found N devices" in HA
+        # Scan-status: "Idle" / "Scanning..." / "Found N devices"
         cv.Optional(CONF_SCAN_STATUS): text_sensor.text_sensor_schema(),
-        # Optional: interval in seconds between automatic QUERY_ACTUAL_LEVEL polls
-        # for lights that have query_address set.  0 or omitted = no polling.
+        # Scan-result: compact last-scan summary persisted in HA
+        cv.Optional(CONF_SCAN_RESULT): text_sensor.text_sensor_schema(),
+        # Couplers-result: unique frames seen during find_couplers window
+        cv.Optional(CONF_COUPLERS_RESULT): text_sensor.text_sensor_schema(),
+        # Bus-monitor: last unsolicited frame (live)
+        cv.Optional(CONF_BUS_MONITOR): text_sensor.text_sensor_schema(),
+        # Optional periodic QUERY_ACTUAL_LEVEL poll in seconds (0 = disabled)
         cv.Optional(CONF_POLL_INTERVAL, default=0): cv.int_range(min=0, max=3600),
+        # Opt-in only: compile the installation-specific local dispatch table.
+        cv.Optional(CONF_HEADLESS_DISPATCH, default=False): cv.boolean,
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -39,8 +49,20 @@ async def to_code(config):
         sens = await text_sensor.new_text_sensor(config[CONF_SCAN_STATUS])
         cg.add(var.set_scan_status_sensor(sens))
 
+    if CONF_SCAN_RESULT in config:
+        sens = await text_sensor.new_text_sensor(config[CONF_SCAN_RESULT])
+        cg.add(var.set_scan_result_sensor(sens))
+
+    if CONF_COUPLERS_RESULT in config:
+        sens = await text_sensor.new_text_sensor(config[CONF_COUPLERS_RESULT])
+        cg.add(var.set_couplers_result_sensor(sens))
+
+    if CONF_BUS_MONITOR in config:
+        sens = await text_sensor.new_text_sensor(config[CONF_BUS_MONITOR])
+        cg.add(var.set_bus_monitor_sensor(sens))
+
     if config[CONF_POLL_INTERVAL] > 0:
         cg.add(var.set_poll_interval(config[CONF_POLL_INTERVAL]))
 
-    # Include path for the protocol stack headers is handled by CMakeLists.txt
-    # (INCLUDE_DIRS "${DALI_IDF_DIR}"). No Python-level flag needed.
+    if config[CONF_HEADLESS_DISPATCH]:
+        cg.add_define("USE_DALI_HEADLESS")

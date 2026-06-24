@@ -11,7 +11,8 @@
 # (see dali_protocol_unity.cpp and the README/todo_esphome_release.md).
 
 set(DALI_IDF_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../components/dali")
-file(GLOB DALI_PROTOCOL_SRCS "${DALI_IDF_DIR}/dali_*.c")
+# CONFIGURE_DEPENDS: re-run CMake automatically when .c files are added/removed.
+file(GLOB DALI_PROTOCOL_SRCS CONFIGURE_DEPENDS "${DALI_IDF_DIR}/dali_*.c")
 
 idf_component_register(
     SRCS
@@ -19,6 +20,10 @@ idf_component_register(
         "dali_scan.cpp"
         "dali_headless.cpp"
         "light/dali_light_output.cpp"
+        # Explicit entry guards against stale glob cache when files are added
+        # after the initial CMake configure. CMake deduplicates if GLOB catches
+        # it too.
+        "${DALI_IDF_DIR}/dali_dispatch.c"
         ${DALI_PROTOCOL_SRCS}
     INCLUDE_DIRS
         "."

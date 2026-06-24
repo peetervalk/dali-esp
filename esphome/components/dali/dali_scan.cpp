@@ -279,6 +279,41 @@ static void scan_task(void *arg) {
     log_inventory_json(&inventory);
     log_yaml_snippet(&inventory);
 
+    /* Build compact summary for the scan_result text sensor.
+     * Format: "16 gear | groups: 0,2,3,4,5,6,7 | 0 input | YAML in logs" */
+    {
+        char     summary[128]   = {};
+        char     grp_buf[48]    = {};
+        uint8_t  gear_count     = 0u;
+        uint8_t  input_count    = 0u;
+        uint16_t groups_seen    = 0u;
+
+        for (uint8_t a = 0u; a < DALI_SHORT_ADDRESS_COUNT; a++) {
+            const DaliDiscoveryDeviceInfo *d = dali_discovery_inventory_get(&inventory, a);
+            if (!d || !d->present) continue;
+            if (d->has_input_device) { input_count++; continue; }
+            gear_count++;
+            if (d->has_groups) groups_seen |= d->groups;
+        }
+
+        /* Build groups string. */
+        bool gfirst = true;
+        for (uint8_t g = 0u; g < 16u; g++) {
+            if (!(groups_seen & (1u << g))) continue;
+            char tmp[6];
+            snprintf(tmp, sizeof(tmp), gfirst ? "%u" : ",%u", (unsigned)g);
+            strncat(grp_buf, tmp, sizeof(grp_buf) - strlen(grp_buf) - 1u);
+            gfirst = false;
+        }
+
+        snprintf(summary, sizeof(summary), "%u gear | grp: %s | %u input | YAML in logs",
+                 (unsigned)gear_count,
+                 grp_buf[0] ? grp_buf : "-",
+                 (unsigned)input_count);
+
+        component->set_scan_result_pending(summary);
+    }
+
     component->on_scan_complete(found, true);
     vTaskDelete(nullptr);
 }

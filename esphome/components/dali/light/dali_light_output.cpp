@@ -1,5 +1,4 @@
 #include "dali_light_output.h"
-#include "../dali_component.h"
 #include "esphome/core/log.h"
 
 #include <cmath>

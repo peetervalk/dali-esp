@@ -1,8 +1,13 @@
 /*
  * dali_headless.cpp — installation-specific button-to-light dispatch table.
  *
- * Edit this file to match the physical wiring for each bus installation.
- * Recompile and flash after any changes.
+ * This file is inert unless the YAML has:
+ *
+ *   dali:
+ *     headless_dispatch: true
+ *
+ * Edit this file to match the physical wiring for each bus installation, then
+ * recompile and flash the explicit headless firmware.
  *
  * ── Current installation: Bus 1k, Tridonic DALI MC couplers in BF6 mode ──
  *
@@ -42,6 +47,10 @@
  *     { DALI_ADDR_GROUP, N },
  *     DALI_DISPATCH_ACTION_TOGGLE, 0 },
  */
+
+#include "esphome/core/defines.h"
+
+#ifdef USE_DALI_HEADLESS
 
 extern "C" {
 #include "../../../components/dali/dali_dispatch.h"
@@ -105,3 +114,5 @@ const DaliDispatchEntry *dali_headless_get_table(uint8_t *out_count)
     *out_count = (uint8_t)(sizeof(bf6_table) / sizeof(bf6_table[0]));
     return bf6_table;
 }
+
+#endif  /* USE_DALI_HEADLESS */

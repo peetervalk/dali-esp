@@ -98,10 +98,22 @@ typedef struct {
  */
 typedef struct {
     bool       has_state;  /* false = brightness inference not possible */
+    bool       matched;    /* true = a table entry fired (even if state unknown) */
     DaliTarget target;     /* output target that was commanded */
     bool       is_on;
     uint8_t    level;      /* DAPC level 1–254 when is_on; 0 when off */
 } DaliDispatchResult;
+
+/* ── Toggle state helpers ─────────────────────────────────────────────────── */
+
+/*
+ * Seed a single target's on/off bit in toggle_state.
+ * Call at boot after querying ACTUAL_LEVEL so TOGGLE entries start from the
+ * correct physical state rather than defaulting to "all off".
+ */
+void dali_dispatch_seed_toggle(DaliDispatchToggleState *state,
+                               DaliTarget               target,
+                               bool                     is_on);
 
 /* ── API ──────────────────────────────────────────────────────────────────── */
 

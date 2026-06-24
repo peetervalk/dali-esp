@@ -19,10 +19,10 @@ Long-term goals:
 ## Context Files
 
 - `current_status.md` - current overview, verified state, immediate priorities.
-- `todo_pre_hardware.md` - software cleanup before hardware bring-up.
 - `todo_hardware_bringup.md` - ESP-IDF, logic analyzer, and Lunatone validation flow.
 - `diagnostic_discovery_plan.md` - bus discovery, inventory, identify, switch training.
 - `todo_esphome_release.md` - end-user diagnostic firmware and final ESPHome flow.
+- `todo_input_devices.md` - DALI-2 input-device ESPHome integration plan.
 - `dali_command_reference.md` - command catalog and parser implementation reference.
 
 ## Non-Negotiable Architecture
@@ -57,7 +57,7 @@ the control/protocol APIs.
 | Protocol, PHY, scheduler, discovery, memory, DT6, DT8, input config | `components/dali` | Reusable, no app dependencies |
 | `dali_mapping` | `components/dali` | Generic enough to stay; move to `main/` if the component is published separately |
 | `dali_dispatch` | `components/dali` | Headless dispatch engine; pure C, no ESPHome dependency |
-| `dali_headless` | `esphome/components/dali` | Installation-specific dispatch table; edit per site |
+| `dali_headless` | `esphome/components/dali` | Installation-specific dispatch table; edit per site; active only with `headless_dispatch: true` |
 | `dali_diag` | `main/` | App-specific CLI; no component depends on it |
 | `main.c` | `main/` | App entry point |
 
@@ -78,7 +78,7 @@ Query commands for all instance types are in `dali_input_device`.
 - GPTIMER tick: 104 us.
 - DALI bit period: about 833.3 us.
 - DALI half-bit period: about 416.7 us.
-- TX-to-RX settle: 7 ms.
+- TX-to-RX settle suppression: 2 ms; DALI reply window opens at 7 ms.
 - Reply timeout: 25 ms.
 - Send-twice window: 100 ms.
 - GPIO 16 and GPIO 17 are connected to WROVER-E PSRAM and must not be used.

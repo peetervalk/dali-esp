@@ -101,11 +101,13 @@ Three scenarios to decide on before committing:
 
 **Firmware failsafe for scenario 2:** ✓ **Dispatch infrastructure implemented
 (2026-06-24).** `dali_dispatch` + `dali_headless.cpp` provide the local mapping
-table. In BF6 mode the dispatch runs unconditionally (no HA dependency). For
-phantom-frame mode, only the mapping table in `dali_headless.cpp` needs updating —
-the dispatch engine already supports `MIRROR` on short addresses. Connection-loss
-detection is not explicitly implemented because BF6 dispatch does not require it;
-add it when switching to phantom frames if needed.
+table. A firmware becomes headless only when its YAML explicitly sets
+`headless_dispatch: true`; diagnostic firmware should omit that line. With that
+opt-in firmware, BF6 dispatch runs locally with no HA dependency. For
+phantom-frame mode, only the mapping table in `dali_headless.cpp` needs updating
+— the dispatch engine already supports `MIRROR` on short addresses.
+Connection-loss detection is not explicitly implemented because BF6 dispatch does
+not require it; add it when switching to phantom frames if needed.
 
 **Scenario 3 is an accepted risk for this installation.** The DALI-1 PB couplers are
 aging hardware well past their early-life period and are statistically more likely to
@@ -130,9 +132,8 @@ With phantom frames, the power-on level decision becomes independent:
 - Keeping POWER ON LEVEL at MASK/max + firmware failsafe (scenario 2 fix) is probably
   the most robust combination.
 
-**Diag shell already supports:** `config b set-power-on-dtr0 <0-255>` (broadcast to all gear).
-**Gap:** `DALI_CMD_SET_SYSTEM_FAILURE_LEVEL_DTR0` exists in the protocol but is not
-exposed in the diag config spec table — add it alongside set-power-on-dtr0.
+**Diag shell already supports:** `config b set-power-on-dtr0 <0-255>` and
+`config b set-failure-dtr0 <0-255>` (broadcast to all gear).
 
 ## Open questions
 
@@ -141,6 +142,8 @@ exposed in the diag config spec table — add it alongside set-power-on-dtr0.
 - Confirm masterCONFIGURATOR COT file format for Macro 8 before reprogramming
 - Decide on phantom-frame approach before reprogramming (can't easily undo without
   the software and cable on-site again)
-- Add set-system-failure-dtr0 to diag config spec table (small gap, one line)
+- Consider adding a `set-system-failure-dtr0` alias if the longer protocol-style
+  command name would be clearer than the current `set-failure-dtr0`.
 - ~~Implement ESP32 firmware failsafe~~ — **done**: `dali_dispatch` + `dali_headless.cpp`
-  provide the local mapping table; BF6 mode runs unconditionally without HA
+  provide the local mapping table; BF6 mode runs locally without HA in firmware
+  that explicitly sets `headless_dispatch: true`

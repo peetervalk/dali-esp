@@ -1,13 +1,16 @@
-# DALI diagnostic firmware — first floor bus
-# Flash this to discover the bus, then use the logged YAML snippet to build dali_1k.yaml.
+# DALI diagnostic firmware — discovery and commissioning aid.
+# Flash this to discover the bus, identify fixtures, and monitor couplers.
 #
 # Workflow:
 #   1. esphome run dali_diag.yaml
-#   2. Press "Scan DALI Bus" button in Home Assistant (or ESPHome device page)
-#   3. Watch the log output in HA → ESPHome → dali-diag → Logs
-#      (or: esphome logs dali_diag.yaml)
-#   4. Copy the "Draft ESPHome YAML" block from the logs into dali_1k.yaml
-#   5. Replace "Group N" with real room names, then flash dali_1k.yaml
+#   2. Press "Scan DALI Bus" in HA — full YAML snippet appears in the device logs.
+#      The "Scan Result" sensor shows a compact summary that persists in HA.
+#   3. Set "Target Address" (0–63) to a short address found by the scan.
+#   4. Press "Identify" to blink the fixture for 10 s to confirm the address.
+#   5. Use On / Off / Max / Min to verify control of that fixture.
+#   6. Press "Find Couplers" and activate physical switches — coupler frames
+#      are captured for 30 s and published to the "Couplers Result" sensor.
+#   7. "Bus Monitor" shows each unsolicited frame as it arrives.
 
 esphome:
   name: dali-diag
@@ -40,7 +43,7 @@ ota:
     password: !secret ota_password
 
 logger:
-  level: INFO  # scan output is at INFO — increase to DEBUG for PHY-level tracing
+  level: INFO  # scan output is at INFO — set DEBUG for PHY-level tracing
 
 # ── DALI bus ──────────────────────────────────────────────────────────────────
 dali:
@@ -49,10 +52,66 @@ dali:
   rx_pin: 19
   scan_status:
     name: "Scan Status"
+  scan_result:
+    name: "Scan Result"
+  couplers_result:
+    name: "Couplers Result"
+  bus_monitor:
+    name: "Bus Monitor"
 
-# ── Discovery button ──────────────────────────────────────────────────────────
+# ── Target address selector ───────────────────────────────────────────────────
+number:
+  - platform: dali
+    dali_id: dali_bus
+    name: "Target Address"
+    icon: "mdi:numeric"
+
+# ── Buttons ───────────────────────────────────────────────────────────────────
 button:
   - platform: dali
     dali_id: dali_bus
     name: "Scan DALI Bus"
     icon: "mdi:magnify-scan"
+    type: scan
+
+  - platform: dali
+    dali_id: dali_bus
+    name: "Refresh State"
+    icon: "mdi:refresh"
+    type: refresh
+
+  - platform: dali
+    dali_id: dali_bus
+    name: "Identify"
+    icon: "mdi:lightbulb-on-outline"
+    type: identify
+
+  - platform: dali
+    dali_id: dali_bus
+    name: "Find Couplers"
+    icon: "mdi:transit-connection-variant"
+    type: find_couplers
+
+  - platform: dali
+    dali_id: dali_bus
+    name: "Turn On"
+    icon: "mdi:lightbulb"
+    type: turn_on
+
+  - platform: dali
+    dali_id: dali_bus
+    name: "Turn Off"
+    icon: "mdi:lightbulb-off"
+    type: turn_off
+
+  - platform: dali
+    dali_id: dali_bus
+    name: "Max"
+    icon: "mdi:brightness-7"
+    type: max
+
+  - platform: dali
+    dali_id: dali_bus
+    name: "Min"
+    icon: "mdi:brightness-2"
+    type: min

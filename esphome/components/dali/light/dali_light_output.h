@@ -4,6 +4,7 @@
 #include "esphome/components/light/light_state.h"
 #include "esphome/components/light/light_traits.h"
 #include "esphome/components/light/color_mode.h"
+#include "../dali_component.h"  // provides DaliBusLight + DaliComponent
 
 #include <atomic>
 #include <cstdint>
@@ -16,9 +17,7 @@ extern "C" {
 namespace esphome {
 namespace dali {
 
-class DaliComponent;  // forward — full include in dali_light_output.cpp
-
-class DaliLightOutput : public light::LightOutput {
+class DaliLightOutput : public light::LightOutput, public DaliBusLight {
  public:
   // Called from __init__.py codegen — registers self with the bus component.
   void set_dali_component(DaliComponent *comp);
@@ -30,8 +29,8 @@ class DaliLightOutput : public light::LightOutput {
 
   // Optional short address to use for QUERY_ACTUAL_LEVEL (boot/refresh/poll).
   // 0xFF = no query (default).  Must be a short address even if target is a group.
-  void set_query_address(uint8_t addr) { query_address_ = addr; }
-  uint8_t get_query_address() const    { return query_address_; }
+  void    set_query_address(uint8_t addr) { query_address_ = addr; }
+  uint8_t get_query_address() const override { return query_address_; }
 
   light::LightTraits get_traits() override {
     auto t = light::LightTraits();
@@ -41,12 +40,9 @@ class DaliLightOutput : public light::LightOutput {
 
   void write_state(light::LightState *state) override;
 
-  // Called from Core 1 (DALI task) after a bus command is dispatched or a
-  // query reply is received.  Sets atomic dirty flag; Core 0 loop() drains it.
-  void mark_state_from_bus(bool is_on, uint8_t level);
-
-  // Called from Core 0 (DaliComponent::loop()).  Publishes pending bus state.
-  void apply_bus_state();
+  // DaliBusLight interface — Core 1 writes, Core 0 drains.
+  void mark_state_from_bus(bool is_on, uint8_t level) override;
+  void apply_bus_state() override;
 
  protected:
   DaliTarget      target_{};

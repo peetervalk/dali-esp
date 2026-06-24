@@ -40,6 +40,7 @@ dali:
   id: dali_bus
   tx_pin: 18
   rx_pin: 19
+  headless_dispatch: true
 
 # ── Lights (one entity per DALI group) ───────────────────────────────────────
 # Group numbers match the bus configuration discovered via "export inventory".

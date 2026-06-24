@@ -81,10 +81,18 @@ static DaliError apply_mirror(const DaliInputEvent    *event,
     }
 }
 
+void dali_dispatch_seed_toggle(DaliDispatchToggleState *state,
+                               DaliTarget               target,
+                               bool                     is_on)
+{
+    toggle_set(state, target, is_on);
+}
+
 static void result_set(DaliDispatchResult *r, DaliTarget tgt, bool on, uint8_t lvl)
 {
     if (r == NULL) return;
     r->has_state = true;
+    r->matched   = true;
     r->target    = tgt;
     r->is_on     = on;
     r->level     = lvl;
@@ -94,6 +102,7 @@ static void result_unknown(DaliDispatchResult *r, DaliTarget tgt)
 {
     if (r == NULL) return;
     r->has_state = false;
+    r->matched   = true;
     r->target    = tgt;
 }
 
@@ -104,7 +113,7 @@ DaliError dali_dispatch(const DaliDispatchEntry  *table,
                         DaliDispatchResult       *result_out)
 {
     if (table == NULL || event == NULL || count == 0u) return DALI_ERR_INVALID;
-    if (result_out) result_out->has_state = false;
+    if (result_out) { result_out->has_state = false; result_out->matched = false; }
 
     for (uint8_t i = 0u; i < count; i++) {
         const DaliDispatchEntry *e = &table[i];

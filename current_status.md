@@ -98,13 +98,16 @@ controller has been removed. Run `scan`; expect the sensor at a new address with
   `MIRROR` (re-issue same legacy opcode), `RECALL_MAX`, `RECALL_MIN`, `OFF`,
   `DIM_UP`, `DIM_DOWN`, `GO_TO_LAST`, `SCENE N`, and `TOGGLE` (stateful
   on/off bitmask for DALI-2 push buttons).
-- **`dali_headless.cpp`** — installation-specific mapping table compiled into the
-  ESPHome firmware. Current config: BF6 MIRROR entries for groups 0/2/3/4/5/6/7.
-  Comments in the file walk through the phantom-address and DALI-2 migration paths.
+- **`dali_headless.cpp`** — installation-specific mapping table in the ESPHome
+  component tree. Current config: BF6 MIRROR entries for groups 0/2/3/4/5/6/7.
+  Comments in the file walk through the phantom-address and DALI-2 migration
+  paths. The table is inert unless the YAML explicitly sets
+  `headless_dispatch: true`.
 - **Wired into `DaliComponent`** — setup registers an unsolicited-RX callback that
   pushes frames to `DaliInputEventQueue`; task drains the queue after each
   `dali_sched_run()` to avoid re-entrancy. Table loaded via weakly-linked
-  `dali_headless_get_table()` — diag firmware gets a null default automatically.
+  `dali_headless_get_table()`; builds without the opt-in table get a null default
+  automatically.
 - **`test_dispatch.c`** — 12 new host tests; all 18 suites green.
 
 **Headless dispatch — what it can and cannot do:**
@@ -122,11 +125,6 @@ Can do:
 - DALI-2 push buttons: add `INPUT_24BIT` entries with `TOGGLE` action.
 
 Cannot do yet:
-- **No HA state sync.** ESPHome light entities don't know a button press happened;
-  their state in HA goes stale. Requires: (a) a target→entity reverse map in
-  `DaliComponent`, (b) cross-core notification from Core 1 → Core 0 `loop()`,
-  (c) knowledge of post-dispatch brightness (easy for RECALL_MAX/OFF, ambiguous
-  for scenes without cached scene levels).
 - **No double-press from BF6 couplers.** The DALI-2 24-bit double-press event
   code (0x03) requires a DALI-2 input device; BF6 couplers are DALI-1 and cannot
   produce it.
@@ -135,6 +133,36 @@ Cannot do yet:
 - **Toggle state does not persist across power cycles.** Resets to all-off on boot
   (correct for BF6 since coupler sends explicit ON/OFF; matters for DALI-2 TOGGLE
   entries).
+
+**Session 2026-06-24 (continued) — HA state sync and deferred query:**
+
+- **Bus snooping** — `DaliDispatchResult` carries inferred on/off + level for
+  deterministic actions (RECALL_MAX, OFF, TOGGLE). Core 1 calls `notify_lights()`
+  after each dispatch; `mark_state_from_bus()` stores state atomically; Core 0
+  `loop()` calls `apply_bus_state()` which pushes a `LightCall` with
+  `skip_next_write_` armed so ESPHome does not re-issue the DALI command.
+- **Boot query** — `start_refresh()` is called once on first `loop()` invocation;
+  issues `QUERY_ACTUAL_LEVEL` on each light entity that has `query_address` set
+  and seeds the toggle bitmask from the reply via `dali_dispatch_seed_toggle()`.
+- **On-demand refresh button** — `type: refresh` button in the `dali` button
+  platform calls `start_refresh()` on press.
+- **Periodic polling** — optional `poll_interval` (seconds) on the `dali:`
+  component; calls `start_refresh()` on the configured cadence.
+- **Deferred query after dim/scene** — `DaliDispatchResult.matched` flag added to
+  distinguish "no table entry found" from "matched but state is indeterminate"
+  (DIM_UP, DIM_DOWN, SCENE, GO_TO_LAST, RECALL_MIN). When Core 1 dispatches one
+  of these, it sets `s_deferred_query_pending_`; Core 0 arms a 600 ms one-shot
+  timer (re-arms on each set, so continuous dimming extends the window); fires
+  `start_refresh()` when elapsed.
+- **`DaliBusLight` abstract interface** — defined in `dali_component.h`; exposes
+  `mark_state_from_bus()`, `apply_bus_state()`, `get_query_address()`. The
+  `DaliComponent` registry stores `DaliBusLight*` so `dali_component.cpp` never
+  includes any `light/` subdirectory header (eliminates the cross-directory include
+  that broke the dali-diag build).
+- **`proto_dali_dispatch.c`** — added to `esphome/components/dali/`; the thin
+  wrapper that ESPHome's GLOB_RECURSE picks up to compile `dali_dispatch.c` as C.
+  Was missing because `dali_dispatch` was added to the protocol stack after the
+  other wrappers were written.
 
 **Session 2026-06-22 — ESPHome component built and both firmwares compile:**
 
@@ -153,21 +181,24 @@ Cannot do yet:
     callback, loads the headless dispatch table, then starts the DALI FreeRTOS
     task pinned to Core 1 (App CPU) at priority 10
   - `dali_headless.cpp` — installation-specific dispatch table; user edits this
-    file to configure button→light mappings; weakly-linked default returns null
-    so the diag firmware compiles without any mappings
+    file to configure button→light mappings. It only emits the strong table when
+    the YAML sets `headless_dispatch: true`.
   - `dali_scan.h/.cpp` — scan task spawned on demand (Core 1, priority 9);
     synchronous transport via `ulTaskNotifyTake`; logs full JSON inventory and a
     draft ESPHome YAML snippet
-  - `button/__init__.py` + `button/dali_scan_button.h` — "Scan DALI Bus" button
+  - `button/__init__.py` + `button/dali_scan_button.h` — diagnostic button
+    platform: scan, refresh, identify, find couplers, and target control actions
   - `light/__init__.py` — light platform schema; `LightType.BRIGHTNESS_ONLY`
     (required in ESPHome 2026.6)
   - `light/dali_light_output.h/.cpp` — `DaliLightOutput` maps ESPHome brightness
     float 0–1 to DALI arc level 1–254; off → `dali_control_off()`
-- **`dali_diag.yaml`** — diagnostic/discovery firmware; scan_status text sensor +
-  "Scan DALI Bus" button; WiFi AP + captive portal for field access without
-  pre-configured Wi-Fi
+- **`dali_diag.yaml`** — diagnostic/discovery firmware; scan/status/result text
+  sensors, bus monitor, target address number, scan/refresh/identify/find-couplers
+  buttons, target on/off/max/min controls; WiFi AP + captive portal for field
+  access without pre-configured Wi-Fi
 - **`dali_1k.yaml`** — first-floor control firmware; 7 group light entities
-  (groups 0/2/3/4/5/6/7) matching the live scan; WiFi AP + captive portal fallback
+  (groups 0/2/3/4/5/6/7) matching the live scan; explicit `headless_dispatch: true`
+  for local BF6 coupler fallback; WiFi AP + captive portal fallback
 - **`secrets.yaml`** — gitignored; contains Wi-Fi credentials, API key, OTA and
   AP passwords
 
@@ -193,14 +224,14 @@ Home Assistant uses "switch" for a binary on/off toggle entity.
 
 ## Immediate Priorities
 
-1. **Flash and test `dali_1k.yaml` with headless dispatch.** Confirm BF6 coupler
-   presses appear in ESP32 logs and lights respond independently of HA.
+1. **Flash and test `dali_1k.yaml` with headless dispatch + HA state sync.**
+   Confirm BF6 coupler presses update HA entity state and lights respond
+   independently of HA. Verify deferred query fires 600 ms after long-press dim.
 2. **Flash and test `dali_diag.yaml`.** Press "Scan DALI Bus" in HA; verify JSON
    inventory and draft YAML appear in logs. Confirm scan_status sensor updates.
 3. Bring up the Steinel HF 360 II: connect to a bus without an existing master,
    run `scan`, confirm 4 instances decode correctly.
-4. Add `set-system-failure-dtr0` to diag config spec table (small gap, one line).
-5. Legacy pushbutton coupler zone grouping — see `todo_pb_couplers.md`.
+4. Legacy pushbutton coupler zone grouping — see `todo_pb_couplers.md`.
 
 ## Architecture
 
