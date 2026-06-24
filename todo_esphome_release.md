@@ -147,6 +147,38 @@ state. Default to `RESTORE_DEFAULT_ON` for control gear lights. Add a YAML
 override for installations that require lights to stay off after a power cycle
 (e.g. safety-critical environments).
 
+### Startup bus-write storm / BUS_STUCK during headless test
+
+Observed on 2026-06-24 after flashing `dali_1k.yaml`: connecting the ESPHome
+headless firmware turned all lights off, while physical switches then worked and
+were logged correctly. The serial log also showed a burst of:
+
+```text
+DALI-SCHED: phy_tx failed: 2
+```
+
+Error 2 is `DALI_ERR_BUS_STUCK` (PHY idle wait timed out; bus appeared held
+active/low). Suspected combined cause:
+
+- ESPHome initializes each light entity at boot and `DaliLightOutput::write_state()`
+  currently treats the initial/default off state as a real command, so it can
+  enqueue OFF for every configured group.
+- That startup command burst may collide with bus activity from the DALI-1 BF6
+  couplers or with the bus settling as the Click board is connected/powered.
+- If it reproduces even without entity startup writes, also re-check ESP-side
+  idle level/polarity at the MikroE Click logic pins and bus idle detection.
+
+Prospective mitigation:
+
+- Suppress the first ESPHome light write after boot/registration unless it is an
+  explicit HA command after the DALI component is ready.
+- Prefer boot state discovery (`QUERY_ACTUAL_LEVEL` via `query_address`) over
+  commanding restore state onto the bus.
+- Rate-limit or coalesce initial DALI entity writes so a boot never creates a
+  multi-group TX storm.
+- Add a clearer log around ignored initial writes and around `DALI_ERR_BUS_STUCK`
+  with sampled RX idle level / recent TX context.
+
 ### Scene recall button entity
 
 We query and store scene levels during discovery — wire that up as ESPHome

@@ -147,3 +147,7 @@ With phantom frames, the power-on level decision becomes independent:
 - ~~Implement ESP32 firmware failsafe~~ — **done**: `dali_dispatch` + `dali_headless.cpp`
   provide the local mapping table; BF6 mode runs locally without HA in firmware
   that explicitly sets `headless_dispatch: true`
+- Headless BF6 bench test worked (physical switches logged and drove lights), but
+  first ESPHome connection turned all lights off and logged a burst of
+  `DALI-SCHED: phy_tx failed: 2` (`DALI_ERR_BUS_STUCK`). Tracked in
+  `todo_esphome_release.md` as a startup entity-write / bus-idle mitigation item.
