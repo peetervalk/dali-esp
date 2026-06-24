@@ -17,9 +17,9 @@
  *   OFF button  → OFF              (opcode 0x00) → group N
  *
  * The lights respond immediately (coupler is the master).  The ESP32 sees
- * these frames as unsolicited RX and re-issues the same command via
- * DALI_DISPATCH_ACTION_MIRROR so its internal toggle state and any future
- * ESPHome state-sync stay current.
+ * these frames as unsolicited RX and observes them via
+ * DALI_DISPATCH_ACTION_OBSERVE so HA/state sync stays current without the ESP32
+ * re-issuing the same command onto the bus.
  *
  * ── Switching to phantom-address mode (Approach B from todo_pb_couplers.md) ─
  *
@@ -63,49 +63,49 @@ static const DaliDispatchEntry bf6_table[] = {
         DALI_EVENT_ADDRESS_GROUP, 0,
         DALI_DISPATCH_OPCODE_ANY },
       { DALI_ADDR_GROUP, 0 },
-      DALI_DISPATCH_ACTION_MIRROR, 0 },
+      DALI_DISPATCH_ACTION_OBSERVE, 0 },
 
     /* Group 2 — addresses 4, 8, 9, 12 */
     { { DALI_EVENT_FRAME_LEGACY_16BIT,
         DALI_EVENT_ADDRESS_GROUP, 2,
         DALI_DISPATCH_OPCODE_ANY },
       { DALI_ADDR_GROUP, 2 },
-      DALI_DISPATCH_ACTION_MIRROR, 0 },
+      DALI_DISPATCH_ACTION_OBSERVE, 0 },
 
     /* Group 3 — address 13 */
     { { DALI_EVENT_FRAME_LEGACY_16BIT,
         DALI_EVENT_ADDRESS_GROUP, 3,
         DALI_DISPATCH_OPCODE_ANY },
       { DALI_ADDR_GROUP, 3 },
-      DALI_DISPATCH_ACTION_MIRROR, 0 },
+      DALI_DISPATCH_ACTION_OBSERVE, 0 },
 
     /* Group 4 — address 1 */
     { { DALI_EVENT_FRAME_LEGACY_16BIT,
         DALI_EVENT_ADDRESS_GROUP, 4,
         DALI_DISPATCH_OPCODE_ANY },
       { DALI_ADDR_GROUP, 4 },
-      DALI_DISPATCH_ACTION_MIRROR, 0 },
+      DALI_DISPATCH_ACTION_OBSERVE, 0 },
 
     /* Group 5 — address 0 (DT6 LED driver) */
     { { DALI_EVENT_FRAME_LEGACY_16BIT,
         DALI_EVENT_ADDRESS_GROUP, 5,
         DALI_DISPATCH_OPCODE_ANY },
       { DALI_ADDR_GROUP, 5 },
-      DALI_DISPATCH_ACTION_MIRROR, 0 },
+      DALI_DISPATCH_ACTION_OBSERVE, 0 },
 
     /* Group 6 — addresses 2, 3, 10, 11 */
     { { DALI_EVENT_FRAME_LEGACY_16BIT,
         DALI_EVENT_ADDRESS_GROUP, 6,
         DALI_DISPATCH_OPCODE_ANY },
       { DALI_ADDR_GROUP, 6 },
-      DALI_DISPATCH_ACTION_MIRROR, 0 },
+      DALI_DISPATCH_ACTION_OBSERVE, 0 },
 
     /* Group 7 — address 15 */
     { { DALI_EVENT_FRAME_LEGACY_16BIT,
         DALI_EVENT_ADDRESS_GROUP, 7,
         DALI_DISPATCH_OPCODE_ANY },
       { DALI_ADDR_GROUP, 7 },
-      DALI_DISPATCH_ACTION_MIRROR, 0 },
+      DALI_DISPATCH_ACTION_OBSERVE, 0 },
 };
 
 extern "C"

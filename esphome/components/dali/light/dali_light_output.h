@@ -38,6 +38,7 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
     return t;
   }
 
+  void setup_state(light::LightState *state) override;
   void write_state(light::LightState *state) override;
 
   // DaliBusLight interface — Core 1 writes, Core 0 drains.
@@ -56,8 +57,11 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
 
   // Core 0 only — prevents re-issuing a DALI command when state is pushed
   // from the bus into ESPHome via LightCall::perform().
+  bool              suppress_initial_write_{true};
   bool              skip_next_write_{false};
   light::LightState *state_{nullptr};
+
+  static void clear_unused_color_fields_(light::LightColorValues &values);
 };
 
 }  // namespace dali

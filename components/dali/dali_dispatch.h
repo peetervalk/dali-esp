@@ -36,19 +36,24 @@ typedef struct {
 
 typedef enum {
     /*
+     * Observe a legacy 16-bit command frame and infer state without issuing any
+     * DALI command. Use this for direct-control BF6 couplers where the coupler
+     * already targeted the real group and the ESP32 only needs to update its
+     * local/HA state.
+     */
+    DALI_DISPATCH_ACTION_OBSERVE = 0,
+
+    /*
      * Re-issue the same legacy opcode received on the bus to the output target.
      * Only valid for DALI_EVENT_FRAME_LEGACY_16BIT command frames
      * (address_selector = 1). Supports: off, up, down, step-up, step-down,
      * recall-max, recall-min, step-down-and-off, on-and-step-up,
      * go-to-last-active-level, and go-to-scene N.
      *
-     * BF6 use: coupler already drove the lights; ESP32 re-issues so its
-     * internal toggle state stays in sync for any later TOGGLE entries.
-     *
      * Phantom-address use: coupler sends to a free address; ESP32 translates
      * to the real group. output target differs from the key address.
      */
-    DALI_DISPATCH_ACTION_MIRROR = 0,
+    DALI_DISPATCH_ACTION_MIRROR,
 
     /* Always issue the named command regardless of input opcode. */
     DALI_DISPATCH_ACTION_RECALL_MAX,
@@ -80,8 +85,8 @@ typedef struct {
 
 /*
  * Tracks on/off state per target for DALI_DISPATCH_ACTION_TOGGLE.
- * MIRROR also updates this so a mix of MIRROR and TOGGLE entries stays
- * consistent (e.g. one zone driven by BF6, another by a DALI-2 button).
+ * OBSERVE and MIRROR also update this so a mix of legacy direct-control,
+ * phantom-translation, and TOGGLE entries stays consistent.
  * Zero-initialise on startup; no persistence across power cycles.
  */
 typedef struct {

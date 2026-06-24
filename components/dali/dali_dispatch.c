@@ -45,7 +45,7 @@ static DaliError apply_mirror(const DaliInputEvent    *event,
                               DaliTarget               out,
                               DaliDispatchToggleState *state)
 {
-    if (!event->address_selector) return DALI_ERR_INVALID; /* DAPC — not a command */
+    if (!event->address_selector) return DALI_ERR_INVALID; /* DAPC - not a command */
 
     uint8_t op = event->event_code;
     switch (op) {
@@ -106,6 +106,58 @@ static void result_unknown(DaliDispatchResult *r, DaliTarget tgt)
     r->target    = tgt;
 }
 
+/*
+ * Observe a legacy 16-bit command frame without transmitting anything.
+ * This is for direct-control couplers: the original frame already commanded
+ * the lamps, so the controller only infers state for HA/toggle bookkeeping.
+ */
+static DaliError observe_legacy(const DaliInputEvent    *event,
+                                DaliTarget               out,
+                                DaliDispatchToggleState *state,
+                                DaliDispatchResult      *result_out)
+{
+    if (!event->address_selector) return DALI_ERR_INVALID; /* DAPC - not a command */
+
+    uint8_t op = event->event_code;
+    switch (op) {
+        case 0x00u:
+            toggle_set(state, out, false);
+            result_set(result_out, out, false, 0u);
+            return DALI_OK;
+        case 0x01u:
+        case 0x02u:
+        case 0x03u:
+        case 0x04u:
+            result_unknown(result_out, out);
+            return DALI_OK;
+        case 0x05u:
+            toggle_set(state, out, true);
+            result_set(result_out, out, true, 254u);
+            return DALI_OK;
+        case 0x06u:
+            toggle_set(state, out, true);
+            result_unknown(result_out, out);
+            return DALI_OK;
+        case 0x07u:
+            toggle_set(state, out, false);
+            result_set(result_out, out, false, 0u);
+            return DALI_OK;
+        case 0x08u:
+            toggle_set(state, out, true);
+            result_unknown(result_out, out);
+            return DALI_OK;
+        case 0x0Au:
+            result_unknown(result_out, out);
+            return DALI_OK;
+        default:
+            if (op >= 0x10u && op <= 0x1Fu) {
+                result_unknown(result_out, out);
+                return DALI_OK;
+            }
+            return DALI_ERR_INVALID;
+    }
+}
+
 DaliError dali_dispatch(const DaliDispatchEntry  *table,
                         uint8_t                   count,
                         const DaliInputEvent     *event,
@@ -121,16 +173,13 @@ DaliError dali_dispatch(const DaliDispatchEntry  *table,
 
         DaliError err;
         switch (e->action) {
+            case DALI_DISPATCH_ACTION_OBSERVE:
+                return observe_legacy(event, e->output, toggle_state, result_out);
+
             case DALI_DISPATCH_ACTION_MIRROR: {
                 err = apply_mirror(event, e->output, toggle_state);
                 if (err == DALI_OK && event->address_selector) {
-                    uint8_t op = event->event_code;
-                    if (op == 0x00u || op == 0x07u)
-                        result_set(result_out, e->output, false, 0u);
-                    else if (op == 0x05u)
-                        result_set(result_out, e->output, true, 254u);
-                    else
-                        result_unknown(result_out, e->output);
+                    observe_legacy(event, e->output, toggle_state, result_out);
                 }
                 return err;
             }

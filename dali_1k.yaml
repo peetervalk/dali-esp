@@ -59,39 +59,46 @@ light:
     name: "DALI Group 0"      # addresses 5, 6, 7, 14
     target_type: group
     target_address: 0
+    query_address: 5
 
   - platform: dali
     dali_id: dali_bus
     name: "DALI Group 2"      # addresses 4, 8, 9, 12
     target_type: group
     target_address: 2
+    query_address: 4
 
   - platform: dali
     dali_id: dali_bus
     name: "DALI Group 3"      # address 13
     target_type: group
     target_address: 3
+    query_address: 13
 
   - platform: dali
     dali_id: dali_bus
     name: "DALI Group 4"      # address 1
     target_type: group
     target_address: 4
+    query_address: 1
 
   - platform: dali
     dali_id: dali_bus
     name: "DALI Group 5"      # address 0 (DT6 LED driver)
     target_type: group
     target_address: 5
+    query_address: 0
 
   - platform: dali
     dali_id: dali_bus
     name: "DALI Group 6"      # addresses 2, 3, 10, 11
     target_type: group
     target_address: 6
+    query_address: 2
 
   - platform: dali
     dali_id: dali_bus
     name: "DALI Group 7"      # address 15
     target_type: group
     target_address: 7
+    query_address: 15

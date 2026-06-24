@@ -151,18 +151,24 @@ override for installations that require lights to stay off after a power cycle
 
 Observed on 2026-06-24 after flashing `dali_1k.yaml`: connecting the ESPHome
 headless firmware turned all lights off, while physical switches then worked and
-were logged correctly. The serial log also showed a burst of:
+were logged correctly. On later flashes/reboots, startup still turned all groups
+off and then turned one random/different group back on. The serial log also
+showed a burst of:
 
 ```text
 DALI-SCHED: phy_tx failed: 2
 ```
 
 Error 2 is `DALI_ERR_BUS_STUCK` (PHY idle wait timed out; bus appeared held
-active/low). Suspected combined cause:
+active/low). Known/suspected combined cause:
 
-- ESPHome initializes each light entity at boot and `DaliLightOutput::write_state()`
-  currently treats the initial/default off state as a real command, so it can
-  enqueue OFF for every configured group.
+- Generated ESPHome code defaults every DALI light to `restore_mode: ALWAYS_OFF`.
+  `DaliLightOutput::write_state()` currently treats that initial/default off
+  state as a real command, so it enqueues OFF for every configured group.
+- The later random group-on was not explained by `ALWAYS_OFF`; suspect a startup
+  TX/RX interaction, stale queued unsolicited event, or a valid BF6 coupler frame
+  being received during/after the OFF storm and then mirrored by the old
+  direct-BF6 headless mapping.
 - That startup command burst may collide with bus activity from the DALI-1 BF6
   couplers or with the bus settling as the Click board is connected/powered.
 - If it reproduces even without entity startup writes, also re-check ESP-side
@@ -170,14 +176,29 @@ active/low). Suspected combined cause:
 
 Prospective mitigation:
 
-- Suppress the first ESPHome light write after boot/registration unless it is an
-  explicit HA command after the DALI component is ready.
-- Prefer boot state discovery (`QUERY_ACTUAL_LEVEL` via `query_address`) over
-  commanding restore state onto the bus.
-- Rate-limit or coalesce initial DALI entity writes so a boot never creates a
-  multi-group TX storm.
-- Add a clearer log around ignored initial writes and around `DALI_ERR_BUS_STUCK`
-  with sampled RX idle level / recent TX context.
+- Bundle the headless reliability fixes together rather than chasing symptoms one
+  at a time:
+  - [x] Suppress the first ESPHome light write after boot/registration. This
+    should make boot passive and remove the deterministic all-groups-off
+    behavior.
+  - [x] Prefer boot state discovery (`QUERY_ACTUAL_LEVEL` via `query_address`)
+    over commanding restore state onto the bus. For group entities, add a
+    representative short-address `query_address` in the final YAML where useful.
+  - [x] Replace direct-BF6 `MIRROR` with `OBSERVE`: in direct BF6 mode the
+    coupler already commanded the lamps, so the ESP32 updates HA state without
+    re-issuing the same DALI command. Keep active `MIRROR` translation for
+    phantom-address modes.
+  - [ ] Add a short headless startup gate so unsolicited events seen during PHY/API
+    bring-up can update diagnostics/state but cannot immediately cause translated
+    output unless intentionally allowed.
+  - [ ] Rate-limit or coalesce initial DALI entity writes so a boot never creates a
+    multi-group TX storm.
+  - [ ] Add clearer logs around ignored initial writes, headless dispatch actions,
+    and `DALI_ERR_BUS_STUCK` with sampled RX idle level / recent TX context.
+  - [x] Clean up brightness-only ESPHome state publishing so unused RGB/white/colour
+    temperature fields are explicitly zeroed. HA already advertises
+    `supported_color_modes: brightness`, so this is log/API hygiene rather than
+    a functional colour-capability fix.
 
 ### Scene recall button entity
 

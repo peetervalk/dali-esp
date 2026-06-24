@@ -94,12 +94,14 @@ controller has been removed. Run `scan`; expect the sensor at a new address with
 **Session 2026-06-24 — Headless dispatch layer added:**
 
 - **`dali_dispatch.{c,h}`** — new pure-C module in `components/dali/`. Static
-  dispatch table maps unsolicited bus frames to `dali_control_*` calls. Supports:
-  `MIRROR` (re-issue same legacy opcode), `RECALL_MAX`, `RECALL_MIN`, `OFF`,
-  `DIM_UP`, `DIM_DOWN`, `GO_TO_LAST`, `SCENE N`, and `TOGGLE` (stateful
-  on/off bitmask for DALI-2 push buttons).
+  dispatch table maps unsolicited bus frames to state tracking or
+  `dali_control_*` calls. Supports: `OBSERVE` (infer state without TX for
+  direct-control BF6 couplers), `MIRROR` (re-issue same legacy opcode for
+  phantom-address translation), `RECALL_MAX`, `RECALL_MIN`, `OFF`, `DIM_UP`,
+  `DIM_DOWN`, `GO_TO_LAST`, `SCENE N`, and `TOGGLE` (stateful on/off bitmask
+  for DALI-2 push buttons).
 - **`dali_headless.cpp`** — installation-specific mapping table in the ESPHome
-  component tree. Current config: BF6 MIRROR entries for groups 0/2/3/4/5/6/7.
+  component tree. Current config: BF6 OBSERVE entries for groups 0/2/3/4/5/6/7.
   Comments in the file walk through the phantom-address and DALI-2 migration
   paths. The table is inert unless the YAML explicitly sets
   `headless_dispatch: true`.
@@ -108,7 +110,7 @@ controller has been removed. Run `scan`; expect the sensor at a new address with
   `dali_sched_run()` to avoid re-entrancy. Table loaded via weakly-linked
   `dali_headless_get_table()`; builds without the opt-in table get a null default
   automatically.
-- **`test_dispatch.c`** — 12 new host tests; all 18 suites green.
+- **`test_dispatch.c`** — 22 host tests; all 18 suites green.
 
 **Headless dispatch — what it can and cannot do:**
 
@@ -117,9 +119,12 @@ Can do:
   runs entirely on Core 1, independent of the network stack.
 - All standard lighting actions: `RECALL_MAX`, `RECALL_MIN`, `OFF`, `DIM_UP`,
   `DIM_DOWN`, `GO_TO_LAST`, `GO_TO_SCENE N`, `TOGGLE` (stateful bitmask).
+- `OBSERVE` tracks direct BF6 group commands without re-transmitting them; the
+  physical coupler remains the controller and the ESP32 only updates local/HA
+  state.
 - `MIRROR` passes through any legacy opcode including repeated `UP`/`DOWN` for
-  long-press dimming — if couplers are reconfigured to send dimming sequences on
-  hold, no firmware change is needed.
+  phantom-address mode, where the coupler sends to an unused short address and
+  the ESP32 must translate that into the real output target.
 - Phantom-address remapping (Approach B from `todo_pb_couplers.md`) requires only a
   `dali_headless.cpp` edit — the engine already handles short-address keys.
 - DALI-2 push buttons: add `INPUT_24BIT` entries with `TOGGLE` action.
@@ -181,8 +186,10 @@ Cannot do yet:
     callback, loads the headless dispatch table, then starts the DALI FreeRTOS
     task pinned to Core 1 (App CPU) at priority 10
   - `dali_headless.cpp` — installation-specific dispatch table; user edits this
-    file to configure button→light mappings. It only emits the strong table when
-    the YAML sets `headless_dispatch: true`.
+    file to configure button→light mappings. Direct BF6 entries observe only;
+    phantom-address entries use `MIRROR` to translate inert frames into real
+    DALI commands. It only emits the strong table when the YAML sets
+    `headless_dispatch: true`.
   - `dali_scan.h/.cpp` — scan task spawned on demand (Core 1, priority 9);
     synchronous transport via `ulTaskNotifyTake`; logs full JSON inventory and a
     draft ESPHome YAML snippet
@@ -307,7 +314,7 @@ should be moved to `main/` alongside `dali_diag`.
 | test_input_config | — | IEC 62386-103 + DT301/303/304 config frame builders |
 | test_control | — | Control-gear command API |
 | test_scheduler | — | TX/RX sequencer |
-| test_dispatch | 12 | Headless dispatch: MIRROR, TOGGLE, actions, key matching |
+| test_dispatch | 22 | Headless dispatch: OBSERVE, MIRROR, TOGGLE, actions, key matching |
 
 ## Known Target Sensor
 

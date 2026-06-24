@@ -103,11 +103,13 @@ Three scenarios to decide on before committing:
 (2026-06-24).** `dali_dispatch` + `dali_headless.cpp` provide the local mapping
 table. A firmware becomes headless only when its YAML explicitly sets
 `headless_dispatch: true`; diagnostic firmware should omit that line. With that
-opt-in firmware, BF6 dispatch runs locally with no HA dependency. For
-phantom-frame mode, only the mapping table in `dali_headless.cpp` needs updating
-— the dispatch engine already supports `MIRROR` on short addresses.
-Connection-loss detection is not explicitly implemented because BF6 dispatch does
-not require it; add it when switching to phantom frames if needed.
+opt-in firmware, direct BF6 frames are observed locally with no HA dependency and
+without re-transmitting commands that the coupler already sent to the real
+group. For phantom-frame mode, only the mapping table in `dali_headless.cpp`
+needs updating — the dispatch engine already supports `MIRROR` on short
+addresses. Connection-loss detection is not explicitly implemented because
+direct BF6 does not require it; add it when switching to phantom frames if
+needed.
 
 **Scenario 3 is an accepted risk for this installation.** The DALI-1 PB couplers are
 aging hardware well past their early-life period and are statistically more likely to
@@ -145,8 +147,10 @@ With phantom frames, the power-on level decision becomes independent:
 - Consider adding a `set-system-failure-dtr0` alias if the longer protocol-style
   command name would be clearer than the current `set-failure-dtr0`.
 - ~~Implement ESP32 firmware failsafe~~ — **done**: `dali_dispatch` + `dali_headless.cpp`
-  provide the local mapping table; BF6 mode runs locally without HA in firmware
-  that explicitly sets `headless_dispatch: true`
+  provide the local mapping table; direct BF6 mode observes physical button
+  frames for HA state sync, while phantom-frame mode can translate inert button
+  frames into real group commands in firmware that explicitly sets
+  `headless_dispatch: true`
 - Headless BF6 bench test worked (physical switches logged and drove lights), but
   first ESPHome connection turned all lights off and logged a burst of
   `DALI-SCHED: phy_tx failed: 2` (`DALI_ERR_BUS_STUCK`). Tracked in

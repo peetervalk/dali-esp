@@ -13,8 +13,34 @@ void DaliLightOutput::set_dali_component(DaliComponent *comp) {
   comp->register_light((uint8_t)target_.type, target_.address, this);
 }
 
+void DaliLightOutput::clear_unused_color_fields_(light::LightColorValues &values) {
+  values.set_red(0.0f);
+  values.set_green(0.0f);
+  values.set_blue(0.0f);
+  values.set_white(0.0f);
+  values.set_color_temperature(0.0f);
+  values.set_cold_white(0.0f);
+  values.set_warm_white(0.0f);
+}
+
+void DaliLightOutput::setup_state(light::LightState *state) {
+  state_ = state;
+  clear_unused_color_fields_(state->remote_values);
+  clear_unused_color_fields_(state->current_values);
+  suppress_initial_write_ = true;
+}
+
 void DaliLightOutput::write_state(light::LightState *state) {
   if (!state_) state_ = state;  // capture on first call
+  clear_unused_color_fields_(state->remote_values);
+  clear_unused_color_fields_(state->current_values);
+
+  if (suppress_initial_write_) {
+    suppress_initial_write_ = false;
+    skip_next_write_ = false;
+    ESP_LOGD(TAG, "suppressing initial restore/default write");
+    return;
+  }
 
   if (skip_next_write_) {
     skip_next_write_ = false;
@@ -56,6 +82,8 @@ void DaliLightOutput::apply_bus_state() {
   call.set_state(is_on);
   if (is_on) call.set_brightness(static_cast<float>(level) / 254.0f);
   call.set_transition_length(0);
+  clear_unused_color_fields_(state_->remote_values);
+  clear_unused_color_fields_(state_->current_values);
   call.perform();
 }
 
