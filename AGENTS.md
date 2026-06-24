@@ -56,6 +56,8 @@ the control/protocol APIs.
 |---|---|---|
 | Protocol, PHY, scheduler, discovery, memory, DT6, DT8, input config | `components/dali` | Reusable, no app dependencies |
 | `dali_mapping` | `components/dali` | Generic enough to stay; move to `main/` if the component is published separately |
+| `dali_dispatch` | `components/dali` | Headless dispatch engine; pure C, no ESPHome dependency |
+| `dali_headless` | `esphome/components/dali` | Installation-specific dispatch table; edit per site |
 | `dali_diag` | `main/` | App-specific CLI; no component depends on it |
 | `main.c` | `main/` | App entry point |
 

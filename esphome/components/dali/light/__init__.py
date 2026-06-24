@@ -9,9 +9,10 @@ DEPENDENCIES = ["dali"]
 
 DaliLightOutput = dali_ns.class_("DaliLightOutput", light.LightOutput)
 
-CONF_DALI_ID = "dali_id"
-CONF_TARGET_TYPE = "target_type"
+CONF_DALI_ID       = "dali_id"
+CONF_TARGET_TYPE   = "target_type"
 CONF_TARGET_ADDRESS = "target_address"
+CONF_QUERY_ADDRESS  = "query_address"
 
 # Must match DaliAddressType enum values in dali_frame.h
 TARGET_TYPES = {
@@ -37,6 +38,10 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(CONF_DALI_ID): cv.use_id(DaliComponent),
             cv.Required(CONF_TARGET_TYPE): cv.enum(TARGET_TYPES, lower=True),
             cv.Optional(CONF_TARGET_ADDRESS, default=0): cv.int_range(min=0, max=63),
+            # Optional short address for QUERY_ACTUAL_LEVEL (boot/refresh/poll).
+            # Useful when target_type is 'group' and a representative gear address
+            # is known.  Omit if state sync via queries is not needed.
+            cv.Optional(CONF_QUERY_ADDRESS): cv.int_range(min=0, max=63),
         }
     ),
     _validate_target_address,
@@ -46,7 +51,9 @@ CONFIG_SCHEMA = cv.All(
 async def to_code(config):
     var = await light.new_light(config)
 
-    # Ensure the parent DaliComponent is a build dependency
-    await cg.get_variable(config[CONF_DALI_ID])
-
+    parent = await cg.get_variable(config[CONF_DALI_ID])
     cg.add(var.set_target(config[CONF_TARGET_TYPE], config[CONF_TARGET_ADDRESS]))
+    cg.add(var.set_dali_component(parent))
+
+    if CONF_QUERY_ADDRESS in config:
+        cg.add(var.set_query_address(config[CONF_QUERY_ADDRESS]))

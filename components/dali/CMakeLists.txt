@@ -17,7 +17,8 @@ idf_component_register(
         "dali_gear_dt8.c"
         "dali_input_config.c"
         "dali_control.c"
-       
+        "dali_dispatch.c"
+
     INCLUDE_DIRS "."
     REQUIRES
         driver

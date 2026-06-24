@@ -1,14 +1,14 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-06-22
+**Last updated:** 2026-06-24
 **Framework:** ESP-IDF v6.0.1 native CMake
 **Hardware target:** ESP32-DevKitC-VE / ESP32-WROVER-E + MikroE DALI-2 Click
 
 ## Where Things Stand
 
 The software stack is now the most complete it has ever been. PHY, scheduler,
-protocol, commissioning, discovery, control, memory, and device-type layers are
-all implemented and covered by 17 host test suites (180+ individual test cases).
+protocol, commissioning, discovery, control, memory, device-type, and headless
+dispatch layers are all implemented and covered by 18 host test suites.
 
 ### Discovery enrichment
 
@@ -91,6 +91,51 @@ full bidirectional DALI communication is confirmed on a live installation bus.
 controller has been removed. Run `scan`; expect the sensor at a new address with
 `kind: "input_device"` and 4 instances (brightness, motion, temperature, humidity).
 
+**Session 2026-06-24 — Headless dispatch layer added:**
+
+- **`dali_dispatch.{c,h}`** — new pure-C module in `components/dali/`. Static
+  dispatch table maps unsolicited bus frames to `dali_control_*` calls. Supports:
+  `MIRROR` (re-issue same legacy opcode), `RECALL_MAX`, `RECALL_MIN`, `OFF`,
+  `DIM_UP`, `DIM_DOWN`, `GO_TO_LAST`, `SCENE N`, and `TOGGLE` (stateful
+  on/off bitmask for DALI-2 push buttons).
+- **`dali_headless.cpp`** — installation-specific mapping table compiled into the
+  ESPHome firmware. Current config: BF6 MIRROR entries for groups 0/2/3/4/5/6/7.
+  Comments in the file walk through the phantom-address and DALI-2 migration paths.
+- **Wired into `DaliComponent`** — setup registers an unsolicited-RX callback that
+  pushes frames to `DaliInputEventQueue`; task drains the queue after each
+  `dali_sched_run()` to avoid re-entrancy. Table loaded via weakly-linked
+  `dali_headless_get_table()` — diag firmware gets a null default automatically.
+- **`test_dispatch.c`** — 12 new host tests; all 18 suites green.
+
+**Headless dispatch — what it can and cannot do:**
+
+Can do:
+- Lights respond to physical button presses with no HA or Wi-Fi dependency — dispatch
+  runs entirely on Core 1, independent of the network stack.
+- All standard lighting actions: `RECALL_MAX`, `RECALL_MIN`, `OFF`, `DIM_UP`,
+  `DIM_DOWN`, `GO_TO_LAST`, `GO_TO_SCENE N`, `TOGGLE` (stateful bitmask).
+- `MIRROR` passes through any legacy opcode including repeated `UP`/`DOWN` for
+  long-press dimming — if couplers are reconfigured to send dimming sequences on
+  hold, no firmware change is needed.
+- Phantom-address remapping (Approach B from `todo_pb_couplers.md`) requires only a
+  `dali_headless.cpp` edit — the engine already handles short-address keys.
+- DALI-2 push buttons: add `INPUT_24BIT` entries with `TOGGLE` action.
+
+Cannot do yet:
+- **No HA state sync.** ESPHome light entities don't know a button press happened;
+  their state in HA goes stale. Requires: (a) a target→entity reverse map in
+  `DaliComponent`, (b) cross-core notification from Core 1 → Core 0 `loop()`,
+  (c) knowledge of post-dispatch brightness (easy for RECALL_MAX/OFF, ambiguous
+  for scenes without cached scene levels).
+- **No double-press from BF6 couplers.** The DALI-2 24-bit double-press event
+  code (0x03) requires a DALI-2 input device; BF6 couplers are DALI-1 and cannot
+  produce it.
+- **No hold-to-dim or multi-step sequences.** One button press → one DALI command.
+  No press-and-hold progression, scene-cycle, or timed fade logic.
+- **Toggle state does not persist across power cycles.** Resets to all-off on boot
+  (correct for BF6 since coupler sends explicit ON/OFF; matters for DALI-2 TOGGLE
+  entries).
+
 **Session 2026-06-22 — ESPHome component built and both firmwares compile:**
 
 - **`esphome/components/dali/`** — external ESPHome component:
@@ -104,8 +149,12 @@ controller has been removed. Run `scan`; expect the sensor at a new address with
     file as C in its own translation unit — avoiding the static-name clashes and
     C99/C++ incompatibilities that made a unity `.cpp` build unworkable.
   - `dali_component.h/.cpp` — `DaliComponent` ESPHome class; `setup()` calls
-    `dali_phy_init()` + `dali_sched_init_device()` then starts the DALI FreeRTOS
+    `dali_phy_init()` + `dali_sched_init_device()`, registers the unsolicited-RX
+    callback, loads the headless dispatch table, then starts the DALI FreeRTOS
     task pinned to Core 1 (App CPU) at priority 10
+  - `dali_headless.cpp` — installation-specific dispatch table; user edits this
+    file to configure button→light mappings; weakly-linked default returns null
+    so the diag firmware compiles without any mappings
   - `dali_scan.h/.cpp` — scan task spawned on demand (Core 1, priority 9);
     synchronous transport via `ulTaskNotifyTake`; logs full JSON inventory and a
     draft ESPHome YAML snippet
@@ -144,10 +193,10 @@ Home Assistant uses "switch" for a binary on/off toggle entity.
 
 ## Immediate Priorities
 
-1. **Flash and test `dali_diag.yaml`.** Press "Scan DALI Bus" in HA; verify JSON
+1. **Flash and test `dali_1k.yaml` with headless dispatch.** Confirm BF6 coupler
+   presses appear in ESP32 logs and lights respond independently of HA.
+2. **Flash and test `dali_diag.yaml`.** Press "Scan DALI Bus" in HA; verify JSON
    inventory and draft YAML appear in logs. Confirm scan_status sensor updates.
-2. **Flash and test `dali_1k.yaml`.** Toggle each of the 7 group lights from HA;
-   confirm lamp response. Verify brightness slider maps correctly (arc level 1–254).
 3. Bring up the Steinel HF 360 II: connect to a bus without an existing master,
    run `scan`, confirm 4 instances decode correctly.
 4. Add `set-system-failure-dtr0` to diag config spec table (small gap, one line).
@@ -157,6 +206,7 @@ Home Assistant uses "switch" for a binary on/off toggle entity.
 
 ```text
 ESPHome / Home Assistant integration      (component scaffold + test YAML ✓)
+Headless dispatch (dali_dispatch + dali_headless)  (implemented, host-tested ✓)
 DALI entity mapping / release integration (mapping helpers ready, release future)
 DALI discovery / inventory helpers        (implemented, hardware-verified ✓)
 DaliControl                               (implemented)
@@ -189,6 +239,8 @@ components/dali/          reusable protocol stack (no app dependencies)
   dali_gear_dt8           Colour gear (IEC 62386-209) frame builders, parsers,
                             Kelvin/Mirek conversion, 16-bit colour value read
   dali_mapping            Static endpoint mapping helpers (see note below)
+  dali_dispatch           Headless dispatch engine: unsolicited-frame → control
+                            action; supports MIRROR, TOGGLE, fixed actions, scenes
   dali_lunatone           Lunatone vendor extensions
   dali_steinel            Steinel vendor extensions
 
@@ -203,7 +255,7 @@ convenience but is application-specific configuration glue. If the component is
 ever published separately or used in a second firmware target, `dali_mapping`
 should be moved to `main/` alongside `dali_diag`.
 
-## Host Test Suites (17 total)
+## Host Test Suites (18 total)
 
 | Suite | Tests | Coverage |
 |---|---:|---|
@@ -224,6 +276,7 @@ should be moved to `main/` alongside `dali_diag`.
 | test_input_config | — | IEC 62386-103 + DT301/303/304 config frame builders |
 | test_control | — | Control-gear command API |
 | test_scheduler | — | TX/RX sequencer |
+| test_dispatch | 12 | Headless dispatch: MIRROR, TOGGLE, actions, key matching |
 
 ## Known Target Sensor
 

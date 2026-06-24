@@ -17,6 +17,7 @@ idf_component_register(
     SRCS
         "dali_component.cpp"
         "dali_scan.cpp"
+        "dali_headless.cpp"
         "light/dali_light_output.cpp"
         ${DALI_PROTOCOL_SRCS}
     INCLUDE_DIRS

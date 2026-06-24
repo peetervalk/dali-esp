@@ -8,9 +8,10 @@ DEPENDENCIES = ["esp32"]
 # Always bundle text_sensor C++ files — we use TextSensor in dali_component.cpp.
 AUTO_LOAD = ["text_sensor"]
 
-CONF_TX_PIN = "tx_pin"
-CONF_RX_PIN = "rx_pin"
-CONF_SCAN_STATUS = "scan_status"
+CONF_TX_PIN       = "tx_pin"
+CONF_RX_PIN       = "rx_pin"
+CONF_SCAN_STATUS  = "scan_status"
+CONF_POLL_INTERVAL = "poll_interval"
 
 dali_ns = cg.esphome_ns.namespace("dali")
 DaliComponent = dali_ns.class_("DaliComponent", cg.Component)
@@ -22,6 +23,9 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Required(CONF_RX_PIN): cv.int_range(min=0, max=39),
         # Optional: shows "Idle" / "Scanning..." / "Found N devices" in HA
         cv.Optional(CONF_SCAN_STATUS): text_sensor.text_sensor_schema(),
+        # Optional: interval in seconds between automatic QUERY_ACTUAL_LEVEL polls
+        # for lights that have query_address set.  0 or omitted = no polling.
+        cv.Optional(CONF_POLL_INTERVAL, default=0): cv.int_range(min=0, max=3600),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -34,6 +38,9 @@ async def to_code(config):
     if CONF_SCAN_STATUS in config:
         sens = await text_sensor.new_text_sensor(config[CONF_SCAN_STATUS])
         cg.add(var.set_scan_status_sensor(sens))
+
+    if config[CONF_POLL_INTERVAL] > 0:
+        cg.add(var.set_poll_interval(config[CONF_POLL_INTERVAL]))
 
     # Include path for the protocol stack headers is handled by CMakeLists.txt
     # (INCLUDE_DIRS "${DALI_IDF_DIR}"). No Python-level flag needed.

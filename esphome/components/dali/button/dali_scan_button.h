@@ -16,5 +16,15 @@ class DaliScanButton : public button::Button {
   DaliComponent *component_{nullptr};
 };
 
+class DaliRefreshButton : public button::Button {
+ public:
+  void set_dali_component(DaliComponent *c) { component_ = c; }
+
+ protected:
+  void press_action() override { component_->start_refresh(); }
+
+  DaliComponent *component_{nullptr};
+};
+
 }  // namespace dali
 }  // namespace esphome

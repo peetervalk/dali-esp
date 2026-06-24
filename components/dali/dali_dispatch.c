@@ -1,0 +1,174 @@
+#include "dali_dispatch.h"
+#include <stddef.h>
+
+static bool key_matches(const DaliDispatchKey *key, const DaliInputEvent *event)
+{
+    if (key->frame_kind   != event->frame_kind)   return false;
+    if (key->address_kind != event->address_kind) return false;
+    if (key->address      != event->address)      return false;
+    if (key->event_code   != DALI_DISPATCH_OPCODE_ANY &&
+        key->event_code   != event->event_code)   return false;
+    return true;
+}
+
+static bool toggle_get(const DaliDispatchToggleState *state, DaliTarget out)
+{
+    if (state == NULL) return false;
+    if (out.type == DALI_ADDR_GROUP && out.address < DALI_GROUP_COUNT)
+        return ((state->group_on >> out.address) & 1u) != 0u;
+    if (out.type == DALI_ADDR_SHORT && out.address < DALI_SHORT_ADDRESS_COUNT)
+        return ((state->short_on >> out.address) & 1u) != 0u;
+    return false;
+}
+
+static void toggle_set(DaliDispatchToggleState *state, DaliTarget out, bool on)
+{
+    if (state == NULL) return;
+    if (out.type == DALI_ADDR_GROUP && out.address < DALI_GROUP_COUNT) {
+        if (on) state->group_on |=  (uint16_t)(1u << out.address);
+        else    state->group_on &= ~(uint16_t)(1u << out.address);
+    } else if (out.type == DALI_ADDR_SHORT && out.address < DALI_SHORT_ADDRESS_COUNT) {
+        if (on) state->short_on |=  ((uint64_t)1u << out.address);
+        else    state->short_on &= ~((uint64_t)1u << out.address);
+    }
+}
+
+/*
+ * Translate a legacy 16-bit command opcode into a dali_control_* call.
+ * Also keeps toggle state current for on/off transitions so that any TOGGLE
+ * entries on overlapping targets stay consistent.
+ *
+ * Returns DALI_ERR_INVALID for DAPC frames (address_selector = 0) or
+ * unrecognised opcodes — caller treats these as no-match.
+ */
+static DaliError apply_mirror(const DaliInputEvent    *event,
+                              DaliTarget               out,
+                              DaliDispatchToggleState *state)
+{
+    if (!event->address_selector) return DALI_ERR_INVALID; /* DAPC — not a command */
+
+    uint8_t op = event->event_code;
+    switch (op) {
+        case 0x00u:
+            toggle_set(state, out, false);
+            return dali_control_off(out);
+        case 0x01u:
+            return dali_control_up(out);
+        case 0x02u:
+            return dali_control_down(out);
+        case 0x03u:
+            return dali_control_step_up(out);
+        case 0x04u:
+            return dali_control_step_down(out);
+        case 0x05u:
+            toggle_set(state, out, true);
+            return dali_control_recall_max(out);
+        case 0x06u:
+            toggle_set(state, out, true);
+            return dali_control_recall_min(out);
+        case 0x07u:
+            toggle_set(state, out, false);
+            return dali_control_step_down_and_off(out);
+        case 0x08u:
+            toggle_set(state, out, true);
+            return dali_control_on_and_step_up(out);
+        case 0x0Au:
+            return dali_control_go_to_last_active_level(out);
+        default:
+            if (op >= 0x10u && op <= 0x1Fu)
+                return dali_control_go_to_scene(out, op - 0x10u);
+            return DALI_ERR_INVALID;
+    }
+}
+
+static void result_set(DaliDispatchResult *r, DaliTarget tgt, bool on, uint8_t lvl)
+{
+    if (r == NULL) return;
+    r->has_state = true;
+    r->target    = tgt;
+    r->is_on     = on;
+    r->level     = lvl;
+}
+
+static void result_unknown(DaliDispatchResult *r, DaliTarget tgt)
+{
+    if (r == NULL) return;
+    r->has_state = false;
+    r->target    = tgt;
+}
+
+DaliError dali_dispatch(const DaliDispatchEntry  *table,
+                        uint8_t                   count,
+                        const DaliInputEvent     *event,
+                        DaliDispatchToggleState  *toggle_state,
+                        DaliDispatchResult       *result_out)
+{
+    if (table == NULL || event == NULL || count == 0u) return DALI_ERR_INVALID;
+    if (result_out) result_out->has_state = false;
+
+    for (uint8_t i = 0u; i < count; i++) {
+        const DaliDispatchEntry *e = &table[i];
+        if (!key_matches(&e->key, event)) continue;
+
+        DaliError err;
+        switch (e->action) {
+            case DALI_DISPATCH_ACTION_MIRROR: {
+                err = apply_mirror(event, e->output, toggle_state);
+                if (err == DALI_OK && event->address_selector) {
+                    uint8_t op = event->event_code;
+                    if (op == 0x00u || op == 0x07u)
+                        result_set(result_out, e->output, false, 0u);
+                    else if (op == 0x05u)
+                        result_set(result_out, e->output, true, 254u);
+                    else
+                        result_unknown(result_out, e->output);
+                }
+                return err;
+            }
+
+            case DALI_DISPATCH_ACTION_RECALL_MAX:
+                toggle_set(toggle_state, e->output, true);
+                result_set(result_out, e->output, true, 254u);
+                return dali_control_recall_max(e->output);
+
+            case DALI_DISPATCH_ACTION_RECALL_MIN:
+                toggle_set(toggle_state, e->output, true);
+                result_unknown(result_out, e->output);
+                return dali_control_recall_min(e->output);
+
+            case DALI_DISPATCH_ACTION_OFF:
+                toggle_set(toggle_state, e->output, false);
+                result_set(result_out, e->output, false, 0u);
+                return dali_control_off(e->output);
+
+            case DALI_DISPATCH_ACTION_GO_TO_LAST:
+                result_unknown(result_out, e->output);
+                return dali_control_go_to_last_active_level(e->output);
+
+            case DALI_DISPATCH_ACTION_DIM_UP:
+                result_unknown(result_out, e->output);
+                return dali_control_up(e->output);
+
+            case DALI_DISPATCH_ACTION_DIM_DOWN:
+                result_unknown(result_out, e->output);
+                return dali_control_down(e->output);
+
+            case DALI_DISPATCH_ACTION_SCENE:
+                result_unknown(result_out, e->output);
+                return dali_control_go_to_scene(e->output, e->scene);
+
+            case DALI_DISPATCH_ACTION_TOGGLE: {
+                bool on = toggle_get(toggle_state, e->output);
+                toggle_set(toggle_state, e->output, !on);
+                result_set(result_out, e->output, !on, !on ? 254u : 0u);
+                return on ? dali_control_off(e->output)
+                          : dali_control_recall_max(e->output);
+            }
+
+            default:
+                return DALI_ERR_INVALID;
+        }
+    }
+
+    return DALI_OK; /* no match — silently ignore */
+}

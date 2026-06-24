@@ -99,10 +99,13 @@ Three scenarios to decide on before committing:
 | ESP32 up, ESPHome disconnected | Lights still respond (coupler is master) | **Nothing happens** unless ESP32 firmware applies fallback translation |
 | ESP32 dead, bus PSU live | Lights respond (coupler is master) | **Nothing happens** — no translation possible |
 
-**Firmware failsafe for scenario 2:** The ESP32 can detect ESPHome connection loss and
-apply a local mapping table (phantom short addr 16 → RECALL MAX to group 6, etc.).
-Switches still control lights without smart logic. This should be implemented if phantom
-frames are adopted.
+**Firmware failsafe for scenario 2:** ✓ **Dispatch infrastructure implemented
+(2026-06-24).** `dali_dispatch` + `dali_headless.cpp` provide the local mapping
+table. In BF6 mode the dispatch runs unconditionally (no HA dependency). For
+phantom-frame mode, only the mapping table in `dali_headless.cpp` needs updating —
+the dispatch engine already supports `MIRROR` on short addresses. Connection-loss
+detection is not explicitly implemented because BF6 dispatch does not require it;
+add it when switching to phantom frames if needed.
 
 **Scenario 3 is an accepted risk for this installation.** The DALI-1 PB couplers are
 aging hardware well past their early-life period and are statistically more likely to
@@ -139,5 +142,5 @@ exposed in the diag config spec table — add it alongside set-power-on-dtr0.
 - Decide on phantom-frame approach before reprogramming (can't easily undo without
   the software and cable on-site again)
 - Add set-system-failure-dtr0 to diag config spec table (small gap, one line)
-- Implement ESP32 firmware failsafe: when ESPHome disconnects, translate phantom frames
-  to real DALI group commands using the stored zone mapping
+- ~~Implement ESP32 firmware failsafe~~ — **done**: `dali_dispatch` + `dali_headless.cpp`
+  provide the local mapping table; BF6 mode runs unconditionally without HA
