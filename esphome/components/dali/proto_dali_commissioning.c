@@ -1,2 +1,2 @@
 #include <stddef.h>
-#include "../../../components/dali/dali_commissioning.c"
+#include "../../../components/dali/dali_commissioning.c.inc"

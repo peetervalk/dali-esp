@@ -1,2 +1,2 @@
 #include <stddef.h>
-#include "../../../components/dali/dali_event.c"
+#include "../../../components/dali/dali_event.c.inc"

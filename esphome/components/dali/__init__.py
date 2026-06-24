@@ -1,7 +1,11 @@
+from pathlib import Path
+import shutil
+
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import text_sensor
 from esphome.const import CONF_ID
+from esphome.core import CORE
 
 CODEOWNERS = ["@peetervalk"]
 DEPENDENCIES = ["esp32"]
@@ -18,6 +22,35 @@ CONF_HEADLESS_DISPATCH = "headless_dispatch"
 
 dali_ns = cg.esphome_ns.namespace("dali")
 DaliComponent = dali_ns.class_("DaliComponent", cg.Component)
+
+
+def _protocol_source_dir():
+    component_dir = Path(__file__).resolve().parent
+    candidates = [
+        component_dir.parents[2] / "components" / "dali",
+        component_dir / "protocol",
+    ]
+    for candidate in candidates:
+        if (candidate / "dali_phy.h").is_file() and (candidate / "dali_phy.c").is_file():
+            return candidate
+    raise cv.Invalid(
+        "DALI protocol sources not found. Expected repo-root components/dali "
+        "next to esphome/components/dali."
+    )
+
+
+def _copy_protocol_stack():
+    src_dir = _protocol_source_dir()
+    dst_dir = CORE.relative_src_path("components", "dali")
+    dst_dir.mkdir(parents=True, exist_ok=True)
+
+    for stale in list(dst_dir.glob("dali_*.h")) + list(dst_dir.glob("dali_*.c.inc")):
+        stale.unlink()
+
+    for header in src_dir.glob("dali_*.h"):
+        shutil.copyfile(header, dst_dir / header.name)
+    for source in src_dir.glob("dali_*.c"):
+        shutil.copyfile(source, dst_dir / f"{source.name}.inc")
 
 CONFIG_SCHEMA = cv.Schema(
     {
@@ -41,6 +74,8 @@ CONFIG_SCHEMA = cv.Schema(
 
 
 async def to_code(config):
+    _copy_protocol_stack()
+
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     cg.add(var.set_pins(config[CONF_TX_PIN], config[CONF_RX_PIN]))

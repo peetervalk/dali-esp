@@ -1,2 +1,2 @@
 #include <stddef.h>
-#include "../../../components/dali/dali_input_config.c"
+#include "../../../components/dali/dali_input_config.c.inc"
