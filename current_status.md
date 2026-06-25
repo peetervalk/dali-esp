@@ -110,7 +110,7 @@ controller has been removed. Run `scan`; expect the sensor at a new address with
   `dali_sched_run()` to avoid re-entrancy. Table loaded via weakly-linked
   `dali_headless_get_table()`; builds without the opt-in table get a null default
   automatically.
-- **`test_dispatch.c`** — 22 host tests; all 18 suites green.
+- **`test_dispatch.c`** — 25 host tests; all 18 suites green.
 
 **Headless dispatch — what it can and cannot do:**
 
@@ -121,10 +121,11 @@ Can do:
   `DIM_DOWN`, `GO_TO_LAST`, `GO_TO_SCENE N`, `TOGGLE` (stateful bitmask).
 - `OBSERVE` tracks direct BF6 group commands without re-transmitting them; the
   physical coupler remains the controller and the ESP32 only updates local/HA
-  state.
+  state. DAPC dimming frames are observed as brightness levels.
 - `MIRROR` passes through any legacy opcode including repeated `UP`/`DOWN` for
   phantom-address mode, where the coupler sends to an unused short address and
-  the ESP32 must translate that into the real output target.
+  the ESP32 must translate that into the real output target. DAPC levels are
+  translated too for phantom dimming.
 - Phantom-address remapping (Approach B from `todo_pb_couplers.md`) requires only a
   `dali_headless.cpp` edit — the engine already handles short-address keys.
 - DALI-2 push buttons: add `INPUT_24BIT` entries with `TOGGLE` action.
@@ -314,7 +315,7 @@ should be moved to `main/` alongside `dali_diag`.
 | test_input_config | — | IEC 62386-103 + DT301/303/304 config frame builders |
 | test_control | — | Control-gear command API |
 | test_scheduler | — | TX/RX sequencer |
-| test_dispatch | 22 | Headless dispatch: OBSERVE, MIRROR, TOGGLE, actions, key matching |
+| test_dispatch | 25 | Headless dispatch: OBSERVE, MIRROR, DAPC dimming, TOGGLE, actions, key matching |
 
 ## Known Target Sensor
 

@@ -45,7 +45,12 @@ static DaliError apply_mirror(const DaliInputEvent    *event,
                               DaliTarget               out,
                               DaliDispatchToggleState *state)
 {
-    if (!event->address_selector) return DALI_ERR_INVALID; /* DAPC - not a command */
+    if (!event->address_selector) {
+        uint8_t level = event->event_code;
+        if (level == 0xFFu) return DALI_ERR_INVALID;
+        toggle_set(state, out, level != 0u);
+        return dali_control_set_level(out, level);
+    }
 
     uint8_t op = event->event_code;
     switch (op) {
@@ -116,7 +121,16 @@ static DaliError observe_legacy(const DaliInputEvent    *event,
                                 DaliDispatchToggleState *state,
                                 DaliDispatchResult      *result_out)
 {
-    if (!event->address_selector) return DALI_ERR_INVALID; /* DAPC - not a command */
+    if (!event->address_selector) {
+        uint8_t level = event->event_code;
+        if (level == 0xFFu) {
+            result_unknown(result_out, out);
+            return DALI_OK;
+        }
+        toggle_set(state, out, level != 0u);
+        result_set(result_out, out, level != 0u, level);
+        return DALI_OK;
+    }
 
     uint8_t op = event->event_code;
     switch (op) {
@@ -178,7 +192,7 @@ DaliError dali_dispatch(const DaliDispatchEntry  *table,
 
             case DALI_DISPATCH_ACTION_MIRROR: {
                 err = apply_mirror(event, e->output, toggle_state);
-                if (err == DALI_OK && event->address_selector) {
+                if (err == DALI_OK) {
                     observe_legacy(event, e->output, toggle_state, result_out);
                 }
                 return err;

@@ -125,11 +125,30 @@ static const char *opcode_name(uint8_t op)
     }
 }
 
+static void format_target(char *buf, size_t len, DaliTarget target)
+{
+    const char *pfx = target.type == DALI_ADDR_GROUP ? "g"
+                    : target.type == DALI_ADDR_BROADCAST ? "bc"
+                                                        : "a";
+    if (target.type == DALI_ADDR_BROADCAST)
+        snprintf(buf, len, "bc");
+    else
+        snprintf(buf, len, "%s%u", pfx, (unsigned)target.address);
+}
+
 static void format_event(char *buf, size_t len, const DaliInputEvent *e)
 {
     const char *pfx = (e->address_kind == DALI_EVENT_ADDRESS_GROUP)     ? "g"
                     : (e->address_kind == DALI_EVENT_ADDRESS_BROADCAST)  ? "bc"
                                                                          : "a";
+    if (e->frame_kind == DALI_EVENT_FRAME_LEGACY_16BIT && !e->address_selector) {
+        if (e->address_kind == DALI_EVENT_ADDRESS_BROADCAST)
+            snprintf(buf, len, "bc dapc %u", (unsigned)e->event_code);
+        else
+            snprintf(buf, len, "%s%u dapc %u", pfx, (unsigned)e->address,
+                     (unsigned)e->event_code);
+        return;
+    }
     if (e->address_kind == DALI_EVENT_ADDRESS_BROADCAST) {
         snprintf(buf, len, "bc %s", opcode_name(e->event_code));
     } else {
@@ -148,6 +167,7 @@ static void on_dali_unsolicited(const DaliFrame *frame, void * /*ctx*/)
     /* Bus monitor: format and signal Core 0. */
     format_event(s_bus_monitor_str, sizeof(s_bus_monitor_str), &event);
     s_bus_monitor_dirty_.store(true, std::memory_order_release);
+    ESP_LOGD(TAG, "rx %s", s_bus_monitor_str);
 
     /* Find-couplers: record unique frames while the window is open. */
     if (s_find_couplers_active_.load(std::memory_order_relaxed)) {
@@ -193,6 +213,8 @@ static void dali_task(void *)
         DaliInputEventRecord rec;
         while (dali_event_queue_pop(&s_event_queue, &rec)) {
             if (s_dispatch_table != nullptr && s_dispatch_count > 0u) {
+                char event_str[48];
+                format_event(event_str, sizeof(event_str), &rec.event);
                 DaliDispatchResult result = {};
                 DaliError err = dali_dispatch(s_dispatch_table, s_dispatch_count,
                                               &rec.event, &s_toggle_state, &result);
@@ -203,6 +225,18 @@ static void dali_task(void *)
                              (int)rec.event.address_kind,
                              (int)rec.event.address,
                              (int)rec.event.event_code);
+                } else if (result.matched) {
+                    char tgt[8];
+                    format_target(tgt, sizeof(tgt), result.target);
+                    if (result.has_state) {
+                        ESP_LOGD(TAG, "dispatch observed %s -> %s %s level=%u",
+                                 event_str, tgt,
+                                 result.is_on ? "on" : "off",
+                                 (unsigned)result.level);
+                    } else {
+                        ESP_LOGD(TAG, "dispatch observed %s -> %s state=unknown",
+                                 event_str, tgt);
+                    }
                 }
                 notify_lights(&result);
             }
@@ -372,6 +406,8 @@ void DaliComponent::start_refresh()
         LightEntry *e  = &s_light_registry[i];
         uint8_t     qa = e->light->get_query_address();
         if (qa == 0xFFu) continue;
+        ESP_LOGD(TAG, "query actual level: light target type=%u addr=%u via short %u",
+                 (unsigned)e->target_type, (unsigned)e->target_address, (unsigned)qa);
         DaliTarget qt;
         qt.type    = DALI_ADDR_SHORT;
         qt.address = qa;

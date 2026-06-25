@@ -195,10 +195,30 @@ Prospective mitigation:
     multi-group TX storm.
   - [ ] Add clearer logs around ignored initial writes, headless dispatch actions,
     and `DALI_ERR_BUS_STUCK` with sampled RX idle level / recent TX context.
-  - [x] Clean up brightness-only ESPHome state publishing so unused RGB/white/colour
-    temperature fields are explicitly zeroed. HA already advertises
-    `supported_color_modes: brightness`, so this is log/API hygiene rather than
-    a functional colour-capability fix.
+- [x] Clean up brightness-only ESPHome state publishing so unused RGB/white/colour
+  temperature fields are explicitly zeroed. HA already advertises
+  `supported_color_modes: brightness`, so this is log/API hygiene rather than
+  a functional colour-capability fix.
+
+Follow-up observation after the headless fix commit: RGB state noise is gone and
+on/off BF6 frames update/log correctly, but flashing still turns all lights off.
+Dimming did not update or log because the couplers appear to send DAPC-level
+frames during dimming; `OBSERVE` originally rejected selector=0 DAPC frames.
+
+Follow-up mitigation:
+
+- [x] Treat direct BF6 DAPC frames as observed brightness levels without TX.
+- [x] Let phantom-address `MIRROR` translate DAPC levels too, for future phantom
+  dimming support.
+- [x] Add explicit debug logs for unsolicited RX, dispatch results, startup write
+  suppression, and firmware-originated light writes.
+- [x] Set the TX GPIO idle level before switching it to output and enable the
+  internal pulldown during firmware init, reducing app-init TX glitches.
+- [ ] Retest boot after flashing. If lights still go off without any
+  `dali.light: tx off` / `tx level` log, suspect TX pin reset/floating behavior
+  on the MikroE Click path rather than ESPHome restore writes. Mitigations to
+  evaluate: add/verify an external pulldown so ESP32 reset/flashing cannot drive
+  the Click TX input active.
 
 ### Scene recall button entity
 

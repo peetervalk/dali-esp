@@ -57,6 +57,7 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
 
   // Core 0 only — prevents re-issuing a DALI command when state is pushed
   // from the bus into ESPHome via LightCall::perform().
+  uint32_t          setup_ms_{0};
   bool              suppress_initial_write_{true};
   bool              skip_next_write_{false};
   light::LightState *state_{nullptr};

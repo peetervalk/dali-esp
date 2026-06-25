@@ -44,9 +44,9 @@ typedef enum {
     DALI_DISPATCH_ACTION_OBSERVE = 0,
 
     /*
-     * Re-issue the same legacy opcode received on the bus to the output target.
-     * Only valid for DALI_EVENT_FRAME_LEGACY_16BIT command frames
-     * (address_selector = 1). Supports: off, up, down, step-up, step-down,
+     * Re-issue the same legacy command opcode or DAPC level received on the bus
+     * to the output target. Only valid for DALI_EVENT_FRAME_LEGACY_16BIT.
+     * Supports: DAPC levels 0-254, off, up, down, step-up, step-down,
      * recall-max, recall-min, step-down-and-off, on-and-step-up,
      * go-to-last-active-level, and go-to-scene N.
      *
@@ -129,7 +129,7 @@ void dali_dispatch_seed_toggle(DaliDispatchToggleState *state,
  * Returns DALI_OK when a matching entry executes (even for fire-and-forget
  * scheduler transactions), or DALI_OK silently when no entry matches.
  * Returns DALI_ERR_INVALID for bad arguments or an unmappable frame
- * (e.g. MIRROR on a DAPC frame).
+ * (e.g. MIRROR on DAPC level 0xFF).
  *
  * toggle_state may be NULL when the table contains no TOGGLE entries.
  * result_out   may be NULL when the caller does not need inferred state.

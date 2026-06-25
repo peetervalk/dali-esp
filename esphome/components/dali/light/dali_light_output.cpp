@@ -1,4 +1,5 @@
 #include "dali_light_output.h"
+#include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
 #include <cmath>
@@ -7,6 +8,16 @@ namespace esphome {
 namespace dali {
 
 static const char *TAG = "dali.light";
+static constexpr uint32_t STARTUP_WRITE_SUPPRESS_MS = 10000u;
+
+static const char *target_type_name(DaliAddressType type) {
+  switch (type) {
+    case DALI_ADDR_SHORT: return "short";
+    case DALI_ADDR_GROUP: return "group";
+    case DALI_ADDR_BROADCAST: return "broadcast";
+    default: return "unknown";
+  }
+}
 
 void DaliLightOutput::set_dali_component(DaliComponent *comp) {
   comp_ = comp;
@@ -27,6 +38,7 @@ void DaliLightOutput::setup_state(light::LightState *state) {
   state_ = state;
   clear_unused_color_fields_(state->remote_values);
   clear_unused_color_fields_(state->current_values);
+  setup_ms_ = millis();
   suppress_initial_write_ = true;
 }
 
@@ -47,10 +59,18 @@ void DaliLightOutput::write_state(light::LightState *state) {
     return;  // state was pushed from bus — don't re-issue DALI command
   }
 
+  if ((uint32_t)(millis() - setup_ms_) < STARTUP_WRITE_SUPPRESS_MS) {
+    ESP_LOGD(TAG, "suppressing startup write to %s %u",
+             target_type_name(target_.type), (unsigned)target_.address);
+    return;
+  }
+
   float brightness = 0.0f;
   state->current_values_as_brightness(&brightness);
 
   if (!state->current_values.is_on() || brightness < (1.0f / 254.0f)) {
+    ESP_LOGD(TAG, "tx off to %s %u",
+             target_type_name(target_.type), (unsigned)target_.address);
     dali_control_off(target_);
     return;
   }
@@ -58,6 +78,8 @@ void DaliLightOutput::write_state(light::LightState *state) {
   uint8_t level = static_cast<uint8_t>(roundf(brightness * 254.0f));
   if (level == 0) level = 1;
 
+  ESP_LOGD(TAG, "tx level %u to %s %u",
+           (unsigned)level, target_type_name(target_.type), (unsigned)target_.address);
   DaliError err = dali_control_set_level(target_, level);
   if (err != DALI_OK) {
     ESP_LOGW(TAG, "set_level failed: %d", (int)err);

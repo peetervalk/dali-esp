@@ -197,6 +197,70 @@ void test_observe_dim_has_unknown_state_without_tx(void)
     TEST_ASSERT_EQUAL_UINT8(0u, result.target.address);
 }
 
+void test_observe_dapc_level_infers_level_without_tx(void)
+{
+    DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 2, false, 123u);
+    DaliDispatchEntry table[] = {
+        { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 2,
+            DALI_DISPATCH_OPCODE_ANY },
+          { DALI_ADDR_GROUP, 2 }, DALI_DISPATCH_ACTION_OBSERVE, 0 },
+    };
+    DaliDispatchToggleState state = {};
+    DaliDispatchResult result = {};
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(table, 1u, &ev, &state, &result));
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL_UINT8(0u, s_tx_count);
+    TEST_ASSERT_TRUE((state.group_on >> 2u) & 1u);
+    TEST_ASSERT_TRUE(result.has_state);
+    TEST_ASSERT_TRUE(result.is_on);
+    TEST_ASSERT_EQUAL_UINT8(123u, result.level);
+    TEST_ASSERT_EQUAL_INT(DALI_ADDR_GROUP, result.target.type);
+    TEST_ASSERT_EQUAL_UINT8(2u, result.target.address);
+}
+
+void test_observe_dapc_zero_infers_off_without_tx(void)
+{
+    DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 2, false, 0u);
+    DaliDispatchEntry table[] = {
+        { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 2,
+            DALI_DISPATCH_OPCODE_ANY },
+          { DALI_ADDR_GROUP, 2 }, DALI_DISPATCH_ACTION_OBSERVE, 0 },
+    };
+    DaliDispatchToggleState state = { .group_on = (uint16_t)(1u << 2u) };
+    DaliDispatchResult result = {};
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(table, 1u, &ev, &state, &result));
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL_UINT8(0u, s_tx_count);
+    TEST_ASSERT_FALSE((state.group_on >> 2u) & 1u);
+    TEST_ASSERT_TRUE(result.has_state);
+    TEST_ASSERT_FALSE(result.is_on);
+    TEST_ASSERT_EQUAL_UINT8(0u, result.level);
+}
+
+void test_mirror_dapc_level_translates_to_output_target(void)
+{
+    DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_SHORT, 16, false, 123u);
+    DaliDispatchEntry table[] = {
+        { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_SHORT, 16,
+            DALI_DISPATCH_OPCODE_ANY },
+          { DALI_ADDR_GROUP, 6 }, DALI_DISPATCH_ACTION_MIRROR, 0 },
+    };
+    DaliDispatchResult result = {};
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(table, 1u, &ev, NULL, &result));
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL_UINT8(1u, s_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x8C7Bu, s_last_tx.data); /* group 6 DAPC 123 */
+    TEST_ASSERT_TRUE(result.has_state);
+    TEST_ASSERT_TRUE(result.is_on);
+    TEST_ASSERT_EQUAL_UINT8(123u, result.level);
+}
+
 void test_mirror_recall_max_issues_correct_frame(void)
 {
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 6, true, 0x05u);
@@ -231,7 +295,7 @@ void test_mirror_off_issues_correct_frame(void)
     TEST_ASSERT_EQUAL_HEX32(0x8D00u, s_last_tx.data);
 }
 
-void test_mirror_skips_dapc_frame(void)
+void test_mirror_dapc_frame_issues_dapc(void)
 {
     /* address_selector = false → DAPC, not a command */
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 6, false, 0x80u);
@@ -242,8 +306,11 @@ void test_mirror_skips_dapc_frame(void)
     };
 
     DaliError err = dali_dispatch(table, 1u, &ev, NULL, NULL);
-    TEST_ASSERT_EQUAL(DALI_ERR_INVALID, err);
-    TEST_ASSERT_EQUAL_UINT8(0u, s_tx_count);
+    TEST_ASSERT_EQUAL(DALI_OK, err);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL_UINT8(1u, s_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x8C80u, s_last_tx.data);
 }
 
 void test_mirror_phantom_remap_to_different_group(void)
@@ -514,9 +581,12 @@ int main(void)
     RUN_TEST(test_observe_recall_max_infers_on_without_tx);
     RUN_TEST(test_observe_off_infers_off_without_tx);
     RUN_TEST(test_observe_dim_has_unknown_state_without_tx);
+    RUN_TEST(test_observe_dapc_level_infers_level_without_tx);
+    RUN_TEST(test_observe_dapc_zero_infers_off_without_tx);
+    RUN_TEST(test_mirror_dapc_level_translates_to_output_target);
     RUN_TEST(test_mirror_recall_max_issues_correct_frame);
     RUN_TEST(test_mirror_off_issues_correct_frame);
-    RUN_TEST(test_mirror_skips_dapc_frame);
+    RUN_TEST(test_mirror_dapc_frame_issues_dapc);
     RUN_TEST(test_mirror_phantom_remap_to_different_group);
     RUN_TEST(test_event_code_specific_only_fires_on_match);
     RUN_TEST(test_action_off_sends_off_frame);
