@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-06-24
+**Last updated:** 2026-06-25
 **Framework:** ESP-IDF v6.0.1 native CMake
 **Hardware target:** ESP32-DevKitC-VE / ESP32-WROVER-E + MikroE DALI-2 Click
 
@@ -170,6 +170,26 @@ Cannot do yet:
   Was missing because `dali_dispatch` was added to the protocol stack after the
   other wrappers were written.
 
+**Session 2026-06-25 — headless state sync verified on live bus:**
+
+- **Boot/flash behavior** — newest `dali_1k.yaml` firmware no longer turns the
+  installation off during startup or after flashing.
+- **BF6 on/off observation** — physical coupler `off` frames are observed without
+  retransmission and update the matching HA light entity immediately.
+- **BF6 hold-dim sync** — physical dimming sends `on-step` plus repeated
+  `up`/`down` frames, which are state-indeterminate. The firmware now re-arms a
+  600 ms deferred refresh during the dim stream, then sends
+  `QUERY_ACTUAL_LEVEL` after the stream stops. Live trace: group 3 dimmed from
+  off, queried representative short address 13, received level 91, and HA
+  updated to 36% brightness.
+- **HA-origin brightness writes** — ESPHome default transition streaming was
+  disabled for DALI outputs; writes now command the requested target value and
+  suppress duplicate known-state commands.
+- **Remaining refinement** — deferred refresh currently polls all configured
+  DALI light entities with `query_address`. This is acceptable for the 7-group
+  installation, but can be narrowed to the affected target if bus traffic or log
+  noise becomes a problem.
+
 **Session 2026-06-22 — ESPHome component built and both firmwares compile:**
 
 - **`esphome/components/dali/`** — external ESPHome component:
@@ -232,14 +252,11 @@ Home Assistant uses "switch" for a binary on/off toggle entity.
 
 ## Immediate Priorities
 
-1. **Flash and test `dali_1k.yaml` with headless dispatch + HA state sync.**
-   Confirm BF6 coupler presses update HA entity state and lights respond
-   independently of HA. Verify deferred query fires 600 ms after long-press dim.
-2. **Flash and test `dali_diag.yaml`.** Press "Scan DALI Bus" in HA; verify JSON
+1. **Flash and test `dali_diag.yaml`.** Press "Scan DALI Bus" in HA; verify JSON
    inventory and draft YAML appear in logs. Confirm scan_status sensor updates.
-3. Bring up the Steinel HF 360 II: connect to a bus without an existing master,
+2. Bring up the Steinel HF 360 II: connect to a bus without an existing master,
    run `scan`, confirm 4 instances decode correctly.
-4. Legacy pushbutton coupler zone grouping — see `todo_pb_couplers.md`.
+3. Legacy pushbutton coupler zone grouping — see `todo_pb_couplers.md`.
 
 ## Architecture
 

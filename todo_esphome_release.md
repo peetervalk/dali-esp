@@ -226,11 +226,12 @@ Follow-up mitigation:
   duplicate target writes.
 - [x] Log deferred-query arming/firing and `QUERY_ACTUAL_LEVEL` replies/failures
   so physical dimming can be debugged end-to-end.
-- [ ] Retest boot after flashing. If lights still go off without any
-  `dali.light: tx off` / `tx level` log, suspect TX pin reset/floating behavior
-  on the MikroE Click path rather than ESPHome restore writes. Mitigations to
-  evaluate: add/verify an external pulldown so ESP32 reset/flashing cannot drive
-  the Click TX input active.
+- [x] Retest boot after flashing: newest firmware left the lights on.
+- [x] Retest physical dimming: repeated `up`/`down` frames re-arm the deferred
+  refresh; after the stream stops, `QUERY_ACTUAL_LEVEL` updates HA brightness.
+- [ ] Optional: narrow deferred refresh to the affected DALI target instead of
+  polling all configured lights, if bus traffic or DEBUG log volume becomes a
+  problem.
 
 ### Scene recall button entity
 
