@@ -1,6 +1,5 @@
 #include "dali_component.h"
 #include "dali_scan.h"
-#include "sensor/dali_input_sensor.h"
 #include "esphome/core/log.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 
@@ -64,8 +63,8 @@ static uint8_t    s_light_count = 0u;
 static constexpr uint8_t MAX_INPUT_SENSORS = 16u;
 
 struct SensorEntry {
-    DaliInputSensor *sensor;
-    uint8_t          pending_msb; /* temp storage during 2-byte async read */
+    DaliBusSensor *sensor;
+    uint8_t        pending_msb; /* temp storage during 2-byte async read */
 };
 
 static SensorEntry s_sensor_registry[MAX_INPUT_SENSORS];
@@ -762,7 +761,7 @@ void DaliComponent::register_light(uint8_t type, uint8_t address,
     }
 }
 
-void DaliComponent::register_input_sensor(DaliInputSensor *sensor)
+void DaliComponent::register_input_sensor(DaliBusSensor *sensor)
 {
     if (s_sensor_count < MAX_INPUT_SENSORS) {
         s_sensor_registry[s_sensor_count++] = { sensor, 0u };

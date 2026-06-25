@@ -7,7 +7,6 @@
 
 // Forward declarations — full includes are in the .cpp files.
 namespace esphome { namespace text_sensor { class TextSensor; } }
-namespace esphome { namespace dali      { class DaliInputSensor; } }
 
 namespace esphome {
 namespace dali {
@@ -24,6 +23,25 @@ class DaliBusLight {
   virtual void    mark_state_from_bus(bool is_on, uint8_t level) = 0;
   virtual void    apply_bus_state() = 0;
   virtual uint8_t get_query_address() const = 0;
+};
+
+/*
+ * Minimal interface used by DaliComponent to poll input device instances and
+ * transfer values to ESPHome sensor entities (Core 1 → Core 0 mailbox).
+ * DaliInputSensor implements this; dali_component.cpp never needs to include
+ * the sensor/ subdirectory header.
+ */
+class DaliBusSensor {
+ public:
+  virtual ~DaliBusSensor() = default;
+  virtual uint8_t  get_address()         const = 0;
+  virtual uint8_t  get_instance()        const = 0;
+  virtual uint32_t get_poll_interval_s() const = 0;
+  virtual uint8_t  get_value_bytes()     const = 0;
+  virtual uint32_t get_last_poll_ms()    const = 0;
+  virtual void     set_last_poll_ms(uint32_t ms) = 0;
+  virtual void     mark_raw_value(uint16_t raw)  = 0;
+  virtual void     apply_value()                 = 0;
 };
 
 class DaliComponent : public Component {
@@ -89,7 +107,7 @@ class DaliComponent : public Component {
   void register_light(uint8_t target_type, uint8_t target_address,
                       uint16_t member_groups, DaliBusLight *light);
   // Called by DaliInputSensor during codegen init (Core 0 setup phase).
-  void register_input_sensor(DaliInputSensor *sensor);
+  void register_input_sensor(DaliBusSensor *sensor);
 
  protected:
   uint8_t tx_pin_{18};

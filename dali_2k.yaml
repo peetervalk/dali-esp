@@ -93,6 +93,7 @@ sensor:
     instance: 0
     poll_interval: 30
     value_bytes: 2
+    scale: 0.01
     unit_of_measurement: "lx"
     device_class: illuminance
     state_class: measurement
@@ -100,13 +101,15 @@ sensor:
 
   - platform: dali
     dali_id: dali_bus
-    name: "Zone 2 Occupancy"
+    id: zone2_occ_raw
+    name: "Zone 2 Occupancy Raw"
     address: 0
     instance: 1
     poll_interval: 10
     unit_of_measurement: ""
     state_class: measurement
     accuracy_decimals: 0
+    internal: true
 
   - platform: dali
     dali_id: dali_bus
@@ -133,3 +136,17 @@ sensor:
     device_class: humidity
     state_class: measurement
     accuracy_decimals: 0
+
+# ── Occupancy state (human-readable) ─────────────────────────────────────────
+# Maps DT303 bit-replicated values: 0=free, 85=movement, 170=present, 255=present+moving.
+text_sensor:
+  - platform: template
+    name: "Zone 2 Occupancy"
+    lambda: |-
+      int v = (int) id(zone2_occ_raw).state;
+      if (v == 0)   return {"Free"};
+      if (v == 85)  return {"Movement"};
+      if (v == 170) return {"Present"};
+      if (v == 255) return {"Present + Moving"};
+      return {"Unknown"};
+    update_interval: 10s

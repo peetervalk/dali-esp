@@ -2,6 +2,7 @@
 
 #include "esphome/core/component.h"
 #include "esphome/components/sensor/sensor.h"
+#include "../dali_component.h"
 
 #include <atomic>
 #include <cstdint>
@@ -14,7 +15,7 @@ namespace dali {
  * Polling and value transfer are driven by DaliComponent; this class
  * only holds the configuration and the Core 1 → Core 0 value mailbox.
  */
-class DaliInputSensor : public sensor::Sensor, public Component {
+class DaliInputSensor : public sensor::Sensor, public Component, public DaliBusSensor {
  public:
   void set_address(uint8_t a)        { address_        = a; }
   void set_instance(uint8_t i)       { instance_       = i; }
