@@ -47,6 +47,7 @@ static constexpr uint8_t MAX_LIGHT_ENTITIES = 32u;
 struct LightEntry {
     uint8_t       target_type;
     uint8_t       target_address;
+    uint16_t      member_groups;  /* bitmask: bit N = this entity is in group N */
     DaliBusLight *light;
 };
 
@@ -62,10 +63,13 @@ static void notify_lights(const DaliDispatchResult *res)
     }
     for (uint8_t i = 0u; i < s_light_count; i++) {
         LightEntry &e = s_light_registry[i];
-        bool match = (e.target_type == (uint8_t)res->target.type) &&
-                     (e.target_address == res->target.address ||
-                      res->target.type == DALI_ADDR_BROADCAST);
-        if (match) e.light->mark_state_from_bus(res->is_on, res->level);
+        bool direct = (e.target_type == (uint8_t)res->target.type) &&
+                      (e.target_address == res->target.address ||
+                       res->target.type == DALI_ADDR_BROADCAST);
+        bool via_group = (res->target.type == DALI_ADDR_GROUP) &&
+                         (e.target_type == (uint8_t)DALI_ADDR_SHORT) &&
+                         ((e.member_groups >> res->target.address) & 1u);
+        if (direct || via_group) e.light->mark_state_from_bus(res->is_on, res->level);
     }
 }
 
@@ -93,6 +97,26 @@ static void on_level_query_reply(DaliError result, const DaliFrame *reply, void 
 static char              s_bus_monitor_str[48] = {};
 static std::atomic<bool> s_bus_monitor_dirty_{false};
 
+/* ── Diag level query result (Core 1 → Core 0) ──────────────────────────── */
+
+static char              s_diag_level_str[24] = {};
+static std::atomic<bool> s_diag_level_dirty_{false};
+
+static void on_diag_refresh_reply(DaliError result, const DaliFrame *reply, void * /*ctx*/)
+{
+    if (result != DALI_OK || reply == nullptr) {
+        strncpy(s_diag_level_str, "Level: no reply", sizeof(s_diag_level_str) - 1u);
+        s_diag_level_str[sizeof(s_diag_level_str) - 1u] = '\0';
+    } else {
+        uint8_t level = (uint8_t)(reply->data & 0xFFu);
+        if (level == 0u)
+            snprintf(s_diag_level_str, sizeof(s_diag_level_str), "Level: 0 (off)");
+        else
+            snprintf(s_diag_level_str, sizeof(s_diag_level_str), "Level: %u", (unsigned)level);
+    }
+    s_diag_level_dirty_.store(true, std::memory_order_release);
+}
+
 /* ── Find-couplers recording (Core 1 writes, Core 0 reads) ──────────────── */
 
 struct CouplerFrame {
@@ -108,7 +132,12 @@ static std::atomic<bool>     s_find_couplers_active_{false};
 
 /* ── Scan result pending (Core 1 → Core 0 via scan_done_ gate) ──────────── */
 
-static char s_scan_result_str[128] = {};
+static char s_scan_result_str[128]  = {};
+static char s_scan_yaml_str[2048]   = {};
+
+/* ── Coupler group mask (set on Core 0 after coupler drain, read on Core 1) */
+
+static std::atomic<uint16_t> s_coupler_group_mask_{0u};
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
@@ -326,6 +355,12 @@ void DaliComponent::loop()
         bus_monitor_->publish_state(s_bus_monitor_str);
     }
 
+    /* ── Diag level query result ── */
+    if (scan_status_ && s_diag_level_dirty_.load(std::memory_order_acquire)) {
+        s_diag_level_dirty_.store(false, std::memory_order_relaxed);
+        scan_status_->publish_state(s_diag_level_str);
+    }
+
     /* ── Identify blink ── */
     if (identify_active_) {
         uint32_t now = millis();
@@ -343,6 +378,8 @@ void DaliComponent::loop()
     }
 
     /* ── Find-couplers timer ── */
+    /* Overflow-safe elapsed check: underflows to a large value before end_ms_
+     * passes, wraps to a small value after — so < 0x80000000u means elapsed. */
     if (s_find_couplers_active_.load(std::memory_order_relaxed) &&
         (uint32_t)(millis() - find_couplers_end_ms_) < 0x80000000u) {
         /* Timer elapsed: stop recording, arm one-tick drain. */
@@ -352,8 +389,17 @@ void DaliComponent::loop()
     } else if (find_couplers_collect_) {
         /* One tick after clearing active — Core 1 has definitely seen the flag. */
         find_couplers_collect_ = false;
+        uint8_t cnt = s_coupler_count_.load(std::memory_order_acquire);
+
+        /* Build coupler group bitmask from captured frames. */
+        uint16_t gmask = 0u;
+        for (uint8_t i = 0u; i < cnt; i++) {
+            if (s_coupler_frames[i].addr_kind == (uint8_t)DALI_EVENT_ADDRESS_GROUP)
+                gmask |= (uint16_t)(1u << s_coupler_frames[i].address);
+        }
+        s_coupler_group_mask_.store(gmask, std::memory_order_release);
+
         if (couplers_result_) {
-            uint8_t cnt = s_coupler_count_.load(std::memory_order_acquire);
             if (cnt == 0u) {
                 couplers_result_->publish_state("None");
             } else {
@@ -386,6 +432,10 @@ void DaliComponent::loop()
         scan_result_->publish_state(s_scan_result_str);
         s_scan_result_str[0] = '\0';
     }
+    if (yaml_result_ && s_scan_yaml_str[0]) {
+        yaml_result_->publish_state(s_scan_yaml_str);
+        s_scan_yaml_str[0] = '\0';
+    }
 
     if (scan_status_) {
         if (scan_success_) {
@@ -399,10 +449,11 @@ void DaliComponent::loop()
 
 /* ── Public methods ──────────────────────────────────────────────────────── */
 
-void DaliComponent::register_light(uint8_t type, uint8_t address, DaliBusLight *light)
+void DaliComponent::register_light(uint8_t type, uint8_t address,
+                                   uint16_t member_groups, DaliBusLight *light)
 {
     if (s_light_count < MAX_LIGHT_ENTITIES) {
-        s_light_registry[s_light_count++] = { type, address, light };
+        s_light_registry[s_light_count++] = { type, address, member_groups, light };
     } else {
         ESP_LOGW(TAG, "light registry full — increase MAX_LIGHT_ENTITIES");
     }
@@ -459,32 +510,49 @@ void DaliComponent::start_find_couplers()
 
 void DaliComponent::send_diag_on()
 {
-    DaliTarget t{ static_cast<DaliAddressType>(DALI_ADDR_SHORT), diag_address_ };
-    dali_control_recall_max(t);
+    DaliTarget t{ DALI_ADDR_SHORT, diag_address_ };
+    dali_control_go_to_last_active_level(t);
 }
 
 void DaliComponent::send_diag_off()
 {
-    DaliTarget t{ static_cast<DaliAddressType>(DALI_ADDR_SHORT), diag_address_ };
+    DaliTarget t{ DALI_ADDR_SHORT, diag_address_ };
     dali_control_off(t);
 }
 
 void DaliComponent::send_diag_max()
 {
-    DaliTarget t{ static_cast<DaliAddressType>(DALI_ADDR_SHORT), diag_address_ };
+    DaliTarget t{ DALI_ADDR_SHORT, diag_address_ };
     dali_control_recall_max(t);
 }
 
 void DaliComponent::send_diag_min()
 {
-    DaliTarget t{ static_cast<DaliAddressType>(DALI_ADDR_SHORT), diag_address_ };
+    DaliTarget t{ DALI_ADDR_SHORT, diag_address_ };
     dali_control_recall_min(t);
+}
+
+void DaliComponent::send_diag_refresh()
+{
+    DaliTarget qt{ DALI_ADDR_SHORT, diag_address_ };
+    dali_control_query(qt, DALI_CMD_QUERY_ACTUAL_LEVEL, 0u, on_diag_refresh_reply, nullptr);
 }
 
 void DaliComponent::set_scan_result_pending(const char *summary)
 {
     strncpy(s_scan_result_str, summary, sizeof(s_scan_result_str) - 1u);
     s_scan_result_str[sizeof(s_scan_result_str) - 1u] = '\0';
+}
+
+void DaliComponent::set_scan_yaml_pending(const char *yaml)
+{
+    strncpy(s_scan_yaml_str, yaml, sizeof(s_scan_yaml_str) - 1u);
+    s_scan_yaml_str[sizeof(s_scan_yaml_str) - 1u] = '\0';
+}
+
+uint16_t DaliComponent::get_coupler_group_mask() const
+{
+    return s_coupler_group_mask_.load(std::memory_order_acquire);
 }
 
 void DaliComponent::on_scan_complete(uint8_t count, bool success)

@@ -9,10 +9,11 @@ DEPENDENCIES = ["dali"]
 
 DaliLightOutput = dali_ns.class_("DaliLightOutput", light.LightOutput)
 
-CONF_DALI_ID       = "dali_id"
-CONF_TARGET_TYPE   = "target_type"
+CONF_DALI_ID        = "dali_id"
+CONF_TARGET_TYPE    = "target_type"
 CONF_TARGET_ADDRESS = "target_address"
 CONF_QUERY_ADDRESS  = "query_address"
+CONF_MEMBER_GROUPS  = "member_groups"
 
 # Must match DaliAddressType enum values in dali_frame.h
 TARGET_TYPES = {
@@ -42,6 +43,13 @@ CONFIG_SCHEMA = cv.All(
             # Useful when target_type is 'group' and a representative gear address
             # is known.  Omit if state sync via queries is not needed.
             cv.Optional(CONF_QUERY_ADDRESS): cv.int_range(min=0, max=63),
+            # List of DALI group numbers (0-15) this entity belongs to.
+            # Only needed for short-address entities so that group-addressed
+            # dispatch results also update this entity's state in HA.
+            cv.Optional(CONF_MEMBER_GROUPS, default=[]): cv.All(
+                cv.ensure_list(cv.int_range(min=0, max=15)),
+                cv.Length(max=16),
+            ),
         }
     ),
     _validate_target_address,
@@ -57,3 +65,10 @@ async def to_code(config):
 
     if CONF_QUERY_ADDRESS in config:
         cg.add(var.set_query_address(config[CONF_QUERY_ADDRESS]))
+
+    groups = config.get(CONF_MEMBER_GROUPS, [])
+    if groups:
+        bitmask = 0
+        for g in groups:
+            bitmask |= (1 << g)
+        cg.add(var.set_member_groups(bitmask))

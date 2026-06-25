@@ -212,8 +212,9 @@ Cannot do yet:
     DALI commands. It only emits the strong table when the YAML sets
     `headless_dispatch: true`.
   - `dali_scan.h/.cpp` — scan task spawned on demand (Core 1, priority 9);
-    synchronous transport via `ulTaskNotifyTake`; logs full JSON inventory and a
-    draft ESPHome YAML snippet
+    synchronous transport via `ulTaskNotifyTake`; logs a draft ESPHome YAML
+    snippet line-by-line prefixed with `YAML|` (extractable via PowerShell
+    `Select-String`); JSON inventory at DEBUG level only
   - `button/__init__.py` + `button/dali_scan_button.h` — diagnostic button
     platform: scan, refresh, identify, find couplers, and target control actions
   - `light/__init__.py` — light platform schema; `LightType.BRIGHTNESS_ONLY`
@@ -252,11 +253,13 @@ Home Assistant uses "switch" for a binary on/off toggle entity.
 
 ## Immediate Priorities
 
-1. **Flash and test `dali_diag.yaml`.** Press "Scan DALI Bus" in HA; verify JSON
-   inventory and draft YAML appear in logs. Confirm scan_status sensor updates.
-2. Bring up the Steinel HF 360 II: connect to a bus without an existing master,
-   run `scan`, confirm 4 instances decode correctly.
-3. Legacy pushbutton coupler zone grouping — see `todo_pb_couplers.md`.
+1. **Bring up the Steinel HF 360 II.** Connect to a bus without an existing
+   master, run scan, confirm 4 instances decode correctly.
+2. Legacy pushbutton coupler zone grouping — see `todo_pb_couplers.md`.
+
+`dali_diag.yaml` is working: scan, Find Couplers, Identify, state commands,
+Group Map sensor, and YAML extraction via PowerShell `Select-String` all
+verified on live bus (16 devices, 7 groups).
 
 ## Architecture
 

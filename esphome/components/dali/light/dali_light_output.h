@@ -32,6 +32,11 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   void    set_query_address(uint8_t addr) { query_address_ = addr; }
   uint8_t get_query_address() const override { return query_address_; }
 
+  // Bitmask of DALI groups this entity belongs to (bit N = group N).
+  // Used by notify_lights to propagate group-addressed dispatch results to
+  // short-address entities.  Defaults to 0 (no group membership tracked).
+  void set_member_groups(uint16_t groups) { member_groups_ = groups; }
+
   light::LightTraits get_traits() override {
     auto t = light::LightTraits();
     t.set_supported_color_modes({light::ColorMode::BRIGHTNESS});
@@ -49,6 +54,7 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   DaliTarget      target_{};
   DaliComponent  *comp_{nullptr};
   uint8_t         query_address_{0xFFu};
+  uint16_t        member_groups_{0};
 
   // Bus state — written on Core 1, read on Core 0.
   std::atomic<bool>    bus_dirty_{false};

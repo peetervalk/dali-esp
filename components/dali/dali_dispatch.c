@@ -191,7 +191,7 @@ DaliError dali_dispatch(const DaliDispatchEntry  *table,
                 return observe_legacy(event, e->output, toggle_state, result_out);
 
             case DALI_DISPATCH_ACTION_MIRROR: {
-                err = apply_mirror(event, e->output, toggle_state);
+                err = apply_mirror(event, e->output, NULL);
                 if (err == DALI_OK) {
                     observe_legacy(event, e->output, toggle_state, result_out);
                 }

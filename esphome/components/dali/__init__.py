@@ -15,6 +15,7 @@ CONF_TX_PIN          = "tx_pin"
 CONF_RX_PIN          = "rx_pin"
 CONF_SCAN_STATUS     = "scan_status"
 CONF_SCAN_RESULT     = "scan_result"
+CONF_YAML_RESULT     = "yaml_result"
 CONF_COUPLERS_RESULT = "couplers_result"
 CONF_BUS_MONITOR     = "bus_monitor"
 CONF_POLL_INTERVAL   = "poll_interval"
@@ -61,6 +62,8 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_SCAN_STATUS): text_sensor.text_sensor_schema(),
         # Scan-result: compact last-scan summary persisted in HA
         cv.Optional(CONF_SCAN_RESULT): text_sensor.text_sensor_schema(),
+        # Yaml-result: full ESPHome light: YAML snippet from last scan
+        cv.Optional(CONF_YAML_RESULT): text_sensor.text_sensor_schema(),
         # Couplers-result: unique frames seen during find_couplers window
         cv.Optional(CONF_COUPLERS_RESULT): text_sensor.text_sensor_schema(),
         # Bus-monitor: last unsolicited frame (live)
@@ -87,6 +90,10 @@ async def to_code(config):
     if CONF_SCAN_RESULT in config:
         sens = await text_sensor.new_text_sensor(config[CONF_SCAN_RESULT])
         cg.add(var.set_scan_result_sensor(sens))
+
+    if CONF_YAML_RESULT in config:
+        sens = await text_sensor.new_text_sensor(config[CONF_YAML_RESULT])
+        cg.add(var.set_yaml_result_sensor(sens))
 
     if CONF_COUPLERS_RESULT in config:
         sens = await text_sensor.new_text_sensor(config[CONF_COUPLERS_RESULT])

@@ -3,13 +3,22 @@
 #
 # Workflow:
 #   1. esphome run dali_diag.yaml
-#   2. Press "Scan DALI Bus" in HA — full YAML snippet appears in the device logs.
-#      The "Scan Result" sensor shows a compact summary that persists in HA.
-#   3. Set "Target Address" (0–63) to a short address found by the scan.
-#   4. Press "Identify" to blink the fixture for 10 s to confirm the address.
-#   5. Use On / Off / Max / Min to verify control of that fixture.
-#   6. Press "Find Couplers" and activate physical switches — coupler frames
-#      are captured for 30 s and published to the "Couplers Result" sensor.
+#   2. Press "Find Couplers", activate all physical switches within 30 s.
+#      Detected groups appear in the "Couplers Result" sensor.
+#   3. Press "Scan DALI Bus" — takes ~50 s for 16 devices.
+#      - "Group Map" sensor shows a compact group→query summary (persists in HA).
+#      - YAML lines stream to the log prefixed with "YAML|".
+#        Save the log session as  dali-diag-logs.txt  in Downloads, then run:
+#
+#          (Select-String "YAML| " "$env:USERPROFILE\Downloads\dali-diag-logs.txt") |
+#            ForEach-Object { $_.Line -replace '.*YAML\| ', '' } |
+#            Out-File -Encoding utf8 "$env:USERPROFILE\Downloads\dali_lights.yaml"
+#
+#        Then add  dali_id: <your_id>  and real names to dali_lights.yaml.
+#        JSON inventory is available at DEBUG log level if needed.
+#   4. Set "Target Address" (0–63) to a short address found by the scan.
+#   5. Press "Identify" to blink the fixture for 10 s to confirm the address.
+#   6. Use On / Off / Max / Min to verify control of that fixture.
 #   7. "Bus Monitor" shows each unsolicited frame as it arrives.
 
 esphome:
@@ -54,6 +63,8 @@ dali:
     name: "Scan Status"
   scan_result:
     name: "Scan Result"
+  yaml_result:
+    name: "Group Map"
   couplers_result:
     name: "Couplers Result"
   bus_monitor:
@@ -65,6 +76,7 @@ number:
     dali_id: dali_bus
     name: "Target Address"
     icon: "mdi:numeric"
+    mode: box
 
 # ── Buttons ───────────────────────────────────────────────────────────────────
 button:

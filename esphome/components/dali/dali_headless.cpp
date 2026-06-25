@@ -56,7 +56,7 @@ extern "C" {
 #include "../../../components/dali/dali_dispatch.h"
 }
 
-static const DaliDispatchEntry bf6_table[] = {
+static const DaliDispatchEntry dispatch_table[] = {
 
     /* Group 0 — addresses 5, 6, 7, 14 */
     { { DALI_EVENT_FRAME_LEGACY_16BIT,
@@ -111,8 +111,8 @@ static const DaliDispatchEntry bf6_table[] = {
 extern "C"
 const DaliDispatchEntry *dali_headless_get_table(uint8_t *out_count)
 {
-    *out_count = (uint8_t)(sizeof(bf6_table) / sizeof(bf6_table[0]));
-    return bf6_table;
+    *out_count = (uint8_t)(sizeof(dispatch_table) / sizeof(dispatch_table[0]));
+    return dispatch_table;
 }
 
 #endif  /* USE_DALI_HEADLESS */

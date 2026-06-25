@@ -52,6 +52,8 @@ class DaliComponent : public Component {
   void send_diag_off();
   void send_diag_max();
   void send_diag_min();
+  // Query ACTUAL_LEVEL for diag_address_ and publish result to scan_status_.
+  void send_diag_refresh();
 
   // ── Diagnostic target address (set by DaliAddressNumber, Core 0 only) ───
 
@@ -62,6 +64,7 @@ class DaliComponent : public Component {
 
   void set_scan_status_sensor(text_sensor::TextSensor *s)     { scan_status_     = s; }
   void set_scan_result_sensor(text_sensor::TextSensor *s)     { scan_result_     = s; }
+  void set_yaml_result_sensor(text_sensor::TextSensor *s)     { yaml_result_     = s; }
   void set_couplers_result_sensor(text_sensor::TextSensor *s) { couplers_result_ = s; }
   void set_bus_monitor_sensor(text_sensor::TextSensor *s)     { bus_monitor_     = s; }
 
@@ -69,10 +72,14 @@ class DaliComponent : public Component {
 
   // Called from scan task (Core 1) before scan_done_ gate fires.
   void set_scan_result_pending(const char *summary);
+  void set_scan_yaml_pending(const char *yaml);
   // Called from scan task when finished.
   void on_scan_complete(uint8_t count, bool success);
+  // Returns bitmask of DALI groups that had frames observed during last coupler scan.
+  uint16_t get_coupler_group_mask() const;
   // Called by DaliLightOutput during codegen init (Core 0 setup phase).
-  void register_light(uint8_t target_type, uint8_t target_address, DaliBusLight *light);
+  void register_light(uint8_t target_type, uint8_t target_address,
+                      uint16_t member_groups, DaliBusLight *light);
 
  protected:
   uint8_t tx_pin_{18};
@@ -81,6 +88,7 @@ class DaliComponent : public Component {
   // Text sensors (Core 0 only).
   text_sensor::TextSensor *scan_status_{nullptr};
   text_sensor::TextSensor *scan_result_{nullptr};
+  text_sensor::TextSensor *yaml_result_{nullptr};
   text_sensor::TextSensor *couplers_result_{nullptr};
   text_sensor::TextSensor *bus_monitor_{nullptr};
 

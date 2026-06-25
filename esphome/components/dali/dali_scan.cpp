@@ -158,22 +158,21 @@ static DaliError scan_sync_transact(const DaliFrame *frame,
 // ---------------------------------------------------------------------------
 
 static void log_inventory_json(const DaliDiscoveryInventory *inv) {
-    ESP_LOGI(TAG, "---[ Inventory JSON ]---");
-    ESP_LOGI(TAG, "{ \"schema_version\": 1, \"devices\": [");
+    ESP_LOGD(TAG, "---[ Inventory JSON ]---");
+    ESP_LOGD(TAG, "{ \"schema_version\": 1, \"devices\": [");
 
     bool first = true;
     for (uint8_t addr = 0; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         const DaliDiscoveryDeviceInfo *d = dali_discovery_inventory_get(inv, addr);
         if (!d || !d->present) continue;
 
-        // Build groups array string inline
         char groups_str[64] = "[";
         bool gfirst = true;
         for (uint8_t g = 0; g < 16; g++) {
             if (d->has_groups && (d->groups & (1u << g))) {
-                char buf[8];
-                snprintf(buf, sizeof(buf), gfirst ? "%u" : ", %u", (unsigned)g);
-                strncat(groups_str, buf, sizeof(groups_str) - strlen(groups_str) - 1);
+                char tmp[8];
+                snprintf(tmp, sizeof(tmp), gfirst ? "%u" : ", %u", (unsigned)g);
+                strncat(groups_str, tmp, sizeof(groups_str) - strlen(groups_str) - 1);
                 gfirst = false;
             }
         }
@@ -183,7 +182,7 @@ static void log_inventory_json(const DaliDiscoveryInventory *inv) {
                          : d->has_device_type  ? "control_gear"
                                                : "unknown";
 
-        ESP_LOGI(TAG, "  %s{ \"address\": %u, \"groups\": %s, \"kind\": \"%s\","
+        ESP_LOGD(TAG, "  %s{ \"address\": %u, \"groups\": %s, \"kind\": \"%s\","
                       " \"device_type\": %u, \"actual_level\": %u }",
                  first ? "" : ",",
                  (unsigned)addr, groups_str, kind,
@@ -191,56 +190,113 @@ static void log_inventory_json(const DaliDiscoveryInventory *inv) {
                  (unsigned)(d->has_actual_level ? d->actual_level : 0u));
         first = false;
     }
-    ESP_LOGI(TAG, "] }");
+    ESP_LOGD(TAG, "] }");
 }
 
 // ---------------------------------------------------------------------------
-// YAML snippet generator
+// YAML snippet generator — builds string for the yaml_result sensor and logs.
 // ---------------------------------------------------------------------------
 
-static void log_yaml_snippet(const DaliDiscoveryInventory *inv) {
-    ESP_LOGI(TAG, "---[ Draft ESPHome YAML — copy into your final config ]---");
-    ESP_LOGI(TAG, "light:");
+static void build_and_publish_yaml(const DaliDiscoveryInventory *inv,
+                                   uint16_t coupler_mask,
+                                   DaliComponent *component)
+{
+    static char buf[2048];
+    size_t pos = 0u;
 
-    // Collect which groups have control gear and which addresses are in each.
-    for (uint8_t g = 0; g < 16; g++) {
+#define Y(...) do { \
+    int _n = snprintf(buf + pos, sizeof(buf) - pos, __VA_ARGS__); \
+    if (_n > 0 && pos + (size_t)_n < sizeof(buf)) pos += (size_t)_n; \
+} while (0)
+
+    Y("light:\n");
+
+    for (uint8_t g = 0u; g < 16u; g++) {
         char addr_list[64] = "";
+        uint8_t query_addr = 0xFFu;
         bool has_gear = false;
 
-        for (uint8_t addr = 0; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
-            const DaliDiscoveryDeviceInfo *d = dali_discovery_inventory_get(inv, addr);
+        for (uint8_t a = 0u; a < DALI_SHORT_ADDRESS_COUNT; a++) {
+            const DaliDiscoveryDeviceInfo *d = dali_discovery_inventory_get(inv, a);
             if (!d || !d->present || !d->has_groups) continue;
             if (!(d->groups & (1u << g))) continue;
-            if (d->has_input_device) continue;  // skip input devices for light entities
-            char buf[8];
-            snprintf(buf, sizeof(buf), has_gear ? ", %u" : "%u", (unsigned)addr);
-            strncat(addr_list, buf, sizeof(addr_list) - strlen(addr_list) - 1);
+            if (d->has_input_device) continue;
+            if (query_addr == 0xFFu) query_addr = a;
+            char tmp[8];
+            snprintf(tmp, sizeof(tmp), has_gear ? ", %u" : "%u", (unsigned)a);
+            strncat(addr_list, tmp, sizeof(addr_list) - strlen(addr_list) - 1u);
             has_gear = true;
         }
 
         if (!has_gear) continue;
 
-        ESP_LOGI(TAG, "  - platform: dali");
-        ESP_LOGI(TAG, "    name: \"Group %u\"  # addresses: %s", (unsigned)g, addr_list);
-        ESP_LOGI(TAG, "    target_type: group");
-        ESP_LOGI(TAG, "    target_address: %u", (unsigned)g);
+        const char *coupler = ((coupler_mask >> g) & 1u) ? " | coupler" : "";
+        Y("  - platform: dali\n");
+        Y("    name: \"Group %u\"  # addresses: %s%s\n", (unsigned)g, addr_list, coupler);
+        Y("    target_type: group\n");
+        Y("    target_address: %u\n", (unsigned)g);
+        if (query_addr != 0xFFu)
+            Y("    query_address: %u\n", (unsigned)query_addr);
     }
 
-    // Input devices get sensor entries (placeholder comment for now)
     bool has_input = false;
-    for (uint8_t addr = 0; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
-        const DaliDiscoveryDeviceInfo *d = dali_discovery_inventory_get(inv, addr);
+    for (uint8_t a = 0u; a < DALI_SHORT_ADDRESS_COUNT; a++) {
+        const DaliDiscoveryDeviceInfo *d = dali_discovery_inventory_get(inv, a);
         if (!d || !d->present || !d->has_input_device) continue;
-        if (!has_input) {
-            ESP_LOGI(TAG, "# Input devices found — sensor entities not yet implemented:");
-            has_input = true;
-        }
-        ESP_LOGI(TAG, "#   addr %u: %u instance(s)",
-                 (unsigned)addr,
-                 (unsigned)(d->has_instance_count ? d->instance_count : 0u));
+        if (!has_input) { Y("# Input devices:\n"); has_input = true; }
+        Y("#   addr %u: %u instance(s)\n",
+          (unsigned)a,
+          (unsigned)(d->has_instance_count ? d->instance_count : 0u));
     }
 
-    ESP_LOGI(TAG, "---[ End of draft YAML ]---");
+#undef Y
+
+    /* Log line-by-line so each fits the ESP32 log buffer and can be
+     * extracted with:  esphome logs ... | grep "YAML|"
+     * Brief delay between lines lets the WiFi logger forward each message
+     * before the next arrives — prevents the API log queue from backing up. */
+    const char *p = buf;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        if (nl) {
+            char line[128];
+            size_t len = (size_t)(nl - p);
+            if (len >= sizeof(line)) len = sizeof(line) - 1u;
+            memcpy(line, p, len);
+            line[len] = '\0';
+            ESP_LOGI(TAG, "YAML| %s", line);
+            p = nl + 1u;
+        } else {
+            if (*p) ESP_LOGI(TAG, "YAML| %s", p);
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+
+    /* HA state is limited to 255 chars — publish a compact group→query map
+     * to the sensor; the full YAML is available in the log block above. */
+    char compact[128] = {};
+    size_t cp = 0u;
+    bool cfirst = true;
+    for (uint8_t g = 0u; g < 16u; g++) {
+        uint8_t qa = 0xFFu;
+        bool has_gear = false;
+        for (uint8_t a = 0u; a < DALI_SHORT_ADDRESS_COUNT; a++) {
+            const DaliDiscoveryDeviceInfo *d = dali_discovery_inventory_get(inv, a);
+            if (!d || !d->present || !d->has_groups || d->has_input_device) continue;
+            if (!(d->groups & (1u << g))) continue;
+            if (qa == 0xFFu) qa = a;
+            has_gear = true;
+        }
+        if (!has_gear) continue;
+        const char *c = ((coupler_mask >> g) & 1u) ? "*" : "";
+        int n = snprintf(compact + cp, sizeof(compact) - cp,
+                         cfirst ? "g%u:q%u%s" : " g%u:q%u%s",
+                         (unsigned)g, (unsigned)(qa != 0xFFu ? qa : 0u), c);
+        if (n > 0 && cp + (size_t)n < sizeof(compact)) cp += (size_t)n;
+        cfirst = false;
+    }
+    component->set_scan_yaml_pending(compact);
 }
 
 // ---------------------------------------------------------------------------
@@ -277,7 +333,7 @@ static void scan_task(void *arg) {
 
     ESP_LOGI(TAG, "---[ DALI Scan Complete: %u device(s) found ]---", (unsigned)found);
     log_inventory_json(&inventory);
-    log_yaml_snippet(&inventory);
+    build_and_publish_yaml(&inventory, component->get_coupler_group_mask(), component);
 
     /* Build compact summary for the scan_result text sensor.
      * Format: "16 gear | groups: 0,2,3,4,5,6,7 | 0 input | YAML in logs" */
@@ -306,7 +362,7 @@ static void scan_task(void *arg) {
             gfirst = false;
         }
 
-        snprintf(summary, sizeof(summary), "%u gear | grp: %s | %u input | YAML in logs",
+        snprintf(summary, sizeof(summary), "%u gear | grp: %s | %u input | YAML in sensor",
                  (unsigned)gear_count,
                  grp_buf[0] ? grp_buf : "-",
                  (unsigned)input_count);

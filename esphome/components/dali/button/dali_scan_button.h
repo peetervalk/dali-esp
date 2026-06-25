@@ -30,7 +30,7 @@ class DaliScanButton : public button::Button {
         component_->start_scan();
         break;
       case DALI_BUTTON_REFRESH:
-        component_->start_refresh();
+        component_->send_diag_refresh();
         break;
       case DALI_BUTTON_IDENTIFY:
         component_->start_identify();

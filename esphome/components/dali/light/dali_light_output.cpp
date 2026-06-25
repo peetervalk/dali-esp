@@ -21,7 +21,7 @@ static const char *target_type_name(DaliAddressType type) {
 
 void DaliLightOutput::set_dali_component(DaliComponent *comp) {
   comp_ = comp;
-  comp->register_light((uint8_t)target_.type, target_.address, this);
+  comp->register_light((uint8_t)target_.type, target_.address, member_groups_, this);
 }
 
 void DaliLightOutput::clear_unused_color_fields_(light::LightColorValues &values) {
