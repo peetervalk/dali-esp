@@ -39,9 +39,8 @@
 /* ---------------------------------------------------------------------------
  * Generic IEC 62386-103 instance query opcodes (Table 16)
  * Single send, expects 8-bit reply.
+ * 0x80 (instance_type) and 0x81 (resolution) are owned by dali_input_device.c.
  * --------------------------------------------------------------------------*/
-#define INST_QUERY_INSTANCE_TYPE      0x80u
-#define INST_QUERY_RESOLUTION         0x81u
 #define INST_QUERY_HYSTERESIS         0x82u
 #define INST_QUERY_DEADTIME_TIMER     0x83u
 #define INST_QUERY_REPORT_TIMER       0x84u
@@ -174,16 +173,6 @@ DaliFrame dali_input_light_build_set_deadband(uint8_t addr, uint8_t instance)
  * Generic IEC 62386-103 instance query builders
  * --------------------------------------------------------------------------*/
 
-DaliFrame dali_input_build_query_instance_type(uint8_t addr, uint8_t instance)
-{
-    return dali_cmd_instance(addr, instance, INST_QUERY_INSTANCE_TYPE);
-}
-
-DaliFrame dali_input_build_query_resolution(uint8_t addr, uint8_t instance)
-{
-    return dali_cmd_instance(addr, instance, INST_QUERY_RESOLUTION);
-}
-
 DaliFrame dali_input_build_query_hysteresis(uint8_t addr, uint8_t instance)
 {
     return dali_cmd_instance(addr, instance, INST_QUERY_HYSTERESIS);
@@ -231,16 +220,3 @@ DaliFrame dali_input_light_build_query_deadband(uint8_t addr, uint8_t instance)
  * Generic IEC 62386-103 instance state query builders (protocol-table backed)
  * --------------------------------------------------------------------------*/
 
-DaliFrame dali_input_build_query_instance_enabled(uint8_t addr, uint8_t instance)
-{
-    DaliFrame f = {};
-    dali_build_instance_command(addr, instance, DALI_CMD_QUERY_INSTANCE_ENABLED, &f);
-    return f;
-}
-
-DaliFrame dali_input_build_query_instance_status(uint8_t addr, uint8_t instance)
-{
-    DaliFrame f = {};
-    dali_build_instance_command(addr, instance, DALI_CMD_QUERY_INSTANCE_STATUS, &f);
-    return f;
-}

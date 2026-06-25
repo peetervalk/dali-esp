@@ -20,6 +20,7 @@ extern "C" {
 #include "../../../components/dali/dali_event.h"
 #include "../../../components/dali/dali_dispatch.h"
 #include "../../../components/dali/dali_protocol.h"
+#include "../../../components/dali/dali_input_device.h"
 #include "../../../components/dali/dali_input_config.h"
 }
 
@@ -641,6 +642,12 @@ static const IConfigEntry s_iconfig_table[] = {
     { "disable-instance",  dali_input_build_disable_instance,     false },
 };
 
+/* Adapters: dali_input_device.h uses DaliError+out-ptr; iquery table needs DaliFrame return. */
+static DaliFrame s_qry_instance_type(uint8_t a, uint8_t i)    { DaliFrame f={}; dali_input_build_query_instance_type(a,i,&f);    return f; }
+static DaliFrame s_qry_resolution(uint8_t a, uint8_t i)       { DaliFrame f={}; dali_input_build_query_resolution(a,i,&f);        return f; }
+static DaliFrame s_qry_instance_status(uint8_t a, uint8_t i)  { DaliFrame f={}; dali_input_build_query_instance_status(a,i,&f);   return f; }
+static DaliFrame s_qry_instance_enabled(uint8_t a, uint8_t i) { DaliFrame f={}; dali_input_build_query_instance_enabled(a,i,&f);  return f; }
+
 /* Lookup table for 24-bit instance query commands (single send, expects reply). */
 struct IQueryEntry { const char *name; IConfigBuilder builder; };
 static const IQueryEntry s_iquery_table[] = {
@@ -649,10 +656,10 @@ static const IQueryEntry s_iquery_table[] = {
     { "hysteresis",        dali_input_build_query_hysteresis           },
     { "deadtime-gen",      dali_input_build_query_deadtime_timer       },
     { "report-timer",      dali_input_build_query_report_timer         },
-    { "instance-type",     dali_input_build_query_instance_type        },
-    { "resolution",        dali_input_build_query_resolution           },
-    { "instance-enabled",  dali_input_build_query_instance_enabled     },
-    { "instance-status",   dali_input_build_query_instance_status      },
+    { "instance-type",     s_qry_instance_type     },
+    { "resolution",        s_qry_resolution        },
+    { "instance-enabled",  s_qry_instance_enabled  },
+    { "instance-status",   s_qry_instance_status   },
 };
 
 void DaliComponent::execute_command(const std::string &cmd_str)

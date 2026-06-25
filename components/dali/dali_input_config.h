@@ -99,8 +99,9 @@ DaliFrame dali_input_light_build_set_deadband(uint8_t addr, uint8_t instance);
  * Single transmission, expects 8-bit reply. No DTR0, no send_twice.
  * --------------------------------------------------------------------------*/
 
-DaliFrame dali_input_build_query_instance_type(uint8_t addr, uint8_t instance);
-DaliFrame dali_input_build_query_resolution(uint8_t addr, uint8_t instance);
+/* Generic IEC 62386-103 instance parameter queries (single send, reply expected).
+ * instance_type, resolution, instance_enabled, instance_status are declared in
+ * dali_input_device.h (different signature); adapters are in dali_component.cpp. */
 DaliFrame dali_input_build_query_hysteresis(uint8_t addr, uint8_t instance);
 DaliFrame dali_input_build_query_deadtime_timer(uint8_t addr, uint8_t instance);
 DaliFrame dali_input_build_query_report_timer(uint8_t addr, uint8_t instance);
@@ -112,7 +113,3 @@ DaliFrame dali_input_occ_build_query_hold_timer(uint8_t addr, uint8_t instance);
 /* DT304 light sensor type-specific queries (IEC 62386-304) */
 DaliFrame dali_input_light_build_query_hysteresis(uint8_t addr, uint8_t instance);
 DaliFrame dali_input_light_build_query_deadband(uint8_t addr, uint8_t instance);
-
-/* Generic IEC 62386-103 instance state queries (protocol-table backed) */
-DaliFrame dali_input_build_query_instance_enabled(uint8_t addr, uint8_t instance);
-DaliFrame dali_input_build_query_instance_status(uint8_t addr, uint8_t instance);
