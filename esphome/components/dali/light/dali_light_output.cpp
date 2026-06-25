@@ -34,8 +34,14 @@ void DaliLightOutput::clear_unused_color_fields_(light::LightColorValues &values
   values.set_warm_white(0.0f);
 }
 
+uint8_t DaliLightOutput::brightness_to_level_(float brightness) {
+  uint8_t level = static_cast<uint8_t>(roundf(brightness * 254.0f));
+  return level == 0 ? 1 : level;
+}
+
 void DaliLightOutput::setup_state(light::LightState *state) {
   state_ = state;
+  state->set_default_transition_length(0);
   clear_unused_color_fields_(state->remote_values);
   clear_unused_color_fields_(state->current_values);
   setup_ms_ = millis();
@@ -65,25 +71,37 @@ void DaliLightOutput::write_state(light::LightState *state) {
     return;
   }
 
-  float brightness = 0.0f;
-  state->current_values_as_brightness(&brightness);
+  const auto &target = state->remote_values;
+  float brightness = target.get_state() * target.get_brightness();
 
-  if (!state->current_values.is_on() || brightness < (1.0f / 254.0f)) {
+  if (!target.is_on() || brightness < (1.0f / 254.0f)) {
+    if (known_state_valid_ && !known_is_on_) return;
     ESP_LOGD(TAG, "tx off to %s %u",
              target_type_name(target_.type), (unsigned)target_.address);
-    dali_control_off(target_);
+    DaliError err = dali_control_off(target_);
+    if (err != DALI_OK) {
+      ESP_LOGW(TAG, "off failed: %d", (int)err);
+      return;
+    }
+    known_state_valid_ = true;
+    known_is_on_ = false;
+    known_level_ = 0;
     return;
   }
 
-  uint8_t level = static_cast<uint8_t>(roundf(brightness * 254.0f));
-  if (level == 0) level = 1;
+  uint8_t level = brightness_to_level_(brightness);
+  if (known_state_valid_ && known_is_on_ && known_level_ == level) return;
 
   ESP_LOGD(TAG, "tx level %u to %s %u",
            (unsigned)level, target_type_name(target_.type), (unsigned)target_.address);
   DaliError err = dali_control_set_level(target_, level);
   if (err != DALI_OK) {
     ESP_LOGW(TAG, "set_level failed: %d", (int)err);
+    return;
   }
+  known_state_valid_ = true;
+  known_is_on_ = true;
+  known_level_ = level;
 }
 
 void DaliLightOutput::mark_state_from_bus(bool is_on, uint8_t level) {
@@ -98,6 +116,10 @@ void DaliLightOutput::apply_bus_state() {
   bool    is_on = bus_is_on_.load(std::memory_order_relaxed);
   uint8_t level = bus_level_.load(std::memory_order_relaxed);
   bus_dirty_.store(false, std::memory_order_relaxed);
+
+  known_state_valid_ = true;
+  known_is_on_ = is_on;
+  known_level_ = level;
 
   skip_next_write_ = true;
   auto call = state_->make_call();

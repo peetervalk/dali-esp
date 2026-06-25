@@ -201,9 +201,14 @@ Prospective mitigation:
   a functional colour-capability fix.
 
 Follow-up observation after the headless fix commit: RGB state noise is gone and
-on/off BF6 frames update/log correctly, but flashing still turns all lights off.
-Dimming did not update or log because the couplers appear to send DAPC-level
-frames during dimming; `OBSERVE` originally rejected selector=0 DAPC frames.
+on/off BF6 frames update/log correctly. A later flash with the newest files left
+the lights on at boot. Physical dimming logs `on-step`/`down` frames, which are
+state-indeterminate and must be followed by a deferred `QUERY_ACTUAL_LEVEL`.
+
+HA-originated brightness changes from off exposed a separate issue: ESPHome's
+transition engine called `write_state()` for each intermediate current value,
+causing a burst of repeated `OFF` and low-level DAPC commands before reaching
+the requested brightness.
 
 Follow-up mitigation:
 
@@ -214,6 +219,13 @@ Follow-up mitigation:
   suppression, and firmware-originated light writes.
 - [x] Set the TX GPIO idle level before switching it to output and enable the
   internal pulldown during firmware init, reducing app-init TX glitches.
+- [x] Disable default ESPHome light transitions for DALI outputs and command the
+  remote/target light value instead of streaming transition frames to the DALI
+  bus.
+- [x] Track known DALI light state/level in `DaliLightOutput` and suppress
+  duplicate target writes.
+- [x] Log deferred-query arming/firing and `QUERY_ACTUAL_LEVEL` replies/failures
+  so physical dimming can be debugged end-to-end.
 - [ ] Retest boot after flashing. If lights still go off without any
   `dali.light: tx off` / `tx level` log, suspect TX pin reset/floating behavior
   on the MikroE Click path rather than ESPHome restore writes. Mitigations to

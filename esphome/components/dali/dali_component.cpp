@@ -71,10 +71,16 @@ static void notify_lights(const DaliDispatchResult *res)
 
 static void on_level_query_reply(DaliError result, const DaliFrame *reply, void *ctx)
 {
-    if (result != DALI_OK || reply == nullptr) return;
     LightEntry *e     = static_cast<LightEntry *>(ctx);
+    if (result != DALI_OK || reply == nullptr) {
+        ESP_LOGD(TAG, "query actual level failed: light target type=%u addr=%u result=%d",
+                 (unsigned)e->target_type, (unsigned)e->target_address, (int)result);
+        return;
+    }
     uint8_t     level = (uint8_t)(reply->data & 0xFFu);
     bool        is_on = (level != 0u);
+    ESP_LOGD(TAG, "query actual level reply: light target type=%u addr=%u level=%u",
+             (unsigned)e->target_type, (unsigned)e->target_address, (unsigned)level);
     e->light->mark_state_from_bus(is_on, level);
     DaliTarget output;
     output.type    = static_cast<DaliAddressType>(e->target_type);
@@ -305,10 +311,12 @@ void DaliComponent::loop()
         s_deferred_query_pending_.store(false, std::memory_order_relaxed);
         deferred_query_armed_  = true;
         deferred_query_arm_ms_ = millis();
+        ESP_LOGD(TAG, "deferred level query armed");
     }
     if (deferred_query_armed_ &&
         (uint32_t)(millis() - deferred_query_arm_ms_) >= 600u) {
         deferred_query_armed_ = false;
+        ESP_LOGD(TAG, "deferred level query firing");
         start_refresh();
     }
 

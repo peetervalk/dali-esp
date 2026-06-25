@@ -58,11 +58,15 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   // Core 0 only — prevents re-issuing a DALI command when state is pushed
   // from the bus into ESPHome via LightCall::perform().
   uint32_t          setup_ms_{0};
+  bool              known_state_valid_{false};
+  bool              known_is_on_{false};
+  uint8_t           known_level_{0};
   bool              suppress_initial_write_{true};
   bool              skip_next_write_{false};
   light::LightState *state_{nullptr};
 
   static void clear_unused_color_fields_(light::LightColorValues &values);
+  static uint8_t brightness_to_level_(float brightness);
 };
 
 }  // namespace dali
