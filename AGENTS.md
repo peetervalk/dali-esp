@@ -5,16 +5,19 @@ first for the active project state, then use the focused planning files below.
 
 ## Project Aim
 
-Build an ESP32-based DALI-2 master/controller using the MikroE DALI-2 Click board.
-The project is a learning and development project, with low-level protocol access
-kept available for debugging and experimentation.
+Two goals, in order:
 
-Long-term goals:
+1. **CLI completeness** — if it can be done using DALI commands, the CLI should be
+   able to do it. The CLI is the reference tool for verifying real-bus behaviour
+   and the proving ground for every protocol feature before it reaches the
+   controller layer.
 
-- Communicate with DALI and DALI-2 devices.
-- Support control gear, DALI-2 input devices, instances, and 24-bit frames.
-- Provide native diagnostic firmware for stack bring-up.
-- Provide an ESPHome/Home Assistant integration after the core stack is proven.
+2. **ESP32 DALI controller** — leverage the proven CLI/protocol stack to build a
+   working DALI controller firmware for ESP32, with primary emphasis on ESPHome and
+   Home Assistant integration.
+
+These are targets the project is working towards, not a description of current state.
+See `current_status.md` for what is implemented and what is next.
 
 ## Context Files
 

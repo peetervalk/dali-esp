@@ -3329,8 +3329,8 @@ static void cmd_help(void)
     printf("  config <addr|sN|gN|b> <config-name> [param]\r\n");
     printf("  config-dtr0 <addr|sN|gN|b> <config-name> <0-255> [param]\r\n");
     printf("  config-list\r\n");
-    printf("  scan\r\n");
-    printf("  discover\r\n");
+    printf("  scan                         brief output; gear only\r\n");
+    printf("  discover                      full output; gear + DALI-2 input device instances\r\n");
     printf("  inventory\r\n");
     printf("  commission unaddressed [first-addr] [max-devices]\r\n");
     printf("  instances <addr>\r\n");

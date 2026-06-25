@@ -21,7 +21,9 @@
  *   query-list       - print supported generic query names
  *   config <target> <config-name> [param] - generic addressed configuration
  *   config-list      - print supported generic config names
- *   scan/discover    - scan short addresses and update inventory
+ *   scan             - scan all short addresses; brief output (control gear only)
+ *   discover         - scan all short addresses; full output including DALI-2
+ *                      input device instances (use this to find sensors/couplers)
  *   inventory        - print the last discovered inventory
  *   commission unaddressed [first-addr] [max-devices]
  *                    - assign short addresses to currently unaddressed gear

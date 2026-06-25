@@ -1,0 +1,65 @@
+# ESPHome config for DALI Bus 2 — 5 control gear, group 0
+# Hardware: ESP32-WROVER-E + MikroE DALI-2 Click (TX=GPIO18, RX=GPIO19)
+# Bus layout (from "discover"):
+#   addr 0: lamp + Steinel HF 360 II (input device, 4 instances: light/occupancy/temp/humidity)
+#   addr 1: lamp + DALI-2 PB coupler (1 instance: push button, BF6 legacy mode)
+#   addr 2, 3, 5: plain lamps
+#   addr 4: absent
+#   All lamps in group 0; BF6 coupler sends group 0 off/recall-max
+
+esphome:
+  name: dali-2k
+  friendly_name: "DALI 2k"
+
+esp32:
+  board: esp32dev  # covers WROVER-E; add sdkconfig SPIRAM options if PSRAM needed
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/peetervalk/dali-esp.git
+      ref: main
+      username: !secret github_username
+      password: !secret github_token
+    components: [dali]
+    refresh: 0s
+
+wifi:
+  ssid: !secret wifi_ssid2
+  password: !secret wifi_password
+  ap:
+    ssid: "dali-2k-ap"
+    password: !secret ap_password
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+  level: DEBUG  # drop to INFO after first successful connection
+
+# ── DALI bus ──────────────────────────────────────────────────────────────────
+dali:
+  id: dali_bus
+  tx_pin: 18
+  rx_pin: 19
+  headless_dispatch: true
+
+# ── Lights ────────────────────────────────────────────────────────────────────
+# One group covers all 5 lamps.
+# query_address=2 uses a plain lamp (no shared input device) for level polling.
+
+light:
+  - platform: dali
+    dali_id: dali_bus
+    name: "DALI Group 0"
+    target_type: group
+    target_address: 0
+    query_address: 2

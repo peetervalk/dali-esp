@@ -22,7 +22,7 @@
 #define DALI_MAX_RETRIES              3u    /* send attempts before offline    */
 #define DALI_SEND_TWICE_WINDOW_MS   100u    /* max gap between repeated sends  */
 #define DALI_BUS_IDLE_GUARD_US   (DALI_BIT_US * 2u) /* idle high before TX      */
-#define DALI_BUS_IDLE_TIMEOUT_US (DALI_BIT_US * 4u) /* max wait for idle before TX*/
+#define DALI_BUS_IDLE_TIMEOUT_US (DALI_BIT_US * 40u) /* ~33 ms; outlasts any 24-bit frame from input devices */
 
 /* ---------------------------------------------------------------------------
  * Protocol limits

@@ -4,6 +4,16 @@
 **Framework:** ESP-IDF v6.0.1 native CMake
 **Hardware target:** ESP32-DevKitC-VE / ESP32-WROVER-E + MikroE DALI-2 Click
 
+## Project Aim
+
+1. **CLI completeness** — if it can be done using DALI commands, the CLI should be
+   able to do it.
+2. **ESP32 DALI controller** — leverage that capability to build a working DALI
+   controller firmware for ESP32, with primary emphasis on ESPHome / Home Assistant
+   integration.
+
+These are targets being worked towards. The sections below describe current state.
+
 ## Where Things Stand
 
 The software stack is now the most complete it has ever been. PHY, scheduler,
