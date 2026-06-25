@@ -37,6 +37,24 @@
 #define LIGHT_SET_DEADBAND            0xE1u
 
 /* ---------------------------------------------------------------------------
+ * Generic IEC 62386-103 instance query opcodes (Table 16)
+ * Single send, expects 8-bit reply.
+ * --------------------------------------------------------------------------*/
+#define INST_QUERY_INSTANCE_TYPE      0x80u
+#define INST_QUERY_RESOLUTION         0x81u
+#define INST_QUERY_HYSTERESIS         0x82u
+#define INST_QUERY_DEADTIME_TIMER     0x83u
+#define INST_QUERY_REPORT_TIMER       0x84u
+
+/* DT303 type-specific query opcodes (IEC 62386-303, Table 7) */
+#define OCC_QUERY_DEADTIME            0xC0u
+#define OCC_QUERY_HOLD_TIMER          0xC1u
+
+/* DT304 type-specific query opcodes (IEC 62386-304, Table 7) */
+#define LIGHT_QUERY_HYSTERESIS        0xC0u
+#define LIGHT_QUERY_DEADBAND          0xC1u
+
+/* ---------------------------------------------------------------------------
  * Generic config builders
  * --------------------------------------------------------------------------*/
 
@@ -150,4 +168,79 @@ DaliFrame dali_input_light_build_set_hysteresis(uint8_t addr, uint8_t instance)
 DaliFrame dali_input_light_build_set_deadband(uint8_t addr, uint8_t instance)
 {
     return dali_cmd_instance(addr, instance, LIGHT_SET_DEADBAND);
+}
+
+/* ---------------------------------------------------------------------------
+ * Generic IEC 62386-103 instance query builders
+ * --------------------------------------------------------------------------*/
+
+DaliFrame dali_input_build_query_instance_type(uint8_t addr, uint8_t instance)
+{
+    return dali_cmd_instance(addr, instance, INST_QUERY_INSTANCE_TYPE);
+}
+
+DaliFrame dali_input_build_query_resolution(uint8_t addr, uint8_t instance)
+{
+    return dali_cmd_instance(addr, instance, INST_QUERY_RESOLUTION);
+}
+
+DaliFrame dali_input_build_query_hysteresis(uint8_t addr, uint8_t instance)
+{
+    return dali_cmd_instance(addr, instance, INST_QUERY_HYSTERESIS);
+}
+
+DaliFrame dali_input_build_query_deadtime_timer(uint8_t addr, uint8_t instance)
+{
+    return dali_cmd_instance(addr, instance, INST_QUERY_DEADTIME_TIMER);
+}
+
+DaliFrame dali_input_build_query_report_timer(uint8_t addr, uint8_t instance)
+{
+    return dali_cmd_instance(addr, instance, INST_QUERY_REPORT_TIMER);
+}
+
+/* ---------------------------------------------------------------------------
+ * DT303 occupancy sensor query builders
+ * --------------------------------------------------------------------------*/
+
+DaliFrame dali_input_occ_build_query_deadtime(uint8_t addr, uint8_t instance)
+{
+    return dali_cmd_instance(addr, instance, OCC_QUERY_DEADTIME);
+}
+
+DaliFrame dali_input_occ_build_query_hold_timer(uint8_t addr, uint8_t instance)
+{
+    return dali_cmd_instance(addr, instance, OCC_QUERY_HOLD_TIMER);
+}
+
+/* ---------------------------------------------------------------------------
+ * DT304 light sensor query builders
+ * --------------------------------------------------------------------------*/
+
+DaliFrame dali_input_light_build_query_hysteresis(uint8_t addr, uint8_t instance)
+{
+    return dali_cmd_instance(addr, instance, LIGHT_QUERY_HYSTERESIS);
+}
+
+DaliFrame dali_input_light_build_query_deadband(uint8_t addr, uint8_t instance)
+{
+    return dali_cmd_instance(addr, instance, LIGHT_QUERY_DEADBAND);
+}
+
+/* ---------------------------------------------------------------------------
+ * Generic IEC 62386-103 instance state query builders (protocol-table backed)
+ * --------------------------------------------------------------------------*/
+
+DaliFrame dali_input_build_query_instance_enabled(uint8_t addr, uint8_t instance)
+{
+    DaliFrame f = {};
+    dali_build_instance_command(addr, instance, DALI_CMD_QUERY_INSTANCE_ENABLED, &f);
+    return f;
+}
+
+DaliFrame dali_input_build_query_instance_status(uint8_t addr, uint8_t instance)
+{
+    DaliFrame f = {};
+    dali_build_instance_command(addr, instance, DALI_CMD_QUERY_INSTANCE_STATUS, &f);
+    return f;
 }

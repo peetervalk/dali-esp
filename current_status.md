@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-06-26
+**Last updated:** 2026-06-26 (evening)
 **Framework:** ESP-IDF v6.0.1 native CMake
 **Hardware target:** ESP32-DevKitC-VE / ESP32-WROVER-E + MikroE DALI-2 Click
 
@@ -180,6 +180,62 @@ Cannot do yet:
   Was missing because `dali_dispatch` was added to the protocol stack after the
   other wrappers were written.
 
+**Session 2026-06-26 (evening) — command console completeness pass:**
+
+- **`DaliBusSensor` abstract base class** — `dali_component.h` now declares
+  `DaliBusSensor` (mirrors `DaliBusLight` pattern); `dali_component.cpp` uses it
+  instead of including `sensor/dali_input_sensor.h` directly. Fixes a build failure
+  where the sensor/ subdirectory was not copied to the PlatformIO source tree for
+  builds that didn't use the sensor platform (dali-1k, dali-diag).
+
+- **`dali_1k.yaml` updated** — now equivalent to `dali_2k.yaml` for console
+  features: `command_result` text sensor and `text:` DALI Command entity added.
+  `refresh: 5min` changed to `0s` to match dali-2k.
+
+- **`dali_2k.yaml` sensor tuning:**
+  - Lux `scale: 0.01` — calibrated against phone ambient light sensor (raw 7200
+    → ~72 lx, consistent with ceiling-height reflected measurement).
+  - Occupancy raw sensor hidden (`internal: true`); new `text_sensor: template`
+    entity "Zone 2 Occupancy" maps DT303 values to human-readable strings:
+    0→Free, 85→Movement, 170→Present, 255→Present+Moving.
+
+- **`iquery` verb added** to `execute_command()`. Syntax: `iquery a<N>:<inst> <name>`.
+  Result appears in "DALI Command Result" text sensor. Names match the `iconfig`
+  SET counterparts:
+
+  | iquery name | reads back |
+  |---|---|
+  | `hold-timer` | DT303 hold timer (Steinel default 900 s) |
+  | `deadtime` | DT303 deadtime |
+  | `hysteresis` | generic input hysteresis |
+  | `deadtime-gen` | generic deadtime timer |
+  | `report-timer` | generic report timer |
+  | `instance-type` | device type (3=DT303, 4=DT304, …) |
+  | `resolution` | bit resolution |
+  | `instance-enabled` | yes/no — whether instance is active |
+  | `instance-status` | status byte |
+
+- **Command console symmetry fixes:**
+  - `query`: renamed misleading `power-on` → `power-on-flag` (yes/no event flag,
+    not a level) and `power-failure` → `power-fail-flag`. Added `power-on-level`
+    (`QUERY_POWER_ON_LEVEL`) and `failure-level` (`QUERY_SYSTEM_FAILURE_LEVEL`) as
+    the correct read counterparts for `set-power-on-dtr0` / `set-failure-dtr0`.
+  - `config`: added `set-operating-mode` (DTR0 = mode byte).
+  - `iconfig`: added `enable-instance` and `disable-instance` (no DTR0 argument;
+    handler now detects `needs_dtr0` flag and builds a 1-step sequence).
+  - `iquery`: renamed `deadtime-timer` → `deadtime-gen` to match `iconfig`'s
+    `set-deadtime-gen`.
+
+- **`dali_input_config.h/.c` extended** — query frame builders added for all
+  instance parameter types: generic 103 (`instance-type`, `resolution`,
+  `hysteresis`, `deadtime-timer`, `report-timer`, `instance-enabled`,
+  `instance-status`), DT303 (`hold-timer`, `deadtime`), DT304 (`hysteresis`,
+  `deadband`).
+
+- **`dali_2k.yaml` verified on hardware**: all 4 Steinel sensor entities confirmed
+  working in HA after flashing via ESPHome device builder (OTA). Lux, temperature,
+  humidity, and occupancy state all publishing correctly.
+
 **Session 2026-06-26 — DALI-2 sensor platform and HA command console:**
 
 - **`DALI_BUS_IDLE_TIMEOUT_US` fix** — was `DALI_BIT_US * 4` (~3.3 ms), shorter than
@@ -315,9 +371,15 @@ Home Assistant uses "switch" for a binary on/off toggle entity.
 
 ## Immediate Priorities
 
-1. **Flash and verify `dali_2k.yaml`** — confirm 4 Steinel sensor entities appear
-   in HA, tune hold timer via command console (`iconfig a0:1 set-hold-timer <N>`).
-2. Legacy pushbutton coupler zone grouping — see `todo_pb_couplers.md`.
+1. **Tune Steinel hold timer** — `iquery a0:1 hold-timer` to read current value,
+   then `iconfig a0:1 set-hold-timer <N>` to set. Target: shortest delay where
+   the light reliably stays on while the room is in use.
+2. **Investigate Steinel detection range** — light activates at shorter distance
+   than expected for an HF sensor. May need sensitivity or deadtime adjustment via
+   `iconfig a0:1 set-deadtime <N>` and/or Steinel-specific configuration.
+3. **Flash `dali_1k.yaml`** — now has the command console; OTA via ESPHome device
+   builder.
+4. Legacy pushbutton coupler zone grouping — see `todo_pb_couplers.md`.
 
 `dali_diag.yaml` is working: scan, Find Couplers, Identify, state commands,
 Group Map sensor, and YAML extraction via PowerShell `Select-String` all
@@ -349,8 +411,9 @@ components/dali/          reusable protocol stack (no app dependencies)
   dali_protocol           Frame builders, command table, address encoding
   dali_control            Control-gear command API
   dali_input_device       Input-device query API
-  dali_input_config       Input-device configuration frame builders (IEC 62386-103,
-                            DT301/303/304); requires send_twice from caller
+  dali_input_config       Input-device configuration and query frame builders
+                            (IEC 62386-103, DT301/303/304); SET commands require
+                            send_twice from caller; QUERY commands are single-send
   dali_input_poll         Input-device polling helpers
   dali_event              Event routing
   dali_discovery          Bus scan, per-device enrichment, inventory

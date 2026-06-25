@@ -43,7 +43,7 @@ ota:
     password: !secret ota_password
 
 logger:
-  level: DEBUG  # drop to INFO after first successful connection
+  level: INFO
 
 # ── DALI bus ──────────────────────────────────────────────────────────────────
 dali:
@@ -144,7 +144,7 @@ text_sensor:
     name: "Zone 2 Occupancy"
     lambda: |-
       int v = (int) id(zone2_occ_raw).state;
-      if (v == 0)   return {"Free"};
+      if (v == 0)   return {"Unoccupied"};
       if (v == 85)  return {"Movement"};
       if (v == 170) return {"Present"};
       if (v == 255) return {"Present + Moving"};

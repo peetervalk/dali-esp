@@ -15,7 +15,6 @@ external_components:
   - source:
       type: git
       url: https://github.com/peetervalk/dali-esp.git
-      ref: main
       username: !secret github_username
       password: !secret github_token
     components: [dali]
@@ -38,7 +37,7 @@ ota:
     password: !secret ota_password
 
 logger:
-  level: DEBUG  # drop to INFO after first successful connection
+  level: INFO
 
 # ── DALI bus ──────────────────────────────────────────────────────────────────
 dali:
@@ -46,8 +45,6 @@ dali:
   tx_pin: 18
   rx_pin: 19
   headless_dispatch: true
-  command_result:
-    name: "DALI Command Result"
 
 # ── Lights (one entity per DALI group) ───────────────────────────────────────
 # Group numbers match the bus configuration discovered via "export inventory".
@@ -104,13 +101,3 @@ light:
     target_type: group
     target_address: 7
     query_address: 15
-
-# ── DALI command console ──────────────────────────────────────────────────────
-# Type commands in HA; result appears in "DALI Command Result" text sensor.
-# Verbs: off/max/min/level/query/config/iconfig
-# Targets: a<N>=short, g<N>=group, b=broadcast
-text:
-  - platform: dali
-    dali_id: dali_bus
-    name: "DALI Command"
-    mode: text

@@ -594,19 +594,21 @@ static bool parse_target(const char *tok, DaliTarget *out)
 /* Lookup table for gear queries (subset of DaliCommandId). */
 struct QueryEntry { const char *name; DaliCommandId id; };
 static const QueryEntry s_query_table[] = {
-    { "actual-level",     DALI_CMD_QUERY_ACTUAL_LEVEL           },
-    { "max-level",        DALI_CMD_QUERY_MAX_LEVEL               },
-    { "min-level",        DALI_CMD_QUERY_MIN_LEVEL               },
-    { "status",           DALI_CMD_QUERY_STATUS                  },
-    { "version",          DALI_CMD_QUERY_VERSION_NUMBER          },
-    { "device-type",      DALI_CMD_QUERY_DEVICE_TYPE             },
-    { "power-on",         DALI_CMD_QUERY_LAMP_POWER_ON           },
-    { "power-failure",    DALI_CMD_QUERY_POWER_FAILURE           },
-    { "groups-0-7",       DALI_CMD_QUERY_GROUPS_0_7              },
-    { "groups-8-15",      DALI_CMD_QUERY_GROUPS_8_15             },
-    { "physical-min",     DALI_CMD_QUERY_PHYSICAL_MINIMUM        },
-    { "operating-mode",   DALI_CMD_QUERY_OPERATING_MODE          },
-    { "fade",             DALI_CMD_QUERY_FADE_TIME_FADE_RATE     },
+    { "actual-level",     DALI_CMD_QUERY_ACTUAL_LEVEL              },
+    { "max-level",        DALI_CMD_QUERY_MAX_LEVEL                 },
+    { "min-level",        DALI_CMD_QUERY_MIN_LEVEL                 },
+    { "power-on-level",   DALI_CMD_QUERY_POWER_ON_LEVEL            },
+    { "failure-level",    DALI_CMD_QUERY_SYSTEM_FAILURE_LEVEL      },
+    { "status",           DALI_CMD_QUERY_STATUS                    },
+    { "version",          DALI_CMD_QUERY_VERSION_NUMBER            },
+    { "device-type",      DALI_CMD_QUERY_DEVICE_TYPE               },
+    { "power-on-flag",    DALI_CMD_QUERY_LAMP_POWER_ON             },
+    { "power-fail-flag",  DALI_CMD_QUERY_POWER_FAILURE             },
+    { "groups-0-7",       DALI_CMD_QUERY_GROUPS_0_7                },
+    { "groups-8-15",      DALI_CMD_QUERY_GROUPS_8_15               },
+    { "physical-min",     DALI_CMD_QUERY_PHYSICAL_MINIMUM          },
+    { "operating-mode",   DALI_CMD_QUERY_OPERATING_MODE            },
+    { "fade",             DALI_CMD_QUERY_FADE_TIME_FADE_RATE       },
 };
 
 /* Lookup table for 16-bit gear config commands (subset). */
@@ -619,21 +621,38 @@ static const ConfigEntry s_config_table[] = {
     { "set-failure-dtr0",     DALI_CMD_SET_SYSTEM_FAILURE_LEVEL_DTR0, true  },
     { "set-fade-time-dtr0",   DALI_CMD_SET_FADE_TIME_DTR0,            true  },
     { "set-fade-rate-dtr0",   DALI_CMD_SET_FADE_RATE_DTR0,            true  },
+    { "set-operating-mode",   DALI_CMD_SET_OPERATING_MODE_DTR0,       true  },
     { "add-group",            DALI_CMD_ADD_TO_GROUP,                   false },
     { "remove-group",         DALI_CMD_REMOVE_FROM_GROUP,              false },
     { "identify-device",      DALI_CMD_IDENTIFY_DEVICE,                false },
     { "save-persistent",      DALI_CMD_SAVE_PERSISTENT_VARIABLES,      false },
 };
 
-/* Lookup table for 24-bit instance config commands. */
+/* Lookup table for 24-bit instance config commands (send_twice; DTR0 optional). */
 typedef DaliFrame (*IConfigBuilder)(uint8_t addr, uint8_t instance);
-struct IConfigEntry { const char *name; IConfigBuilder builder; };
+struct IConfigEntry { const char *name; IConfigBuilder builder; bool needs_dtr0; };
 static const IConfigEntry s_iconfig_table[] = {
-    { "set-hold-timer",    dali_input_occ_build_set_hold_timer      },
-    { "set-deadtime",      dali_input_occ_build_set_deadtime        },
-    { "set-hysteresis",    dali_input_build_set_hysteresis          },
-    { "set-report-timer",  dali_input_build_set_report_timer        },
-    { "set-deadtime-gen",  dali_input_build_set_deadtime_timer      },
+    { "set-hold-timer",    dali_input_occ_build_set_hold_timer,   true  },
+    { "set-deadtime",      dali_input_occ_build_set_deadtime,     true  },
+    { "set-hysteresis",    dali_input_build_set_hysteresis,       true  },
+    { "set-report-timer",  dali_input_build_set_report_timer,     true  },
+    { "set-deadtime-gen",  dali_input_build_set_deadtime_timer,   true  },
+    { "enable-instance",   dali_input_build_enable_instance,      false },
+    { "disable-instance",  dali_input_build_disable_instance,     false },
+};
+
+/* Lookup table for 24-bit instance query commands (single send, expects reply). */
+struct IQueryEntry { const char *name; IConfigBuilder builder; };
+static const IQueryEntry s_iquery_table[] = {
+    { "hold-timer",        dali_input_occ_build_query_hold_timer       },
+    { "deadtime",          dali_input_occ_build_query_deadtime         },
+    { "hysteresis",        dali_input_build_query_hysteresis           },
+    { "deadtime-gen",      dali_input_build_query_deadtime_timer       },
+    { "report-timer",      dali_input_build_query_report_timer         },
+    { "instance-type",     dali_input_build_query_instance_type        },
+    { "resolution",        dali_input_build_query_resolution           },
+    { "instance-enabled",  dali_input_build_query_instance_enabled     },
+    { "instance-status",   dali_input_build_query_instance_status      },
 };
 
 void DaliComponent::execute_command(const std::string &cmd_str)
@@ -715,9 +734,8 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         return;
     }
 
-    /* ── Instance config: iconfig a<N>:<inst> <cmd> <dtr0> ── */
-    if (strcmp(verb, "iconfig") == 0 && ntok >= 4u) {
-        /* Parse "a<N>:<inst>" */
+    /* ── Instance config: iconfig a<N>:<inst> <cmd> [<dtr0>] ── */
+    if (strcmp(verb, "iconfig") == 0 && ntok >= 3u) {
         const char *at = tok[1];
         if (at[0] != 'a' && at[0] != 's') { set_cmd_result("iconfig: use a<N>:<inst>"); return; }
         char *colon = strchr(const_cast<char *>(at), ':');
@@ -727,23 +745,55 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         uint8_t inst = (uint8_t)strtoul(colon + 1, nullptr, 10);
         if (addr > 63u || inst > 31u) { set_cmd_result("iconfig: addr 0-63, inst 0-31"); return; }
 
-        uint8_t dtr0 = (uint8_t)strtoul(tok[3], nullptr, 10);
-
         for (const auto &e : s_iconfig_table) {
             if (strcmp(tok[2], e.name) == 0) {
-                DaliFrame dtr_frame, cfg_frame;
-                dali_control_build_dtr(DALI_DTR0, dtr0, &dtr_frame);
-                cfg_frame = e.builder(addr, inst);
+                if (e.needs_dtr0 && ntok < 4u) { set_cmd_result("needs dtr0 value"); return; }
+                DaliFrame cfg_frame = e.builder(addr, inst);
                 DaliSequence seq = {};
-                seq.steps[0] = { dtr_frame, false, false, 0u };
-                seq.steps[1] = { cfg_frame, false, true,  0u }; /* send_twice = true */
-                seq.step_count = 2u;
+                if (e.needs_dtr0) {
+                    DaliFrame dtr_frame;
+                    dali_control_build_dtr(DALI_DTR0, (uint8_t)strtoul(tok[3], nullptr, 10), &dtr_frame);
+                    seq.steps[0] = { dtr_frame, false, false, 0u };
+                    seq.steps[1] = { cfg_frame, false, true,  0u };
+                    seq.step_count = 2u;
+                } else {
+                    seq.steps[0] = { cfg_frame, false, true, 0u };
+                    seq.step_count = 1u;
+                }
                 DaliError err = dali_sched_enqueue_sequence(&seq);
                 set_cmd_result(err == DALI_OK ? "OK" : "err");
                 return;
             }
         }
         set_cmd_result("unknown iconfig cmd");
+        return;
+    }
+
+    /* ── Instance query: iquery a<N>:<inst> <name> ── */
+    if (strcmp(verb, "iquery") == 0 && ntok >= 3u) {
+        const char *at = tok[1];
+        if (at[0] != 'a' && at[0] != 's') { set_cmd_result("iquery: use a<N>:<inst>"); return; }
+        char *colon = strchr(const_cast<char *>(at), ':');
+        if (!colon) { set_cmd_result("iquery: missing :<inst>"); return; }
+        *colon      = '\0';
+        uint8_t addr = (uint8_t)strtoul(at + 1, nullptr, 10);
+        uint8_t inst = (uint8_t)strtoul(colon + 1, nullptr, 10);
+        if (addr > 63u || inst > 31u) { set_cmd_result("iquery: addr 0-63, inst 0-31"); return; }
+
+        for (const auto &e : s_iquery_table) {
+            if (strcmp(tok[2], e.name) == 0) {
+                DaliFrame frame = e.builder(addr, inst);
+                DaliTransaction txn = {};
+                txn.frame       = frame;
+                txn.needs_reply = true;
+                txn.on_complete = on_cmd_query_reply;
+                txn.cb_ctx      = nullptr;
+                DaliError err = dali_sched_enqueue(&txn);
+                if (err != DALI_OK) set_cmd_result("queue full");
+                return;
+            }
+        }
+        set_cmd_result("unknown iquery");
         return;
     }
 
