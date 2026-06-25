@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-06-25
+**Last updated:** 2026-06-26
 **Framework:** ESP-IDF v6.0.1 native CMake
 **Hardware target:** ESP32-DevKitC-VE / ESP32-WROVER-E + MikroE DALI-2 Click
 
@@ -180,6 +180,52 @@ Cannot do yet:
   Was missing because `dali_dispatch` was added to the protocol stack after the
   other wrappers were written.
 
+**Session 2026-06-26 — DALI-2 sensor platform and HA command console:**
+
+- **`DALI_BUS_IDLE_TIMEOUT_US` fix** — was `DALI_BIT_US * 4` (~3.3 ms), shorter than
+  a 24-bit DALI-2 frame (~10.8 ms). Steinel HF 360 II spamming unsolicited events
+  caused `DALI_ERR_BUS_STUCK` on every scan TX. Fixed to `DALI_BIT_US * 40` (~33 ms)
+  in `dali_frame.h`. Scan now completes cleanly with the sensor on the bus.
+
+- **`dali_2k.yaml`** — ESPHome config for Bus 2: 5 control gear (addrs 0/1/2/3/5,
+  all in group 0), Steinel HF 360 II at addr 0, DALI-2 PB coupler (BF6 mode) at
+  addr 1. `headless_dispatch: true` covers group 0 coupler frames. `query_address: 2`
+  uses a plain lamp for level polling.
+
+- **ESPHome `sensor/` platform** (`esphome/components/dali/sensor/`):
+  - `DaliInputSensor` — polls `QUERY_INPUT_VALUE` via the async scheduler (no
+    blocking). 1-byte and 2-byte instances handled via callback chaining
+    (MSB → enqueue LATCH → LSB → combine → publish). Core 1→Core 0 via atomic
+    dirty flag + `apply_value()` drain in `loop()`.
+  - Config: `address`, `instance`, `poll_interval` (seconds), `value_bytes` (1 or 2),
+    `scale`, `offset`.
+  - All 4 Steinel instances configured in `dali_2k.yaml`: lux (30 s, 2-byte),
+    occupancy (10 s, 1-byte, raw 0/85/170/255 = free/movement/hold/present+moving),
+    temperature (60 s, 2-byte, scale=0.1 offset=-5 → °C),
+    humidity (60 s, 1-byte, scale=0.5 → %).
+
+- **ESPHome `text/` platform** (`esphome/components/dali/text/`):
+  - `DaliCommandText` — text entity in HA; `control(value)` calls
+    `DaliComponent::execute_command()`. Result appears in a `command_result`
+    text sensor defined under the `dali:` component.
+  - `execute_command()` parses CLI-style commands: `off/max/min/level <target>`,
+    `query <target> <name>`, `config <target> <name> [dtr0]`,
+    `iconfig a<N>:<inst> <name> <dtr0>`. Targets: `a<N>`/`s<N>` = short,
+    `g<N>` = group, `b` = broadcast.
+  - `iconfig` supports DT303 occupancy config: `set-hold-timer`, `set-deadtime`;
+    generic: `set-hysteresis`, `set-report-timer`, `set-deadtime-gen`.
+  - Replaces the need to flash CLI firmware just to tune sensor parameters.
+    Hold timer and sensitivity can be adjusted from HA: e.g.
+    `iconfig a0:1 set-hold-timer 20`.
+
+- **Steinel HF 360 II hardware verified** on Bus 2:
+  - All 4 instances polled successfully via CLI `sensor poll 0`.
+  - Occupancy states 0x00 (free), 0xAA (hold/present), 0xFF (present+moving) confirmed.
+  - Temperature formula `T = raw × 0.1 − 5` verified (raw=276 → 22.6°C).
+  - Humidity formula `H = raw × 0.5` verified (raw=104 → 52%).
+  - Light sensor raw=7107 at time of measurement.
+  - Default hold timer ~900 s (15 min) — tune via HA command console.
+
 **Session 2026-06-25 — headless state sync verified on live bus:**
 
 - **Boot/flash behavior** — newest `dali_1k.yaml` firmware no longer turns the
@@ -231,6 +277,12 @@ Cannot do yet:
     (required in ESPHome 2026.6)
   - `light/dali_light_output.h/.cpp` — `DaliLightOutput` maps ESPHome brightness
     float 0–1 to DALI arc level 1–254; off → `dali_control_off()`
+  - `sensor/__init__.py` + `sensor/dali_input_sensor.h` — `DaliInputSensor` polls
+    `QUERY_INPUT_VALUE` on a configurable interval; 1- or 2-byte async reads with
+    callback chaining; `scale`/`offset` for unit conversion
+  - `text/__init__.py` + `text/dali_command_text.h` — `DaliCommandText` exposes a
+    HA text input that parses CLI-style DALI commands; result in `command_result`
+    text sensor; supports gear control, queries, config, and instance config
 - **`dali_diag.yaml`** — diagnostic/discovery firmware; scan/status/result text
   sensors, bus monitor, target address number, scan/refresh/identify/find-couplers
   buttons, target on/off/max/min controls; WiFi AP + captive portal for field
@@ -263,8 +315,8 @@ Home Assistant uses "switch" for a binary on/off toggle entity.
 
 ## Immediate Priorities
 
-1. **Bring up the Steinel HF 360 II.** Connect to a bus without an existing
-   master, run scan, confirm 4 instances decode correctly.
+1. **Flash and verify `dali_2k.yaml`** — confirm 4 Steinel sensor entities appear
+   in HA, tune hold timer via command console (`iconfig a0:1 set-hold-timer <N>`).
 2. Legacy pushbutton coupler zone grouping — see `todo_pb_couplers.md`.
 
 `dali_diag.yaml` is working: scan, Find Couplers, Identify, state commands,

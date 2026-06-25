@@ -51,6 +51,8 @@ dali:
   tx_pin: 18
   rx_pin: 19
   headless_dispatch: true
+  command_result:
+    name: "DALI Command Result"
 
 # ── Lights ────────────────────────────────────────────────────────────────────
 # One group covers all 5 lamps.
@@ -63,3 +65,71 @@ light:
     target_type: group
     target_address: 0
     query_address: 2
+
+# ── DALI command console ──────────────────────────────────────────────────────
+# Type commands in HA; result appears in "DALI Command Result" text sensor.
+# Verbs: off/max/min/level/query/config/iconfig
+# Targets: a<N>=short, g<N>=group, b=broadcast
+# Examples:
+#   query a0 actual-level
+#   config a0 set-max-dtr0 200
+#   iconfig a0:1 set-hold-timer 20  (occupancy hold timer for Steinel, DTR0=20)
+text:
+  - platform: dali
+    dali_id: dali_bus
+    name: "DALI Command"
+    mode: text
+
+# ── Steinel HF 360 II — addr 0, 4 instances ──────────────────────────────────
+# Instance byte seen in unsolicited frames: 0x80=inst0, 0x84=inst2 (approx).
+# Occupancy raw values: 0=free, 85=movement, 170=hold/present, 255=present+moving.
+# Hold timer default is 900 s (15 min); reduce via CLI: config a0 set-hold-timer N.
+
+sensor:
+  - platform: dali
+    dali_id: dali_bus
+    name: "Zone 2 Lux"
+    address: 0
+    instance: 0
+    poll_interval: 30
+    value_bytes: 2
+    unit_of_measurement: "lx"
+    device_class: illuminance
+    state_class: measurement
+    accuracy_decimals: 0
+
+  - platform: dali
+    dali_id: dali_bus
+    name: "Zone 2 Occupancy"
+    address: 0
+    instance: 1
+    poll_interval: 10
+    unit_of_measurement: ""
+    state_class: measurement
+    accuracy_decimals: 0
+
+  - platform: dali
+    dali_id: dali_bus
+    name: "Zone 2 Temperature"
+    address: 0
+    instance: 2
+    poll_interval: 60
+    value_bytes: 2
+    scale: 0.1
+    offset: -5.0
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+
+  - platform: dali
+    dali_id: dali_bus
+    name: "Zone 2 Humidity"
+    address: 0
+    instance: 3
+    poll_interval: 60
+    scale: 0.5
+    unit_of_measurement: "%"
+    device_class: humidity
+    state_class: measurement
+    accuracy_decimals: 0

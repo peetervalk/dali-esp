@@ -7,6 +7,7 @@
 
 // Forward declarations — full includes are in the .cpp files.
 namespace esphome { namespace text_sensor { class TextSensor; } }
+namespace esphome { namespace dali      { class DaliInputSensor; } }
 
 namespace esphome {
 namespace dali {
@@ -67,6 +68,13 @@ class DaliComponent : public Component {
   void set_yaml_result_sensor(text_sensor::TextSensor *s)     { yaml_result_     = s; }
   void set_couplers_result_sensor(text_sensor::TextSensor *s) { couplers_result_ = s; }
   void set_bus_monitor_sensor(text_sensor::TextSensor *s)     { bus_monitor_     = s; }
+  void set_command_result_sensor(text_sensor::TextSensor *s)  { command_result_  = s; }
+
+  // ── Text command interface ──────────────────────────────────────────────────
+
+  // Parse and execute a CLI-style DALI command string (called from Core 0).
+  // Supports: off/max/min/level/query/config/iconfig <target> [args...]
+  void execute_command(const std::string &cmd);
 
   // ── Callbacks (called from other tasks / Core 1) ─────────────────────────
 
@@ -80,6 +88,8 @@ class DaliComponent : public Component {
   // Called by DaliLightOutput during codegen init (Core 0 setup phase).
   void register_light(uint8_t target_type, uint8_t target_address,
                       uint16_t member_groups, DaliBusLight *light);
+  // Called by DaliInputSensor during codegen init (Core 0 setup phase).
+  void register_input_sensor(DaliInputSensor *sensor);
 
  protected:
   uint8_t tx_pin_{18};
@@ -91,6 +101,7 @@ class DaliComponent : public Component {
   text_sensor::TextSensor *yaml_result_{nullptr};
   text_sensor::TextSensor *couplers_result_{nullptr};
   text_sensor::TextSensor *bus_monitor_{nullptr};
+  text_sensor::TextSensor *command_result_{nullptr};
 
   // Scan state (Core 1 writes, Core 0 reads via atomic gate).
   std::atomic<bool>    scan_done_{false};
@@ -119,6 +130,9 @@ class DaliComponent : public Component {
   // Find couplers timer (Core 0); active flag is the module-level atomic.
   uint32_t find_couplers_end_ms_{0};
   bool     find_couplers_collect_{false};  // one-tick drain gate
+
+  // Input sensor boot query (Core 0 only).
+  bool boot_sensor_query_done_{false};
 };
 
 }  // namespace dali

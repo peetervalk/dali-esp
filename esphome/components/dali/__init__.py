@@ -17,8 +17,9 @@ CONF_SCAN_STATUS     = "scan_status"
 CONF_SCAN_RESULT     = "scan_result"
 CONF_YAML_RESULT     = "yaml_result"
 CONF_COUPLERS_RESULT = "couplers_result"
-CONF_BUS_MONITOR     = "bus_monitor"
-CONF_POLL_INTERVAL   = "poll_interval"
+CONF_BUS_MONITOR       = "bus_monitor"
+CONF_COMMAND_RESULT    = "command_result"
+CONF_POLL_INTERVAL     = "poll_interval"
 CONF_HEADLESS_DISPATCH = "headless_dispatch"
 
 dali_ns = cg.esphome_ns.namespace("dali")
@@ -68,6 +69,8 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_COUPLERS_RESULT): text_sensor.text_sensor_schema(),
         # Bus-monitor: last unsolicited frame (live)
         cv.Optional(CONF_BUS_MONITOR): text_sensor.text_sensor_schema(),
+        # Command-result: output of the last text command entity execution
+        cv.Optional(CONF_COMMAND_RESULT): text_sensor.text_sensor_schema(),
         # Optional periodic QUERY_ACTUAL_LEVEL poll in seconds (0 = disabled)
         cv.Optional(CONF_POLL_INTERVAL, default=0): cv.int_range(min=0, max=3600),
         # Opt-in only: compile the installation-specific local dispatch table.
@@ -102,6 +105,10 @@ async def to_code(config):
     if CONF_BUS_MONITOR in config:
         sens = await text_sensor.new_text_sensor(config[CONF_BUS_MONITOR])
         cg.add(var.set_bus_monitor_sensor(sens))
+
+    if CONF_COMMAND_RESULT in config:
+        sens = await text_sensor.new_text_sensor(config[CONF_COMMAND_RESULT])
+        cg.add(var.set_command_result_sensor(sens))
 
     if config[CONF_POLL_INTERVAL] > 0:
         cg.add(var.set_poll_interval(config[CONF_POLL_INTERVAL]))

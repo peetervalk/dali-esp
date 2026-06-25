@@ -1,4 +1,16 @@
-# TODO: DALI-2 Input Device ESPHome Integration
+# DONE: DALI-2 Input Device ESPHome Integration
+
+**Implemented 2026-06-26.** See `current_status.md` session notes. Summary:
+polling approach used for all 4 Steinel instances (event-driven abandoned — hold
+timer too long to observe transitions, lux events use different scale). Sensor
+platform at `esphome/components/dali/sensor/`. Occupancy tunable from HA via
+text command console (`iconfig a0:1 set-hold-timer <N>`).
+
+---
+
+Original design notes preserved below for reference.
+
+# ORIGINAL: DALI-2 Input Device ESPHome Integration
 
 ## Context
 
