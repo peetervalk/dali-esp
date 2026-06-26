@@ -610,6 +610,9 @@ static const QueryEntry s_query_table[] = {
     { "physical-min",     DALI_CMD_QUERY_PHYSICAL_MINIMUM          },
     { "operating-mode",   DALI_CMD_QUERY_OPERATING_MODE            },
     { "fade",             DALI_CMD_QUERY_FADE_TIME_FADE_RATE       },
+    { "content-dtr0",     DALI_CMD_QUERY_CONTENT_DTR0              },
+    { "content-dtr1",     DALI_CMD_QUERY_CONTENT_DTR1              },
+    { "content-dtr2",     DALI_CMD_QUERY_CONTENT_DTR2              },
 };
 
 /* Lookup table for 16-bit gear config commands (subset). */
