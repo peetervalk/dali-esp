@@ -68,7 +68,7 @@ light:
 
 # ── DALI command console ──────────────────────────────────────────────────────
 # Type commands in HA; result appears in "DALI Command Result" text sensor.
-# Verbs: off/max/min/level/query/config/iconfig
+# Verbs: off/max/min/level/query/config/iquery/iconfig
 # Targets: a<N>=short, g<N>=group, b=broadcast
 # Examples:
 #   query a0 actual-level
@@ -83,7 +83,9 @@ text:
 # ── Steinel HF 360 II — addr 0, 4 instances ──────────────────────────────────
 # Instance byte seen in unsolicited frames: 0x80=inst0, 0x84=inst2 (approx).
 # Occupancy raw values: 0=free, 85=movement, 170=hold/present, 255=present+moving.
-# Hold timer default is 900 s (15 min); reduce via CLI: config a0 set-hold-timer N.
+# Hold timer default is about 900 s (15 min).
+# Read before writing: iquery a0:1 hold-timer
+# Tune cautiously: iconfig a0:1 set-hold-timer N
 
 sensor:
   - platform: dali

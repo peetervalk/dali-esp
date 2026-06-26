@@ -1,49 +1,58 @@
-# DALI Command Reference - Working Draft
+# DALI Command Reference
 
-This is a working implementation reference for `dali_protocol`, parsers, and
-dedicated vendor/profile helpers. It is not a replacement for IEC 62386. Public
-manufacturer/library references are used to build the first command database.
+This is the project command/protocol reference for the native CLI, ESPHome
+command console, and reusable protocol builders. It is not a replacement for
+IEC 62386.
 
-Verification status as of 2026-06-09:
+**Last reviewed:** 2026-06-26
 
-- Standard control-gear opcodes, response kind assignments, and special command
-  opcodes are source-checked against the Microchip/IEC references.
-- Standard DALI-2 input-device opcodes `0x81`, `0x8C`, and `0x8D` are
-  source-checked against IEC 62386-103 references.
-- Instance opcodes `0x40`..`0x46` are real Lunatone sensor-instance scaling
-  queries implemented in `dali_lunatone`; they are intentionally excluded from
-  generic `dali_protocol` metadata because they are sensor-specific extensions
-  rather than generic IEC 62386-103 commands.
-- Frame length, address range, instance range, broadcast-byte, and DAPC-level
-  limits are centralized in `dali_frame` and reused by protocol/control helpers.
-- Output-level helpers now cover the normal short/group/broadcast control
-  commands through `GO TO SCENE`.
-- Addressed 16-bit configuration instructions are available through the generic
-  `dali_control_build_config` / `dali_control_config` path and the diagnostic
-  `config` CLI. They use command metadata for opcode ranges and send-twice
-  scheduling. DTR0-consuming configuration can be sequenced with an explicit
-  DTR0 DATA load through `dali_control_config_with_dtr0` and diagnostic
-  `config-dtr0`.
-- Single-frame special command builders are available through
-  `dali_build_special` and the diagnostic `special` CLI. Unaddressed-device
-  commissioning search/program/verify workflows are implemented in
-  `dali_commissioning`; device-type selection and memory workflows that combine
-  special frames remain separate flow-module work.
-- Addressed 16-bit control-gear queries are available through the generic
-  `dali_control_build_query` / `dali_control_query` path and the diagnostic
-  `query` CLI. Higher-level flows that prepare DTR state remain separate
-  planned work.
+## Current Implementation Status
 
-## Sources Used
+- Standard control-gear addressing, DAPC, output commands, queries, and
+  configuration commands are implemented in `dali_protocol` and `dali_control`.
+- DTR0/DTR1/DTR2 DATA builders and DTR0-consuming configuration sequences are
+  implemented.
+- Commissioning, memory-bank reads, DT6 helpers, DT8 helpers, input-device
+  queries, input polling, and input-device configuration frame builders are
+  implemented.
+- `dali_input_config` SET builders exist, but real-bus writes still require
+  cautious validation. Read the current value first, write one parameter, then
+  read back before broader use.
+- ESPHome command console supports the practical subset needed from HA:
+  `off`, `max`, `min`, `level`, `query`, `config`, `iquery`, and `iconfig`.
+- Active code gaps and cleanup work live in `current_status.md`.
 
-- Microchip DALI command table: https://onlinedocs.microchip.com/oxy/GUID-0CDBB4BA-5972-4F58-98B2-3F0408F3E10B-en-US-1/GUID-DA5EBBA5-6A56-4135-AF78-FB1F780EF475.html
-- Microchip TB3200 PDF: https://ww1.microchip.com/downloads/en/Appnotes/90003200A.pdf
-- Beckhoff DALI-2 Query Input Value: https://infosys.beckhoff.com/content/1033/tcplclib_tc2_dali/4346134027.html
-- Lunatone DALI-2 instance guide: https://www.lunatone.com/wp-content/uploads/2021/10/DALI-2_Instance-Guide_EN_M0024.pdf
-- Lunatone DALI-2 sensor instances: https://www.lunatone.com/wp-content/uploads/2022/11/Lunatone_DALI-2_Sensor_Instances_EN_M0026.pdf
-- Steinel DALI-2 interface description: https://www.steinel.de/out/media/interfacedoc/94546_DALI-2%20Interface%20Description_V1.5.pdf
+## Sources
 
-## Frame Encoding Notes
+- Microchip DALI command table:
+  https://onlinedocs.microchip.com/oxy/GUID-0CDBB4BA-5972-4F58-98B2-3F0408F3E10B-en-US-1/GUID-DA5EBBA5-6A56-4135-AF78-FB1F780EF475.html
+- Microchip TB3200:
+  https://ww1.microchip.com/downloads/en/Appnotes/90003200A.pdf
+- Beckhoff DALI-2 Query Input Value:
+  https://infosys.beckhoff.com/content/1033/tcplclib_tc2_dali/4346134027.html
+- Lunatone DALI-2 instance guide:
+  https://www.lunatone.com/wp-content/uploads/2021/10/DALI-2_Instance-Guide_EN_M0024.pdf
+- Lunatone DALI-2 sensor instances:
+  https://www.lunatone.com/wp-content/uploads/2022/11/Lunatone_DALI-2_Sensor_Instances_EN_M0026.pdf
+- Steinel DALI-2 interface description:
+  https://www.steinel.de/out/media/interfacedoc/94546_DALI-2%20Interface%20Description_V1.5.pdf
+
+## Target Syntax
+
+Native CLI and ESPHome command console both use this target language where
+supported:
+
+| Syntax | Meaning |
+|---|---|
+| `a<N>` or `s<N>` | Short address `0..63` |
+| `g<N>` | Group address `0..15` |
+| `b` | Broadcast |
+| `a<N>:<I>` | Input-device short address plus instance `0..31` |
+
+Queries should normally target one short address. Group or broadcast queries can
+create reply collisions if multiple devices answer.
+
+## Frame Encoding
 
 ### Standard 16-bit forward frame
 
@@ -63,261 +72,293 @@ Address byte:
 | Broadcast DAPC | 0 | `0xFE` |
 | Broadcast command | 1 | `0xFF` |
 
-`DAPC` is not a named command byte. It is selected by address selector bit `0`,
-and the second byte is the requested arc power level `0x00..0xFE`.
+`DAPC` is selected by address selector bit `0`; the second byte is the requested
+arc power level `0x00..0xFE`.
 
-### DALI-2 24-bit instance query frame
-
-Working layout for DALI-2 input-device queries:
+### DALI-2 24-bit input-device frame
 
 ```text
-data = (device_address_byte << 16) | (instance_byte << 8) | command_byte
+data = (device_address_byte << 16) | (instance_byte << 8) | command_or_event
 bit_length = 24
 ```
 
-For a short-addressed input device, `device_address_byte = (short_addr << 1) | 1`.
-Instance byte `0x00..0x1F` addresses a specific instance, `0xFE` addresses the
-device-level command space, and `0xFF` addresses all instances where supported.
+For short-addressed input devices, `device_address_byte = (short_addr << 1) | 1`.
+Instance byte `0x00..0x1F` addresses one instance, `0xFE` addresses device-level
+commands, and `0xFF` addresses all instances where supported.
 
-## Response Kinds To Model
+## Native CLI Reference
 
-| Kind | Meaning | Parser target |
-|---|---|---|
-| `NONE` | no backward frame expected | set commands |
-| `YES_NO` | `0xFF` means YES; missing/no reply means NO in many query contexts | simple presence/status queries |
-| `UINT8` | raw 8-bit value | levels, DTR values, device type |
-| `STATUS` | QUERY STATUS bitfield | `DaliStatus` |
-| `BITSET8` | 8-bit group/scene membership mask | group queries |
-| `MEMORY_BYTE` | memory location value | read memory |
-| `INPUT_VALUE_MSB` | first byte of latched DALI-2 input value | input devices |
-| `INPUT_VALUE_LATCH` | subsequent byte of latched DALI-2 input value | input devices |
-| `FADE_TIME_RATE` | packed high/low nibbles | fade-time/fade-rate query |
+Important diagnostic commands:
 
-## Standard Control Gear Commands
+```text
+bus check
+capture start|stop|clear|status|export
+scan
+discover
+inventory
+export inventory
+identify <addr>
+find switches [seconds]
+events
+instances <addr>
+sensor poll <addr> [instance]
+smoke <addr>
+commission unaddressed [first-addr] [max-devices]
+```
 
-### Direct Arc Power Control
+Control commands:
 
-| Code | Name | Response | Status |
-|---:|---|---|---|
-| `0x00..0xFE` | DAPC level, selected by address selector bit `0` | none | implemented for short/group/broadcast |
+```text
+off <target>
+max <target>
+min <target>
+level <target> <0-254>
+up <target>
+down <target>
+step-up <target>
+step-down <target>
+step-off <target>
+on-step <target>
+last <target>
+scene <target> <0-15>
+dapc-seq <target>
+```
 
-### Output Level Instructions
+Query/config helpers:
 
-| Opcode | Name | Response | Status |
-|---:|---|---|---|
-| `0x00` | OFF | none | implemented for short/group/broadcast |
-| `0x01` | UP | none | implemented for short/group/broadcast |
-| `0x02` | DOWN | none | implemented for short/group/broadcast |
-| `0x03` | STEP UP | none | implemented for short/group/broadcast |
-| `0x04` | STEP DOWN | none | implemented for short/group/broadcast |
-| `0x05` | RECALL MAX LEVEL | none | implemented for short/group/broadcast |
-| `0x06` | RECALL MIN LEVEL | none | implemented for short/group/broadcast |
-| `0x07` | STEP DOWN AND OFF | none | implemented for short/group/broadcast |
-| `0x08` | ON AND STEP UP | none | implemented for short/group/broadcast |
-| `0x09` | ENABLE DAPC SEQUENCE | none | implemented for short/group/broadcast, DALI-2 |
-| `0x0A` | GO TO LAST ACTIVE LEVEL | none | implemented for short/group/broadcast, DALI-2 |
-| `0x10..0x1F` | GO TO SCENE 0..15 | none | implemented for short/group/broadcast |
+```text
+query-list
+query <target> <query-name> [param]
+config-list
+config <target> <config-name> [param]
+```
 
-### Configuration Instructions
+## ESPHome Command Console
 
-These are normal addressed 16-bit configuration instructions. The generic
-control/config path builds them and schedules their required send-twice
-transmission. Commands that consume DTR0 can either use the current DTR0 value
-through `config`, or load DTR0 and run the consuming command as one scheduler
-sequence through `config-dtr0`.
+Available through `text:` platform entity `DALI Command` when configured:
 
-| Opcode | Name | Response | Status |
-|---:|---|---|---|
-| `0x20` | RESET | none | generic config/CLI implemented, send twice |
-| `0x21` | STORE ACTUAL LEVEL IN DTR0 | none | generic config/CLI implemented, send twice |
-| `0x22` | SAVE PERSISTENT VARIABLES | none | generic config/CLI implemented, send twice, DALI-2 |
-| `0x23` | SET OPERATING MODE DTR0 | none | generic config/CLI implemented, send twice, DALI-2; sequenced DTR0 load available |
-| `0x24` | RESET MEMORY BANK DTR0 | none | generic config/CLI implemented, send twice, DALI-2; sequenced DTR0 load available |
-| `0x25` | IDENTIFY DEVICE | none | generic config/CLI implemented, send twice |
-| `0x2A` | SET MAX LEVEL DTR0 | none | generic config/CLI implemented, send twice; sequenced DTR0 load available |
-| `0x2B` | SET MIN LEVEL DTR0 | none | generic config/CLI implemented, send twice; sequenced DTR0 load available |
-| `0x2C` | SET SYSTEM FAILURE LEVEL DTR0 | none | generic config/CLI implemented, send twice; sequenced DTR0 load available |
-| `0x2D` | SET POWER ON LEVEL DTR0 | none | generic config/CLI implemented, send twice; sequenced DTR0 load available |
-| `0x2E` | SET FADE TIME DTR0 | none | generic config/CLI implemented, send twice; sequenced DTR0 load available |
-| `0x2F` | SET FADE RATE DTR0 | none | generic config/CLI implemented, send twice; sequenced DTR0 load available |
-| `0x30` | SET EXTENDED FADE TIME DTR0 | none | generic config/CLI implemented, send twice, DALI-2; sequenced DTR0 load available |
-| `0x40..0x4F` | SET SCENE 0..15 DTR0 | none | generic config/CLI implemented, send twice; sequenced DTR0 load available |
-| `0x50..0x5F` | REMOVE FROM SCENE 0..15 | none | generic config/CLI implemented, send twice |
-| `0x60..0x6F` | ADD TO GROUP 0..15 | none | generic config/CLI implemented, send twice |
-| `0x70..0x7F` | REMOVE FROM GROUP 0..15 | none | generic config/CLI implemented, send twice |
-| `0x80` | SET SHORT ADDRESS DTR0 | none | generic config/CLI implemented, send twice; sequenced DTR0 load available |
-| `0x81` | ENABLE WRITE MEMORY | none | generic config/CLI implemented, send twice |
+```text
+off <target>
+max <target>
+min <target>
+level <target> <0-254>
+query <target> <query-name>
+config <target> <config-name> [dtr0]
+iquery a<N>:<instance> <query-name>
+iconfig a<N>:<instance> <config-name> [dtr0]
+```
 
-### Query Instructions
+Common examples:
 
-Queries should normally target a single short address. Group/broadcast queries
-can create multiple simultaneous backward frames.
+```text
+query a0 actual-level
+query a0 power-on-level
+query a0 failure-level
+config a0 set-max-dtr0 200
+iquery a0:1 hold-timer
+iconfig a0:1 set-hold-timer 20
+```
 
-| Opcode | Name | Response | Status |
-|---:|---|---|---|
-| `0x90` | QUERY STATUS | `STATUS` | generic query plus named diagnostic CLI implemented |
-| `0x91` | QUERY CONTROL GEAR PRESENT | `YES_NO` | generic query/parse/CLI implemented |
-| `0x92` | QUERY LAMP FAILURE | `YES_NO` | generic query/parse/CLI implemented |
-| `0x93` | QUERY LAMP POWER ON | `YES_NO` | generic query/parse/CLI implemented |
-| `0x94` | QUERY LIMIT ERROR | `YES_NO` | generic query/parse/CLI implemented |
-| `0x95` | QUERY RESET STATE | `YES_NO` | generic query/parse/CLI implemented |
-| `0x96` | QUERY MISSING SHORT ADDRESS | `YES_NO` | generic query/parse/CLI implemented |
-| `0x97` | QUERY VERSION NUMBER | `UINT8` | generic query/parse/CLI implemented |
-| `0x98` | QUERY CONTENT DTR0 | `UINT8` | generic query/parse/CLI implemented |
-| `0x99` | QUERY DEVICE TYPE | `UINT8` | generic query/parse/CLI implemented |
-| `0x9A` | QUERY PHYSICAL MINIMUM | `UINT8` | generic query/parse/CLI implemented |
-| `0x9B` | QUERY POWER FAILURE | `YES_NO` | generic query/parse/CLI implemented |
-| `0x9C` | QUERY CONTENT DTR1 | `UINT8` | generic query/parse/CLI implemented |
-| `0x9D` | QUERY CONTENT DTR2 | `UINT8` | generic query/parse/CLI implemented |
-| `0x9E` | QUERY OPERATING MODE | `UINT8` | generic query/parse/CLI implemented, DALI-2 |
-| `0x9F` | QUERY LIGHT SOURCE TYPE | `UINT8` | generic query/parse/CLI implemented, DALI-2 |
-| `0xA0` | QUERY ACTUAL LEVEL | `UINT8` | generic query/parse/CLI implemented |
-| `0xA1` | QUERY MAX LEVEL | `UINT8` | generic query/parse/CLI implemented |
-| `0xA2` | QUERY MIN LEVEL | `UINT8` | generic query/parse/CLI implemented |
-| `0xA3` | QUERY POWER ON LEVEL | `UINT8` | generic query/parse/CLI implemented |
-| `0xA4` | QUERY SYSTEM FAILURE LEVEL | `UINT8` | generic query/parse/CLI implemented |
-| `0xA5` | QUERY FADE TIME / FADE RATE | `FADE_TIME_RATE` | generic query/parse/CLI implemented |
-| `0xA6` | QUERY MANUFACTURER SPECIFIC MODE | `YES_NO` | generic query/parse/CLI implemented, DALI-2 |
-| `0xA7` | QUERY NEXT DEVICE TYPE | `UINT8` or special sequence | generic query/parse/CLI implemented; sequence interpretation pending |
-| `0xA8` | QUERY EXTENDED FADE TIME | `UINT8` packed nibbles | generic query/parse/CLI implemented, DALI-2 |
-| `0xAA` | QUERY CONTROL GEAR FAILURE | `YES_NO` | generic query/parse/CLI implemented, DALI-2 |
-| `0xB0..0xBF` | QUERY SCENE LEVEL 0..15 | `UINT8` | generic query/parse/CLI implemented |
-| `0xC0` | QUERY GROUPS 0-7 | `BITSET8` | generic query/parse/CLI implemented |
-| `0xC1` | QUERY GROUPS 8-15 | `BITSET8` | generic query/parse/CLI implemented |
-| `0xC2` | QUERY RANDOM ADDRESS H | `UINT8` | generic query/parse/CLI implemented; separate from unaddressed commissioning search |
-| `0xC3` | QUERY RANDOM ADDRESS M | `UINT8` | generic query/parse/CLI implemented; separate from unaddressed commissioning search |
-| `0xC4` | QUERY RANDOM ADDRESS L | `UINT8` | generic query/parse/CLI implemented; separate from unaddressed commissioning search |
-| `0xC5` | READ MEMORY LOCATION | `MEMORY_BYTE` | generic query/parse/CLI implemented; memory-address setup pending |
-| `0xFF` | QUERY EXTENDED VERSION NUMBER | `UINT8` | generic query/parse/CLI implemented |
+## Control-Gear Command Groups
 
-### Special Commands
+### Direct arc power control
 
-Special commands do not use the same normal addressed-command shape as ordinary
-16-bit gear commands. Single-frame builders are implemented separately from
-commissioning and memory flow modules.
+| Code | Meaning | Status |
+|---:|---|---|
+| `0x00..0xFE` | DAPC level selected by address selector bit `0` | Implemented for short/group/broadcast |
 
-| Opcode | Name | Response | Status |
-|---:|---|---|---|
-| `0xA1` | TERMINATE | none | special frame builder/CLI implemented |
-| `0xA3` | DTR0 DATA | none | special frame builder/control/CLI implemented |
-| `0xA5` | INITIALISE | none | special frame builder/CLI implemented, send twice; unaddressed commissioning workflow implemented |
-| `0xA7` | RANDOMIZE | none | special frame builder/CLI implemented, send twice; unaddressed commissioning workflow implemented |
-| `0xA9` | COMPARE | `YES_NO` | special frame builder/CLI implemented; binary search workflow implemented |
-| `0xAB` | WITHDRAW | none | special frame builder/CLI implemented; commissioning workflow implemented |
-| `0xAD` | PING | none | special frame builder/CLI implemented, DALI-2 |
-| `0xB1` | SEARCH ADDRH | none | special frame builder/CLI implemented; commissioning workflow implemented |
-| `0xB3` | SEARCH ADDRM | none | special frame builder/CLI implemented; commissioning workflow implemented |
-| `0xB5` | SEARCH ADDRL | none | special frame builder/CLI implemented; commissioning workflow implemented |
-| `0xB7` | PROGRAM SHORT ADDRESS | none | special frame builder/CLI implemented; commissioning workflow implemented |
-| `0xB9` | VERIFY SHORT ADDRESS | `YES_NO` | special frame builder/CLI implemented; commissioning workflow implemented |
-| `0xBB` | QUERY SHORT ADDRESS | `UINT8` | special frame builder/CLI implemented; commissioning workflow implemented |
-| `0xC1` | ENABLE DEVICE TYPE | none | special frame builder/CLI implemented; device-type flow pending |
-| `0xC3` | DTR1 DATA | none | special frame builder/control/CLI implemented |
-| `0xC5` | DTR2 DATA | none | special frame builder/control/CLI implemented |
-| `0xC7` | WRITE MEMORY LOCATION | `MEMORY_BYTE` | special frame builder/CLI implemented; memory flow pending |
-| `0xC9` | WRITE MEMORY LOCATION NO REPLY | none | special frame builder/CLI implemented; memory flow pending |
+### Output-level instructions
+
+| Opcode | Name | Status |
+|---:|---|---|
+| `0x00` | OFF | Implemented |
+| `0x01` | UP | Implemented |
+| `0x02` | DOWN | Implemented |
+| `0x03` | STEP UP | Implemented |
+| `0x04` | STEP DOWN | Implemented |
+| `0x05` | RECALL MAX LEVEL | Implemented |
+| `0x06` | RECALL MIN LEVEL | Implemented |
+| `0x07` | STEP DOWN AND OFF | Implemented |
+| `0x08` | ON AND STEP UP | Implemented |
+| `0x09` | ENABLE DAPC SEQUENCE | Implemented |
+| `0x0A` | GO TO LAST ACTIVE LEVEL | Implemented |
+| `0x10..0x1F` | GO TO SCENE 0..15 | Implemented |
+
+### Configuration instructions
+
+These addressed commands require send-twice scheduling. DTR0-consuming commands
+can use an existing DTR0 value or a helper sequence that loads DTR0 first.
+
+| Opcode/range | Name |
+|---:|---|
+| `0x20` | RESET |
+| `0x21` | STORE ACTUAL LEVEL IN DTR0 |
+| `0x22` | SAVE PERSISTENT VARIABLES |
+| `0x23` | SET OPERATING MODE DTR0 |
+| `0x24` | RESET MEMORY BANK DTR0 |
+| `0x25` | IDENTIFY DEVICE |
+| `0x2A..0x30` | SET MAX/MIN/FAILURE/POWER-ON/FADE/EXTENDED-FADE values from DTR0 |
+| `0x40..0x4F` | SET SCENE 0..15 DTR0 |
+| `0x50..0x5F` | REMOVE FROM SCENE 0..15 |
+| `0x60..0x6F` | ADD TO GROUP 0..15 |
+| `0x70..0x7F` | REMOVE FROM GROUP 0..15 |
+| `0x80` | SET SHORT ADDRESS DTR0 |
+| `0x81` | ENABLE WRITE MEMORY |
+
+### Native CLI query names
+
+Run `query-list` on the native CLI for the authoritative list. Common names:
+
+| Query name | Underlying command |
+|---|---|
+| `status` | QUERY STATUS |
+| `present` | QUERY CONTROL GEAR PRESENT |
+| `lamp-failure` | QUERY LAMP FAILURE |
+| `limit-error` | QUERY LIMIT ERROR |
+| `reset-state` | QUERY RESET STATE |
+| `missing-address` | QUERY MISSING SHORT ADDRESS |
+| `version` | QUERY VERSION NUMBER |
+| `dtr0`, `dtr1`, `dtr2` | QUERY CONTENT DTR0/DTR1/DTR2 |
+| `device-type` | QUERY DEVICE TYPE |
+| `physical-min` | QUERY PHYSICAL MINIMUM |
+| `power-failure` | QUERY POWER FAILURE |
+| `operating-mode` | QUERY OPERATING MODE |
+| `light-source` | QUERY LIGHT SOURCE TYPE |
+| `actual` | QUERY ACTUAL LEVEL |
+| `max-level` | QUERY MAX LEVEL |
+| `min-level` | QUERY MIN LEVEL |
+| `power-on` | QUERY POWER ON LEVEL |
+| `failure-level` | QUERY SYSTEM FAILURE LEVEL |
+| `fade` | QUERY FADE TIME / FADE RATE |
+| `next-device-type` | QUERY NEXT DEVICE TYPE |
+| `scene-level <0-15>` | QUERY SCENE LEVEL |
+| `groups-0-7`, `groups-8-15` | QUERY GROUPS |
+| `random-h`, `random-m`, `random-l` | QUERY RANDOM ADDRESS |
+| `memory` | READ MEMORY LOCATION |
+| `extended-version` | QUERY EXTENDED VERSION NUMBER |
+
+### ESPHome command-console query names
+
+| Query name | Underlying command |
+|---|---|
+| `status` | QUERY STATUS |
+| `version` | QUERY VERSION NUMBER |
+| `device-type` | QUERY DEVICE TYPE |
+| `physical-min` | QUERY PHYSICAL MINIMUM |
+| `operating-mode` | QUERY OPERATING MODE |
+| `actual-level` | QUERY ACTUAL LEVEL |
+| `max-level` | QUERY MAX LEVEL |
+| `min-level` | QUERY MIN LEVEL |
+| `power-on-level` | QUERY POWER ON LEVEL |
+| `failure-level` | QUERY SYSTEM FAILURE LEVEL |
+| `power-on-flag` | QUERY LAMP POWER ON |
+| `power-fail-flag` | QUERY POWER FAILURE |
+| `fade` | QUERY FADE TIME / FADE RATE |
+| `groups-0-7`, `groups-8-15` | QUERY GROUPS |
+| `content-dtr0`, `content-dtr1`, `content-dtr2` | QUERY CONTENT DTR0/DTR1/DTR2 |
+
+## Special Commands
+
+Special commands do not use the normal addressed-command shape. Builders are in
+`dali_protocol`; higher-level flows live in commissioning, memory, and device
+helpers.
+
+| Opcode | Name | Notes |
+|---:|---|---|
+| `0xA1` | TERMINATE | Implemented |
+| `0xA3` | DTR0 DATA | Implemented |
+| `0xA5` | INITIALISE | Implemented, send twice |
+| `0xA7` | RANDOMIZE | Implemented, send twice |
+| `0xA9` | COMPARE | Used by commissioning |
+| `0xAB` | WITHDRAW | Used by commissioning |
+| `0xAD` | PING | Implemented |
+| `0xB1/0xB3/0xB5` | SEARCH ADDRH/M/L | Used by commissioning |
+| `0xB7` | PROGRAM SHORT ADDRESS | Used by commissioning |
+| `0xB9` | VERIFY SHORT ADDRESS | Used by commissioning |
+| `0xBB` | QUERY SHORT ADDRESS | Used by commissioning |
+| `0xC1` | ENABLE DEVICE TYPE | Used before device-type-specific commands |
+| `0xC3` | DTR1 DATA | Implemented |
+| `0xC5` | DTR2 DATA | Implemented |
+| `0xC7` | WRITE MEMORY LOCATION | Builder implemented |
+| `0xC9` | WRITE MEMORY LOCATION NO REPLY | Builder implemented |
 
 ## DALI-2 Input Device Commands
 
-These are 24-bit device/instance commands used for generic DALI-2 input-device
-discovery. They intentionally do not apply Steinel or Lunatone profiles.
+Generic query builders live in `dali_input_device`; configuration/query builders
+for IEC 62386-103 plus DT301/DT303/DT304 live in `dali_input_config`.
 
-| Instance byte | Opcode | Name | Response | Status |
-|---:|---:|---|---|---|
-| `0xFE` | `0x35` | QUERY NUMBER OF INSTANCES | `UINT8` | implemented in `dali_input_device` |
-| instance | `0x80` | QUERY INSTANCE TYPE | `UINT8` | implemented in `dali_input_device` |
-| instance | `0x81` | QUERY RESOLUTION | `UINT8` | implemented in `dali_input_device` |
-| instance | `0x82` | QUERY INSTANCE ERROR | `YES_NO` | implemented in `dali_input_device` |
-| instance | `0x83` | QUERY INSTANCE STATUS | `UINT8` | implemented in `dali_input_device` |
-| instance | `0x86` | QUERY INSTANCE ENABLED | `YES_NO` | implemented in `dali_input_device` |
-| instance | `0x8C` | QUERY INPUT VALUE | `INPUT_VALUE_MSB` | metadata/builder and raw value CLI implemented |
-| instance | `0x8D` | QUERY INPUT VALUE LATCH | `INPUT_VALUE_LATCH` | metadata/builder and raw value CLI implemented |
+| Instance byte | Opcode | Name | Status |
+|---:|---:|---|---|
+| `0xFE` | `0x35` | QUERY NUMBER OF INSTANCES | Implemented |
+| instance | `0x80` | QUERY INSTANCE TYPE | Implemented |
+| instance | `0x81` | QUERY RESOLUTION | Implemented |
+| instance | `0x82` | QUERY INSTANCE ERROR | Implemented |
+| instance | `0x83` | QUERY INSTANCE STATUS | Implemented |
+| instance | `0x86` | QUERY INSTANCE ENABLED | Implemented |
+| instance | `0x8C` | QUERY INPUT VALUE | Implemented |
+| instance | `0x8D` | QUERY INPUT VALUE LATCH | Implemented |
 
-### DALI Input Event / Controller Frames
+ESPHome `iquery` names:
 
-The diagnostic event parser keeps frames raw-first. For DALI-2 input-event
-frames it decodes the current working 24-bit shape:
+| Name | Meaning |
+|---|---|
+| `instance-type` | Input instance type |
+| `resolution` | Bit resolution |
+| `instance-enabled` | Whether the instance is active |
+| `instance-status` | Status byte |
+| `hysteresis` | Generic input hysteresis |
+| `deadtime-gen` | Generic deadtime timer |
+| `report-timer` | Generic report timer |
+| `hold-timer` | DT303 occupancy hold timer |
+| `deadtime` | DT303 occupancy deadtime |
+
+ESPHome `iconfig` names:
+
+| Name | Meaning |
+|---|---|
+| `enable-instance` | Enable the selected instance |
+| `disable-instance` | Disable the selected instance |
+| `set-hysteresis` | Set generic hysteresis from DTR0 |
+| `set-deadtime-gen` | Set generic deadtime from DTR0 |
+| `set-report-timer` | Set generic report timer from DTR0 |
+| `set-hold-timer` | Set DT303 hold timer from DTR0 |
+| `set-deadtime` | Set DT303 deadtime from DTR0 |
+
+## Vendor-Specific Instance Queries
+
+Lunatone documents these commands for its DALI-2 sensor instances. They are
+implemented in `dali_lunatone`, but are **untested on hardware** in this project
+and are not exposed through the native CLI or ESPHome command console.
+
+They are intentionally kept out of generic `dali_protocol` metadata because they
+are not generic IEC 62386-103 input-device commands.
+
+| Opcode | Name | Response |
+|---:|---|---|
+| `0x40` | LUNATONE QUERY VALUE MULTIPLICATOR | `UINT8` |
+| `0x41` | LUNATONE QUERY VALUE DIVISOR | `UINT8` |
+| `0x42` | LUNATONE QUERY OFFSET MSB | `UINT8` |
+| `0x43` | LUNATONE QUERY OFFSET LSB | `UINT8` |
+| `0x44` | LUNATONE QUERY OFFSET MULTIPLICATOR | `UINT8` |
+| `0x45` | LUNATONE QUERY OFFSET DIVISOR | `UINT8` |
+| `0x46` | LUNATONE QUERY UNIT | `UINT8` |
+
+## Event Frames
+
+`dali_event` keeps unsolicited frames raw-first and decodes:
+
+- DALI-2 24-bit input-device event frames:
 
 ```text
 data = (address_byte << 16) | (instance_byte << 8) | event_byte
 ```
 
-For legacy/DALI-1-style push-button couplers, the parser also accepts normal
-16-bit DALI controller frames:
+- Legacy/DALI-1 pushbutton coupler frames:
 
 ```text
 data = (target_address_byte << 8) | command_or_level_byte
 ```
 
-These frames generally identify the target/action, not the source coupler or
-source instance. Export therefore marks them as `legacy-16bit` mappings and
-preserves the raw frame.
-
-`dali_event` preserves the raw frame and exposes address byte, decoded
-short/group/broadcast address where applicable, optional instance byte, and
-action/event code. The first DALI-2 switch-training path treats event code
-`0x03` as a push-button double-press candidate; confirm this against Lunatone
-captures before relying on exported switch mappings.
-
-Generic role classification in `dali_input_device`:
-
-| Type | Role | Usable state |
-|---:|---|---|
-| `0` | generic | unverified until self-described, profiled, or user-confirmed |
-| `1` | push-button | standard |
-| `2` | absolute | standard |
-| `3` | occupancy/motion | standard |
-| `4` | light | standard |
-
-### Lunatone Sensor-Specific Instance Queries
-
-These are documented by Lunatone for their generic-purpose sensor instances.
-They should not be treated as standard IEC 62386-103 commands or assumed to
-work on the Steinel sensor until confirmed on hardware or in Steinel docs.
-
-| Opcode | Name | Response | Status |
-|---:|---|---|---|
-| `0x40` | QUERY VALUE MULTIPLICATOR | `UINT8` | implemented in `dali_lunatone` |
-| `0x41` | QUERY VALUE DIVISOR | `UINT8` | implemented in `dali_lunatone` |
-| `0x42` | QUERY OFFSET MSB | `UINT8` | implemented in `dali_lunatone` |
-| `0x43` | QUERY OFFSET LSB | `UINT8` | implemented in `dali_lunatone` |
-| `0x44` | QUERY OFFSET MULTIPLICATOR | `UINT8` | implemented in `dali_lunatone` |
-| `0x45` | QUERY OFFSET DIVISOR | `UINT8` | implemented in `dali_lunatone` |
-| `0x46` | QUERY UNIT | `UINT8` | implemented in `dali_lunatone` |
-
-Known Steinel HF 360 II DALI-2 IPD instance targets:
-
-| Instance | Type | Meaning | Initial query plan |
-|---:|---:|---|---|
-| 0 | 4 | brightness | query resolution, query input value, latch if needed |
-| 1 | 3 | motion | query resolution, query input value |
-| 2 | 0 | generic temperature | query input value + latch, apply Steinel conversion |
-| 3 | 0 | generic humidity | query input value, apply Steinel conversion |
-
-## Implementation Plan
-
-- [x] Add command metadata enums/tables in `dali_protocol`.
-- [x] Add generic addressed command builders by target type.
-- [x] Add response parser functions by `ResponseKind`.
-- [x] Add DALI-2 input-device constants and short-address instance builders.
-- [x] Add generic DALI-2 input-device count/type discovery helpers and CLI
-      command `instances <addr>`.
-- [x] Add Lunatone-specific query helpers outside generic `dali_protocol`.
-- [x] Add Steinel-specific value conversion helpers outside PHY/scheduler.
-- [x] Add static mapping validation helpers without entity-name assumptions.
-- [x] Add initial unit tests for command metadata, generic builders, and parser dispatch.
-- [x] Add focused unit tests for every new specialized command/parser before hardware tests.
-- [x] Add raw input-value polling helpers and diagnostic `sensor poll`.
-- [x] Add raw 24-bit DALI-2 event parser, 16-bit legacy controller-frame
-      parser, diagnostic event queue, switch training, and JSON inventory/switch
-      export.
-- [x] Add diagnostic capture log, `bus check`, query-only `smoke <addr>`, and
-      latest raw sensor values in JSON export.
-- [x] Centralize shared protocol limits used by protocol, control, PHY,
-      scheduler, mapping, and vendor helpers.
-- [x] Add generic addressed control-gear query API, diagnostic CLI, and tests.
-- [x] Add generic addressed configuration API, diagnostic CLI, send-twice
-      scheduling, and tests.
-- [x] Add DTR0/DTR1/DTR2 DATA builders plus fixed scheduler sequences for
-      DTR0-consuming configuration commands.
-- [x] Add generic single-frame special command builders and diagnostic CLI.
+Legacy frames identify the target/action, not the source coupler or source
+button. Existing BF6 couplers use this mode successfully; the ESP32 observes the
+frames and syncs HA state.

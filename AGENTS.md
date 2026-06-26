@@ -1,32 +1,20 @@
 # DALI-ESP Agent Guide
 
-This file is the short orientation guide for coding agents. Read `current_status.md`
-first for the active project state, then use the focused planning files below.
+Read `current_status.md` first. It is the source of truth for active project
+state, verified hardware status, and remaining work. Use
+`dali_command_reference.md` only when you need command/protocol details.
 
 ## Project Aim
 
 Two goals, in order:
 
-1. **CLI completeness** — if it can be done using DALI commands, the CLI should be
-   able to do it. The CLI is the reference tool for verifying real-bus behaviour
-   and the proving ground for every protocol feature before it reaches the
-   controller layer.
-
-2. **ESP32 DALI controller** — leverage the proven CLI/protocol stack to build a
+1. **CLI completeness**: if it can be done using DALI commands, the CLI
+   should be able to do it. The CLI is the reference tool for verifying real-bus
+   behavior and for proving protocol features before they reach the controller
+   layer.
+2. **ESP32 DALI controller**: leverage the proven CLI/protocol stack to build a
    working DALI controller firmware for ESP32, with primary emphasis on ESPHome and
    Home Assistant integration.
-
-These are targets the project is working towards, not a description of current state.
-See `current_status.md` for what is implemented and what is next.
-
-## Context Files
-
-- `current_status.md` - current overview, verified state, immediate priorities.
-- `todo_hardware_bringup.md` - ESP-IDF, logic analyzer, and Lunatone validation flow.
-- `diagnostic_discovery_plan.md` - bus discovery, inventory, identify, switch training.
-- `todo_esphome_release.md` - end-user diagnostic firmware and final ESPHome flow.
-- `todo_input_devices.md` - DALI-2 input-device ESPHome integration plan.
-- `dali_command_reference.md` - command catalog and parser implementation reference.
 
 ## Non-Negotiable Architecture
 
@@ -43,17 +31,16 @@ DALI-2 Click
 DALI bus
 ```
 
-`components/dali` is the reusable protocol, scheduler, and PHY stack.
-`main/main.c` is the native ESP-IDF diagnostic entry point.
-`main/dali_diag.c/.h` is the diagnostic serial CLI — app-specific, deliberately
-not in `components/dali` because nothing in the reusable stack depends on it.
-`esphome/dali_esphome.h` is a stub until hardware validation is complete.
+`components/dali` is the reusable protocol, scheduler, discovery, dispatch, and
+PHY stack. `main/main.c` is the native ESP-IDF diagnostic entry point.
+`main/dali_diag.c/.h` is the app-specific serial CLI. The active ESPHome
+component is `esphome/components/dali`.
 
 Do not put protocol, timing, sensor, or addressing logic into ESPHome entities.
 The ESPHome layer should map configured entities to `DaliTarget` values and call
 the control/protocol APIs.
 
-### What lives where
+### What Lives Where
 
 | Module | Location | Reason |
 |---|---|---|
@@ -64,13 +51,13 @@ the control/protocol APIs.
 | `dali_diag` | `main/` | App-specific CLI; no component depends on it |
 | `main.c` | `main/` | App entry point |
 
-### Device type coverage
+### Device Type Coverage
 
 | DT | Standard | Status |
 |---:|---|---|
 | DT6 | IEC 62386-207 | Implemented (`dali_gear_dt6`) |
 | DT8 | IEC 62386-209 | Implemented (`dali_gear_dt8`) |
-| DT1 | IEC 62386-202 | **Not implemented** — fluorescent gear, limited new-install relevance; add when needed following the DT6/DT8 pattern |
+| DT1 | IEC 62386-202 | Not implemented; add when needed following the DT6/DT8 pattern |
 
 Input device instance types DT301 (push button), DT303 (occupancy), and DT304
 (light sensor) are covered by `dali_input_config` for configuration commands.
@@ -84,7 +71,7 @@ Query commands for all instance types are in `dali_input_device`.
 - TX-to-RX settle suppression: 2 ms; DALI reply window opens at 7 ms.
 - Reply timeout: 25 ms.
 - Send-twice window: 100 ms.
-- GPIO 16 and GPIO 17 are connected to WROVER-E PSRAM and must not be used.
+- GPIO16 and GPIO17 are connected to WROVER-E PSRAM and must not be used.
 
 ISR code must remain minimal:
 
