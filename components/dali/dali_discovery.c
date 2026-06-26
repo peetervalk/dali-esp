@@ -104,6 +104,7 @@ DaliError dali_discovery_inventory_store_status(DaliDiscoveryInventory *inventor
     }
     device->present = true;
     device->has_status = true;
+    device->has_control_gear = true;
     device->status = status;
     return DALI_OK;
 }

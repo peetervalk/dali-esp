@@ -8,6 +8,9 @@ static bool key_matches(const DaliDispatchKey *key, const DaliInputEvent *event)
     if (key->address      != event->address)      return false;
     if (key->event_code   != DALI_DISPATCH_OPCODE_ANY &&
         key->event_code   != event->event_code)   return false;
+    if (event->frame_kind == DALI_EVENT_FRAME_INPUT_24BIT &&
+        key->instance     != DALI_DISPATCH_INSTANCE_ANY &&
+        key->instance     != event->instance)     return false;
     return true;
 }
 
@@ -199,42 +202,58 @@ DaliError dali_dispatch(const DaliDispatchEntry  *table,
             }
 
             case DALI_DISPATCH_ACTION_RECALL_MAX:
-                toggle_set(toggle_state, e->output, true);
-                result_set(result_out, e->output, true, 254u);
-                return dali_control_recall_max(e->output);
+                err = dali_control_recall_max(e->output);
+                if (err == DALI_OK) {
+                    toggle_set(toggle_state, e->output, true);
+                    result_set(result_out, e->output, true, 254u);
+                }
+                return err;
 
             case DALI_DISPATCH_ACTION_RECALL_MIN:
-                toggle_set(toggle_state, e->output, true);
-                result_unknown(result_out, e->output);
-                return dali_control_recall_min(e->output);
+                err = dali_control_recall_min(e->output);
+                if (err == DALI_OK) {
+                    toggle_set(toggle_state, e->output, true);
+                    result_unknown(result_out, e->output);
+                }
+                return err;
 
             case DALI_DISPATCH_ACTION_OFF:
-                toggle_set(toggle_state, e->output, false);
-                result_set(result_out, e->output, false, 0u);
-                return dali_control_off(e->output);
+                err = dali_control_off(e->output);
+                if (err == DALI_OK) {
+                    toggle_set(toggle_state, e->output, false);
+                    result_set(result_out, e->output, false, 0u);
+                }
+                return err;
 
             case DALI_DISPATCH_ACTION_GO_TO_LAST:
-                result_unknown(result_out, e->output);
-                return dali_control_go_to_last_active_level(e->output);
+                err = dali_control_go_to_last_active_level(e->output);
+                if (err == DALI_OK) result_unknown(result_out, e->output);
+                return err;
 
             case DALI_DISPATCH_ACTION_DIM_UP:
-                result_unknown(result_out, e->output);
-                return dali_control_up(e->output);
+                err = dali_control_up(e->output);
+                if (err == DALI_OK) result_unknown(result_out, e->output);
+                return err;
 
             case DALI_DISPATCH_ACTION_DIM_DOWN:
-                result_unknown(result_out, e->output);
-                return dali_control_down(e->output);
+                err = dali_control_down(e->output);
+                if (err == DALI_OK) result_unknown(result_out, e->output);
+                return err;
 
             case DALI_DISPATCH_ACTION_SCENE:
-                result_unknown(result_out, e->output);
-                return dali_control_go_to_scene(e->output, e->scene);
+                err = dali_control_go_to_scene(e->output, e->scene);
+                if (err == DALI_OK) result_unknown(result_out, e->output);
+                return err;
 
             case DALI_DISPATCH_ACTION_TOGGLE: {
                 bool on = toggle_get(toggle_state, e->output);
-                toggle_set(toggle_state, e->output, !on);
-                result_set(result_out, e->output, !on, !on ? 254u : 0u);
-                return on ? dali_control_off(e->output)
-                          : dali_control_recall_max(e->output);
+                err = on ? dali_control_off(e->output)
+                         : dali_control_recall_max(e->output);
+                if (err == DALI_OK) {
+                    toggle_set(toggle_state, e->output, !on);
+                    result_set(result_out, e->output, !on, !on ? 254u : 0u);
+                }
+                return err;
             }
 
             default:

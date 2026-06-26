@@ -44,6 +44,7 @@ typedef struct {
     uint8_t                  version;
     bool                     has_actual_level;
     uint8_t                  actual_level;
+    bool                     has_control_gear;  /* true if QUERY STATUS responded (Part 209) */
     bool                     has_input_device;
     bool                     has_instance_count;
     uint8_t                  instance_count;

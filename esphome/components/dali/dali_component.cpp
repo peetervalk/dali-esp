@@ -95,7 +95,8 @@ static void on_input_value_msb(DaliError result, const DaliFrame *reply, void *c
     txn.needs_reply = true;
     txn.on_complete = on_input_value_lsb;
     txn.cb_ctx      = e;
-    dali_sched_enqueue(&txn);
+    if (dali_sched_enqueue(&txn) != DALI_OK)
+        ESP_LOGW(TAG, "sensor LSB enqueue failed; reading resumes next poll");
 }
 
 static void on_input_value_1byte(DaliError result, const DaliFrame *reply, void *ctx)
@@ -107,7 +108,6 @@ static void on_input_value_1byte(DaliError result, const DaliFrame *reply, void 
 
 static void enqueue_sensor_poll(SensorEntry *e, uint32_t now_ms)
 {
-    e->sensor->set_last_poll_ms(now_ms);
     DaliFrame frame;
     dali_build_instance_command(e->sensor->get_address(), e->sensor->get_instance(),
                                 DALI_CMD_QUERY_INPUT_VALUE, &frame);
@@ -117,7 +117,8 @@ static void enqueue_sensor_poll(SensorEntry *e, uint32_t now_ms)
     txn.on_complete = (e->sensor->get_value_bytes() == 2u) ? on_input_value_msb
                                                             : on_input_value_1byte;
     txn.cb_ctx      = e;
-    dali_sched_enqueue(&txn);
+    if (dali_sched_enqueue(&txn) == DALI_OK)
+        e->sensor->set_last_poll_ms(now_ms);
 }
 
 static void notify_lights(const DaliDispatchResult *res)
@@ -158,7 +159,11 @@ static void on_level_query_reply(DaliError result, const DaliFrame *reply, void 
     dali_dispatch_seed_toggle(&s_toggle_state, output, is_on);
 }
 
-/* ── Bus monitor (Core 1 → Core 0) ──────────────────────────────────────── */
+/* ── Cross-core string handoff (Core 1 → Core 0) ────────────────────────── */
+/* Shared spinlock protects all three string buffers below.
+ * Write side: format to a local buffer, then memcpy + dirty=true under lock.
+ * Read side:  memcpy to a local buffer + dirty=false under lock, then publish. */
+static portMUX_TYPE s_string_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static char              s_bus_monitor_str[48] = {};
 static std::atomic<bool> s_bus_monitor_dirty_{false};
@@ -170,17 +175,21 @@ static std::atomic<bool> s_diag_level_dirty_{false};
 
 static void on_diag_refresh_reply(DaliError result, const DaliFrame *reply, void * /*ctx*/)
 {
+    char tmp[sizeof(s_diag_level_str)];
     if (result != DALI_OK || reply == nullptr) {
-        strncpy(s_diag_level_str, "Level: no reply", sizeof(s_diag_level_str) - 1u);
-        s_diag_level_str[sizeof(s_diag_level_str) - 1u] = '\0';
+        strncpy(tmp, "Level: no reply", sizeof(tmp) - 1u);
+        tmp[sizeof(tmp) - 1u] = '\0';
     } else {
         uint8_t level = (uint8_t)(reply->data & 0xFFu);
         if (level == 0u)
-            snprintf(s_diag_level_str, sizeof(s_diag_level_str), "Level: 0 (off)");
+            snprintf(tmp, sizeof(tmp), "Level: 0 (off)");
         else
-            snprintf(s_diag_level_str, sizeof(s_diag_level_str), "Level: %u", (unsigned)level);
+            snprintf(tmp, sizeof(tmp), "Level: %u", (unsigned)level);
     }
-    s_diag_level_dirty_.store(true, std::memory_order_release);
+    portENTER_CRITICAL(&s_string_mux);
+    memcpy(s_diag_level_str, tmp, sizeof(s_diag_level_str));
+    s_diag_level_dirty_.store(true, std::memory_order_relaxed);
+    portEXIT_CRITICAL(&s_string_mux);
 }
 
 /* ── Command result (Core 1 → Core 0) ───────────────────────────────────── */
@@ -190,9 +199,11 @@ static std::atomic<bool> s_cmd_result_dirty_{false};
 
 static void set_cmd_result(const char *str)
 {
+    portENTER_CRITICAL(&s_string_mux);
     strncpy(s_cmd_result_str, str, sizeof(s_cmd_result_str) - 1u);
     s_cmd_result_str[sizeof(s_cmd_result_str) - 1u] = '\0';
-    s_cmd_result_dirty_.store(true, std::memory_order_release);
+    s_cmd_result_dirty_.store(true, std::memory_order_relaxed);
+    portEXIT_CRITICAL(&s_string_mux);
 }
 
 static void on_cmd_query_reply(DaliError result, const DaliFrame *reply, void * /*ctx*/)
@@ -289,10 +300,15 @@ static void on_dali_unsolicited(const DaliFrame *frame, void * /*ctx*/)
     DaliInputEvent event;
     if (dali_event_parse_frame(frame, &event) != DALI_OK) return;
 
-    /* Bus monitor: format and signal Core 0. */
-    format_event(s_bus_monitor_str, sizeof(s_bus_monitor_str), &event);
-    s_bus_monitor_dirty_.store(true, std::memory_order_release);
-    ESP_LOGD(TAG, "rx %s", s_bus_monitor_str);
+    /* Bus monitor: format locally, then copy under lock so Core 0 never sees a
+     * partially-written buffer. Log from the local copy, not the shared buffer. */
+    char monitor_copy[sizeof(s_bus_monitor_str)];
+    format_event(monitor_copy, sizeof(monitor_copy), &event);
+    portENTER_CRITICAL(&s_string_mux);
+    memcpy(s_bus_monitor_str, monitor_copy, sizeof(s_bus_monitor_str));
+    s_bus_monitor_dirty_.store(true, std::memory_order_relaxed);
+    portEXIT_CRITICAL(&s_string_mux);
+    ESP_LOGD(TAG, "rx %s", monitor_copy);
 
     /* Find-couplers: record unique frames while the window is open. */
     if (s_find_couplers_active_.load(std::memory_order_relaxed)) {
@@ -457,21 +473,45 @@ void DaliComponent::loop()
     }
 
     /* ── Command result ── */
-    if (command_result_ && s_cmd_result_dirty_.load(std::memory_order_acquire)) {
-        s_cmd_result_dirty_.store(false, std::memory_order_relaxed);
-        command_result_->publish_state(s_cmd_result_str);
+    if (command_result_) {
+        char tmp[sizeof(s_cmd_result_str)];
+        bool dirty = false;
+        portENTER_CRITICAL(&s_string_mux);
+        dirty = s_cmd_result_dirty_.load(std::memory_order_relaxed);
+        if (dirty) {
+            memcpy(tmp, s_cmd_result_str, sizeof(tmp));
+            s_cmd_result_dirty_.store(false, std::memory_order_relaxed);
+        }
+        portEXIT_CRITICAL(&s_string_mux);
+        if (dirty) command_result_->publish_state(tmp);
     }
 
     /* ── Bus monitor ── */
-    if (bus_monitor_ && s_bus_monitor_dirty_.load(std::memory_order_acquire)) {
-        s_bus_monitor_dirty_.store(false, std::memory_order_relaxed);
-        bus_monitor_->publish_state(s_bus_monitor_str);
+    if (bus_monitor_) {
+        char tmp[sizeof(s_bus_monitor_str)];
+        bool dirty = false;
+        portENTER_CRITICAL(&s_string_mux);
+        dirty = s_bus_monitor_dirty_.load(std::memory_order_relaxed);
+        if (dirty) {
+            memcpy(tmp, s_bus_monitor_str, sizeof(tmp));
+            s_bus_monitor_dirty_.store(false, std::memory_order_relaxed);
+        }
+        portEXIT_CRITICAL(&s_string_mux);
+        if (dirty) bus_monitor_->publish_state(tmp);
     }
 
     /* ── Diag level query result ── */
-    if (scan_status_ && s_diag_level_dirty_.load(std::memory_order_acquire)) {
-        s_diag_level_dirty_.store(false, std::memory_order_relaxed);
-        scan_status_->publish_state(s_diag_level_str);
+    if (scan_status_) {
+        char tmp[sizeof(s_diag_level_str)];
+        bool dirty = false;
+        portENTER_CRITICAL(&s_string_mux);
+        dirty = s_diag_level_dirty_.load(std::memory_order_relaxed);
+        if (dirty) {
+            memcpy(tmp, s_diag_level_str, sizeof(tmp));
+            s_diag_level_dirty_.store(false, std::memory_order_relaxed);
+        }
+        portEXIT_CRITICAL(&s_string_mux);
+        if (dirty) scan_status_->publish_state(tmp);
     }
 
     /* ── Identify blink ── */
@@ -563,6 +603,19 @@ void DaliComponent::loop()
 /* ── Public methods ──────────────────────────────────────────────────────── */
 
 /* ── execute_command ─────────────────────────────────────────────────────── */
+
+/* Parse decimal integer in s into *out; return false if empty, non-numeric,
+ * has trailing garbage, or is outside [lo, hi]. */
+static bool parse_uint(const char *s, unsigned long lo, unsigned long hi,
+                        unsigned long *out)
+{
+    if (!s || !*s) return false;
+    char *end;
+    unsigned long v = strtoul(s, &end, 10);
+    if (end == s || *end != '\0' || v < lo || v > hi) return false;
+    *out = v;
+    return true;
+}
 
 /* Parse "a0", "s3", "g5", "b" into a DaliTarget. Returns false on error. */
 static bool parse_target(const char *tok, DaliTarget *out)
@@ -700,8 +753,8 @@ void DaliComponent::execute_command(const std::string &cmd_str)
 
     if (strcmp(verb, "level") == 0 && ntok >= 3u) {
         if (!parse_target(tok[1], &tgt)) { set_cmd_result("bad target"); return; }
-        unsigned long lv = strtoul(tok[2], nullptr, 10);
-        if (lv > 254u) { set_cmd_result("level 0-254"); return; }
+        unsigned long lv;
+        if (!parse_uint(tok[2], 0u, 254u, &lv)) { set_cmd_result("level 0-254"); return; }
         dali_control_set_level(tgt, (uint8_t)lv);
         set_cmd_result("OK");
         return;
@@ -727,11 +780,13 @@ void DaliComponent::execute_command(const std::string &cmd_str)
             if (strcmp(tok[2], e.name) == 0) {
                 DaliError err;
                 if (e.uses_dtr0 && ntok >= 4u) {
-                    uint8_t dtr0 = (uint8_t)strtoul(tok[3], nullptr, 10);
-                    err = dali_control_config_with_dtr0(tgt, e.id, dtr0, 0u);
+                    unsigned long dtr0v;
+                    if (!parse_uint(tok[3], 0u, 255u, &dtr0v)) { set_cmd_result("bad dtr0 value"); return; }
+                    err = dali_control_config_with_dtr0(tgt, e.id, (uint8_t)dtr0v, 0u);
                 } else if (!e.uses_dtr0) {
-                    err = dali_control_config(tgt, e.id, ntok >= 4u
-                        ? (uint8_t)strtoul(tok[3], nullptr, 10) : 0u);
+                    unsigned long paramv = 0u;
+                    if (ntok >= 4u && !parse_uint(tok[3], 0u, 255u, &paramv)) { set_cmd_result("bad param"); return; }
+                    err = dali_control_config(tgt, e.id, (uint8_t)paramv);
                 } else {
                     set_cmd_result("needs dtr0 value");
                     return;
@@ -751,9 +806,11 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         char *colon = strchr(const_cast<char *>(at), ':');
         if (!colon) { set_cmd_result("iconfig: missing :<inst>"); return; }
         *colon      = '\0';
-        uint8_t addr = (uint8_t)strtoul(at + 1, nullptr, 10);
-        uint8_t inst = (uint8_t)strtoul(colon + 1, nullptr, 10);
-        if (addr > 63u || inst > 31u) { set_cmd_result("iconfig: addr 0-63, inst 0-31"); return; }
+        unsigned long addrv, instv;
+        if (!parse_uint(at + 1, 0u, 63u, &addrv)) { set_cmd_result("iconfig: addr 0-63"); return; }
+        if (!parse_uint(colon + 1, 0u, 31u, &instv)) { set_cmd_result("iconfig: inst 0-31"); return; }
+        uint8_t addr = (uint8_t)addrv;
+        uint8_t inst = (uint8_t)instv;
 
         for (const auto &e : s_iconfig_table) {
             if (strcmp(tok[2], e.name) == 0) {
@@ -761,8 +818,10 @@ void DaliComponent::execute_command(const std::string &cmd_str)
                 DaliFrame cfg_frame = e.builder(addr, inst);
                 DaliSequence seq = {};
                 if (e.needs_dtr0) {
+                    unsigned long dtr0v;
+                    if (!parse_uint(tok[3], 0u, 255u, &dtr0v)) { set_cmd_result("bad dtr0 value"); return; }
                     DaliFrame dtr_frame;
-                    dali_control_build_dtr(DALI_DTR0, (uint8_t)strtoul(tok[3], nullptr, 10), &dtr_frame);
+                    dali_control_build_dtr(DALI_DTR0, (uint8_t)dtr0v, &dtr_frame);
                     seq.steps[0] = { dtr_frame, false, false, 0u };
                     seq.steps[1] = { cfg_frame, false, true,  0u };
                     seq.step_count = 2u;
@@ -786,9 +845,11 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         char *colon = strchr(const_cast<char *>(at), ':');
         if (!colon) { set_cmd_result("iquery: missing :<inst>"); return; }
         *colon      = '\0';
-        uint8_t addr = (uint8_t)strtoul(at + 1, nullptr, 10);
-        uint8_t inst = (uint8_t)strtoul(colon + 1, nullptr, 10);
-        if (addr > 63u || inst > 31u) { set_cmd_result("iquery: addr 0-63, inst 0-31"); return; }
+        unsigned long addrv, instv;
+        if (!parse_uint(at + 1, 0u, 63u, &addrv)) { set_cmd_result("iquery: addr 0-63"); return; }
+        if (!parse_uint(colon + 1, 0u, 31u, &instv)) { set_cmd_result("iquery: inst 0-31"); return; }
+        uint8_t addr = (uint8_t)addrv;
+        uint8_t inst = (uint8_t)instv;
 
         for (const auto &e : s_iquery_table) {
             if (strcmp(tok[2], e.name) == 0) {

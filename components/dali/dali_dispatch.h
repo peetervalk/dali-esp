@@ -8,7 +8,9 @@
 /* ── Match key ────────────────────────────────────────────────────────────── */
 
 /* Use in event_code to match any opcode or DALI-2 event code. */
-#define DALI_DISPATCH_OPCODE_ANY 0xFFu
+#define DALI_DISPATCH_OPCODE_ANY   0xFFu
+/* Use in instance to match any DALI-2 instance (INPUT_24BIT frames only). */
+#define DALI_DISPATCH_INSTANCE_ANY 0xFFu
 
 /*
  * Selects which unsolicited frames trigger this entry.
@@ -16,20 +18,25 @@
  * For BF6 / legacy couplers (DALI_EVENT_FRAME_LEGACY_16BIT):
  *   address_kind = DALI_EVENT_ADDRESS_GROUP, address = group number
  *   event_code   = DALI_DISPATCH_OPCODE_ANY  (coupler encodes ON/OFF itself)
+ *   instance     = DALI_DISPATCH_INSTANCE_ANY (not used for 16-bit frames)
  *
  * For phantom-address remapping (still LEGACY_16BIT, couplers reprogrammed):
  *   address_kind = DALI_EVENT_ADDRESS_SHORT, address = phantom short address
  *   event_code   = DALI_DISPATCH_OPCODE_ANY
+ *   instance     = DALI_DISPATCH_INSTANCE_ANY
  *
  * For DALI-2 push buttons (DALI_EVENT_FRAME_INPUT_24BIT):
  *   address_kind = DALI_EVENT_ADDRESS_SHORT, address = input device short addr
  *   event_code   = 0x02 (short-press) or 0x03 (double-press) per device config
+ *   instance     = instance number (0, 1, …) or DALI_DISPATCH_INSTANCE_ANY
  */
 typedef struct {
     DaliEventFrameKind   frame_kind;
     DaliEventAddressKind address_kind;
     uint8_t              address;
-    uint8_t              event_code;  /* DALI_DISPATCH_OPCODE_ANY = match all */
+    uint8_t              event_code;  /* DALI_DISPATCH_OPCODE_ANY   = match all */
+    uint8_t              instance;    /* DALI_DISPATCH_INSTANCE_ANY = match all;
+                                         only checked for INPUT_24BIT frames */
 } DaliDispatchKey;
 
 /* ── Actions ──────────────────────────────────────────────────────────────── */

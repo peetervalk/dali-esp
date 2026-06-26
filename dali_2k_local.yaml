@@ -1,0 +1,127 @@
+# dali_2k_local.yaml — local-component build of dali_2k for development.
+# Uses esphome/components from the working tree so no git credentials are needed.
+# DO NOT flash to production without testing. Production firmware: dali_2k.yaml.
+
+esphome:
+  name: dali-2k
+  friendly_name: "DALI 2k"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: esphome/components
+
+wifi:
+  ssid: !secret wifi_ssid2
+  password: !secret wifi_password
+  ap:
+    ssid: "dali-2k-ap"
+    password: !secret ap_password
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+  level: INFO
+
+# ── DALI bus ──────────────────────────────────────────────────────────────────
+dali:
+  id: dali_bus
+  tx_pin: 18
+  rx_pin: 19
+  headless_dispatch: true
+  command_result:
+    name: "DALI Command Result"
+
+# ── Lights ────────────────────────────────────────────────────────────────────
+light:
+  - platform: dali
+    dali_id: dali_bus
+    name: "DALI Group 0"
+    target_type: group
+    target_address: 0
+    query_address: 2
+
+# ── DALI command console ──────────────────────────────────────────────────────
+text:
+  - platform: dali
+    dali_id: dali_bus
+    name: "DALI Command"
+    mode: text
+
+# ── Steinel HF 360 II — addr 0, 4 instances ──────────────────────────────────
+sensor:
+  - platform: dali
+    dali_id: dali_bus
+    name: "Zone 2 Lux"
+    address: 0
+    instance: 0
+    poll_interval: 30
+    value_bytes: 2
+    scale: 0.01
+    unit_of_measurement: "lx"
+    device_class: illuminance
+    state_class: measurement
+    accuracy_decimals: 0
+
+  - platform: dali
+    dali_id: dali_bus
+    id: zone2_occ_raw
+    name: "Zone 2 Occupancy Raw"
+    address: 0
+    instance: 1
+    poll_interval: 10
+    unit_of_measurement: ""
+    state_class: measurement
+    accuracy_decimals: 0
+    internal: true
+
+  - platform: dali
+    dali_id: dali_bus
+    name: "Zone 2 Temperature"
+    address: 0
+    instance: 2
+    poll_interval: 60
+    value_bytes: 2
+    scale: 0.1
+    offset: -5.0
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+
+  - platform: dali
+    dali_id: dali_bus
+    name: "Zone 2 Humidity"
+    address: 0
+    instance: 3
+    poll_interval: 60
+    scale: 0.5
+    unit_of_measurement: "%"
+    device_class: humidity
+    state_class: measurement
+    accuracy_decimals: 0
+
+# ── Occupancy state (human-readable) ─────────────────────────────────────────
+text_sensor:
+  - platform: template
+    name: "Zone 2 Occupancy"
+    lambda: |-
+      int v = (int) id(zone2_occ_raw).state;
+      if (v == 0)   return {"Unoccupied"};
+      if (v == 85)  return {"Movement"};
+      if (v == 170) return {"Present"};
+      if (v == 255) return {"Present + Moving"};
+      return {"Unknown"};
+    update_interval: 10s

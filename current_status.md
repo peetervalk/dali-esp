@@ -99,19 +99,16 @@ DALI bus
 
 ## Active Code Work
 
-| Priority | Area | Need |
-|---|---|---|
-| P1 | ESPHome command console | Add strict numeric parsing/range checks for `level`, `config`, `iquery`, and `iconfig`; reject invalid text and overflow instead of silently using 0 or wrapped values. |
-| P1 | Headless dispatch | Extend dispatch keys to include DALI-2 instance and legacy address selector where appropriate, so input instances and DAPC/command frames cannot collide. |
-| P1 | Discovery/export | Model hybrid short addresses that are both control gear and input device. Current YAML/JSON paths can collapse these into only `input_device`. |
-| P2 | Native CLI display | Ensure pure input devices detected without gear status are visible in human `discover`/`inventory` output, not only in the data model/export. |
-| P2 | Cross-core state handoff | Harden ESPHome dirty-flag/string handoff so bus state, sensors, monitor strings, and command results cannot be lost or torn under higher event rates. |
-| P2 | Dispatch result semantics | Publish inferred HA light state only after the DALI control command was actually queued/sent successfully. |
-| P2 | Sensor polling | Handle scheduler enqueue failures and consider making 2-byte input reads contiguous scheduler sequences if more sensors are added. |
-| P2 | Pin/init validation | Reject invalid ESP32 pins in ESPHome config, especially GPIO16/17 on WROVER-E and TX pins 34-39; check important ESP-IDF init return values. |
-| P3 | Startup writes | Refine the 10 s startup write suppression so intentional HA user commands during boot are not silently ignored. |
-| P3 | Light registry | Set `member_groups` before light registration, or refresh the registry snapshot after codegen sets it. |
-| P3 | Deferred refresh | Optionally narrow deferred refresh to the affected DALI target instead of polling all configured lights. |
+| Priority | Area | Need | Status |
+|---|---|---|---|
+| P1 | ESPHome command console | Add strict numeric parsing/range checks for `level`, `config`, `iquery`, and `iconfig`; reject invalid text and overflow instead of silently using 0 or wrapped values. | ✅ done |
+| P1 | Headless dispatch | Extend dispatch keys to include DALI-2 instance and legacy address selector where appropriate, so input instances and DAPC/command frames cannot collide. | ✅ done |
+| P1 | Discovery/export | Model hybrid short addresses that are both control gear and input device. Current YAML/JSON paths can collapse these into only `input_device`. | ✅ done |
+| P2 | Native CLI display | Ensure pure input devices detected without gear status are visible in human `discover`/`inventory` output, not only in the data model/export. | ✅ done |
+| P2 | Cross-core state handoff | Harden ESPHome dirty-flag/string handoff so bus state, sensors, monitor strings, and command results cannot be lost or torn under higher event rates. | ✅ done |
+| P2 | Dispatch result semantics | Publish inferred HA light state only after the DALI control command was actually queued/sent successfully. | ✅ done |
+| P2 | Sensor polling | Handle scheduler enqueue failures and consider making 2-byte input reads contiguous scheduler sequences if more sensors are added. | ✅ done |
+| P3 | Light registry | Set `member_groups` before light registration, or refresh the registry snapshot after codegen sets it. | ✅ done |
 
 ## Active Field/Config Tasks
 
@@ -122,7 +119,13 @@ DALI bus
 - Investigate Steinel detection range and deadtime only after readback is proven.
 - Decide whether `dali_1k.yaml` should gain the HA command console, or whether
   the first-floor firmware should stay as a minimal control firmware.
-- Clean remaining mojibake/stale comments in YAML and source comments as touched.
+- Startup writes: refine the 10 s startup write suppression so intentional HA
+  user commands during boot are not silently ignored.
+- Deferred refresh: optionally narrow deferred refresh to the affected DALI target
+  instead of polling all configured lights.
+- After power cut: decide and implement post-power-cut behavior (e.g. whether the
+  ESP32 should query or command lights after a bus power restoration event).
+- Clean remaining mojibake/stale comments in YAML and source as encountered.
 
 ## Source Layout
 

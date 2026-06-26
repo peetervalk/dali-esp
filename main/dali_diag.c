@@ -2567,44 +2567,56 @@ static void diag_discovery_found_cb(uint8_t addr,
                                     void *ctx)
 {
     DiagDiscoveryPrintCtx *print_ctx = (DiagDiscoveryPrintCtx *)ctx;
-    if (device == NULL || !device->has_status) {
+    if (device == NULL || (!device->has_status && !device->has_input_device)) {
         return;
     }
 
     if (print_ctx != NULL && print_ctx->detailed) {
-        const char *kind = device->has_device_type
-            ? dali_discovery_device_type_name(device->device_type)
-            : "unknown-type";
-        printf("%02u: present, %s, status=0x%02X",
-               (unsigned)addr, kind, (unsigned)device->status);
-        if (device->has_version) {
-            printf(", v%u", (unsigned)(device->version / 2u));
-        }
-        if (device->has_actual_level) {
-            printf(", level=%u", (unsigned)device->actual_level);
-        }
-        if (device->has_groups && device->groups != 0u) {
-            printf(", groups=[");
-            bool first = true;
-            for (uint8_t g = 0u; g < 16u; g++) {
-                if (device->groups & (1u << g)) {
-                    if (!first) {
-                        printf(",");
-                    }
-                    printf("%u", (unsigned)g);
-                    first = false;
-                }
+        if (device->has_status) {
+            const char *kind = device->has_device_type
+                ? dali_discovery_device_type_name(device->device_type)
+                : "unknown-type";
+            printf("%02u: present, %s, status=0x%02X",
+                   (unsigned)addr, kind, (unsigned)device->status);
+            if (device->has_version) {
+                printf(", v%u", (unsigned)(device->version / 2u));
             }
-            printf("]");
+            if (device->has_actual_level) {
+                printf(", level=%u", (unsigned)device->actual_level);
+            }
+            if (device->has_groups && device->groups != 0u) {
+                printf(", groups=[");
+                bool first = true;
+                for (uint8_t g = 0u; g < 16u; g++) {
+                    if (device->groups & (1u << g)) {
+                        if (!first) {
+                            printf(",");
+                        }
+                        printf("%u", (unsigned)g);
+                        first = false;
+                    }
+                }
+                printf("]");
+            }
+            if (device->has_input_device) {
+                printf(", input-device(%u instances)", (unsigned)device->instance_count);
+            }
+            printf("\r\n");
+        } else {
+            printf("%02u: input-device, %u instance(s)\r\n",
+                   (unsigned)addr,
+                   (unsigned)(device->has_instance_count ? device->instance_count : 0u));
         }
-        if (device->has_input_device) {
-            printf(", input-device(%u instances)", (unsigned)device->instance_count);
-        }
-        printf("\r\n");
     } else {
-        printf("Device %2u: present (status=0x%02X)\r\n",
-               (unsigned)addr,
-               (unsigned)device->status);
+        if (device->has_status) {
+            printf("Device %2u: present (status=0x%02X)\r\n",
+                   (unsigned)addr,
+                   (unsigned)device->status);
+        } else {
+            printf("Device %2u: input-device (%u instance(s))\r\n",
+                   (unsigned)addr,
+                   (unsigned)(device->has_instance_count ? device->instance_count : 0u));
+        }
     }
 }
 
@@ -2680,11 +2692,16 @@ static void cmd_inventory(void)
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         const DaliDiscoveryDeviceInfo *entry =
             dali_discovery_inventory_get(&inventory, addr);
-        if (entry != NULL && entry->present && entry->has_status) {
-            const char *kind = entry->has_device_type
-                ? dali_discovery_device_type_name(entry->device_type)
-                : "unknown-type";
-            printf("%02u: %s, status=0x%02X", (unsigned)addr, kind, (unsigned)entry->status);
+        if (entry != NULL && entry->present &&
+            (entry->has_status || entry->has_input_device)) {
+            if (entry->has_status) {
+                const char *kind = entry->has_device_type
+                    ? dali_discovery_device_type_name(entry->device_type)
+                    : "unknown-type";
+                printf("%02u: %s, status=0x%02X", (unsigned)addr, kind, (unsigned)entry->status);
+            } else {
+                printf("%02u: input-device", (unsigned)addr);
+            }
             if (entry->has_version) {
                 printf(", v%u", (unsigned)(entry->version / 2u));
             }
@@ -2960,13 +2977,19 @@ static void cmd_export(const char *args)
                 }
                 printf("]");
             }
-            if (entry->has_input_device) {
+            if (entry->has_control_gear && entry->has_input_device) {
+                printf(", \"kind\": \"hybrid\"");
+                if (entry->has_instance_count) {
+                    printf(", \"instance_count\": %u",
+                           (unsigned)entry->instance_count);
+                }
+            } else if (entry->has_input_device) {
                 printf(", \"kind\": \"input_device\"");
                 if (entry->has_instance_count) {
                     printf(", \"instance_count\": %u",
                            (unsigned)entry->instance_count);
                 }
-            } else if (entry->has_device_type) {
+            } else if (entry->has_control_gear) {
                 printf(", \"kind\": \"control_gear\"");
             } else {
                 printf(", \"kind\": \"unknown\"");

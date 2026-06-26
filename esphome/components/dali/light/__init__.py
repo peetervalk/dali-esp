@@ -61,14 +61,17 @@ async def to_code(config):
 
     parent = await cg.get_variable(config[CONF_DALI_ID])
     cg.add(var.set_target(config[CONF_TARGET_TYPE], config[CONF_TARGET_ADDRESS]))
-    cg.add(var.set_dali_component(parent))
 
-    if CONF_QUERY_ADDRESS in config:
-        cg.add(var.set_query_address(config[CONF_QUERY_ADDRESS]))
-
+    # member_groups must be set before set_dali_component because
+    # set_dali_component calls register_light which snapshots member_groups_.
     groups = config.get(CONF_MEMBER_GROUPS, [])
     if groups:
         bitmask = 0
         for g in groups:
             bitmask |= (1 << g)
         cg.add(var.set_member_groups(bitmask))
+
+    cg.add(var.set_dali_component(parent))
+
+    if CONF_QUERY_ADDRESS in config:
+        cg.add(var.set_query_address(config[CONF_QUERY_ADDRESS]))

@@ -29,7 +29,7 @@
  *   .key = { DALI_EVENT_FRAME_LEGACY_16BIT,
  *             DALI_EVENT_ADDRESS_SHORT,
  *             <phantom_addr>,          ← e.g. 16 for zone that was group 6
- *             DALI_DISPATCH_OPCODE_ANY },
+ *             DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
  *   .output  = { DALI_ADDR_GROUP, <real_group> },
  *   .action  = DALI_DISPATCH_ACTION_MIRROR,
  *
@@ -43,7 +43,8 @@
  *   { { DALI_EVENT_FRAME_INPUT_24BIT,
  *        DALI_EVENT_ADDRESS_SHORT,
  *        A,
- *        0x02 },                       ← short-press event code
+ *        0x02,                         ← short-press event code
+ *        0 },                          ← instance number (DALI_DISPATCH_INSTANCE_ANY for any)
  *     { DALI_ADDR_GROUP, N },
  *     DALI_DISPATCH_ACTION_TOGGLE, 0 },
  */
@@ -61,49 +62,49 @@ static const DaliDispatchEntry dispatch_table[] = {
     /* Group 0 — addresses 5, 6, 7, 14 */
     { { DALI_EVENT_FRAME_LEGACY_16BIT,
         DALI_EVENT_ADDRESS_GROUP, 0,
-        DALI_DISPATCH_OPCODE_ANY },
+        DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
       { DALI_ADDR_GROUP, 0 },
       DALI_DISPATCH_ACTION_OBSERVE, 0 },
 
     /* Group 2 — addresses 4, 8, 9, 12 */
     { { DALI_EVENT_FRAME_LEGACY_16BIT,
         DALI_EVENT_ADDRESS_GROUP, 2,
-        DALI_DISPATCH_OPCODE_ANY },
+        DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
       { DALI_ADDR_GROUP, 2 },
       DALI_DISPATCH_ACTION_OBSERVE, 0 },
 
     /* Group 3 — address 13 */
     { { DALI_EVENT_FRAME_LEGACY_16BIT,
         DALI_EVENT_ADDRESS_GROUP, 3,
-        DALI_DISPATCH_OPCODE_ANY },
+        DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
       { DALI_ADDR_GROUP, 3 },
       DALI_DISPATCH_ACTION_OBSERVE, 0 },
 
     /* Group 4 — address 1 */
     { { DALI_EVENT_FRAME_LEGACY_16BIT,
         DALI_EVENT_ADDRESS_GROUP, 4,
-        DALI_DISPATCH_OPCODE_ANY },
+        DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
       { DALI_ADDR_GROUP, 4 },
       DALI_DISPATCH_ACTION_OBSERVE, 0 },
 
     /* Group 5 — address 0 (DT6 LED driver) */
     { { DALI_EVENT_FRAME_LEGACY_16BIT,
         DALI_EVENT_ADDRESS_GROUP, 5,
-        DALI_DISPATCH_OPCODE_ANY },
+        DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
       { DALI_ADDR_GROUP, 5 },
       DALI_DISPATCH_ACTION_OBSERVE, 0 },
 
     /* Group 6 — addresses 2, 3, 10, 11 */
     { { DALI_EVENT_FRAME_LEGACY_16BIT,
         DALI_EVENT_ADDRESS_GROUP, 6,
-        DALI_DISPATCH_OPCODE_ANY },
+        DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
       { DALI_ADDR_GROUP, 6 },
       DALI_DISPATCH_ACTION_OBSERVE, 0 },
 
     /* Group 7 — address 15 */
     { { DALI_EVENT_FRAME_LEGACY_16BIT,
         DALI_EVENT_ADDRESS_GROUP, 7,
-        DALI_DISPATCH_OPCODE_ANY },
+        DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
       { DALI_ADDR_GROUP, 7 },
       DALI_DISPATCH_ACTION_OBSERVE, 0 },
 };

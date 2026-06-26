@@ -178,9 +178,10 @@ static void log_inventory_json(const DaliDiscoveryInventory *inv) {
         }
         strncat(groups_str, "]", sizeof(groups_str) - strlen(groups_str) - 1);
 
-        const char *kind = d->has_input_device ? "input_device"
-                         : d->has_device_type  ? "control_gear"
-                                               : "unknown";
+        const char *kind = (d->has_control_gear && d->has_input_device) ? "hybrid"
+                         :  d->has_control_gear                         ? "control_gear"
+                         :  d->has_input_device                         ? "input_device"
+                         :                                                 "unknown";
 
         ESP_LOGD(TAG, "  %s{ \"address\": %u, \"groups\": %s, \"kind\": \"%s\","
                       " \"device_type\": %u, \"actual_level\": %u }",
@@ -220,7 +221,7 @@ static void build_and_publish_yaml(const DaliDiscoveryInventory *inv,
             const DaliDiscoveryDeviceInfo *d = dali_discovery_inventory_get(inv, a);
             if (!d || !d->present || !d->has_groups) continue;
             if (!(d->groups & (1u << g))) continue;
-            if (d->has_input_device) continue;
+            if (d->has_input_device && !d->has_control_gear) continue;
             if (query_addr == 0xFFu) query_addr = a;
             char tmp[8];
             snprintf(tmp, sizeof(tmp), has_gear ? ", %u" : "%u", (unsigned)a);
@@ -283,7 +284,8 @@ static void build_and_publish_yaml(const DaliDiscoveryInventory *inv,
         bool has_gear = false;
         for (uint8_t a = 0u; a < DALI_SHORT_ADDRESS_COUNT; a++) {
             const DaliDiscoveryDeviceInfo *d = dali_discovery_inventory_get(inv, a);
-            if (!d || !d->present || !d->has_groups || d->has_input_device) continue;
+            if (!d || !d->present || !d->has_groups ||
+                (d->has_input_device && !d->has_control_gear)) continue;
             if (!(d->groups & (1u << g))) continue;
             if (qa == 0xFFu) qa = a;
             has_gear = true;
@@ -347,9 +349,11 @@ static void scan_task(void *arg) {
         for (uint8_t a = 0u; a < DALI_SHORT_ADDRESS_COUNT; a++) {
             const DaliDiscoveryDeviceInfo *d = dali_discovery_inventory_get(&inventory, a);
             if (!d || !d->present) continue;
-            if (d->has_input_device) { input_count++; continue; }
-            gear_count++;
-            if (d->has_groups) groups_seen |= d->groups;
+            if (d->has_input_device) input_count++;
+            if (d->has_control_gear) {
+                gear_count++;
+                if (d->has_groups) groups_seen |= d->groups;
+            }
         }
 
         /* Build groups string. */
