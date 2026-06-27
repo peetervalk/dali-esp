@@ -511,6 +511,47 @@ void test_dtr_data_convenience_builders(void)
     TEST_ASSERT_EQUAL_UINT8(16u, frame.bit_length);
 }
 
+void test_control_device_special_dtr_builders(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_control_device_dtr_data(DALI_DTR0, 0x42u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xC13042u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(24u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_control_device_dtr_data(DALI_DTR1, 0x02u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xC13102u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(24u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_control_device_dtr_data(DALI_DTR2, 0x7Fu, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xC1327Fu, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(24u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_control_device_dtr_data((DaliDtrRegister)3, 0x00u, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_control_device_dtr_data(DALI_DTR0, 0x00u, NULL));
+}
+
+void test_control_device_special_convenience_builders(void)
+{
+    DaliFrame frame = dali_cmd_control_device_dtr0_data(0x05u);
+    TEST_ASSERT_EQUAL_HEX32(0xC13005u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(24u, frame.bit_length);
+
+    frame = dali_cmd_control_device_dtr1_data(0x02u);
+    TEST_ASSERT_EQUAL_HEX32(0xC13102u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(24u, frame.bit_length);
+
+    frame = dali_cmd_control_device_write_memory_location_no_reply(0x55u);
+    TEST_ASSERT_EQUAL_HEX32(0xC12155u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(24u, frame.bit_length);
+
+    frame = dali_cmd_control_device_write_memory_location(0x80u);
+    TEST_ASSERT_EQUAL_HEX32(0xC12080u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(24u, frame.bit_length);
+}
+
 void test_special_convenience_builders(void)
 {
     DaliFrame frame = dali_cmd_compare();
@@ -963,6 +1004,8 @@ int main(void)
     RUN_TEST(test_build_dtr_data_special_frames);
     RUN_TEST(test_build_dtr_data_rejects_invalid_args);
     RUN_TEST(test_dtr_data_convenience_builders);
+    RUN_TEST(test_control_device_special_dtr_builders);
+    RUN_TEST(test_control_device_special_convenience_builders);
     RUN_TEST(test_special_convenience_builders);
     RUN_TEST(test_build_instance_command_query_input_value);
     RUN_TEST(test_build_instance_command_rejects_invalid_args);

@@ -270,6 +270,15 @@ DaliFrame dali_cmd_dtr2_data(uint8_t value);
 DaliFrame dali_cmd_write_memory_location(uint8_t value);
 DaliFrame dali_cmd_write_memory_location_no_reply(uint8_t value);
 
+DaliError dali_build_control_device_dtr_data(DaliDtrRegister reg,
+                                             uint8_t value,
+                                             DaliFrame *out);
+DaliFrame dali_cmd_control_device_dtr0_data(uint8_t value);
+DaliFrame dali_cmd_control_device_dtr1_data(uint8_t value);
+DaliFrame dali_cmd_control_device_dtr2_data(uint8_t value);
+DaliFrame dali_cmd_control_device_write_memory_location(uint8_t value);
+DaliFrame dali_cmd_control_device_write_memory_location_no_reply(uint8_t value);
+
 /* ---------------------------------------------------------------------------
  * DALI-2 24-bit instance command builders  (IEC 62386-103 §9.1.3)
  *

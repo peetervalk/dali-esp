@@ -7,9 +7,9 @@
  * All configuration commands require send_twice = true in the scheduler.
  * DTR loading (before sending the command) is the caller's responsibility.
  *
- * Opcodes are in the 24-bit instance command byte:
- *   Generic IEC 62386-103 config: 0x60–0x7F
- *   Type-specific (DT301/303/304): 0xE0–0xFF
+ * Opcodes are in the 24-bit instance command byte. Type-specific helper names
+ * intentionally carry their instance type because identical command names can
+ * map to different command bytes in different IEC 62386-3xx parts.
  *
  * Opcode source: IEC 62386-103:2014 Table 15, cross-referenced with
  * python-dali (https://github.com/sde1000/python-dali).
@@ -81,6 +81,9 @@ DaliFrame dali_input_pb_build_set_hold_timer(uint8_t addr, uint8_t instance);
 /* Set occupancy dead-time before re-trigger (DTR0 = value). send_twice. */
 DaliFrame dali_input_occ_build_set_deadtime(uint8_t addr, uint8_t instance);
 
+/* Set occupancy report timer (DTR0 = value). send_twice. */
+DaliFrame dali_input_occ_build_set_report_timer(uint8_t addr, uint8_t instance);
+
 /* Set hold timer for "occupied" state (DTR0 = value). send_twice. */
 DaliFrame dali_input_occ_build_set_hold_timer(uint8_t addr, uint8_t instance);
 
@@ -109,6 +112,7 @@ DaliFrame dali_input_build_query_report_timer(uint8_t addr, uint8_t instance);
 /* DT303 occupancy sensor type-specific queries (IEC 62386-303) */
 DaliFrame dali_input_occ_build_query_deadtime(uint8_t addr, uint8_t instance);
 DaliFrame dali_input_occ_build_query_hold_timer(uint8_t addr, uint8_t instance);
+DaliFrame dali_input_occ_build_query_report_timer(uint8_t addr, uint8_t instance);
 
 /* DT304 light sensor type-specific queries (IEC 62386-304) */
 DaliFrame dali_input_light_build_query_hysteresis(uint8_t addr, uint8_t instance);

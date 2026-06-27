@@ -169,6 +169,11 @@ static DaliFrame make_frame24(uint8_t addr_byte, uint8_t inst_byte, uint8_t cmd_
     return f;
 }
 
+static DaliFrame make_control_device_special(uint8_t opcode, uint8_t value)
+{
+    return make_frame24(0xC1u, opcode, value);
+}
+
 static uint8_t group_addr_byte(uint8_t group, uint8_t selector)
 {
     /* Group address byte: 1 0 0 G3 G2 G1 G0 S
@@ -586,6 +591,48 @@ DaliFrame dali_cmd_write_memory_location_no_reply(uint8_t value)
     DaliFrame f = {0u, 0u};
     (void)dali_build_special(DALI_CMD_WRITE_MEMORY_LOCATION_NO_REPLY, value, &f);
     return f;
+}
+
+DaliError dali_build_control_device_dtr_data(DaliDtrRegister reg,
+                                             uint8_t value,
+                                             DaliFrame *out)
+{
+    if (out == NULL || reg > DALI_DTR2) {
+        return DALI_ERR_INVALID;
+    }
+    *out = make_control_device_special((uint8_t)(0x30u + (uint8_t)reg), value);
+    return DALI_OK;
+}
+
+DaliFrame dali_cmd_control_device_dtr0_data(uint8_t value)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_control_device_dtr_data(DALI_DTR0, value, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_control_device_dtr1_data(uint8_t value)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_control_device_dtr_data(DALI_DTR1, value, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_control_device_dtr2_data(uint8_t value)
+{
+    DaliFrame f = {0u, 0u};
+    (void)dali_build_control_device_dtr_data(DALI_DTR2, value, &f);
+    return f;
+}
+
+DaliFrame dali_cmd_control_device_write_memory_location(uint8_t value)
+{
+    return make_control_device_special(0x20u, value);
+}
+
+DaliFrame dali_cmd_control_device_write_memory_location_no_reply(uint8_t value)
+{
+    return make_control_device_special(0x21u, value);
 }
 
 /* ---------------------------------------------------------------------------

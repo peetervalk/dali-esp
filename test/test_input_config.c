@@ -177,13 +177,26 @@ void test_pb_set_hold_timer_frame(void)
 void test_occ_set_deadtime_frame(void)
 {
     DaliFrame f = dali_input_occ_build_set_deadtime(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0xE0u);
+    assert_instance_frame(f, 5u, 0u, 0x23u);
+}
+
+void test_occ_set_report_timer_frame(void)
+{
+    DaliFrame f = dali_input_occ_build_set_report_timer(5u, 0u);
+    assert_instance_frame(f, 5u, 0u, 0x22u);
 }
 
 void test_occ_set_hold_timer_frame(void)
 {
     DaliFrame f = dali_input_occ_build_set_hold_timer(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0xE1u);
+    assert_instance_frame(f, 5u, 0u, 0x21u);
+}
+
+void test_occ_query_timer_frames(void)
+{
+    assert_instance_frame(dali_input_occ_build_query_deadtime(5u, 0u), 5u, 0u, 0x2Cu);
+    assert_instance_frame(dali_input_occ_build_query_hold_timer(5u, 0u), 5u, 0u, 0x2Du);
+    assert_instance_frame(dali_input_occ_build_query_report_timer(5u, 0u), 5u, 0u, 0x2Eu);
 }
 
 /* ---------------------------------------------------------------------------
@@ -218,9 +231,9 @@ void test_generic_and_type_specific_use_different_opcodes(void)
     DaliFrame light_hys    = dali_input_light_build_set_hysteresis(5u, 0u);
     TEST_ASSERT_NOT_EQUAL(generic_prio.data, light_hys.data);
 
-    /* DT303 deadtime == DT304 hysteresis (both 0xE0, same addr/inst) — both are type-specific */
-    TEST_ASSERT_EQUAL(dali_input_occ_build_set_deadtime(5u, 0u).data,
-                      dali_input_light_build_set_hysteresis(5u, 0u).data);
+    /* Equal names are not reusable across IEC 62386-3xx instance types. */
+    TEST_ASSERT_NOT_EQUAL(dali_input_occ_build_set_deadtime(5u, 0u).data,
+                          dali_input_light_build_set_hysteresis(5u, 0u).data);
 }
 
 int main(void)
@@ -245,7 +258,9 @@ int main(void)
     RUN_TEST(test_pb_set_repeat_period_frame);
     RUN_TEST(test_pb_set_hold_timer_frame);
     RUN_TEST(test_occ_set_deadtime_frame);
+    RUN_TEST(test_occ_set_report_timer_frame);
     RUN_TEST(test_occ_set_hold_timer_frame);
+    RUN_TEST(test_occ_query_timer_frames);
     RUN_TEST(test_light_set_hysteresis_frame);
     RUN_TEST(test_light_set_deadband_frame);
     RUN_TEST(test_generic_and_type_specific_use_different_opcodes);

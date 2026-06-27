@@ -334,7 +334,8 @@ void test_mirror_phantom_remap_to_different_group(void)
 void test_event_code_specific_only_fires_on_match(void)
 {
     DaliDispatchEntry table[] = {
-        { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 0, 0x05u },
+        { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 0,
+            0x05u, DALI_DISPATCH_INSTANCE_ANY },
           { DALI_ADDR_GROUP, 0 }, DALI_DISPATCH_ACTION_RECALL_MAX, 0 },
     };
 
@@ -389,7 +390,7 @@ void test_toggle_starts_off_and_flips(void)
 {
     DaliInputEvent ev = make_dali2(DALI_EVENT_ADDRESS_SHORT, 3, 0, 0x02u);
     DaliDispatchEntry table[] = {
-        { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 3, 0x02u },
+        { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 3, 0x02u, 0u },
           { DALI_ADDR_GROUP, 0 }, DALI_DISPATCH_ACTION_TOGGLE, 0 },
     };
     DaliDispatchToggleState state = {};
@@ -541,7 +542,7 @@ void test_result_toggle_infers_state(void)
 {
     DaliInputEvent ev = make_dali2(DALI_EVENT_ADDRESS_SHORT, 1, 0, 0x02u);
     DaliDispatchEntry table[] = {
-        { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 1, 0x02u },
+        { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 1, 0x02u, 0u },
           { DALI_ADDR_GROUP, 0 }, DALI_DISPATCH_ACTION_TOGGLE, 0 },
     };
     DaliDispatchToggleState state = {};

@@ -27,8 +27,9 @@
 /* ---------------------------------------------------------------------------
  * DT303 occupancy sensor type-specific opcodes (IEC 62386-303)
  * --------------------------------------------------------------------------*/
-#define OCC_SET_DEADTIME              0xE0u
-#define OCC_SET_HOLD_TIMER            0xE1u
+#define OCC_SET_HOLD_TIMER            0x21u
+#define OCC_SET_REPORT_TIMER          0x22u
+#define OCC_SET_DEADTIME              0x23u
 
 /* ---------------------------------------------------------------------------
  * DT304 light sensor type-specific opcodes (IEC 62386-304)
@@ -46,8 +47,9 @@
 #define INST_QUERY_REPORT_TIMER       0x84u
 
 /* DT303 type-specific query opcodes (IEC 62386-303, Table 7) */
-#define OCC_QUERY_DEADTIME            0xC0u
-#define OCC_QUERY_HOLD_TIMER          0xC1u
+#define OCC_QUERY_DEADTIME            0x2Cu
+#define OCC_QUERY_HOLD_TIMER          0x2Du
+#define OCC_QUERY_REPORT_TIMER        0x2Eu
 
 /* DT304 type-specific query opcodes (IEC 62386-304, Table 7) */
 #define LIGHT_QUERY_HYSTERESIS        0xC0u
@@ -150,6 +152,11 @@ DaliFrame dali_input_occ_build_set_deadtime(uint8_t addr, uint8_t instance)
     return dali_cmd_instance(addr, instance, OCC_SET_DEADTIME);
 }
 
+DaliFrame dali_input_occ_build_set_report_timer(uint8_t addr, uint8_t instance)
+{
+    return dali_cmd_instance(addr, instance, OCC_SET_REPORT_TIMER);
+}
+
 DaliFrame dali_input_occ_build_set_hold_timer(uint8_t addr, uint8_t instance)
 {
     return dali_cmd_instance(addr, instance, OCC_SET_HOLD_TIMER);
@@ -200,6 +207,11 @@ DaliFrame dali_input_occ_build_query_deadtime(uint8_t addr, uint8_t instance)
 DaliFrame dali_input_occ_build_query_hold_timer(uint8_t addr, uint8_t instance)
 {
     return dali_cmd_instance(addr, instance, OCC_QUERY_HOLD_TIMER);
+}
+
+DaliFrame dali_input_occ_build_query_report_timer(uint8_t addr, uint8_t instance)
+{
+    return dali_cmd_instance(addr, instance, OCC_QUERY_REPORT_TIMER);
 }
 
 /* ---------------------------------------------------------------------------

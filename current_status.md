@@ -70,6 +70,9 @@ DALI bus
 - The ESPHome HA command console includes `raw` and `raw2` for direct 16/24-bit
   frame entry; use these for Steinel Bank 2 diagnostics if helper verbs produce
   suspect output.
+- Steinel helper verbs for `memread`, `memwrite`, `dtrcheck`, and DT303
+  occupancy timer `iquery`/`iconfig` now use the verified 24-bit Part 103
+  control-device frames.
 - `esphome/dali_esphome.h` is only a legacy placeholder. Do not add new logic
   there.
 
@@ -86,6 +89,8 @@ DALI bus
 ### DALI-2 input devices
 
 - Steinel HF 360 II DALI-2 IPD is working through ESPHome polling.
+- Occupancy report timer is verified at 5 s, and the second-floor ESPHome YAMLs
+  poll/publish occupancy on the same 5 s cadence.
 - Instance layout in use:
 
 | Instance | Type | Meaning | Current handling |

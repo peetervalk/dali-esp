@@ -773,7 +773,7 @@ static const IConfigEntry s_iconfig_table[] = {
     { "set-hold-timer",    dali_input_occ_build_set_hold_timer,   true  },
     { "set-deadtime",      dali_input_occ_build_set_deadtime,     true  },
     { "set-hysteresis",    dali_input_build_set_hysteresis,       true  },
-    { "set-report-timer",  dali_input_build_set_report_timer,     true  },
+    { "set-report-timer",  dali_input_occ_build_set_report_timer, true  },
     { "set-deadtime-gen",  dali_input_build_set_deadtime_timer,   true  },
     { "enable-instance",   dali_input_build_enable_instance,      false },
     { "disable-instance",  dali_input_build_disable_instance,     false },
@@ -794,7 +794,7 @@ static const IQueryEntry s_iquery_table[] = {
     { "deadtime",            dali_input_occ_build_query_deadtime         },
     { "hysteresis",          dali_input_build_query_hysteresis           },
     { "deadtime-gen",        dali_input_build_query_deadtime_timer       },
-    { "report-timer",        dali_input_build_query_report_timer         },
+    { "report-timer",        dali_input_occ_build_query_report_timer     },
     { "instance-type",       s_qry_instance_type     },
     { "resolution",          s_qry_resolution        },
     { "instance-enabled",    s_qry_instance_enabled  },
@@ -935,8 +935,7 @@ void DaliComponent::execute_command(const std::string &cmd_str)
                 if (e.needs_dtr0) {
                     unsigned long dtr0v;
                     if (!parse_uint(tok[3], 0u, 255u, &dtr0v)) { set_cmd_result("bad dtr0 value"); return; }
-                    DaliFrame dtr_frame;
-                    dali_control_build_dtr(DALI_DTR0, (uint8_t)dtr0v, &dtr_frame);
+                    DaliFrame dtr_frame = dali_cmd_control_device_dtr0_data((uint8_t)dtr0v);
                     seq.steps[0] = { dtr_frame, false, false, 0u };
                     seq.steps[1] = { cfg_frame, false, true,  0u };
                     seq.step_count = 2u;
@@ -993,13 +992,12 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         unsigned long bankv, offv;
         if (!parse_uint(tok[2], 0u, 255u, &bankv)) { set_cmd_result("bad bank");   return; }
         if (!parse_uint(tok[3], 0u, 255u, &offv))  { set_cmd_result("bad offset"); return; }
-        /* READ MEMORY LOCATION for a 103 control device is a 24-bit device command
-         * (opcode 0x3C), not the 16-bit gear command — the gear and the input device
-         * share the same short address, so the gear-addressed form reads the lamp. */
+        /* READ MEMORY LOCATION for a 103 control device uses 24-bit control-device
+         * DTR setup plus a 24-bit device command. */
         DaliSequence seq = {};
-        seq.steps[0] = { dali_cmd_dtr1_data((uint8_t)bankv),          false, false, 0u };
-        seq.steps[1] = { dali_cmd_dtr0_data((uint8_t)offv),           false, false, 0u };
-        seq.steps[2] = { dali_cmd_device(memtgt.address, 0x3Cu),      true,  false, 0u };
+        seq.steps[0] = { dali_cmd_control_device_dtr1_data((uint8_t)bankv), false, false, 0u };
+        seq.steps[1] = { dali_cmd_control_device_dtr0_data((uint8_t)offv),  false, false, 0u };
+        seq.steps[2] = { dali_cmd_device(memtgt.address, 0x3Cu),            true,  false, 0u };
         seq.step_count  = 3u;
         seq.on_complete = on_memread_done;
         seq.cb_ctx      = nullptr;
@@ -1009,10 +1007,10 @@ void DaliComponent::execute_command(const std::string &cmd_str)
 
     /* ── Raw device query: devquery a<N> <opcode>
      * Sends a single 24-bit device-level command (addr FE opcode) and returns
-     * the 8-bit reply. Opcode in decimal (e.g. 48=0x30=QUERY CONTENT DTR0,
-     * 49=0x31=QUERY CONTENT DTR1, 60=0x3C=READ MEM LOCATION without DTR setup).
-     *   devquery a0 48   → 01 FE 30, returns Steinel's current DTR0
-     *   devquery a0 49   → 01 FE 31, returns Steinel's current DTR1 ── */
+     * the 8-bit reply. Opcode in decimal (e.g. 48=0x30=QUERY DEVICE STATUS,
+     * 53=0x35=QUERY NUMBER OF INSTANCES, 60=0x3C=READ MEM LOCATION without DTR setup).
+     *   devquery a0 54   → 01 FE 36, returns Steinel's current DTR0
+     *   devquery a0 55   → 01 FE 37, returns Steinel's current DTR1 ── */
     if (strcmp(verb, "devquery") == 0 && ntok >= 3u) {
         DaliTarget tgt{};
         if (!parse_target(tok[1], &tgt) || tgt.type != DALI_ADDR_SHORT) {
@@ -1031,11 +1029,10 @@ void DaliComponent::execute_command(const std::string &cmd_str)
     }
 
     /* ── DTR check: dtrcheck a<N> <reg> <value>
-     * Broadcasts SET DTR0 (reg=0) or SET DTR1 (reg=1), then immediately queries
-     * that register from the addressed 103 device. Used to verify that the 16-bit
-     * Part-101 SET commands reach the device's DTR.
-     *   dtrcheck a0 0 66  → send 0xA3 0x42 then 01 FE 30; if Steinel replies
-     *                        0x42 the SET works; any other value means it doesn't. ── */
+     * Sends SET DTR0 (reg=0) or SET DTR1 (reg=1), then immediately queries
+     * that register from the addressed 103 device.
+     *   dtrcheck a0 0 66  → set DTR0=0x42, then query it back.
+     *                        If Steinel replies 0x42 the SET works. ── */
     if (strcmp(verb, "dtrcheck") == 0 && ntok >= 4u) {
         DaliTarget tgt{};
         if (!parse_target(tok[1], &tgt) || tgt.type != DALI_ADDR_SHORT) {
@@ -1045,9 +1042,9 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         unsigned long regv, valv;
         if (!parse_uint(tok[2], 0u, 1u,   &regv)) { set_cmd_result("dtrcheck: reg 0 or 1"); return; }
         if (!parse_uint(tok[3], 0u, 255u,  &valv)) { set_cmd_result("bad value");            return; }
-        DaliFrame set_frame  = (regv == 0u) ? dali_cmd_dtr0_data((uint8_t)valv)
-                                            : dali_cmd_dtr1_data((uint8_t)valv);
-        uint8_t   query_opc  = (regv == 0u) ? 0x30u : 0x31u; /* QUERY CONTENT DTR0/1 */
+        DaliFrame set_frame  = (regv == 0u) ? dali_cmd_control_device_dtr0_data((uint8_t)valv)
+                                            : dali_cmd_control_device_dtr1_data((uint8_t)valv);
+        uint8_t   query_opc  = (regv == 0u) ? 0x36u : 0x37u;
         DaliSequence seq = {};
         seq.steps[0] = { set_frame,                                        false, false, 0u };
         seq.steps[1] = { dali_cmd_device(tgt.address, query_opc),         true,  false, 0u };
@@ -1081,17 +1078,17 @@ void DaliComponent::execute_command(const std::string &cmd_str)
 
         /* Seq 1: select bank, point at lock byte (0x02), enable write, unlock. */
         DaliSequence seq1 = {};
-        seq1.steps[0] = { dali_cmd_dtr1_data((uint8_t)bankv),              false, false, 0u };
-        seq1.steps[1] = { dali_cmd_dtr0_data(0x02u),                       false, false, 0u };
+        seq1.steps[0] = { dali_cmd_control_device_dtr1_data((uint8_t)bankv), false, false, 0u };
+        seq1.steps[1] = { dali_cmd_control_device_dtr0_data(0x02u),          false, false, 0u };
         seq1.steps[2] = { ewm_frame,                                        false, true,  0u };
-        seq1.steps[3] = { dali_cmd_write_memory_location_no_reply(0x55u),  false, false, 0u };
+        seq1.steps[3] = { dali_cmd_control_device_write_memory_location_no_reply(0x55u), false, false, 0u };
         seq1.step_count = 4u;
 
         /* Seq 2: re-point at target offset, enable write, write value. */
         DaliSequence seq2 = {};
-        seq2.steps[0] = { dali_cmd_dtr0_data((uint8_t)offv),               false, false, 0u };
+        seq2.steps[0] = { dali_cmd_control_device_dtr0_data((uint8_t)offv), false, false, 0u };
         seq2.steps[1] = { ewm_frame,                                        false, true,  0u };
-        seq2.steps[2] = { dali_cmd_write_memory_location_no_reply((uint8_t)valv), false, false, 0u };
+        seq2.steps[2] = { dali_cmd_control_device_write_memory_location_no_reply((uint8_t)valv), false, false, 0u };
         seq2.step_count = 3u;
 
         if (dali_sched_enqueue_sequence(&seq1) != DALI_OK) { set_cmd_result("queue full"); return; }

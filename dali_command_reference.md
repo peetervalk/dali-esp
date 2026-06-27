@@ -154,8 +154,8 @@ Common examples:
 
 ```text
 query a0 actual-level
-raw C302 len=16
-raw A304 len=16
+raw C13102 len=24
+raw C13004 len=24
 raw 01FE3C len=24 wait
 raw2 01FE15 len=24
 query a0 power-on-level
@@ -318,9 +318,9 @@ ESPHome `iquery` names:
 | `instance-status` | Status byte |
 | `hysteresis` | Generic input hysteresis |
 | `deadtime-gen` | Generic deadtime timer |
-| `report-timer` | Generic report timer |
-| `hold-timer` | DT303 occupancy hold timer |
-| `deadtime` | DT303 occupancy deadtime |
+| `hold-timer` | DT303 occupancy hold timer (`0x2D`) |
+| `report-timer` | DT303 occupancy report timer (`0x2E`) |
+| `deadtime` | DT303 occupancy deadtime (`0x2C`) |
 
 ESPHome `iconfig` names:
 
@@ -330,9 +330,9 @@ ESPHome `iconfig` names:
 | `disable-instance` | Disable the selected instance |
 | `set-hysteresis` | Set generic hysteresis from DTR0 |
 | `set-deadtime-gen` | Set generic deadtime from DTR0 |
-| `set-report-timer` | Set generic report timer from DTR0 |
-| `set-hold-timer` | Set DT303 hold timer from DTR0 |
-| `set-deadtime` | Set DT303 deadtime from DTR0 |
+| `set-hold-timer` | Set DT303 hold timer from control-device DTR0 (`0x21`) |
+| `set-report-timer` | Set DT303 report timer from control-device DTR0 (`0x22`) |
+| `set-deadtime` | Set DT303 deadtime from control-device DTR0 (`0x23`) |
 
 ## Vendor-Specific Instance Queries
 
