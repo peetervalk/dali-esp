@@ -116,11 +116,37 @@ The `memwrite` command translates to two scheduler sequences:
 | `ENABLE WRITE MEMORY` (×2) | 24-bit device cmd `01 FE 15` | Re-enable; write-enable lapses after any non-data frame |
 | `WRITE MEMORY LOCATION NO REPLY = value` | 16-bit broadcast special | Steinel writes value to NVM |
 
-**`memread` uses the 24-bit device READ MEMORY LOCATION (`01 FE 3C`), not the
-16-bit gear command.** Both the lamp and the Steinel share short address 0; the
-gear-addressed 16-bit form would read from the lamp.
+**`memread` uses the 24-bit device READ MEMORY LOCATION (`01 FE 3C`).**
+Both the lamp and the Steinel share short address 0; the gear-addressed 16-bit
+form (`01 C5`) would read from the lamp, not the Steinel.
+
+The first 16 bits of the 24-bit frame (`01 FE`) look like gear address 0 +
+command 0xFE to the lamp. Gear command 0xFE is the DT6 "QUERY MIN FAST FADE
+TIME" which requires a prior ENABLE DEVICE TYPE 6 — the memread sequence does
+not send that, so the lamp stays silent. All replies come from the Steinel.
 
 ---
+
+## Diagnosing DTR0/DTR1 problems
+
+`memread` and `memwrite` both work by broadcasting SET DTR0/DTR1 (Part-101
+universal commands) before the 24-bit device READ or WRITE. If these SET
+commands are not landing in the Steinel's DTR registers, reads return data from
+wrong offsets and writes go to wrong locations.
+
+Use `dtrcheck` to verify before trusting any memread results:
+
+```
+dtrcheck a0 0 66    # set DTR0 = 0x42, query it back; reply 66 = SET works
+dtrcheck a0 1 2     # set DTR1 = 0x02 (bank 2), query it back; reply 2 = SET works
+```
+
+Use `devquery` for raw 24-bit queries:
+```
+devquery a0 48      # 0x30 = QUERY CONTENT DTR0 (current value in Steinel)
+devquery a0 49      # 0x31 = QUERY CONTENT DTR1
+devquery a0 53      # 0x35 = QUERY NUMBER OF INSTANCES (should return 4)
+```
 
 ## Caveats
 
@@ -129,8 +155,13 @@ gear-addressed 16-bit form would read from the lamp.
 - **Only one device should be write-enabled at a time.** `WRITE MEMORY LOCATION` is
   a broadcast; if multiple devices were enabled (e.g. after a broadcast
   `ENABLE WRITE MEMORY`), all of them would commit the write.
-- **Verify offsets beyond `0x05` against the current Steinel document** before
-  writing — Steinel versions the Interface Description and the map may shift.
+- **Bank 2, offset 0x00** is ROM. Its value is the last accessible address:
+  `0x05` for base-model sensors (type < 100), `0x0D` for type 107 (HF 360 II
+  DALI-2 IPD, which supports per-direction settings but not True Presence).
+  Any other value from a `memread a0 2 0` indicates a DTR problem.
+- **V1.5 Bank 2 map is definitive for type 107.** Offsets 0x13–0xFF are
+  reserved (answer NO). Values outside the expected range from `memread` are
+  a sign of wrong bank/offset due to DTR state issues, not extended NVM.
 
 ---
 

@@ -910,6 +910,57 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         return;
     }
 
+    /* ── Raw device query: devquery a<N> <opcode>
+     * Sends a single 24-bit device-level command (addr FE opcode) and returns
+     * the 8-bit reply. Opcode in decimal (e.g. 48=0x30=QUERY CONTENT DTR0,
+     * 49=0x31=QUERY CONTENT DTR1, 60=0x3C=READ MEM LOCATION without DTR setup).
+     *   devquery a0 48   → 01 FE 30, returns Steinel's current DTR0
+     *   devquery a0 49   → 01 FE 31, returns Steinel's current DTR1 ── */
+    if (strcmp(verb, "devquery") == 0 && ntok >= 3u) {
+        DaliTarget tgt{};
+        if (!parse_target(tok[1], &tgt) || tgt.type != DALI_ADDR_SHORT) {
+            set_cmd_result("devquery: use a<N>");
+            return;
+        }
+        unsigned long opcv;
+        if (!parse_uint(tok[2], 0u, 255u, &opcv)) { set_cmd_result("bad opcode"); return; }
+        DaliTransaction txn = {};
+        txn.frame       = dali_cmd_device(tgt.address, (uint8_t)opcv);
+        txn.needs_reply = true;
+        txn.on_complete = on_cmd_query_reply;
+        txn.cb_ctx      = nullptr;
+        if (dali_sched_enqueue(&txn) != DALI_OK) set_cmd_result("queue full");
+        return;
+    }
+
+    /* ── DTR check: dtrcheck a<N> <reg> <value>
+     * Broadcasts SET DTR0 (reg=0) or SET DTR1 (reg=1), then immediately queries
+     * that register from the addressed 103 device. Used to verify that the 16-bit
+     * Part-101 SET commands reach the device's DTR.
+     *   dtrcheck a0 0 66  → send 0xA3 0x42 then 01 FE 30; if Steinel replies
+     *                        0x42 the SET works; any other value means it doesn't. ── */
+    if (strcmp(verb, "dtrcheck") == 0 && ntok >= 4u) {
+        DaliTarget tgt{};
+        if (!parse_target(tok[1], &tgt) || tgt.type != DALI_ADDR_SHORT) {
+            set_cmd_result("dtrcheck: use a<N>");
+            return;
+        }
+        unsigned long regv, valv;
+        if (!parse_uint(tok[2], 0u, 1u,   &regv)) { set_cmd_result("dtrcheck: reg 0 or 1"); return; }
+        if (!parse_uint(tok[3], 0u, 255u,  &valv)) { set_cmd_result("bad value");            return; }
+        DaliFrame set_frame  = (regv == 0u) ? dali_cmd_dtr0_data((uint8_t)valv)
+                                            : dali_cmd_dtr1_data((uint8_t)valv);
+        uint8_t   query_opc  = (regv == 0u) ? 0x30u : 0x31u; /* QUERY CONTENT DTR0/1 */
+        DaliSequence seq = {};
+        seq.steps[0] = { set_frame,                                        false, false, 0u };
+        seq.steps[1] = { dali_cmd_device(tgt.address, query_opc),         true,  false, 0u };
+        seq.step_count  = 2u;
+        seq.on_complete = on_memread_done;
+        seq.cb_ctx      = nullptr;
+        if (dali_sched_enqueue_sequence(&seq) != DALI_OK) set_cmd_result("queue full");
+        return;
+    }
+
     /* ── Memory write: memwrite a<N> <bank> <offset> <value> ──
      * Implements the IEC 62386-103 write sequence:
      *   Seq 1 — unlock bank: DTR1=bank, DTR0=0x02(lock), ENABLE_WRITE(×2), WRITE=0x55

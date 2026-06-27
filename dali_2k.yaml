@@ -78,6 +78,9 @@ light:
 #   memread  a0 2 5    (read  Steinel Bank 2 offset 0x05 = detection range)
 #   memwrite a0 2 4 128  (write 0x80 = ~50% sensitivity to Bank 2 offset 0x04)
 #   memwrite a0 2 5 128  (write 0x80 = ~50% detection range to Bank 2 offset 0x05)
+#   devquery a0 48   (raw 24-bit device query: opcode 0x30 = QUERY CONTENT DTR0)
+#   devquery a0 49   (raw 24-bit device query: opcode 0x31 = QUERY CONTENT DTR1)
+#   dtrcheck a0 0 66 (set DTR0=0x42, query it back; reply=66 means SET works, else broken)
 # Steinel Bank 2 map (from DALI-2 Interface Description V1.5):
 #   0x02 = lock byte (write 0x55 to unlock; done automatically by memwrite)
 #   0x04 = global sensitivity  (0x00=min, 0xFF=max/default)

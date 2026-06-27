@@ -32,3 +32,6 @@ Thumbs.db
 # ESPHome
 secrets.yaml
 .esphome/
+
+# Local scratch / informational files (not part of the project)
+_local/
