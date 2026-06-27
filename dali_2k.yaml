@@ -94,9 +94,10 @@ text:
 # Instance byte seen in unsolicited frames: 0x80=inst0, 0x84=inst2 (approx).
 # Occupancy raw values: 0=free, 85=movement, 170=hold/present, 255=present+moving.
 # Hold timer default is about 900 s (15 min).
-# Read before writing: iquery a0:1 hold-timer
-# Tune hold timer: iconfig a0:1 set-hold-timer N
-# Tune sensitivity (global): memread/memwrite a0 2 4 <0x00-0xFF>
+# On-demand occupancy read: iquery a0:1 input-value  → 0=free 85=move 170=present 255=both
+# Read before writing:      iquery a0:1 hold-timer
+# Tune hold timer:          iconfig a0:1 set-hold-timer N
+# Tune sensitivity (global):     memread/memwrite a0 2 4 <0x00-0xFF>
 # Tune detection range (HF, global): memread/memwrite a0 2 5 <0x00-0xFF>
 
 sensor:

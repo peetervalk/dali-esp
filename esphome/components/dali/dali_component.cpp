@@ -717,19 +717,23 @@ static DaliFrame s_qry_instance_type(uint8_t a, uint8_t i)    { DaliFrame f={}; 
 static DaliFrame s_qry_resolution(uint8_t a, uint8_t i)       { DaliFrame f={}; dali_input_build_query_resolution(a,i,&f);        return f; }
 static DaliFrame s_qry_instance_status(uint8_t a, uint8_t i)  { DaliFrame f={}; dali_input_build_query_instance_status(a,i,&f);   return f; }
 static DaliFrame s_qry_instance_enabled(uint8_t a, uint8_t i) { DaliFrame f={}; dali_input_build_query_instance_enabled(a,i,&f);  return f; }
+static DaliFrame s_qry_input_value(uint8_t a, uint8_t i)      { DaliFrame f={}; dali_build_instance_command(a,i,DALI_CMD_QUERY_INPUT_VALUE,&f);       return f; }
+static DaliFrame s_qry_input_value_latch(uint8_t a, uint8_t i){ DaliFrame f={}; dali_build_instance_command(a,i,DALI_CMD_QUERY_INPUT_VALUE_LATCH,&f); return f; }
 
 /* Lookup table for 24-bit instance query commands (single send, expects reply). */
 struct IQueryEntry { const char *name; IConfigBuilder builder; };
 static const IQueryEntry s_iquery_table[] = {
-    { "hold-timer",        dali_input_occ_build_query_hold_timer       },
-    { "deadtime",          dali_input_occ_build_query_deadtime         },
-    { "hysteresis",        dali_input_build_query_hysteresis           },
-    { "deadtime-gen",      dali_input_build_query_deadtime_timer       },
-    { "report-timer",      dali_input_build_query_report_timer         },
-    { "instance-type",     s_qry_instance_type     },
-    { "resolution",        s_qry_resolution        },
-    { "instance-enabled",  s_qry_instance_enabled  },
-    { "instance-status",   s_qry_instance_status   },
+    { "hold-timer",          dali_input_occ_build_query_hold_timer       },
+    { "deadtime",            dali_input_occ_build_query_deadtime         },
+    { "hysteresis",          dali_input_build_query_hysteresis           },
+    { "deadtime-gen",        dali_input_build_query_deadtime_timer       },
+    { "report-timer",        dali_input_build_query_report_timer         },
+    { "instance-type",       s_qry_instance_type     },
+    { "resolution",          s_qry_resolution        },
+    { "instance-enabled",    s_qry_instance_enabled  },
+    { "instance-status",     s_qry_instance_status   },
+    { "input-value",         s_qry_input_value       },
+    { "input-value-latch",   s_qry_input_value_latch },
 };
 
 void DaliComponent::execute_command(const std::string &cmd_str)
@@ -892,10 +896,13 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         unsigned long bankv, offv;
         if (!parse_uint(tok[2], 0u, 255u, &bankv)) { set_cmd_result("bad bank");   return; }
         if (!parse_uint(tok[3], 0u, 255u, &offv))  { set_cmd_result("bad offset"); return; }
+        /* READ MEMORY LOCATION for a 103 control device is a 24-bit device command
+         * (opcode 0x3C), not the 16-bit gear command — the gear and the input device
+         * share the same short address, so the gear-addressed form reads the lamp. */
         DaliSequence seq = {};
         seq.steps[0] = { dali_cmd_dtr1_data((uint8_t)bankv),          false, false, 0u };
         seq.steps[1] = { dali_cmd_dtr0_data((uint8_t)offv),           false, false, 0u };
-        seq.steps[2] = { dali_memory_build_read(memtgt.address),      true,  false, 0u };
+        seq.steps[2] = { dali_cmd_device(memtgt.address, 0x3Cu),      true,  false, 0u };
         seq.step_count  = 3u;
         seq.on_complete = on_memread_done;
         seq.cb_ctx      = nullptr;
