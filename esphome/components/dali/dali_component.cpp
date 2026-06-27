@@ -22,6 +22,7 @@ extern "C" {
 #include "../../../components/dali/dali_protocol.h"
 #include "../../../components/dali/dali_input_device.h"
 #include "../../../components/dali/dali_input_config.h"
+#include "../../../components/dali/dali_memory.h"
 }
 
 namespace esphome {
@@ -207,6 +208,19 @@ static void set_cmd_result(const char *str)
 }
 
 static void on_cmd_query_reply(DaliError result, const DaliFrame *reply, void * /*ctx*/)
+{
+    if (result != DALI_OK || reply == nullptr) {
+        set_cmd_result("no reply");
+    } else {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%u (0x%02X)", (unsigned)(reply->data & 0xFFu),
+                 (unsigned)(reply->data & 0xFFu));
+        set_cmd_result(buf);
+    }
+}
+
+static void on_memread_done(DaliError result, uint8_t /*failed_step*/,
+                            const DaliFrame *reply, void * /*ctx*/)
 {
     if (result != DALI_OK || reply == nullptr) {
         set_cmd_result("no reply");
@@ -865,6 +879,69 @@ void DaliComponent::execute_command(const std::string &cmd_str)
             }
         }
         set_cmd_result("unknown iquery");
+        return;
+    }
+
+    /* ── Memory read: memread a<N> <bank> <offset> ── */
+    if (strcmp(verb, "memread") == 0 && ntok >= 4u) {
+        DaliTarget memtgt{};
+        if (!parse_target(tok[1], &memtgt) || memtgt.type != DALI_ADDR_SHORT) {
+            set_cmd_result("memread: use a<N>");
+            return;
+        }
+        unsigned long bankv, offv;
+        if (!parse_uint(tok[2], 0u, 255u, &bankv)) { set_cmd_result("bad bank");   return; }
+        if (!parse_uint(tok[3], 0u, 255u, &offv))  { set_cmd_result("bad offset"); return; }
+        DaliSequence seq = {};
+        seq.steps[0] = { dali_cmd_dtr1_data((uint8_t)bankv),          false, false, 0u };
+        seq.steps[1] = { dali_cmd_dtr0_data((uint8_t)offv),           false, false, 0u };
+        seq.steps[2] = { dali_memory_build_read(memtgt.address),      true,  false, 0u };
+        seq.step_count  = 3u;
+        seq.on_complete = on_memread_done;
+        seq.cb_ctx      = nullptr;
+        if (dali_sched_enqueue_sequence(&seq) != DALI_OK) set_cmd_result("queue full");
+        return;
+    }
+
+    /* ── Memory write: memwrite a<N> <bank> <offset> <value> ──
+     * Implements the IEC 62386-103 write sequence:
+     *   Seq 1 — unlock bank: DTR1=bank, DTR0=0x02(lock), ENABLE_WRITE(×2), WRITE=0x55
+     *   Seq 2 — write value: DTR0=offset, ENABLE_WRITE(×2), WRITE=value
+     * ENABLE WRITE MEMORY for a control device is a 24-bit device command (FE 0x15),
+     * distinct from the 16-bit gear command (0x81). ── */
+    if (strcmp(verb, "memwrite") == 0 && ntok >= 5u) {
+        DaliTarget memtgt{};
+        if (!parse_target(tok[1], &memtgt) || memtgt.type != DALI_ADDR_SHORT) {
+            set_cmd_result("memwrite: use a<N>");
+            return;
+        }
+        unsigned long bankv, offv, valv;
+        if (!parse_uint(tok[2], 0u, 255u, &bankv)) { set_cmd_result("bad bank");   return; }
+        if (!parse_uint(tok[3], 0u, 255u, &offv))  { set_cmd_result("bad offset"); return; }
+        if (!parse_uint(tok[4], 0u, 255u, &valv))  { set_cmd_result("bad value");  return; }
+
+        uint8_t   addr      = memtgt.address;
+        /* ENABLE WRITE MEMORY as 24-bit device command (103 §11, opcode 0x15). */
+        DaliFrame ewm_frame = dali_cmd_device(addr, 0x15u);
+
+        /* Seq 1: select bank, point at lock byte (0x02), enable write, unlock. */
+        DaliSequence seq1 = {};
+        seq1.steps[0] = { dali_cmd_dtr1_data((uint8_t)bankv),              false, false, 0u };
+        seq1.steps[1] = { dali_cmd_dtr0_data(0x02u),                       false, false, 0u };
+        seq1.steps[2] = { ewm_frame,                                        false, true,  0u };
+        seq1.steps[3] = { dali_cmd_write_memory_location_no_reply(0x55u),  false, false, 0u };
+        seq1.step_count = 4u;
+
+        /* Seq 2: re-point at target offset, enable write, write value. */
+        DaliSequence seq2 = {};
+        seq2.steps[0] = { dali_cmd_dtr0_data((uint8_t)offv),               false, false, 0u };
+        seq2.steps[1] = { ewm_frame,                                        false, true,  0u };
+        seq2.steps[2] = { dali_cmd_write_memory_location_no_reply((uint8_t)valv), false, false, 0u };
+        seq2.step_count = 3u;
+
+        if (dali_sched_enqueue_sequence(&seq1) != DALI_OK) { set_cmd_result("queue full"); return; }
+        if (dali_sched_enqueue_sequence(&seq2) != DALI_OK) { set_cmd_result("queue full"); return; }
+        set_cmd_result("OK");
         return;
     }
 

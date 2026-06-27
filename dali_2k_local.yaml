@@ -54,6 +54,23 @@ light:
     query_address: 2
 
 # ── DALI command console ──────────────────────────────────────────────────────
+# Type commands in HA; result appears in "DALI Command Result" text sensor.
+# Verbs: off/max/min/level/query/config/iquery/iconfig/memread/memwrite
+# Targets: a<N>=short, g<N>=group, b=broadcast
+# Examples:
+#   query a0 actual-level
+#   config a0 set-max-dtr0 200
+#   iconfig a0:1 set-hold-timer 20  (occupancy hold timer for Steinel, DTR0=20)
+#   memread  a0 2 4    (read  Steinel Bank 2 offset 0x04 = global sensitivity)
+#   memread  a0 2 5    (read  Steinel Bank 2 offset 0x05 = detection range)
+#   memwrite a0 2 4 128  (write 0x80 = ~50% sensitivity to Bank 2 offset 0x04)
+#   memwrite a0 2 5 128  (write 0x80 = ~50% detection range to Bank 2 offset 0x05)
+# Steinel Bank 2 map (from DALI-2 Interface Description V1.5):
+#   0x02 = lock byte (write 0x55 to unlock; done automatically by memwrite)
+#   0x04 = global sensitivity  (0x00=min, 0xFF=max/default)
+#   0x05 = detection range     (0x00=min, 0xFF=max)
+#   0x06-0x09 = per-direction range      (0x00-0x64, percent)
+#   0x0A-0x0D = per-direction sensitivity (0x00-0x64, percent)
 text:
   - platform: dali
     dali_id: dali_bus
@@ -61,6 +78,13 @@ text:
     mode: text
 
 # ── Steinel HF 360 II — addr 0, 4 instances ──────────────────────────────────
+# Instance byte seen in unsolicited frames: 0x80=inst0, 0x84=inst2 (approx).
+# Occupancy raw values: 0=free, 85=movement, 170=hold/present, 255=present+moving.
+# Hold timer default is about 900 s (15 min).
+# Read before writing: iquery a0:1 hold-timer
+# Tune hold timer: iconfig a0:1 set-hold-timer N
+# Tune sensitivity (global): memread/memwrite a0 2 4 <0x00-0xFF>
+# Tune detection range (HF, global): memread/memwrite a0 2 5 <0x00-0xFF>
 sensor:
   - platform: dali
     dali_id: dali_bus
