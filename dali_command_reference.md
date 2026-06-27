@@ -142,6 +142,8 @@ off <target>
 max <target>
 min <target>
 level <target> <0-254>
+raw <hex> len=<16|24> [wait]
+raw2 <hex> len=<16|24> [wait]
 query <target> <query-name>
 config <target> <config-name> [dtr0]
 iquery a<N>:<instance> <query-name>
@@ -152,12 +154,20 @@ Common examples:
 
 ```text
 query a0 actual-level
+raw C302 len=16
+raw A304 len=16
+raw 01FE3C len=24 wait
+raw2 01FE15 len=24
 query a0 power-on-level
 query a0 failure-level
 config a0 set-max-dtr0 200
 iquery a0:1 hold-timer
 iconfig a0:1 set-hold-timer 20
 ```
+
+`raw2` uses the scheduler send-twice path for commands that must be transmitted
+twice inside the DALI timing window. It avoids relying on Home Assistant to send
+the same text entity state twice.
 
 ## Control-Gear Command Groups
 

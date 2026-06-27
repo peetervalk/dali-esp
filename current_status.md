@@ -67,6 +67,9 @@ DALI bus
   entities for groups 0/2/3/4/5/6/7, and headless BF6 observation.
 - `dali_2k.yaml` is the second-floor/control-sensor firmware: group 0 lighting,
   HA command console, and Steinel HF 360 II sensor polling.
+- The ESPHome HA command console includes `raw` and `raw2` for direct 16/24-bit
+  frame entry; use these for Steinel Bank 2 diagnostics if helper verbs produce
+  suspect output.
 - `esphome/dali_esphome.h` is only a legacy placeholder. Do not add new logic
   there.
 

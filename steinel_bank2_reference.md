@@ -55,16 +55,50 @@ close-range events.
 Commands are entered via the **DALI Command** text entity in Home Assistant.
 Results appear in **DALI Command Result**.
 
-### Read
+### Raw read (recommended)
 
 ```
-memread a0 2 4      # global sensitivity   (255 = 0xFF = factory max)
-memread a0 2 5      # global detection range
-memread a0 2 6      # direction 1 range    (percent)
-memread a0 2 10     # direction 1 sensitivity (0x0A = 10 decimal)
+raw C302 len=16          # DTR1 = 0x02 (Bank 2)
+raw A304 len=16          # DTR0 = 0x04 (global sensitivity)
+raw 01FE3C len=24 wait   # READ MEMORY LOCATION; 255 = 0xFF = factory max
+
+raw C302 len=16          # DTR1 = 0x02 (Bank 2)
+raw A305 len=16          # DTR0 = 0x05 (global detection range)
+raw 01FE3C len=24 wait   # READ MEMORY LOCATION
+
+raw C302 len=16          # DTR1 = 0x02 (Bank 2)
+raw A306 len=16          # DTR0 = 0x06 (direction 1 range)
+raw 01FE3C len=24 wait   # READ MEMORY LOCATION
+
+raw C302 len=16          # DTR1 = 0x02 (Bank 2)
+raw A30A len=16          # DTR0 = 0x0A (direction 1 sensitivity)
+raw 01FE3C len=24 wait   # READ MEMORY LOCATION
 ```
 
-### Write
+### Raw write
+
+Use `raw2` for ENABLE WRITE MEMORY because Home Assistant text entities can
+ignore repeated identical text commands.
+
+```
+raw  C302 len=16       # DTR1 = 0x02 (Bank 2)
+raw  A302 len=16       # DTR0 = 0x02 (lock byte)
+raw2 01FE15 len=24     # ENABLE WRITE MEMORY x2
+raw  C955 len=16       # WRITE MEMORY LOCATION NO REPLY = 0x55 unlock
+
+raw  A304 len=16       # DTR0 = 0x04 (global sensitivity)
+raw2 01FE15 len=24     # ENABLE WRITE MEMORY x2
+raw  C980 len=16       # WRITE MEMORY LOCATION NO REPLY = 0x80
+```
+
+For global detection range `0x80`, use the same sequence with `raw A305 len=16`
+in the second half. For direction 1 range `50` (`0x32`), use `raw A306 len=16`
+and `raw C932 len=16`.
+
+### Helper equivalents
+
+The helper verbs are intended to produce the same frame sequences, but use the
+raw commands above if helper output looks wrong.
 
 `memwrite` handles the unlock sequence automatically (DTR1=bank, DTR0=lock byte,
 ENABLE WRITE MEMORY ×2, WRITE 0x55, re-point DTR0, ENABLE WRITE MEMORY ×2, WRITE value).
@@ -84,9 +118,14 @@ memwrite a0 2 6 50    # direction 1 range = 50 % (0x32)
 5. Read back the written value to confirm NVM commit.
 
 ```
-memread  a0 2 5       # note current range value
-memwrite a0 2 5 128   # set to ~50%
-memread  a0 2 5       # confirm 128 (0x80) was stored
+raw C302 len=16          # Bank 2
+raw A305 len=16          # detection range offset
+raw 01FE3C len=24 wait   # note current range value
+
+# Write 0x80 using the raw write sequence above, then read back:
+raw C302 len=16
+raw A305 len=16
+raw 01FE3C len=24 wait   # confirm 128 (0x80) was stored
 ```
 
 ### Verify occupancy state on demand

@@ -68,9 +68,17 @@ light:
 
 # ── DALI command console ──────────────────────────────────────────────────────
 # Type commands in HA; result appears in "DALI Command Result" text sensor.
-# Verbs: off/max/min/level/query/config/iquery/iconfig/memread/memwrite
+# Reliable diagnostics: raw <hex> len=<16|24> [wait], raw2 <hex> len=<16|24> [wait]
+# raw2 sends the same frame twice inside the DALI send-twice window; this avoids
+# HA text entities swallowing repeated identical commands.
+# Existing helper verbs remain available:
+#   off/max/min/level/query/config/iquery/iconfig/memread/memwrite/devquery/dtrcheck
 # Targets: a<N>=short, g<N>=group, b=broadcast
 # Examples:
+#   raw C302 len=16       (DTR1 = 0x02 bank 2)
+#   raw A304 len=16       (DTR0 = 0x04 global sensitivity offset)
+#   raw 01FE3C len=24 wait  (read memory location from Steinel)
+#   raw2 01FE15 len=24    (ENABLE WRITE MEMORY x2)
 #   query a0 actual-level
 #   config a0 set-max-dtr0 200
 #   iconfig a0:1 set-hold-timer 20  (occupancy hold timer for Steinel, DTR0=20)

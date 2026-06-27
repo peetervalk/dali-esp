@@ -232,6 +232,41 @@ static void on_memread_done(DaliError result, uint8_t /*failed_step*/,
     }
 }
 
+static void set_raw_result(DaliError result, const DaliFrame *reply, bool sent_twice)
+{
+    if (result == DALI_OK && reply != nullptr) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "RX %u (0x%02X)", (unsigned)(reply->data & 0xFFu),
+                 (unsigned)(reply->data & 0xFFu));
+        set_cmd_result(buf);
+        return;
+    }
+
+    if (result == DALI_ERR_TIMEOUT) {
+        set_cmd_result("RX timeout");
+        return;
+    }
+
+    if (result == DALI_OK) {
+        set_cmd_result(sent_twice ? "TX2 OK" : "TX OK");
+        return;
+    }
+
+    char buf[20];
+    snprintf(buf, sizeof(buf), sent_twice ? "TX2 ERR %d" : "TX ERR %d", (int)result);
+    set_cmd_result(buf);
+}
+
+static void on_raw_done(DaliError result, const DaliFrame *reply, void * /*ctx*/)
+{
+    set_raw_result(result, reply, false);
+}
+
+static void on_raw2_done(DaliError result, const DaliFrame *reply, void * /*ctx*/)
+{
+    set_raw_result(result, reply, true);
+}
+
 /* ── Find-couplers recording (Core 1 writes, Core 0 reads) ──────────────── */
 
 struct CouplerFrame {
@@ -631,6 +666,38 @@ static bool parse_uint(const char *s, unsigned long lo, unsigned long hi,
     return true;
 }
 
+static bool parse_raw_len(const char *s, uint8_t *out)
+{
+    if (s == nullptr || out == nullptr || strncmp(s, "len=", 4) != 0) return false;
+    unsigned long bits;
+    if (!parse_uint(s + 4, 16u, 24u, &bits)) return false;
+    if (bits != 16u && bits != 24u) return false;
+    *out = (uint8_t)bits;
+    return true;
+}
+
+static bool parse_hex_frame(const char *s, uint8_t bit_len, DaliFrame *out)
+{
+    if (s == nullptr || out == nullptr || (bit_len != 16u && bit_len != 24u)) return false;
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+    if (*s == '\0') return false;
+
+    for (const char *p = s; *p != '\0'; p++) {
+        if (!isxdigit((unsigned char)*p)) return false;
+    }
+
+    char *end;
+    unsigned long value = strtoul(s, &end, 16);
+    if (*end != '\0') return false;
+
+    unsigned long max_value = (1UL << bit_len) - 1UL;
+    if (value > max_value) return false;
+
+    out->data       = (uint32_t)value;
+    out->bit_length = bit_len;
+    return true;
+}
+
 /* Parse "a0", "s3", "g5", "b" into a DaliTarget. Returns false on error. */
 static bool parse_target(const char *tok, DaliTarget *out)
 {
@@ -756,6 +823,36 @@ void DaliComponent::execute_command(const std::string &cmd_str)
     if (ntok == 0u) return;
 
     const char *verb = tok[0];
+
+    /* Raw frame: raw/raw2 <hex> len=<16|24> [wait]. */
+    if (strcmp(verb, "raw") == 0 || strcmp(verb, "raw2") == 0) {
+        if (ntok < 3u) { set_cmd_result("bad raw syntax"); return; }
+        bool send_twice = (strcmp(verb, "raw2") == 0);
+        bool wait_reply = false;
+        if (ntok == 4u) {
+            if (strcmp(tok[3], "wait") != 0) { set_cmd_result("bad raw syntax"); return; }
+            wait_reply = true;
+        } else if (ntok > 4u) {
+            set_cmd_result("bad raw syntax");
+            return;
+        }
+
+        uint8_t bit_len;
+        DaliFrame frame;
+        if (!parse_raw_len(tok[2], &bit_len) || !parse_hex_frame(tok[1], bit_len, &frame)) {
+            set_cmd_result("bad raw syntax");
+            return;
+        }
+
+        DaliTransaction txn = {};
+        txn.frame       = frame;
+        txn.needs_reply = wait_reply;
+        txn.send_twice  = send_twice;
+        txn.on_complete = send_twice ? on_raw2_done : on_raw_done;
+        txn.cb_ctx      = nullptr;
+        if (dali_sched_enqueue(&txn) != DALI_OK) set_cmd_result("queue full");
+        return;
+    }
 
     /* ── Direct gear control ── */
     DaliTarget tgt{};
