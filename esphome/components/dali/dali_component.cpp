@@ -65,8 +65,9 @@ static uint8_t    s_light_count = 0u;
 static constexpr uint8_t MAX_INPUT_SENSORS = 16u;
 
 struct SensorEntry {
-    DaliBusSensor *sensor;
-    uint8_t        pending_msb; /* temp storage during 2-byte async read */
+    DaliBusSensor    *sensor;
+    uint8_t           pending_msb;
+    std::atomic<bool> seq_in_flight;
 };
 
 static SensorEntry s_sensor_registry[MAX_INPUT_SENSORS];
@@ -77,6 +78,7 @@ static uint8_t     s_sensor_count = 0u;
 static void on_input_value_lsb(DaliError result, const DaliFrame *reply, void *ctx)
 {
     SensorEntry *e = static_cast<SensorEntry *>(ctx);
+    e->seq_in_flight.store(false, std::memory_order_release);
     if (result != DALI_OK || reply == nullptr) return;
     uint8_t  lsb = (uint8_t)(reply->data & 0xFFu);
     uint16_t raw = ((uint16_t)e->pending_msb << 8) | lsb;
@@ -86,7 +88,10 @@ static void on_input_value_lsb(DaliError result, const DaliFrame *reply, void *c
 static void on_input_value_msb(DaliError result, const DaliFrame *reply, void *ctx)
 {
     SensorEntry *e = static_cast<SensorEntry *>(ctx);
-    if (result != DALI_OK || reply == nullptr) return;
+    if (result != DALI_OK || reply == nullptr) {
+        e->seq_in_flight.store(false, std::memory_order_release);
+        return;
+    }
     e->pending_msb = (uint8_t)(reply->data & 0xFFu);
     DaliFrame frame;
     dali_build_instance_command(e->sensor->get_address(), e->sensor->get_instance(),
@@ -96,8 +101,10 @@ static void on_input_value_msb(DaliError result, const DaliFrame *reply, void *c
     txn.needs_reply = true;
     txn.on_complete = on_input_value_lsb;
     txn.cb_ctx      = e;
-    if (dali_sched_enqueue(&txn) != DALI_OK)
-        ESP_LOGW(TAG, "sensor LSB enqueue failed; reading resumes next poll");
+    if (dali_sched_enqueue(&txn) != DALI_OK) {
+        e->seq_in_flight.store(false, std::memory_order_release);
+        ESP_LOGW(TAG, "sensor LSB enqueue failed; poll will retry at next interval");
+    }
 }
 
 static void on_input_value_1byte(DaliError result, const DaliFrame *reply, void *ctx)
@@ -109,17 +116,26 @@ static void on_input_value_1byte(DaliError result, const DaliFrame *reply, void 
 
 static void enqueue_sensor_poll(SensorEntry *e, uint32_t now_ms)
 {
+    bool two_byte = (e->sensor->get_value_bytes() == 2u);
+    if (two_byte && e->seq_in_flight.load(std::memory_order_acquire)) {
+        ESP_LOGD(TAG, "sensor 2-byte poll: previous sequence still in flight, skipping");
+        return;
+    }
     DaliFrame frame;
     dali_build_instance_command(e->sensor->get_address(), e->sensor->get_instance(),
                                 DALI_CMD_QUERY_INPUT_VALUE, &frame);
     DaliTransaction txn = {};
     txn.frame       = frame;
     txn.needs_reply = true;
-    txn.on_complete = (e->sensor->get_value_bytes() == 2u) ? on_input_value_msb
-                                                            : on_input_value_1byte;
+    txn.on_complete = two_byte ? on_input_value_msb : on_input_value_1byte;
     txn.cb_ctx      = e;
-    if (dali_sched_enqueue(&txn) == DALI_OK)
+    if (dali_sched_enqueue(&txn) == DALI_OK) {
+        if (two_byte)
+            e->seq_in_flight.store(true, std::memory_order_release);
         e->sensor->set_last_poll_ms(now_ms);
+    } else {
+        ESP_LOGW(TAG, "sensor poll enqueue failed (queue full); will retry next interval");
+    }
 }
 
 static void notify_lights(const DaliDispatchResult *res)
@@ -387,6 +403,27 @@ static void on_dali_unsolicited(const DaliFrame *frame, void * /*ctx*/)
     rec.event        = event;
     rec.timestamp_us = 0u;
     dali_event_queue_push(&s_event_queue, &rec);
+
+    /* Event-driven sensor update for 1-byte input sensors (e.g. occupancy).
+     * IEC 62386-103 instance byte: bit7=source, bits6:2=instance, bits1:0=scheme.
+     * For 2-byte sensors the event_code is only 8 bits wide — polling remains
+     * the source of truth for those. */
+    if (event.frame_kind == DALI_EVENT_FRAME_INPUT_24BIT &&
+        event.address_kind == DALI_EVENT_ADDRESS_SHORT) {
+        uint8_t decoded_instance = (event.instance >> 2u) & 0x1Fu;
+        for (uint8_t i = 0u; i < s_sensor_count; i++) {
+            SensorEntry &e = s_sensor_registry[i];
+            if (e.sensor->get_value_bytes() == 1u &&
+                e.sensor->get_address()     == event.address &&
+                e.sensor->get_instance()    == decoded_instance) {
+                e.sensor->mark_raw_value((uint16_t)event.event_code);
+                ESP_LOGD(TAG, "event update: addr=%u inst=%u val=%u",
+                         (unsigned)event.address,
+                         (unsigned)decoded_instance,
+                         (unsigned)event.event_code);
+            }
+        }
+    }
 }
 
 /* ── DALI task (Core 1) ──────────────────────────────────────────────────── */
@@ -465,6 +502,7 @@ void DaliComponent::setup()
     xTaskCreatePinnedToCore(dali_task, "dali", 4096, nullptr, 10, nullptr, 1);
 
     if (scan_status_) scan_status_->publish_state("Idle");
+    if (bus_fault_)   bus_fault_->publish_state("OK");
 
     ESP_LOGI(TAG, "DALI initialized (TX GPIO%d, RX GPIO%d)", tx_pin_, rx_pin_);
 }
@@ -547,6 +585,18 @@ void DaliComponent::loop()
         }
         portEXIT_CRITICAL(&s_string_mux);
         if (dirty) bus_monitor_->publish_state(tmp);
+    }
+
+    /* ── Bus fault detection ── */
+    if (bus_fault_) {
+        uint32_t count = g_dali_stats.bus_idle_failures;
+        if (count != last_bus_fault_count_) {
+            last_bus_fault_count_ = count;
+            char buf[32];
+            snprintf(buf, sizeof(buf), "Bus stuck: %u", (unsigned)count);
+            ESP_LOGE(TAG, "DALI bus stuck — %u total occurrence(s)", (unsigned)count);
+            bus_fault_->publish_state(buf);
+        }
     }
 
     /* ── Diag level query result ── */
@@ -1114,7 +1164,10 @@ void DaliComponent::register_light(uint8_t type, uint8_t address,
 void DaliComponent::register_input_sensor(DaliBusSensor *sensor)
 {
     if (s_sensor_count < MAX_INPUT_SENSORS) {
-        s_sensor_registry[s_sensor_count++] = { sensor, 0u };
+        SensorEntry &e = s_sensor_registry[s_sensor_count++];
+        e.sensor      = sensor;
+        e.pending_msb = 0u;
+        // seq_in_flight is zero-initialized for global-static storage
     } else {
         ESP_LOGW(TAG, "sensor registry full — increase MAX_INPUT_SENSORS");
     }

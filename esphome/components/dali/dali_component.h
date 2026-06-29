@@ -87,6 +87,7 @@ class DaliComponent : public Component {
   void set_couplers_result_sensor(text_sensor::TextSensor *s) { couplers_result_ = s; }
   void set_bus_monitor_sensor(text_sensor::TextSensor *s)     { bus_monitor_     = s; }
   void set_command_result_sensor(text_sensor::TextSensor *s)  { command_result_  = s; }
+  void set_bus_fault_sensor(text_sensor::TextSensor *s)       { bus_fault_       = s; }
 
   // ── Text command interface ──────────────────────────────────────────────────
 
@@ -120,6 +121,10 @@ class DaliComponent : public Component {
   text_sensor::TextSensor *couplers_result_{nullptr};
   text_sensor::TextSensor *bus_monitor_{nullptr};
   text_sensor::TextSensor *command_result_{nullptr};
+  text_sensor::TextSensor *bus_fault_{nullptr};
+
+  // Bus fault tracking (Core 0 only; reads volatile g_dali_stats.bus_idle_failures).
+  uint32_t last_bus_fault_count_{0u};
 
   // Scan state (Core 1 writes, Core 0 reads via atomic gate).
   std::atomic<bool>    scan_done_{false};

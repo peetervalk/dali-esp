@@ -59,6 +59,8 @@ dali:
   id: dali_bus
   tx_pin: 18
   rx_pin: 19
+  command_result:
+    name: "DALI Command Result"
   scan_status:
     name: "Scan Status"
   scan_result:
@@ -69,6 +71,8 @@ dali:
     name: "Couplers Result"
   bus_monitor:
     name: "Bus Monitor"
+  bus_fault:
+    name: "Bus Fault"
 
 # ── Target address selector ───────────────────────────────────────────────────
 number:
@@ -127,3 +131,20 @@ button:
     name: "Min"
     icon: "mdi:brightness-2"
     type: min
+
+# ── DALI command console ──────────────────────────────────────────────────────
+# Type commands in HA; result appears in "DALI Command Result" text sensor.
+# Verbs: off/max/min/level/query/config/iquery/iconfig/memread/memwrite/devquery/dtrcheck
+# raw <hex> len=<16|24> [wait]  — send an arbitrary frame, optional wait for reply
+# raw2 <hex> len=<16|24> [wait] — send twice inside the DALI send-twice window
+# Targets: a<N>=short, g<N>=group, b=broadcast
+# Examples:
+#   query a0 actual-level
+#   query b status
+#   raw FF05 len=16          (broadcast RECALL MAX)
+#   raw 0101 len=16 wait     (short addr 0, QUERY STATUS)
+text:
+  - platform: dali
+    dali_id: dali_bus
+    name: "DALI Command"
+    mode: text

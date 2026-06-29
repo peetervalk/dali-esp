@@ -53,6 +53,8 @@ dali:
   headless_dispatch: true
   command_result:
     name: "DALI Command Result"
+  bus_fault:
+    name: "Bus Fault"
 
 # ── Lights ────────────────────────────────────────────────────────────────────
 # One group covers all 5 lamps.
@@ -101,8 +103,12 @@ text:
     mode: text
 
 # ── Steinel HF 360 II — addr 0, 4 instances ──────────────────────────────────
-# Instance byte seen in unsolicited frames: 0x80=inst0, 0x84=inst2 (approx).
+# Unsolicited event frame instance byte (IEC 62386-103):
+#   bit7=1 (input device), bits6:2=instance number, bits1:0=event scheme
+#   0x80=inst0 (lux), 0x84=inst1 (occupancy), 0x88=inst2, 0x8C=inst3
 # Occupancy raw values: 0=free, 85=movement, 170=hold/present, 255=present+moving.
+# Occupancy sensor (inst 1, 1-byte) gets immediate push updates from unsolicited
+# events; poll_interval is a fallback only — can be raised to e.g. 60 s.
 # Steinel factory section 3: hold timer 1 (~10 s), report timer 5 s.
 # On-demand occupancy read: iquery a0:1 input-value  → 0=free 85=move 170=present 255=both
 # Read before writing:      iquery a0:1 hold-timer

@@ -324,6 +324,14 @@ ESPHome `iquery` names:
 
 ESPHome `iconfig` names:
 
+> **Warning — hardware validation incomplete.**
+> `iconfig` SET commands are implemented and reviewed against DALI-2 Part 103 but have not
+> been round-trip validated on hardware for every parameter. A wrong encoding or instance
+> address silently does nothing or corrupts an adjacent parameter. Always follow the sequence:
+> read with `iquery` first, write one parameter with `iconfig`, then verify with `iquery`
+> again. Do not write multiple parameters in a single session until each is individually
+> confirmed.
+
 | Name | Meaning |
 |---|---|
 | `enable-instance` | Enable the selected instance |

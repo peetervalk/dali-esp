@@ -1,0 +1,13 @@
+dali-esp
+Copyright 2026 peetervalk
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full license text.
+
+DALI, DALI-2, D4i and related logos are trademarks of the Digital
+Illumination Interface Alliance. This project is independent,
+unaffiliated, and not DALI-certified.
+
+python-dali (https://github.com/sde1000/python-dali) was used as an
+external reference for cross-checking DALI command encodings and
+behavior against IEC 62386. No python-dali source code is incorporated.

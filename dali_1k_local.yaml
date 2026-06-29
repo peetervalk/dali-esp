@@ -41,6 +41,10 @@ dali:
   tx_pin: 18
   rx_pin: 19
   headless_dispatch: true
+  command_result:
+    name: "DALI Command Result"
+  bus_fault:
+    name: "Bus Fault"
 
 # ── Lights (one entity per DALI group) ───────────────────────────────────────
 light:
@@ -92,3 +96,22 @@ light:
     target_type: group
     target_address: 7
     query_address: 15
+
+# ── DALI command console ──────────────────────────────────────────────────────
+# Type commands in HA; result appears in "DALI Command Result" text sensor.
+# Verbs: off/max/min/level/query/config/iquery/iconfig/memread/memwrite/devquery/dtrcheck
+# raw <hex> len=<16|24> [wait]  — send an arbitrary frame, optional wait for reply
+# raw2 <hex> len=<16|24> [wait] — send twice inside the DALI send-twice window
+# Targets: a<N>=short, g<N>=group, b=broadcast
+# Examples:
+#   off g0                   (turn off group 0)
+#   max g2                   (recall max group 2)
+#   query a5 actual-level    (read level of short address 5)
+#   query b status           (broadcast status query — may cause reply collision)
+#   raw 8305 len=16          (group 1 RECALL MAX)
+#   raw 0101 len=16 wait     (short addr 0, QUERY STATUS)
+text:
+  - platform: dali
+    dali_id: dali_bus
+    name: "DALI Command"
+    mode: text

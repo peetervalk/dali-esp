@@ -16,6 +16,9 @@ Makefile
 # Test build output
 test/build/
 
+# CTest generated artifacts (do not track)
+test/Testing/
+
 # VS Code / IDE
 .vscode/
 *.code-workspace
