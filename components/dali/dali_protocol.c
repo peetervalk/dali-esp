@@ -1,5 +1,7 @@
 #include "dali_protocol.h"
 
+#include <stddef.h>
+
 #define CMD(id, name, first, last, frame, resp, twice, implemented) \
     { id, name, first, last, frame, resp, twice, implemented }
 
