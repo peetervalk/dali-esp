@@ -262,17 +262,30 @@ should be tagged only after the clean external-component build path is proven.
 
 ---
 
-#### 6. Site-specific headless dispatch ships inside the component
+#### 6. Headless dispatch is hardcoded and fundamentally breaks the ESPHome model
 
-**What happens:** `esphome/components/dali/dali_headless.cpp` is intentionally
-installation-specific, but it lives inside the reusable ESPHome component. If another user
-enables `headless_dispatch: true`, they compile the current Bus 1k group mapping unless they
-know to edit the file first. That can produce surprising or wrong bus behavior.
+**Severity: P1. Do not tag 1.0 without resolving this.**
 
-**Fix required:** Before a public 1.0, either replace the checked-in headless table with an
-empty/template table, move the site-specific table outside the reusable component, or document
-very explicitly that `headless_dispatch: true` is not generic and must be edited per site
-before flashing.
+**What actually happens:** `dali_headless.cpp` contains the physical wiring of Bus 1k —
+specific group numbers mapped to specific actions. This file is compiled into the reusable
+ESPHome component unconditionally when `headless_dispatch: true`. There is no way for a user
+to supply their own dispatch table without modifying files inside the component folder.
+
+Worse: Bus 2k currently works correctly only because it shares group 0 with Bus 1k by
+coincidence. If Bus 2k's coupler had targeted a different group, HA light state would be
+permanently stale after every button press, with no obvious error. The correct behavior is
+being produced by accidental overlap of hardcoded group numbers, not by design.
+
+This is the opposite of how ESPHome is supposed to work. An external component must be
+installation-agnostic. Site-specific wiring belongs in the user's YAML or in a user-supplied
+file, not compiled into the shared component.
+
+**Fix required:** The dispatch table must be user-supplied, not hardcoded in the component.
+The right model is a YAML-driven dispatch table (entries defined in the user's YAML and
+code-generated into the build, the same way lights and sensors are registered). Until that
+is implemented, `headless_dispatch` must not be documented as a usable feature for external
+users and should carry a prominent warning in the component. The current Bus 1k table must
+be removed from the component before 1.0.
 
 ---
 
