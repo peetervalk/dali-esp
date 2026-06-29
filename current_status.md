@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-06-29
+**Last updated:** 2026-06-29 (session 2)
 **Status:** ESPHome firmware works on live hardware. This file is now the active
 project state and to-do list. Old session-log planning files have been folded
 into this file and removed.
@@ -111,14 +111,8 @@ DALI bus
 
 | Priority | Area | Need | Status |
 |---|---|---|---|
-| P1 | ESPHome command console | Add strict numeric parsing/range checks for `level`, `config`, `iquery`, and `iconfig`; reject invalid text and overflow instead of silently using 0 or wrapped values. | ✅ done |
-| P1 | Headless dispatch | Extend dispatch keys to include DALI-2 instance and legacy address selector where appropriate, so input instances and DAPC/command frames cannot collide. | ✅ done |
-| P1 | Discovery/export | Model hybrid short addresses that are both control gear and input device. Current YAML/JSON paths can collapse these into only `input_device`. | ✅ done |
-| P2 | Native CLI display | Ensure pure input devices detected without gear status are visible in human `discover`/`inventory` output, not only in the data model/export. | ✅ done |
-| P2 | Cross-core state handoff | Harden ESPHome dirty-flag/string handoff so bus state, sensors, monitor strings, and command results cannot be lost or torn under higher event rates. | ✅ done |
-| P2 | Dispatch result semantics | Publish inferred HA light state only after the DALI control command was actually queued/sent successfully. | ✅ done |
-| P2 | Sensor polling | Handle scheduler enqueue failures and consider making 2-byte input reads contiguous scheduler sequences if more sensors are added. | ✅ done |
-| P3 | Light registry | Set `member_groups` before light registration, or refresh the registry snapshot after codegen sets it. | ✅ done |
+| P3 | `raw` command parser | `parse_raw_len` bounds `parse_uint` to `[16, 24]` then immediately checks `!= 16 && != 24` — the first range silently accepts 17-23 before the second rejects them. Not a bug, but misleading. Either tighten the `parse_uint` bounds to remove the second check, or widen them so the intent of the second check is clear. | open |
+| P3 | `memwrite` DTR1 lifetime | seq2 relies on DTR1 surviving from seq1 (bank select set in seq1 step 0). No intermediate command should reset it, but this is an implicit dependency. If the scheduler ever interleaves unrelated commands between the two sequences this would silently write to bank 0. Worth adding a DTR1 reset at the start of seq2 as a defensive measure. | open |
 
 ## Active Field/Config Tasks
 
@@ -262,30 +256,21 @@ should be tagged only after the clean external-component build path is proven.
 
 ---
 
-#### 6. Headless dispatch is hardcoded and fundamentally breaks the ESPHome model
+#### ✅ 6. Headless dispatch is hardcoded and fundamentally breaks the ESPHome model
 
-**Severity: P1. Do not tag 1.0 without resolving this.**
+**Fixed 2026-06-29.**
 
-**What actually happens:** `dali_headless.cpp` contains the physical wiring of Bus 1k —
-specific group numbers mapped to specific actions. This file is compiled into the reusable
-ESPHome component unconditionally when `headless_dispatch: true`. There is no way for a user
-to supply their own dispatch table without modifying files inside the component folder.
+`headless_dispatch` is now YAML-driven. Each entry is declared in the user's YAML as a
+list under `headless_dispatch:` (frame_kind, address_kind, address, event_code, instance,
+output_type, output_address, action, scene). `__init__.py` validates the list and
+code-generates `var.add_dispatch_entry(...)` calls, exactly like lights and sensors.
+`dali_component.cpp` owns a static `DaliDispatchEntry[32]` array populated at boot from
+those calls. The weak-symbol / `dali_headless.cpp` compile path is gone from the component.
+`dali_headless.cpp` remains in the repo inert under its `#ifdef USE_DALI_HEADLESS` guard
+(never defined) and can be deleted at any time.
 
-Worse: Bus 2k currently works correctly only because it shares group 0 with Bus 1k by
-coincidence. If Bus 2k's coupler had targeted a different group, HA light state would be
-permanently stale after every button press, with no obvious error. The correct behavior is
-being produced by accidental overlap of hardcoded group numbers, not by design.
-
-This is the opposite of how ESPHome is supposed to work. An external component must be
-installation-agnostic. Site-specific wiring belongs in the user's YAML or in a user-supplied
-file, not compiled into the shared component.
-
-**Fix required:** The dispatch table must be user-supplied, not hardcoded in the component.
-The right model is a YAML-driven dispatch table (entries defined in the user's YAML and
-code-generated into the build, the same way lights and sensors are registered). Until that
-is implemented, `headless_dispatch` must not be documented as a usable feature for external
-users and should carry a prominent warning in the component. The current Bus 1k table must
-be removed from the component before 1.0.
+All four active YAML files (`dali_1k`, `dali_1k_local`, `dali_2k`, `dali_2k_local`) have
+been converted to explicit entry lists.
 
 ---
 

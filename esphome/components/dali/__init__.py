@@ -26,6 +26,61 @@ CONF_HEADLESS_DISPATCH = "headless_dispatch"
 dali_ns = cg.esphome_ns.namespace("dali")
 DaliComponent = dali_ns.class_("DaliComponent", cg.Component)
 
+# ── Dispatch entry enum mappings ──────────────────────────────────────────────
+# Values must match the C enums in dali_event.h, dali_frame.h, dali_dispatch.h.
+
+_FRAME_KIND = {
+    "legacy_16bit": 1,   # DALI_EVENT_FRAME_LEGACY_16BIT
+    "input_24bit":  2,   # DALI_EVENT_FRAME_INPUT_24BIT
+}
+
+_ADDRESS_KIND = {
+    "short":     1,   # DALI_EVENT_ADDRESS_SHORT
+    "group":     2,   # DALI_EVENT_ADDRESS_GROUP
+    "broadcast": 3,   # DALI_EVENT_ADDRESS_BROADCAST
+}
+
+_OUTPUT_TYPE = {
+    "short":     0,   # DALI_ADDR_SHORT
+    "group":     1,   # DALI_ADDR_GROUP
+    "broadcast": 2,   # DALI_ADDR_BROADCAST
+}
+
+_DISPATCH_ACTION = {
+    "observe":    0,   # DALI_DISPATCH_ACTION_OBSERVE
+    "mirror":     1,   # DALI_DISPATCH_ACTION_MIRROR
+    "recall_max": 2,   # DALI_DISPATCH_ACTION_RECALL_MAX
+    "recall_min": 3,   # DALI_DISPATCH_ACTION_RECALL_MIN
+    "off":        4,   # DALI_DISPATCH_ACTION_OFF
+    "go_to_last": 5,   # DALI_DISPATCH_ACTION_GO_TO_LAST
+    "dim_up":     6,   # DALI_DISPATCH_ACTION_DIM_UP
+    "dim_down":   7,   # DALI_DISPATCH_ACTION_DIM_DOWN
+    "scene":      8,   # DALI_DISPATCH_ACTION_SCENE
+    "toggle":     9,   # DALI_DISPATCH_ACTION_TOGGLE
+}
+
+_ANY = 0xFF  # DALI_DISPATCH_OPCODE_ANY / DALI_DISPATCH_INSTANCE_ANY
+
+
+def _any_or_uint8(value):
+    """Accept 'any' (→ 0xFF) or an integer 0-255."""
+    if isinstance(value, str) and value.lower() == "any":
+        return _ANY
+    return cv.int_range(min=0, max=255)(value)
+
+
+_DISPATCH_ENTRY_SCHEMA = cv.Schema({
+    cv.Required("frame_kind"):    cv.one_of(*_FRAME_KIND,   lower=True),
+    cv.Required("address_kind"):  cv.one_of(*_ADDRESS_KIND, lower=True),
+    cv.Optional("address", default=0):     cv.int_range(min=0, max=63),
+    cv.Optional("event_code", default="any"): _any_or_uint8,
+    cv.Optional("instance",   default="any"): _any_or_uint8,
+    cv.Required("output_type"):   cv.one_of(*_OUTPUT_TYPE,  lower=True),
+    cv.Optional("output_address", default=0): cv.int_range(min=0, max=63),
+    cv.Required("action"):        cv.one_of(*_DISPATCH_ACTION, lower=True),
+    cv.Optional("scene", default=0): cv.int_range(min=0, max=15),
+})
+
 
 def _protocol_source_dir():
     component_dir = Path(__file__).resolve().parent
@@ -76,8 +131,11 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_BUS_FAULT): text_sensor.text_sensor_schema(),
         # Optional periodic QUERY_ACTUAL_LEVEL poll in seconds (0 = disabled)
         cv.Optional(CONF_POLL_INTERVAL, default=0): cv.int_range(min=0, max=3600),
-        # Opt-in only: compile the installation-specific local dispatch table.
-        cv.Optional(CONF_HEADLESS_DISPATCH, default=False): cv.boolean,
+        # Autonomous bus event dispatch — list of entries, each defining one
+        # frame-match → action rule. Absent or empty = no dispatch.
+        cv.Optional(CONF_HEADLESS_DISPATCH, default=[]): cv.ensure_list(
+            _DISPATCH_ENTRY_SCHEMA
+        ),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -120,5 +178,15 @@ async def to_code(config):
     if config[CONF_POLL_INTERVAL] > 0:
         cg.add(var.set_poll_interval(config[CONF_POLL_INTERVAL]))
 
-    if config[CONF_HEADLESS_DISPATCH]:
-        cg.add_define("USE_DALI_HEADLESS")
+    for entry in config[CONF_HEADLESS_DISPATCH]:
+        cg.add(var.add_dispatch_entry(
+            _FRAME_KIND[entry["frame_kind"]],
+            _ADDRESS_KIND[entry["address_kind"]],
+            entry["address"],
+            entry["event_code"],
+            entry["instance"],
+            _OUTPUT_TYPE[entry["output_type"]],
+            entry["output_address"],
+            _DISPATCH_ACTION[entry["action"]],
+            entry["scene"],
+        ))

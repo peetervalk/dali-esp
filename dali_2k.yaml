@@ -50,7 +50,8 @@ dali:
   id: dali_bus
   tx_pin: 18
   rx_pin: 19
-  headless_dispatch: true
+  headless_dispatch:
+    - { frame_kind: legacy_16bit, address_kind: group, address: 0, action: observe, output_type: group, output_address: 0 }
   command_result:
     name: "DALI Command Result"
   bus_fault:

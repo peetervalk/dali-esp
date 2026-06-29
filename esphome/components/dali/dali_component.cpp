@@ -32,15 +32,9 @@ static const char *TAG = "dali";
 
 /* ── Headless dispatch state ─────────────────────────────────────────────── */
 
-extern "C" __attribute__((weak))
-const DaliDispatchEntry *dali_headless_get_table(uint8_t *out_count)
-{
-    *out_count = 0;
-    return nullptr;
-}
-
-static const DaliDispatchEntry *s_dispatch_table = nullptr;
-static uint8_t                  s_dispatch_count  = 0;
+static constexpr uint8_t MAX_DISPATCH_ENTRIES = 32u;
+static DaliDispatchEntry s_dispatch_table[MAX_DISPATCH_ENTRIES];
+static uint8_t           s_dispatch_count = 0u;
 static DaliDispatchToggleState  s_toggle_state    = {};
 static DaliInputEventQueue      s_event_queue;
 
@@ -439,7 +433,7 @@ static void dali_task(void *)
          * Only dispatch if a headless table is loaded. */
         DaliInputEventRecord rec;
         while (dali_event_queue_pop(&s_event_queue, &rec)) {
-            if (s_dispatch_table != nullptr && s_dispatch_count > 0u) {
+            if (s_dispatch_count > 0u) {
                 char event_str[48];
                 format_event(event_str, sizeof(event_str), &rec.event);
                 DaliDispatchResult result = {};
@@ -494,8 +488,7 @@ void DaliComponent::setup()
     dali_event_queue_init(&s_event_queue);
     dali_sched_set_event_callback(on_dali_unsolicited, nullptr);
 
-    s_dispatch_table = dali_headless_get_table(&s_dispatch_count);
-    if (s_dispatch_table != nullptr && s_dispatch_count > 0) {
+    if (s_dispatch_count > 0u) {
         ESP_LOGI(TAG, "headless dispatch: %u entries loaded", (unsigned)s_dispatch_count);
     }
 
@@ -1171,6 +1164,28 @@ void DaliComponent::register_input_sensor(DaliBusSensor *sensor)
     } else {
         ESP_LOGW(TAG, "sensor registry full — increase MAX_INPUT_SENSORS");
     }
+}
+
+void DaliComponent::add_dispatch_entry(uint8_t frame_kind, uint8_t address_kind,
+                                       uint8_t address, uint8_t event_code,
+                                       uint8_t instance, uint8_t output_type,
+                                       uint8_t output_address, uint8_t action,
+                                       uint8_t scene)
+{
+    if (s_dispatch_count >= MAX_DISPATCH_ENTRIES) {
+        ESP_LOGW(TAG, "dispatch table full — increase MAX_DISPATCH_ENTRIES");
+        return;
+    }
+    DaliDispatchEntry &e = s_dispatch_table[s_dispatch_count++];
+    e.key.frame_kind   = static_cast<DaliEventFrameKind>(frame_kind);
+    e.key.address_kind = static_cast<DaliEventAddressKind>(address_kind);
+    e.key.address      = address;
+    e.key.event_code   = event_code;
+    e.key.instance     = instance;
+    e.output.type      = static_cast<DaliAddressType>(output_type);
+    e.output.address   = output_address;
+    e.action           = static_cast<DaliDispatchAction>(action);
+    e.scene            = scene;
 }
 
 void DaliComponent::start_refresh()

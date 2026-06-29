@@ -109,6 +109,11 @@ class DaliComponent : public Component {
                       uint16_t member_groups, DaliBusLight *light);
   // Called by DaliInputSensor during codegen init (Core 0 setup phase).
   void register_input_sensor(DaliBusSensor *sensor);
+  // Called once per headless_dispatch entry during codegen init (Core 0 setup phase).
+  void add_dispatch_entry(uint8_t frame_kind, uint8_t address_kind, uint8_t address,
+                          uint8_t event_code, uint8_t instance,
+                          uint8_t output_type, uint8_t output_address,
+                          uint8_t action, uint8_t scene);
 
  protected:
   uint8_t tx_pin_{18};

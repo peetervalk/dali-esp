@@ -44,7 +44,15 @@ dali:
   id: dali_bus
   tx_pin: 18
   rx_pin: 19
-  headless_dispatch: true
+  headless_dispatch:
+    # BF6 couplers command groups directly; ESP observes and keeps HA state in sync.
+    - { frame_kind: legacy_16bit, address_kind: group, address: 0, action: observe, output_type: group, output_address: 0 }
+    - { frame_kind: legacy_16bit, address_kind: group, address: 2, action: observe, output_type: group, output_address: 2 }
+    - { frame_kind: legacy_16bit, address_kind: group, address: 3, action: observe, output_type: group, output_address: 3 }
+    - { frame_kind: legacy_16bit, address_kind: group, address: 4, action: observe, output_type: group, output_address: 4 }
+    - { frame_kind: legacy_16bit, address_kind: group, address: 5, action: observe, output_type: group, output_address: 5 }
+    - { frame_kind: legacy_16bit, address_kind: group, address: 6, action: observe, output_type: group, output_address: 6 }
+    - { frame_kind: legacy_16bit, address_kind: group, address: 7, action: observe, output_type: group, output_address: 7 }
   command_result:
     name: "DALI Command Result"
   bus_fault:
