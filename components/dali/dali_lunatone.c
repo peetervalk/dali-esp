@@ -1,5 +1,7 @@
 #include "dali_lunatone.h"
 
+#include <stddef.h>
+
 #define LUNATONE_CMD(id, name, opcode, resp) { id, name, opcode, resp }
 
 static const DaliLunatoneCommandInfo s_lunatone_commands[] = {

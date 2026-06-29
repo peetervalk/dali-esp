@@ -1,5 +1,7 @@
 #include "dali_mapping.h"
 
+#include <stddef.h>
+
 static bool mapping_input_instance_valid(uint8_t instance)
 {
     return instance < DALI_INSTANCE_COUNT;

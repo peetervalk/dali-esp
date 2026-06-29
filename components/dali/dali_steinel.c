@@ -1,5 +1,7 @@
 #include "dali_steinel.h"
 
+#include <stddef.h>
+
 static const DaliSteinelInstanceInfo s_hf360_instances[] = {
     { DALI_STEINEL_HF360_INSTANCE_BRIGHTNESS,  4u, "brightness" },
     { DALI_STEINEL_HF360_INSTANCE_MOTION,      3u, "motion" },

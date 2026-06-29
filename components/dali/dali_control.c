@@ -1,6 +1,8 @@
 #include "dali_control.h"
 #include "dali_protocol.h"
 
+#include <stddef.h>
+
 #define HA_BRIGHTNESS_MAX       255u
 #define HA_BRIGHTNESS_ROUNDING  128u
 #define PERCENT_MAX             100u

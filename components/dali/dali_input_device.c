@@ -1,5 +1,7 @@
 #include "dali_input_device.h"
 
+#include <stddef.h>
+
 static DaliInputRole role_for_type(uint8_t type)
 {
     switch (type) {

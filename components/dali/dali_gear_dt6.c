@@ -1,5 +1,7 @@
 #include "dali_gear_dt6.h"
 
+#include <stddef.h>
+
 /* Build an addressed 16-bit DT6 command frame.
  * Format: address_byte = (addr << 1) | 1, opcode in low byte. */
 static DaliFrame build_dt6_frame(uint8_t addr, uint8_t opcode)
