@@ -18,7 +18,6 @@ idf_component_register(
     SRCS
         "dali_component.cpp"
         "dali_scan.cpp"
-        "dali_headless.cpp"
         "light/dali_light_output.cpp"
         # Explicit entry guards against stale glob cache when files are added
         # after the initial CMake configure. CMake deduplicates if GLOB catches

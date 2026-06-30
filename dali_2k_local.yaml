@@ -33,7 +33,11 @@ ota:
     password: !secret ota_password
 
 logger:
-  level: INFO
+  level: DEBUG
+  logs:
+    dali: DEBUG
+    wifi: WARN
+
 
 # ── DALI bus ──────────────────────────────────────────────────────────────────
 dali:
@@ -95,8 +99,15 @@ text:
 #   bit7=1 (input device), bits6:2=instance number, bits1:0=event scheme
 #   0x80=inst0 (lux), 0x84=inst1 (occupancy), 0x88=inst2, 0x8C=inst3
 # Occupancy raw values: 0=free, 85=movement, 170=hold/present, 255=present+moving.
-# Occupancy sensor (inst 1, 1-byte) gets immediate push updates from unsolicited
-# events; poll_interval is a fallback only — can be raised to e.g. 60 s.
+# Occupancy sensor (inst 1, 1-byte): the 5s poll (QUERY_INPUT_VALUE) is the
+# only source of the actual DT303 state. Confirmed on live hardware
+# (2026-06-30): this Steinel's autonomous event report on instance 1 is NOT
+# the DT303 state — it's a raw PIR signal/diagnostic value that idles ~12 and
+# swings both above and below that (observed 8-15) during real motion, i.e.
+# sensor telemetry, not a debounced state. Firmware only accepts a pushed
+# event value if it coincidentally equals one of the four valid states;
+# everything else (the telemetry channel) is ignored so it can't stomp a good
+# polled reading.
 # Steinel factory section 3: hold timer 1 (~10 s), report timer 5 s.
 # On-demand occupancy read: iquery a0:1 input-value  → 0=free 85=move 170=present 255=both
 # Read before writing:      iquery a0:1 hold-timer
@@ -155,6 +166,8 @@ sensor:
     accuracy_decimals: 0
 
 # ── Occupancy state (human-readable) ─────────────────────────────────────────
+# Unrecognized raw values are skipped (hold last state) rather than published as
+# "Unknown" — see dali_2k.yaml for why.
 text_sensor:
   - platform: template
     name: "Zone 2 Occupancy"
@@ -164,5 +177,5 @@ text_sensor:
       if (v == 85)  return {"Movement"};
       if (v == 170) return {"Present"};
       if (v == 255) return {"Present + Moving"};
-      return {"Unknown"};
+      return {};  // unrecognized raw value: hold last published state
     update_interval: 5s

@@ -344,6 +344,22 @@ static void format_event(char *buf, size_t len, const DaliInputEvent *e)
                      (unsigned)e->event_code);
         return;
     }
+    /* 24-bit input-device event: decode instance/scheme/event_code directly.
+     * Do NOT run this through opcode_name() — that table is legacy 16-bit
+     * command names and is meaningless for input-device event data (it was
+     * previously mislabeling these as e.g. "up"/"cmd", which is bogus). */
+    if (e->frame_kind == DALI_EVENT_FRAME_INPUT_24BIT) {
+        uint8_t scheme = e->instance & 0x03u;
+        uint8_t inst   = (e->instance >> 2u) & 0x1Fu;
+        if (e->address_kind == DALI_EVENT_ADDRESS_BROADCAST)
+            snprintf(buf, len, "bc inst=%u scheme=%u evt=%u",
+                     (unsigned)inst, (unsigned)scheme, (unsigned)e->event_code);
+        else
+            snprintf(buf, len, "%s%u inst=%u scheme=%u evt=%u", pfx,
+                     (unsigned)e->address, (unsigned)inst, (unsigned)scheme,
+                     (unsigned)e->event_code);
+        return;
+    }
     if (e->address_kind == DALI_EVENT_ADDRESS_BROADCAST) {
         snprintf(buf, len, "bc %s", opcode_name(e->event_code));
     } else {
@@ -401,20 +417,43 @@ static void on_dali_unsolicited(const DaliFrame *frame, void * /*ctx*/)
     /* Event-driven sensor update for 1-byte input sensors (e.g. occupancy).
      * IEC 62386-103 instance byte: bit7=source, bits6:2=instance, bits1:0=scheme.
      * For 2-byte sensors the event_code is only 8 bits wide — polling remains
-     * the source of truth for those. */
+     * the source of truth for those.
+     *
+     * Confirmed on live hardware (2026-06-30): the Steinel's autonomous event
+     * report on the occupancy instance does NOT carry the DT303 bit-replicated
+     * state (0/85/170/255). It's a raw PIR signal/diagnostic value that idles
+     * around ~12 and swings both above and below that baseline during real
+     * motion (observed 8-15 while moving in front of the sensor) — i.e. it's
+     * telemetry from the sensor's analog front end, not the debounced
+     * occupancy state. Only QUERY_INPUT_VALUE (the poll) returns the actual
+     * DT303 state on this device. So: only accept a pushed event value when it
+     * happens to equal one of the four valid states (harmless coincidence
+     * guard); everything else is the PIR telemetry channel and is correctly
+     * ignored, with the poll remaining the sole source of truth. */
     if (event.frame_kind == DALI_EVENT_FRAME_INPUT_24BIT &&
         event.address_kind == DALI_EVENT_ADDRESS_SHORT) {
         uint8_t decoded_instance = (event.instance >> 2u) & 0x1Fu;
+        uint8_t code = event.event_code;
+        bool valid_dt303_state = (code == 0u || code == 85u || code == 170u || code == 255u);
         for (uint8_t i = 0u; i < s_sensor_count; i++) {
             SensorEntry &e = s_sensor_registry[i];
             if (e.sensor->get_value_bytes() == 1u &&
                 e.sensor->get_address()     == event.address &&
                 e.sensor->get_instance()    == decoded_instance) {
-                e.sensor->mark_raw_value((uint16_t)event.event_code);
-                ESP_LOGD(TAG, "event update: addr=%u inst=%u val=%u",
+                if (!valid_dt303_state) {
+                    ESP_LOGD(TAG, "event update ignored (not a DT303 state): addr=%u inst=%u val=%u raw=%06X",
+                             (unsigned)event.address,
+                             (unsigned)decoded_instance,
+                             (unsigned)code,
+                             (unsigned)event.raw.data);
+                    continue;
+                }
+                e.sensor->mark_raw_value((uint16_t)code);
+                ESP_LOGD(TAG, "event update: addr=%u inst=%u val=%u raw=%06X",
                          (unsigned)event.address,
                          (unsigned)decoded_instance,
-                         (unsigned)event.event_code);
+                         (unsigned)code,
+                         (unsigned)event.raw.data);
             }
         }
     }
