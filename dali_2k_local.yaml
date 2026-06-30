@@ -33,10 +33,7 @@ ota:
     password: !secret ota_password
 
 logger:
-  level: DEBUG
-  logs:
-    dali: DEBUG
-    wifi: WARN
+  level: INFO
 
 
 # ── DALI bus ──────────────────────────────────────────────────────────────────
@@ -102,7 +99,7 @@ text:
 # Occupancy sensor (inst 1, 1-byte): the 5s poll (QUERY_INPUT_VALUE) is the
 # only source of the actual DT303 state. Confirmed on live hardware
 # (2026-06-30): this Steinel's autonomous event report on instance 1 is NOT
-# the DT303 state — it's a raw PIR signal/diagnostic value that idles ~12 and
+# the DT303 state — it's a raw HF motion signal/diagnostic value that idles ~12 and
 # swings both above and below that (observed 8-15) during real motion, i.e.
 # sensor telemetry, not a debounced state. Firmware only accepts a pushed
 # event value if it coincidentally equals one of the four valid states;

@@ -136,6 +136,7 @@ config <target> <config-name> [param]
 ## ESPHome Command Console
 
 Available through `text:` platform entity `DALI Command` when configured:
+see `esphome_verb_readme.md` for the practical parameter guide.
 
 ```text
 off <target>

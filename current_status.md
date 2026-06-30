@@ -113,6 +113,7 @@ DALI bus
 |---|---|---|---|
 | P3 | `raw` command parser | `parse_raw_len` bounds `parse_uint` to `[16, 24]` then immediately checks `!= 16 && != 24` — the first range silently accepts 17-23 before the second rejects them. Not a bug, but misleading. Either tighten the `parse_uint` bounds to remove the second check, or widen them so the intent of the second check is clear. | open |
 | P3 | `memwrite` DTR1 lifetime | seq2 relies on DTR1 surviving from seq1 (bank select set in seq1 step 0). No intermediate command should reset it, but this is an implicit dependency. If the scheduler ever interleaves unrelated commands between the two sequences this would silently write to bank 0. Worth adding a DTR1 reset at the start of seq2 as a defensive measure. | open |
+| P2 | `input_24bit` dispatch instance matching | `headless_dispatch` accepts `frame_kind: input_24bit`, but `dali_dispatch` currently compares YAML `instance` directly with the raw DALI-2 event instance byte. Bus monitor decodes that byte into `inst=<N>` and `scheme=<N>`, so YAML `instance: 0` may not match a real decoded instance 0 event. Before using Lunatone MC+ event-message mode seriously, make dispatch compare against the decoded instance number, update comments/docs, and add host tests. Until then use `instance: any` for 24-bit dispatch experiments. | open |
 
 ## Active Field/Config Tasks
 
