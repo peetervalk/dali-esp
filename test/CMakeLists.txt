@@ -36,6 +36,7 @@ set(DALI_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_control.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_scheduler.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_dispatch.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_group_map.c
 )
 
 set(DALI_INC
@@ -72,3 +73,4 @@ add_dali_test(test_input_config test_input_config.c)
 add_dali_test(test_control    test_control.c)
 add_dali_test(test_scheduler  test_scheduler.c)
 add_dali_test(test_dispatch   test_dispatch.c)
+add_dali_test(test_group_map  test_group_map.c)

@@ -23,6 +23,7 @@ extern "C" {
 #include "../../../components/dali/dali_input_device.h"
 #include "../../../components/dali/dali_input_config.h"
 #include "../../../components/dali/dali_memory.h"
+#include "../../../components/dali/dali_group_map.h"
 }
 
 namespace esphome {
@@ -53,6 +54,56 @@ struct LightEntry {
 
 static LightEntry s_light_registry[MAX_LIGHT_ENTITIES];
 static uint8_t    s_light_count = 0u;
+
+/* ── Group membership (auto-selects query_address for group-type lights) ──── */
+/* Pure decision logic lives in dali_group_map.c; this layer owns one instance,
+ * guards it with a spinlock (scan writes on Core 1, poll/console on Core 0), and
+ * handles logging + flash persistence. Seeded from each light's static
+ * query_address at setup() (only when no persisted snapshot exists), replaced
+ * wholesale by a bus scan, and updated live by add-group/remove-group console
+ * commands. Persisted to flash so state survives reboots; see start_refresh(),
+ * load/save_group_membership(), and DaliComponent::loop(). */
+static DaliGroupMap    s_group_map = {};
+static portMUX_TYPE    s_group_map_mux = portMUX_INITIALIZER_UNLOCKED;
+/* Set whenever the map changes from an authoritative source (scan or console
+ * edit); the main loop drains this and writes the snapshot to flash. Decouples
+ * the Core 1 scan task from the Core 0-only preferences API. */
+static std::atomic<bool> s_group_members_dirty_{false};
+
+/* Persisted-to-flash layout (see load/save_group_membership). */
+static constexpr uint32_t GROUP_MEMBERSHIP_MAGIC = 0x44475031u;  /* "DGP1" */
+struct GroupMembershipPersist {
+    uint32_t     magic;
+    DaliGroupMap map;
+};
+
+static uint8_t pick_group_member(uint8_t group)
+{
+    portENTER_CRITICAL(&s_group_map_mux);
+    uint8_t addr = dali_group_map_pick(&s_group_map, group);
+    portEXIT_CRITICAL(&s_group_map_mux);
+    return addr;
+}
+
+static void update_group_members_from_config(DaliTarget target,
+                                             DaliCommandId id,
+                                             uint8_t group)
+{
+    portENTER_CRITICAL(&s_group_map_mux);
+    DaliGroupMapResult res = dali_group_map_apply_config(&s_group_map, target, id, group);
+    portEXIT_CRITICAL(&s_group_map_mux);
+
+    if (res == DALI_GROUP_MAP_NO_CHANGE) return;
+    s_group_members_dirty_.store(true, std::memory_order_release);
+    if (res == DALI_GROUP_MAP_UNVERIFIED_ADD || res == DALI_GROUP_MAP_UNVERIFIED_REMOVE) {
+        ESP_LOGW(TAG, "config g%u %s %u: source group not scan-verified; g%u query cache %s until next scan",
+                 (unsigned)target.address,
+                 id == DALI_CMD_ADD_TO_GROUP ? "add-group" : "remove-group",
+                 (unsigned)group,
+                 (unsigned)group,
+                 res == DALI_GROUP_MAP_UNVERIFIED_REMOVE ? "cleared" : "left partial");
+    }
+}
 
 /* ── Input sensor registry ───────────────────────────────────────────────── */
 
@@ -531,6 +582,34 @@ void DaliComponent::setup()
         ESP_LOGI(TAG, "headless dispatch: %u entries loaded", (unsigned)s_dispatch_count);
     }
 
+    /* Group-membership table: prefer the persisted snapshot (from a prior scan
+     * or console edits); it fully describes reality including empty groups. Only
+     * when nothing is persisted (first boot, flash erase, format change) do we
+     * fall back to seeding from each group light's static query_address.
+     *
+     * Reading get_query_address() is safe here (unlike inside register_light()):
+     * codegen emits set_query_address() after set_dali_component(), so the value
+     * is only final once every light's setup calls have run — guaranteed by the
+     * time Component::setup() fires.
+     *
+     * Note: a group light added to YAML after the last scan won't be in the
+     * persisted snapshot and so won't be polled until the next scan. */
+    group_pref_ = global_preferences->make_preference<GroupMembershipPersist>(GROUP_MEMBERSHIP_MAGIC);
+    if (load_group_membership()) {
+        ESP_LOGI(TAG, "group membership restored from flash");
+    } else {
+        /* No cross-core contention yet — dali_task is not started until below. */
+        portENTER_CRITICAL(&s_group_map_mux);
+        for (uint8_t i = 0u; i < s_light_count; i++) {
+            LightEntry &e = s_light_registry[i];
+            if (e.target_type != (uint8_t)DALI_ADDR_GROUP || e.target_address >= 16u) continue;
+            uint8_t qa = e.light->get_query_address();
+            if (qa == 0xFFu) continue;
+            dali_group_map_seed(&s_group_map, e.target_address, qa);
+        }
+        portEXIT_CRITICAL(&s_group_map_mux);
+    }
+
     xTaskCreatePinnedToCore(dali_task, "dali", 4096, nullptr, 10, nullptr, 1);
 
     if (scan_status_) scan_status_->publish_state("Idle");
@@ -572,6 +651,10 @@ void DaliComponent::loop()
         }
         boot_sensor_query_done_ = true;
     }
+
+    /* ── Persist group membership when a scan/console edit dirtied it ── */
+    if (s_group_members_dirty_.exchange(false, std::memory_order_acq_rel))
+        save_group_membership();
 
     /* ── Input sensor: publish dirty values ── */
     for (uint8_t i = 0u; i < s_sensor_count; i++)
@@ -982,8 +1065,19 @@ void DaliComponent::execute_command(const std::string &cmd_str)
                     err = dali_control_config_with_dtr0(tgt, e.id, (uint8_t)dtr0v, 0u);
                 } else if (!e.uses_dtr0) {
                     unsigned long paramv = 0u;
-                    if (ntok >= 4u && !parse_uint(tok[3], 0u, 255u, &paramv)) { set_cmd_result("bad param"); return; }
+                    bool group_edit = (e.id == DALI_CMD_ADD_TO_GROUP ||
+                                       e.id == DALI_CMD_REMOVE_FROM_GROUP);
+                    if (group_edit) {
+                        if (ntok < 4u) { set_cmd_result("needs group 0-15"); return; }
+                        if (!parse_uint(tok[3], 0u, 15u, &paramv)) { set_cmd_result("group 0-15"); return; }
+                        if (tgt.type == DALI_ADDR_BROADCAST) { set_cmd_result("no broadcast group config"); return; }
+                    } else if (ntok >= 4u && !parse_uint(tok[3], 0u, 255u, &paramv)) {
+                        set_cmd_result("bad param");
+                        return;
+                    }
                     err = dali_control_config(tgt, e.id, (uint8_t)paramv);
+                    if (err == DALI_OK && group_edit)
+                        update_group_members_from_config(tgt, e.id, (uint8_t)paramv);
                 } else {
                     set_cmd_result("needs dtr0 value");
                     return;
@@ -1193,6 +1287,37 @@ void DaliComponent::register_light(uint8_t type, uint8_t address,
     }
 }
 
+void DaliComponent::set_group_membership_snapshot(const uint64_t masks[16])
+{
+    /* Runs on the scan task (Core 1); flash write is deferred to loop() (Core 0). */
+    portENTER_CRITICAL(&s_group_map_mux);
+    for (uint8_t g = 0u; g < 16u; g++)
+        s_group_map.members[g] = masks[g];
+    s_group_map.verified = 0xFFFFu;
+    portEXIT_CRITICAL(&s_group_map_mux);
+    s_group_members_dirty_.store(true, std::memory_order_release);
+}
+
+bool DaliComponent::load_group_membership()
+{
+    GroupMembershipPersist st{};
+    if (!group_pref_.load(&st) || st.magic != GROUP_MEMBERSHIP_MAGIC) return false;
+    portENTER_CRITICAL(&s_group_map_mux);
+    s_group_map = st.map;
+    portEXIT_CRITICAL(&s_group_map_mux);
+    return true;
+}
+
+void DaliComponent::save_group_membership()
+{
+    GroupMembershipPersist st{};
+    st.magic = GROUP_MEMBERSHIP_MAGIC;
+    portENTER_CRITICAL(&s_group_map_mux);
+    st.map = s_group_map;
+    portEXIT_CRITICAL(&s_group_map_mux);
+    group_pref_.save(&st);
+}
+
 void DaliComponent::register_input_sensor(DaliBusSensor *sensor)
 {
     if (s_sensor_count < MAX_INPUT_SENSORS) {
@@ -1231,7 +1356,12 @@ void DaliComponent::start_refresh()
 {
     for (uint8_t i = 0u; i < s_light_count; i++) {
         LightEntry *e  = &s_light_registry[i];
-        uint8_t     qa = e->light->get_query_address();
+        uint8_t     qa = 0xFFu;
+        if (e->target_type == (uint8_t)DALI_ADDR_GROUP) {
+            qa = pick_group_member(e->target_address);
+        } else {
+            qa = e->light->get_query_address();
+        }
         if (qa == 0xFFu) continue;
         ESP_LOGD(TAG, "query actual level: light target type=%u addr=%u via short %u",
                  (unsigned)e->target_type, (unsigned)e->target_address, (unsigned)qa);

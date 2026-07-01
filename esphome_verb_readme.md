@@ -213,8 +213,11 @@ send-twice path where required by the protocol.
 For `*-dtr0` commands and `set-operating-mode`, `[value]` is loaded into DTR0
 before the config command is sent. The parser accepts DTR0 values `0-255`.
 
-For `add-group` and `remove-group`, `[value]` is the group number encoded into
-the DALI opcode. Use `0-15`.
+For `add-group` and `remove-group`, `[value]` is required and is the group
+number encoded into the DALI opcode. Use `0-15`. Short and group targets are
+accepted; broadcast targets are rejected because they make the runtime group
+query cache ambiguous. After group-target edits, run a scan if the source group
+has not already been scan-verified.
 
 Available config names:
 
@@ -239,6 +242,7 @@ Examples:
 config a0 set-max-dtr0 200
 config a0 set-fade-time-dtr0 4
 config a0 add-group 3
+config g0 remove-group 3
 config a0 save-persistent
 ```
 

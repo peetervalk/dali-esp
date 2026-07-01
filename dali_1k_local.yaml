@@ -54,6 +54,9 @@ dali:
     name: "Bus Fault"
 
 # ── Lights (one entity per DALI group) ───────────────────────────────────────
+# query_address is only a COLD-START SEED for group state polling — replaced by
+# scan-verified members and add-group/remove-group console edits (both persisted
+# to flash across reboots). Pick any member of the group.
 light:
   - platform: dali
     dali_id: dali_bus

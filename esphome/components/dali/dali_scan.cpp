@@ -12,6 +12,7 @@
 extern "C" {
 #include "../../../components/dali/dali_discovery.h"
 #include "../../../components/dali/dali_scheduler.h"
+#include "../../../components/dali/dali_group_map.h"
 }
 
 namespace esphome {
@@ -195,6 +196,18 @@ static void log_inventory_json(const DaliDiscoveryInventory *inv) {
 }
 
 // ---------------------------------------------------------------------------
+// Group-membership snapshot — rebuilds DaliComponent's runtime table
+// (used by start_refresh() to auto-select query_address for group lights)
+// from bus-verified data, superseding any YAML-seeded or console-edited state.
+// ---------------------------------------------------------------------------
+
+static void rebuild_group_membership(const DaliDiscoveryInventory *inv, DaliComponent *component) {
+    DaliGroupMap map;
+    dali_group_map_rebuild_from_inventory(&map, inv);
+    component->set_group_membership_snapshot(map.members);
+}
+
+// ---------------------------------------------------------------------------
 // YAML snippet generator — builds string for the yaml_result sensor and logs.
 // ---------------------------------------------------------------------------
 
@@ -335,6 +348,7 @@ static void scan_task(void *arg) {
 
     ESP_LOGI(TAG, "---[ DALI Scan Complete: %u device(s) found ]---", (unsigned)found);
     log_inventory_json(&inventory);
+    rebuild_group_membership(&inventory, component);
     build_and_publish_yaml(&inventory, component->get_coupler_group_mask(), component);
 
     /* Build compact summary for the scan_result text sensor.

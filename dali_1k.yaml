@@ -63,6 +63,12 @@ dali:
 # Replace placeholder names with real room/zone names.
 #
 # Groups 1 and 8-15 have no gear assigned — omitted.
+#
+# query_address is only a COLD-START SEED for group state polling — the address
+# used until the component learns real group membership. A bus scan replaces it
+# with scan-verified members, and add-group/remove-group console commands update
+# it live; both are persisted to flash and survive reboots. Pick any member of
+# the group (a plain lamp with no shared input device is ideal).
 
 light:
   - platform: dali

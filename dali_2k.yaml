@@ -60,7 +60,11 @@ dali:
 
 # ── Lights ────────────────────────────────────────────────────────────────────
 # One group covers all 5 lamps.
-# query_address=2 uses a plain lamp (no shared input device) for level polling.
+# query_address is only a COLD-START SEED for group state polling: the address
+# used until the component learns real group membership. A bus scan replaces it
+# with scan-verified members, and add-group/remove-group console commands update
+# it live; both are persisted to flash and survive reboots. Pick a plain lamp
+# (no shared input device) that is a member of the group. query_address=2 here.
 
 light:
   - platform: dali

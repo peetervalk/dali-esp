@@ -151,6 +151,9 @@ iquery a<N>:<instance> <query-name>
 iconfig a<N>:<instance> <config-name> [dtr0]
 ```
 
+For ESPHome `add-group` and `remove-group`, the final group value `0-15` is
+required. Short and group targets are accepted; broadcast targets are rejected.
+
 Common examples:
 
 ```text

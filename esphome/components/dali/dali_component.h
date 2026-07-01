@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "esphome/core/preferences.h"
 
 #include <atomic>
 #include <cstdint>
@@ -104,6 +105,10 @@ class DaliComponent : public Component {
   void on_scan_complete(uint8_t count, bool success);
   // Returns bitmask of DALI groups that had frames observed during last coupler scan.
   uint16_t get_coupler_group_mask() const;
+  // Called from scan task (Core 1) after a successful scan — replaces the
+  // runtime group-membership table (masks[g] = bitmask of short addresses
+  // currently in group g) used to auto-select query_address in start_refresh().
+  void set_group_membership_snapshot(const uint64_t masks[16]);
   // Called by DaliLightOutput during codegen init (Core 0 setup phase).
   void register_light(uint8_t target_type, uint8_t target_address,
                       uint16_t member_groups, DaliBusLight *light);
@@ -161,6 +166,15 @@ class DaliComponent : public Component {
 
   // Input sensor boot query (Core 0 only).
   bool boot_sensor_query_done_{false};
+
+  // Group-membership persistence (Core 0 only). Snapshot of s_group_members +
+  // verified mask, saved to flash whenever a scan or console group edit dirties
+  // the table so it survives reboots. Loaded once in setup().
+  ESPPreferenceObject group_pref_;
+  // Load persisted membership into the runtime table; true if valid data applied.
+  bool load_group_membership();
+  // Write the current runtime table to flash.
+  void save_group_membership();
 };
 
 }  // namespace dali
