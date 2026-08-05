@@ -35,13 +35,11 @@ external_components:
       type: git
       url: https://github.com/peetervalk/dali-esp.git
       ref: main
-      username: !secret github_username
-      password: !secret github_token
     components: [dali]
     refresh: 0s
 
 wifi:
-  ssid: !secret wifi_ssid2
+  ssid: !secret wifi_ssid
   password: !secret wifi_password
   ap:
     ssid: "dali-diag-ap"

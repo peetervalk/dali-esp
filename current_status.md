@@ -63,10 +63,12 @@ DALI bus
 - `dali_diag.yaml` is the diagnostic/discovery firmware. It exposes scan,
   identify, find-couplers, target-control buttons, bus monitor, group-map text
   sensors, and YAML snippets in logs prefixed with `YAML|`.
-- `dali_1k.yaml` is the first-floor control firmware: 16 control gear, group
-  entities for groups 0/2/3/4/5/6/7, and headless BF6 observation.
-- `dali_2k.yaml` is the second-floor/control-sensor firmware: group 0 lighting,
-  HA command console, and Steinel HF 360 II sensor polling.
+- `_local/dali_1k.yaml` is the first-floor control firmware: 16 control gear,
+  group entities for groups 0/2/3/4/5/6/7, and headless BF6 observation.
+  (Site-specific; untracked, lives in `_local/`.)
+- `_local/dali_2k.yaml` is the second-floor/control-sensor firmware: group 0
+  lighting, HA command console, and Steinel HF 360 II sensor polling.
+  (Site-specific; untracked, lives in `_local/`.)
 - The ESPHome HA command console includes `raw` and `raw2` for direct 16/24-bit
   frame entry; use these for Steinel Bank 2 diagnostics if helper verbs produce
   suspect output.
@@ -139,8 +141,8 @@ DALI bus
 | `main/dali_diag.c/.h` | App-specific serial diagnostic CLI |
 | `esphome/components/dali` | Active ESPHome external component |
 | `dali_diag.yaml` | ESPHome diagnostic/discovery firmware |
-| `dali_1k.yaml` | Bus 1 control firmware |
-| `dali_2k.yaml` | Bus 2 control/sensor firmware |
+| `_local/dali_1k.yaml` | Bus 1 control firmware (site-specific, untracked) |
+| `_local/dali_2k.yaml` | Bus 2 control/sensor firmware (site-specific, untracked) |
 | `dali_command_reference.md` | Command catalog and parser/protocol reference |
 
 ## Documentation Policy
@@ -346,13 +348,11 @@ dirty for no useful reason.
 
 ---
 
-#### Public example YAMLs should not require private GitHub credentials
+#### ✅ Public example YAMLs should not require private GitHub credentials
 
-The deployment YAMLs use `username: !secret github_username` and
-`password: !secret github_token` for the `external_components` git source. That is fine for a
-private workflow, but public examples should not imply that a GitHub token is required to use a
-public release. If these files remain as site-specific deployment configs, document them as
-such and provide release instructions that use a public git tag without credentials.
+**Resolved 2026-08-06.** The site-specific deployment YAMLs (`dali_1k.yaml`, `dali_2k.yaml`)
+were moved to untracked `_local/`. `dali_diag.yaml` remains tracked with a credential-free
+`external_components` git source, and `README.md` carries a credential-free example config.
 
 ---
 
@@ -438,8 +438,8 @@ ESPHome:
 
 ```powershell
 esphome compile dali_diag.yaml
-esphome compile dali_1k.yaml
-esphome compile dali_2k.yaml
+esphome compile _local/dali_1k.yaml
+esphome compile _local/dali_2k.yaml
 esphome run dali_diag.yaml
 esphome logs dali_diag.yaml
 ```
