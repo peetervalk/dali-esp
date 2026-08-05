@@ -164,11 +164,6 @@ static bool IRAM_ATTR tx_rx_suppression_active(void)
     return s_tx_state != DALI_PHY_TX_IDLE;
 }
 
-static uint32_t tx_rx_timestamp_us(void)
-{
-    return (uint32_t)(esp_timer_get_time() & RX_TS_MASK);
-}
-
 static DaliError wait_for_bus_idle_before_tx(void)
 {
     int64_t start_us      = esp_timer_get_time();

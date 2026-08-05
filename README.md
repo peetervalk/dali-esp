@@ -33,6 +33,11 @@ Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The ESP32 has no t
 A bus with two lamp groups, one individually addressed lamp, and a DALI-2 multi-sensor (e.g. Steinel HF 360 II) at short address 0:
 
 ```yaml
+esp32:
+  variant: esp32   # classic ESP32, e.g. WROVER-E
+  framework:
+    type: esp-idf
+
 external_components:
   - source:
       type: git

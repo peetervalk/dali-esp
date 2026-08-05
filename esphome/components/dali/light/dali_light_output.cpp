@@ -10,7 +10,8 @@ namespace dali {
 static const char *TAG = "dali.light";
 static constexpr uint32_t STARTUP_WRITE_SUPPRESS_MS = 10000u;
 
-static const char *target_type_name(DaliAddressType type) {
+// Only referenced from ESP_LOGD; unused when the build's log level is above DEBUG.
+[[maybe_unused]] static const char *target_type_name(DaliAddressType type) {
   switch (type) {
     case DALI_ADDR_SHORT: return "short";
     case DALI_ADDR_GROUP: return "group";
