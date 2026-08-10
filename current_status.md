@@ -52,7 +52,7 @@ adding broad new device support.
 
 - The audit began from commit `0302d70` (tag `v1.0.1`); all three working-tree
   deployment YAMLs now reference that tag.
-- All 20 host test executables pass.
+- All 21 host test executables pass.
 - The native ESP-IDF firmware builds successfully with ESP-IDF 6.0.1.
 - All three pinned YAMLs pass `esphome config` with ESPHome 2026.6.2 and
   resolve the published `v1.0.1` external component.
@@ -89,6 +89,12 @@ adding broad new device support.
   publish `pending`, and generation-gated callbacks prevent an older completion
   from overwriting the newest command result. This is compile-verified; the
   console parser/result layer still has no direct host test.
+- ESPHome full-light refresh now admits only one query at a time, retains its
+  cursor on scheduler queue pressure, pauses admission during scans, and
+  coalesces overlapping requests into one follow-up pass. Short-address lights
+  query their own target by default, and a successful scan requests fresh state
+  using the rebuilt group map. Portable cursor tests cover retries, skips, and
+  coalescing; the ESPHome integration compiles, but hardware is not re-verified.
 - Tracked source and documentation files are valid UTF-8; no active mojibake
   cleanup is required.
 
@@ -175,6 +181,9 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
   read-back verified, and it does not exclude another physical bus master.
 - Light state transferred from the DALI task to ESPHome is one coherent packed
   update; multiple pending observations intentionally coalesce to the latest.
+- Boot, periodic, deferred, and post-scan light refreshes share a one-query-at-a-
+  time pump. Queue-full leaves the current light pending for retry, and refresh
+  requests arriving during a pass coalesce into one additional pass.
 - Matching Device/Instance events request an immediate authoritative sensor
   poll; event information is never published as a generic sensor value.
 - Bus monitoring and Find Couplers retain and format the canonical Part 103
@@ -252,8 +261,8 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   ENABLE DEVICE TYPE sequences, memory access, DT8 multi-byte queries,
   send-twice commands, discovery, and commissioning.
 - Make scans exclusive or explicitly pause/reject normal polling and HA traffic.
-- Handle remaining non-console enqueue failures; pace full refresh, retry missed
-  entries, and expose queue depth/high-water/drop diagnostics.
+- Handle remaining non-console enqueue failures in identify, diagnostic, and
+  headless-dispatch paths, and expose queue depth/high-water/drop diagnostics.
 - Update light-command deduplication only after confirmed transmission, or
   invalidate its cached state after TX/bus errors, so a failed command can be retried.
 - Correct observed-state semantics for RECALL MAX, STEP DOWN AND OFF, TOGGLE, and
@@ -273,8 +282,6 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 
 ### P1 — ESPHome correctness and architecture
 
-- Default a short-address light's query target to its control target; boot and
-  deferred refresh must retry queue failures.
 - Replace the blanket ten-second startup write suppression with logic that
   distinguishes restore/default writes from intentional user commands.
 - Extend the compact Part 103 dispatch key if a site needs to distinguish
@@ -286,8 +293,9 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   reusable typed C APIs.
 - Use board-aware ESPHome GPIO schemas, reject TX=RX and invalid output pins, and
   honor the documented WROVER-E restrictions.
-- Check task-creation results and remove or validate hard-coded Core 1 assumptions,
-  particularly for single-core ESP32 targets.
+- Check the remaining DALI-task creation result and remove or validate hard-coded
+  Core 1 assumptions, particularly for single-core ESP32 targets. Scan-task
+  allocation/creation failure is now reported and releases scan/refresh state.
 - Define recovery after DALI bus faults and bus-only power cycles. Distinguish
   current fault/availability from cumulative fault history.
 
@@ -295,7 +303,7 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 
 - Add CI that compiles a clean external-component checkout from the release tag and
   validates the Python schema, ESPHome C++ layer, YAML, and wrapper packaging.
-- Add the native ESP-IDF build to CI alongside the existing 20-suite host workflow.
+- Add the native ESP-IDF build to CI alongside the existing 21-suite host workflow.
 - Keep one intentional ESPHome source-inclusion path. Remove the unused component
   `CMakeLists.txt` path and stale fallback references if the Python-copy/wrapper
   route remains authoritative.

@@ -6,13 +6,13 @@ A reusable C protocol stack (`components/dali`) drives the bus — PHY, schedule
 
 ## Features
 
-- Lights by group, short address, or broadcast, with query-based state readback when a short-address query target is available (`QUERY ACTUAL LEVEL`)
+- Lights by group, short address, or broadcast, with query-based state readback; short-address entities query themselves by default and groups use a representative member (`QUERY ACTUAL LEVEL`)
 - Bus scan and discovery from Home Assistant; control-gear commissioning through the native CLI
 - DALI-2 input devices: occupancy, lux, temperature, humidity — authoritative polling, with matching Device/Instance events requesting an immediate poll
 - Passive observation of existing pushbutton couplers (`headless_dispatch`): couplers keep commanding the lamps, ESP32 keeps HA state in sync
 - Free-text DALI command console in HA: queries, config, memory bank read/write, raw 16/24-bit frames
 - Protocol core is plain C with no ESPHome dependency; protocol and cross-task
-  helpers are covered by 20 host test suites (run in CI)
+  helpers are covered by 21 host test suites (run in CI)
 
 ## Hardware
 

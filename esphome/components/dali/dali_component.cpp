@@ -54,6 +54,7 @@ struct LightEntry {
 
 static LightEntry s_light_registry[MAX_LIGHT_ENTITIES];
 static uint8_t    s_light_count = 0u;
+static std::atomic<bool> s_refresh_query_in_flight_{false};
 
 /* ── Group membership (auto-selects query_address for group-type lights) ──── */
 /* Pure decision logic lives in dali_group_map.c; this layer owns one instance,
@@ -212,6 +213,7 @@ static void on_level_query_reply(DaliError result, const DaliFrame *reply, void 
     if (result != DALI_OK || reply == nullptr) {
         ESP_LOGD(TAG, "query actual level failed: light target type=%u addr=%u result=%d",
                  (unsigned)e->target_type, (unsigned)e->target_address, (int)result);
+        s_refresh_query_in_flight_.store(false, std::memory_order_release);
         return;
     }
     uint8_t     level = (uint8_t)(reply->data & 0xFFu);
@@ -223,6 +225,7 @@ static void on_level_query_reply(DaliError result, const DaliFrame *reply, void 
     output.type    = static_cast<DaliAddressType>(e->target_type);
     output.address = e->target_address;
     dali_dispatch_seed_toggle(&s_toggle_state, output, is_on);
+    s_refresh_query_in_flight_.store(false, std::memory_order_release);
 }
 
 /* ── Cross-core string handoff (Core 1 → Core 0) ────────────────────────── */
@@ -748,6 +751,10 @@ void DaliComponent::loop()
         start_refresh();
     }
 
+    /* Admit full-refresh queries one at a time. Queue pressure and scans retain
+     * the cursor, so no later light is silently dropped. */
+    pump_refresh();
+
     /* ── Command result ── */
     if (command_result_) {
         char tmp[sizeof(s_cmd_result_str)];
@@ -880,14 +887,16 @@ void DaliComponent::loop()
         s_scan_yaml_str[0] = '\0';
     }
 
+    bool scan_success = scan_success_.load();
     if (scan_status_) {
-        if (scan_success_) {
+        if (scan_success) {
             scan_status_->publish_state(
                 "Found " + std::to_string(scan_count_.load()) + " devices");
         } else {
             scan_status_->publish_state("Scan error");
         }
     }
+    if (scan_success) start_refresh();
 }
 
 /* ── Public methods ──────────────────────────────────────────────────────── */
@@ -1511,22 +1520,67 @@ void DaliComponent::add_dispatch_entry(uint8_t frame_kind, uint8_t address_kind,
 
 void DaliComponent::start_refresh()
 {
-    for (uint8_t i = 0u; i < s_light_count; i++) {
-        LightEntry *e  = &s_light_registry[i];
+    dali_refresh_cursor_request(&refresh_cursor_);
+}
+
+void DaliComponent::pump_refresh()
+{
+    if (scan_running_.load(std::memory_order_acquire) ||
+        s_refresh_query_in_flight_.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    uint8_t i;
+    while (dali_refresh_cursor_current(&refresh_cursor_, s_light_count, &i)) {
+        LightEntry *e = &s_light_registry[i];
         uint8_t     qa = 0xFFu;
         if (e->target_type == (uint8_t)DALI_ADDR_GROUP) {
             qa = pick_group_member(e->target_address);
         } else {
             qa = e->light->get_query_address();
         }
-        if (qa == 0xFFu) continue;
-        ESP_LOGD(TAG, "query actual level: light target type=%u addr=%u via short %u",
-                 (unsigned)e->target_type, (unsigned)e->target_address, (unsigned)qa);
+        if (qa == 0xFFu) {
+            dali_refresh_cursor_complete(&refresh_cursor_, s_light_count,
+                                         DALI_REFRESH_ADVANCE);
+            continue;
+        }
+
         DaliTarget qt;
         qt.type    = DALI_ADDR_SHORT;
         qt.address = qa;
-        dali_control_query(qt, DALI_CMD_QUERY_ACTUAL_LEVEL, 0u, on_level_query_reply, e);
+        s_refresh_query_in_flight_.store(true, std::memory_order_release);
+        DaliError err =
+            dali_control_query(qt, DALI_CMD_QUERY_ACTUAL_LEVEL, 0u,
+                               on_level_query_reply, e);
+        if (err == DALI_OK) {
+            refresh_queue_blocked_ = false;
+            dali_refresh_cursor_complete(&refresh_cursor_, s_light_count,
+                                         DALI_REFRESH_ADVANCE);
+            ESP_LOGD(TAG, "query actual level: light target type=%u addr=%u via short %u",
+                     (unsigned)e->target_type, (unsigned)e->target_address,
+                     (unsigned)qa);
+            return;
+        }
+
+        s_refresh_query_in_flight_.store(false, std::memory_order_release);
+        if (err == DALI_ERR_QUEUE_FULL) {
+            dali_refresh_cursor_complete(&refresh_cursor_, s_light_count,
+                                         DALI_REFRESH_RETRY);
+            if (!refresh_queue_blocked_) {
+                ESP_LOGD(TAG, "light refresh paused: scheduler queue full");
+                refresh_queue_blocked_ = true;
+            }
+            return;
+        }
+
+        refresh_queue_blocked_ = false;
+        dali_refresh_cursor_complete(&refresh_cursor_, s_light_count,
+                                     DALI_REFRESH_ADVANCE);
+        ESP_LOGW(TAG, "light refresh rejected: target type=%u addr=%u result=%d",
+                 (unsigned)e->target_type, (unsigned)e->target_address, (int)err);
+        return;
     }
+    refresh_queue_blocked_ = false;
 }
 
 void DaliComponent::start_scan()
@@ -1536,7 +1590,10 @@ void DaliComponent::start_scan()
         return;
     }
     if (scan_status_) scan_status_->publish_state("Scanning...");
-    dali_scan_start(this);
+    if (!dali_scan_start(this)) {
+        scan_running_.store(false);
+        if (scan_status_) scan_status_->publish_state("Scan start failed");
+    }
 }
 
 void DaliComponent::start_identify()

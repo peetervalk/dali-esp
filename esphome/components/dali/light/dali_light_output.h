@@ -28,9 +28,13 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   }
 
   // Optional short address to use for QUERY_ACTUAL_LEVEL (boot/refresh/poll).
-  // 0xFF = no query (default).  Must be a short address even if target is a group.
+  // A short-address entity defaults to its own target; group/broadcast entities
+  // require an explicit or scan-derived representative short address.
   void    set_query_address(uint8_t addr) { query_address_ = addr; }
-  uint8_t get_query_address() const override { return query_address_; }
+  uint8_t get_query_address() const override {
+    if (query_address_ != 0xFFu) return query_address_;
+    return target_.type == DALI_ADDR_SHORT ? target_.address : 0xFFu;
+  }
 
   // Bitmask of DALI groups this entity belongs to (bit N = group N).
   // Used by notify_lights to propagate group-addressed dispatch results to

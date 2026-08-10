@@ -2,6 +2,7 @@
 
 #include "esphome/core/component.h"
 #include "esphome/core/preferences.h"
+#include "../../../components/dali/dali_refresh_cursor.h"
 
 #include <atomic>
 #include <cstdint>
@@ -146,6 +147,8 @@ class DaliComponent : public Component {
   uint32_t poll_interval_s_{0};
   uint32_t last_poll_ms_{0};
   bool     boot_query_done_{false};
+  DaliRefreshCursor refresh_cursor_{};
+  bool     refresh_queue_blocked_{false};
 
   // Deferred query after dim/scene (Core 0 only, signalled via module atomic).
   bool     deferred_query_armed_{false};
@@ -175,6 +178,9 @@ class DaliComponent : public Component {
   bool load_group_membership();
   // Write the current runtime table to flash.
   void save_group_membership();
+  // Admit at most one eligible light query per loop; queue pressure retains the
+  // cursor so that the same entry is retried instead of being dropped.
+  void pump_refresh();
 };
 
 }  // namespace dali

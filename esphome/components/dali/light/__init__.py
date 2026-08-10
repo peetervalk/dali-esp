@@ -39,9 +39,9 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(CONF_DALI_ID): cv.use_id(DaliComponent),
             cv.Required(CONF_TARGET_TYPE): cv.enum(TARGET_TYPES, lower=True),
             cv.Optional(CONF_TARGET_ADDRESS, default=0): cv.int_range(min=0, max=63),
-            # Optional short address for QUERY_ACTUAL_LEVEL (boot/refresh/poll).
-            # Useful when target_type is 'group' and a representative gear address
-            # is known.  Omit if state sync via queries is not needed.
+            # Optional QUERY_ACTUAL_LEVEL short-address override. A short target
+            # queries itself by default; group/broadcast targets need a
+            # representative gear address (or scan-derived group membership).
             cv.Optional(CONF_QUERY_ADDRESS): cv.int_range(min=0, max=63),
             # List of DALI group numbers (0-15) this entity belongs to.
             # Only needed for short-address entities so that group-addressed

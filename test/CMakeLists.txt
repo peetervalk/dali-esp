@@ -79,3 +79,7 @@ add_dali_test(test_group_map  test_group_map.c)
 add_executable(test_light_state_mailbox test_light_state_mailbox.cpp)
 target_link_libraries(test_light_state_mailbox PRIVATE unity)
 add_test(NAME test_light_state_mailbox COMMAND test_light_state_mailbox)
+
+add_executable(test_refresh_cursor test_refresh_cursor.cpp)
+target_link_libraries(test_refresh_cursor PRIVATE unity)
+add_test(NAME test_refresh_cursor COMMAND test_refresh_cursor)

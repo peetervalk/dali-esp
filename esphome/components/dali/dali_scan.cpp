@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <new>
 
 extern "C" {
 #include "../../../components/dali/dali_discovery.h"
@@ -396,11 +397,22 @@ static void scan_task(void *arg) {
 // Public entry point — called from ESPHome loop task (Core 0).
 // ---------------------------------------------------------------------------
 
-void dali_scan_start(DaliComponent *component) {
-    ScanTaskArgs *args = new ScanTaskArgs{component};
+bool dali_scan_start(DaliComponent *component) {
+    ScanTaskArgs *args = new (std::nothrow) ScanTaskArgs{component};
+    if (args == nullptr) {
+        ESP_LOGE(TAG, "failed to allocate scan task arguments");
+        return false;
+    }
     // Pin to Core 1 alongside the DALI task so the sync wait doesn't starve
     // the ESPHome main loop on Core 0.
-    xTaskCreatePinnedToCore(scan_task, "dali_scan", 8192, args, 9, nullptr, 1);
+    BaseType_t created =
+        xTaskCreatePinnedToCore(scan_task, "dali_scan", 8192, args, 9, nullptr, 1);
+    if (created != pdPASS) {
+        delete args;
+        ESP_LOGE(TAG, "failed to create scan task");
+        return false;
+    }
+    return true;
 }
 
 }  // namespace dali
