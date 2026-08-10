@@ -146,6 +146,58 @@ void test_build_read_rejects_invalid_short_addresses(void)
     TEST_ASSERT_EQUAL_UINT32(0u, frame.data);
 }
 
+void test_build_control_device_write_sequence_matches_standard_frames(void)
+{
+    static const uint32_t expected_data[7] = {
+        0xC13102u, 0xC13002u, 0x0BFE15u, 0xC12155u,
+        0xC13004u, 0x0BFE15u, 0xC121FFu,
+    };
+    static const bool expected_send_twice[7] = {
+        false, false, true, false, false, true, false,
+    };
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_memory_build_control_device_write_sequence(
+                          5u, 2u, 4u, 0xFFu, &seq));
+    TEST_ASSERT_EQUAL_UINT8(7u, seq.step_count);
+    TEST_ASSERT_NULL(seq.on_complete);
+    TEST_ASSERT_NULL(seq.cb_ctx);
+    for (uint8_t i = 0u; i < 7u; i++) {
+        TEST_ASSERT_EQUAL_HEX32(expected_data[i], seq.steps[i].frame.data);
+        TEST_ASSERT_EQUAL_UINT8(24u, seq.steps[i].frame.bit_length);
+        TEST_ASSERT_FALSE(seq.steps[i].needs_reply);
+        TEST_ASSERT_EQUAL(expected_send_twice[i], seq.steps[i].send_twice);
+        TEST_ASSERT_EQUAL_UINT8(0u, seq.steps[i].retries_left);
+    }
+}
+
+void test_build_control_device_write_sequence_accepts_boundary_values(void)
+{
+    DaliSequence seq;
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_memory_build_control_device_write_sequence(
+                          63u, 255u, 255u, 255u, &seq));
+    TEST_ASSERT_EQUAL_HEX32(0x7FFE15u, seq.steps[2].frame.data);
+}
+
+void test_build_control_device_write_sequence_rejects_invalid_inputs(void)
+{
+    DaliSequence seq;
+    memset(&seq, 0xA5, sizeof(seq));
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_memory_build_control_device_write_sequence(
+                          64u, 1u, 3u, 0u, &seq));
+    TEST_ASSERT_EQUAL_HEX8(0xA5u, ((const uint8_t *)&seq)[0]);
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_memory_build_control_device_write_sequence(
+                          0u, 0u, 3u, 0u, &seq));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_memory_build_control_device_write_sequence(
+                          0u, 1u, 3u, 0u, NULL));
+}
+
 /* ---------------------------------------------------------------------------
  * dali_memory_read_byte — transaction sequence
  * --------------------------------------------------------------------------*/
@@ -453,6 +505,9 @@ int main(void)
     RUN_TEST(test_build_read_matches_build_command);
     RUN_TEST(test_build_read_accepts_max_short_address);
     RUN_TEST(test_build_read_rejects_invalid_short_addresses);
+    RUN_TEST(test_build_control_device_write_sequence_matches_standard_frames);
+    RUN_TEST(test_build_control_device_write_sequence_accepts_boundary_values);
+    RUN_TEST(test_build_control_device_write_sequence_rejects_invalid_inputs);
 
     RUN_TEST(test_read_byte_sends_three_frames);
     RUN_TEST(test_read_byte_first_two_frames_no_reply);

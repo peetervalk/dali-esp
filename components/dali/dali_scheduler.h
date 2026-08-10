@@ -6,7 +6,7 @@
  * Responsibilities:
  *   - Transaction queue (DALI_CMD_QUEUE_SIZE entries)
  *   - Fixed-size transaction sequences for DTR setup and dependent commands
- *   - Send-twice enforcement (DALI_SEND_TWICE_WINDOW_MS)
+ *   - Send-twice expansion into adjacent forward frames
  *   - Reply timeout (DALI_REPLY_TIMEOUT_MS) and retry (retries_left)
  *   - TX/RX handoff with DaliPhy via injected ops
  *   - Optional task-context trace callbacks for diagnostics
@@ -21,7 +21,7 @@
 #include "dali_frame.h"
 #include "dali_phy.h"   /* for DaliPhyRxCallback */
 
-#define DALI_SEQUENCE_MAX_STEPS      4u
+#define DALI_SEQUENCE_MAX_STEPS      7u
 #define DALI_SEQUENCE_NO_FAILED_STEP 0xFFu
 
 /* ---------------------------------------------------------------------------

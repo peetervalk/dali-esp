@@ -1,7 +1,7 @@
 #pragma once
 
 /*
- * dali_memory.h — DALI memory bank access (IEC 62386-102 §9.10)
+ * dali_memory.h — DALI memory bank access (IEC 62386-102/103)
  *
  * Memory read sequence for a single byte:
  *   DTR1 = bank     (special broadcast frame, no reply)
@@ -11,11 +11,17 @@
  * Subsequent READ_MEMORY_LOCATION calls auto-increment DTR0, so a block read
  * needs one DTR1 + one DTR0 setup followed by N READ frames (§9.10.3).
  *
+ * Control-device writes use a separate seven-step sequence builder so the
+ * caller can enqueue the complete DTR/unlock/write workflow atomically.
+ *
  * No hardware dependencies.
  */
 
 #include <stdint.h>
 #include "dali_protocol.h"
+#include "dali_scheduler.h"
+
+#define DALI_MEMORY_CONTROL_DEVICE_WRITE_STEPS 7u
 
 /* ---------------------------------------------------------------------------
  * Bank 0 — mandatory identity bank (IEC 62386-102:2022 §9.10.7)
@@ -92,6 +98,18 @@ DaliFrame dali_memory_build_dtr0_offset(uint8_t offset);
 /* Build READ_MEMORY_LOCATION for short_addr 0..63. Invalid addresses return a
  * zero-length frame; the transaction helpers reject them before bus traffic. */
 DaliFrame dali_memory_build_read(uint8_t short_addr);
+
+/*
+ * Build the Part 103 control-device sequence that unlocks a writable bank and
+ * writes one byte. Bank 0 is read-only; bank must be 1..255. The returned seven
+ * logical steps expand to nine forward frames because each addressed ENABLE
+ * WRITE MEMORY command is marked send-twice. The sequence has no callback.
+ */
+DaliError dali_memory_build_control_device_write_sequence(uint8_t       short_addr,
+                                                          uint8_t       bank,
+                                                          uint8_t       offset,
+                                                          uint8_t       value,
+                                                          DaliSequence *out);
 
 /* ---------------------------------------------------------------------------
  * Read helpers — use the transport to issue frames and collect replies

@@ -4,6 +4,13 @@
 #define BANK0_IDENTITY_INDEX(offset) \
     ((uint8_t)((offset) - DALI_MEMORY_BANK0_IDENTITY_FIRST))
 
+#define CONTROL_DEVICE_ENABLE_WRITE_MEMORY_OPCODE 0x15u
+#define MEMORY_BANK_LOCK_OFFSET                   0x02u
+#define MEMORY_BANK_UNLOCK_VALUE                  0x55u
+
+_Static_assert(DALI_SEQUENCE_MAX_STEPS >= DALI_MEMORY_CONTROL_DEVICE_WRITE_STEPS,
+               "scheduler sequence capacity must fit a control-device memory write");
+
 DaliFrame dali_memory_build_dtr1_bank(uint8_t bank)
 {
     return dali_cmd_dtr1_data(bank);
@@ -23,6 +30,37 @@ DaliFrame dali_memory_build_read(uint8_t short_addr)
     dali_build_command(DALI_ADDR_SHORT, short_addr,
                        DALI_CMD_READ_MEMORY_LOCATION, 0u, &frame);
     return frame;
+}
+
+DaliError dali_memory_build_control_device_write_sequence(uint8_t short_addr,
+                                                          uint8_t bank,
+                                                          uint8_t offset,
+                                                          uint8_t value,
+                                                          DaliSequence *out)
+{
+    if (out == NULL ||
+        short_addr >= DALI_SHORT_ADDRESS_COUNT ||
+        bank == DALI_MEMORY_BANK0) {
+        return DALI_ERR_INVALID;
+    }
+
+    memset(out, 0, sizeof(*out));
+    DaliFrame enable_write = dali_cmd_device(
+        short_addr, CONTROL_DEVICE_ENABLE_WRITE_MEMORY_OPCODE);
+
+    out->steps[0].frame = dali_cmd_control_device_dtr1_data(bank);
+    out->steps[1].frame = dali_cmd_control_device_dtr0_data(MEMORY_BANK_LOCK_OFFSET);
+    out->steps[2].frame = enable_write;
+    out->steps[2].send_twice = true;
+    out->steps[3].frame =
+        dali_cmd_control_device_write_memory_location_no_reply(MEMORY_BANK_UNLOCK_VALUE);
+    out->steps[4].frame = dali_cmd_control_device_dtr0_data(offset);
+    out->steps[5].frame = enable_write;
+    out->steps[5].send_twice = true;
+    out->steps[6].frame =
+        dali_cmd_control_device_write_memory_location_no_reply(value);
+    out->step_count = DALI_MEMORY_CONTROL_DEVICE_WRITE_STEPS;
+    return DALI_OK;
 }
 
 static bool mem_transport_valid(const DaliMemoryTransport *transport)

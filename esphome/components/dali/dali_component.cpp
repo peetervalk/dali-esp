@@ -1073,15 +1073,19 @@ static const IQueryEntry s_iquery_table[] = {
 
 void DaliComponent::execute_command(const std::string &cmd_str)
 {
-    /* Tokenise into up to 5 tokens on whitespace. */
+    /* Tokenise into 5 command tokens plus one overflow sentinel. */
     char buf[96];
+    if (cmd_str.size() >= sizeof(buf)) {
+        set_cmd_result("command too long");
+        return;
+    }
     strncpy(buf, cmd_str.c_str(), sizeof(buf) - 1u);
     buf[sizeof(buf) - 1u] = '\0';
 
-    const char *tok[5] = {};
+    const char *tok[6] = {};
     uint8_t     ntok   = 0u;
     char       *p      = buf;
-    while (*p && ntok < 5u) {
+    while (*p && ntok < 6u) {
         while (*p == ' ') p++;
         if (!*p) break;
         tok[ntok++] = p;
@@ -1340,44 +1344,32 @@ void DaliComponent::execute_command(const std::string &cmd_str)
     }
 
     /* ── Memory write: memwrite a<N> <bank> <offset> <value> ──
-     * Implements the IEC 62386-103 write sequence:
-     *   Seq 1 — unlock bank: DTR1=bank, DTR0=0x02(lock), ENABLE_WRITE(×2), WRITE=0x55
-     *   Seq 2 — write value: DTR0=offset, ENABLE_WRITE(×2), WRITE=value
+     * Implements the IEC 62386-103 write sequence as one scheduler sequence
+     * (seven logical steps, nine forward frames after send-twice expansion):
+     *   unlock bank: DTR1=bank, DTR0=0x02(lock), ENABLE_WRITE(×2), WRITE=0x55
+     *   write value: DTR0=offset, ENABLE_WRITE(×2), WRITE=value
      * ENABLE WRITE MEMORY for a control device is a 24-bit device command (FE 0x15),
      * distinct from the 16-bit gear command (0x81). ── */
-    if (strcmp(verb, "memwrite") == 0 && ntok >= 5u) {
+    if (strcmp(verb, "memwrite") == 0) {
+        if (ntok != 5u) { set_cmd_result("memwrite: needs 4 args"); return; }
         DaliTarget memtgt{};
         if (!parse_target(tok[1], &memtgt) || memtgt.type != DALI_ADDR_SHORT) {
             set_cmd_result("memwrite: use a<N>");
             return;
         }
         unsigned long bankv, offv, valv;
-        if (!parse_uint(tok[2], 0u, 255u, &bankv)) { set_cmd_result("bad bank");   return; }
+        if (!parse_uint(tok[2], 1u, 255u, &bankv)) { set_cmd_result("bank 1-255"); return; }
         if (!parse_uint(tok[3], 0u, 255u, &offv))  { set_cmd_result("bad offset"); return; }
         if (!parse_uint(tok[4], 0u, 255u, &valv))  { set_cmd_result("bad value");  return; }
 
-        uint8_t   addr      = memtgt.address;
-        /* ENABLE WRITE MEMORY as 24-bit device command (103 §11, opcode 0x15). */
-        DaliFrame ewm_frame = dali_cmd_device(addr, 0x15u);
-
-        /* Seq 1: select bank, point at lock byte (0x02), enable write, unlock. */
-        DaliSequence seq1 = {};
-        seq1.steps[0] = { dali_cmd_control_device_dtr1_data((uint8_t)bankv), false, false, 0u };
-        seq1.steps[1] = { dali_cmd_control_device_dtr0_data(0x02u),          false, false, 0u };
-        seq1.steps[2] = { ewm_frame,                                        false, true,  0u };
-        seq1.steps[3] = { dali_cmd_control_device_write_memory_location_no_reply(0x55u), false, false, 0u };
-        seq1.step_count = 4u;
-
-        /* Seq 2: re-point at target offset, enable write, write value. */
-        DaliSequence seq2 = {};
-        seq2.steps[0] = { dali_cmd_control_device_dtr0_data((uint8_t)offv), false, false, 0u };
-        seq2.steps[1] = { ewm_frame,                                        false, true,  0u };
-        seq2.steps[2] = { dali_cmd_control_device_write_memory_location_no_reply((uint8_t)valv), false, false, 0u };
-        seq2.step_count = 3u;
-
-        if (dali_sched_enqueue_sequence(&seq1) != DALI_OK) { set_cmd_result("queue full"); return; }
-        if (dali_sched_enqueue_sequence(&seq2) != DALI_OK) { set_cmd_result("queue full"); return; }
-        set_cmd_result("OK");
+        DaliSequence seq = {};
+        DaliError err = dali_memory_build_control_device_write_sequence(
+            memtgt.address, (uint8_t)bankv, (uint8_t)offv, (uint8_t)valv, &seq);
+        if (err == DALI_OK) {
+            err = dali_sched_enqueue_sequence(&seq);
+        }
+        set_cmd_result(err == DALI_OK ? "OK" :
+                       err == DALI_ERR_QUEUE_FULL ? "queue full" : "err");
         return;
     }
 

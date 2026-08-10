@@ -27,14 +27,14 @@ text:
 
 ## Syntax Rules
 
-Commands are whitespace-separated and lowercase:
+Commands are space-separated and lowercase:
 
 ```text
 <verb> [parameters...]
 ```
 
-The parser accepts up to 5 tokens. There is no quoting, so every parameter must
-be a single token.
+Commands currently use at most 5 tokens and 95 characters. There is no quoting,
+so every parameter must be a single token.
 
 Results are short strings:
 
@@ -399,13 +399,18 @@ Writes one byte to a control-device memory bank.
 | Parameter | Range | Meaning |
 |---|---:|---|
 | `a<N>` | `0-63` | Short address. |
-| `<bank>` | `0-255` | Memory bank number. |
+| `<bank>` | `1-255` | Writable memory bank number. Bank 0 is read-only. |
 | `<offset>` | `0-255` | Memory offset. |
 | `<value>` | `0-255` | Byte to write. |
 
 This helper unlocks the bank by writing `0x55` to lock byte offset `0x02`, then
-writes the requested byte. Treat this as persistent device configuration: read
-the current value first and write only one value at a time.
+writes the requested byte. Its seven logical steps are copied into one scheduler
+queue entry and run contiguously relative to other traffic queued by this
+controller. `OK` means the complete helper sequence was queued; the no-reply
+write does not acknowledge or verify that the device committed the byte, and an
+external bus master is not excluded. Treat this as persistent device
+configuration: read the current value first, write one value at a time, and read
+it back afterward.
 
 Example:
 

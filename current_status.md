@@ -57,7 +57,7 @@ adding broad new device support.
 - All three pinned YAMLs pass `esphome config` with ESPHome 2026.6.2 and
   resolve the published `v1.0.1` external component.
 - The current `dev` worktree compiles and links as a local ESPHome 2026.6.2
-  external component through `_local/dali_diag.yaml`; dispatch schema boundary
+  external component through `_local/dali_diag_local.yaml`; dispatch schema boundary
   and backwards-compatibility cases also pass.
 - The ESPHome protocol wrapper set matches the 19 reusable C source files.
 - The input-device configuration opcode audit is complete against Part 103:2022,
@@ -74,6 +74,11 @@ adding broad new device support.
   location `0x01`. The unsupported duplicate Bank 1 identity model is removed,
   and invalid short addresses are rejected before bus traffic. Independent host
   vectors cover the layout and address boundaries; hardware is not re-verified.
+- ESPHome control-device `memwrite` now queues its seven dependent logical steps
+  as one contiguous scheduler entry, including adjacent expansion of both
+  send-twice commands. Host tests cover nine-frame ordering, queue-boundary
+  admission, and execution before a following local command; the ESPHome build
+  is verified, but the write path has not been re-verified on hardware.
 - Tracked source and documentation files are valid UTF-8; no active mojibake
   cleanup is required.
 
@@ -151,6 +156,9 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
 - The command console includes `raw`, `raw2`, memory, DTR, instance-query, and
   instance-configuration helpers. These do not imply equivalent native CLI or
   hardware validation.
+- Control-device `memwrite` is one scheduler-contiguous sequence and cannot be
+  partially enqueued. Its `OK` result means queued, not device-acknowledged or
+  read-back verified, and it does not exclude another physical bus master.
 - Matching Device/Instance events request an immediate authoritative sensor
   poll; event information is never published as a generic sensor value.
 - Bus monitoring and Find Couplers retain and format the canonical Part 103
@@ -178,6 +186,11 @@ This changes the layouts of `DaliMemoryBank0Identity`, `DaliDiscoveryDeviceInfo`
 and `DaliDiscoveryInventory`. Callers using the removed typed Bank 1 model must
 migrate to generic bank access.
 
+`DALI_SEQUENCE_MAX_STEPS` increases from 4 to 7 so the control-device memory
+write fits in one queue entry. This changes the public `DaliSequence` layout and
+requires all callers to rebuild. In the ESP32 build, the active-sequence and
+16-entry scheduler queue storage increase by 612 bytes in total.
+
 ## Installation State
 
 The three active firmware configurations pin their external component to
@@ -190,7 +203,7 @@ The three active firmware configurations pin their external component to
 | `_local/dali-2k.yaml` | Second-floor site firmware; group 0 lighting, HA console, and Steinel HF 360 II polling |
 
 The entire `_local` directory is deliberately ignored by Git. This checkout also
-contains `_local/dali_diag.yaml`, a compile-test copy of the tracked diagnostic
+contains `_local/dali_diag_local.yaml`, a compile-test copy of the tracked diagnostic
 configuration, and `_local/secrets.yaml`, whose values are explicitly marked
 dummy/compile-only and must not be deployed. Inspect and back up any real site
 files separately; normal `git status` does not show changes under `_local`.
@@ -223,7 +236,6 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   ENABLE DEVICE TYPE sequences, memory access, DT8 multi-byte queries,
   send-twice commands, discovery, and commissioning.
 - Make scans exclusive or explicitly pause/reject normal polling and HA traffic.
-  Fix the split ESPHome `memwrite` sequence so unrelated traffic cannot alter DTR1.
 - Handle every enqueue result. Never report `OK` for a dropped command; pace full
   refresh, retry missed entries, and expose queue depth/high-water/drop diagnostics.
 - Fix the cross-task light-state mailbox so on/off and level are published as one
