@@ -315,6 +315,45 @@ void test_command_lookup_dali2_input_value(void)
     TEST_ASSERT_TRUE(cmd->implemented);
 }
 
+void test_command_lookup_dali2_generic_instance_queries(void)
+{
+    typedef struct {
+        DaliCommandId id;
+        uint8_t       opcode;
+    } QueryMetadataVector;
+
+    static const QueryMetadataVector vectors[] = {
+        { DALI_CMD_QUERY_INSTANCE_ERROR,              0x82u },
+        { DALI_CMD_QUERY_EVENT_PRIORITY,              0x84u },
+        { DALI_CMD_QUERY_PRIMARY_INSTANCE_GROUP,      0x88u },
+        { DALI_CMD_QUERY_INSTANCE_GROUP_1,            0x89u },
+        { DALI_CMD_QUERY_INSTANCE_GROUP_2,            0x8Au },
+        { DALI_CMD_QUERY_EVENT_SCHEME,                0x8Bu },
+        { DALI_CMD_QUERY_EVENT_FILTER_0_7,            0x90u },
+        { DALI_CMD_QUERY_EVENT_FILTER_8_15,           0x91u },
+        { DALI_CMD_QUERY_EVENT_FILTER_16_23,          0x92u },
+        { DALI_CMD_QUERY_INSTANCE_CONFIGURATION,      0x93u },
+        { DALI_CMD_QUERY_AVAILABLE_INSTANCE_TYPES,    0x94u },
+    };
+
+    for (uint8_t i = 0u; i < (uint8_t)(sizeof(vectors) / sizeof(vectors[0])); i++) {
+        const DaliCommandInfo *by_id = dali_command_lookup(vectors[i].id);
+        const DaliCommandInfo *by_opcode =
+            dali_command_lookup_opcode(DALI_CMD_FRAME_24BIT_INST, vectors[i].opcode);
+
+        TEST_ASSERT_NOT_NULL(by_id);
+        TEST_ASSERT_EQUAL_UINT8(vectors[i].opcode, by_id->opcode_first);
+        TEST_ASSERT_EQUAL_UINT8(vectors[i].opcode, by_id->opcode_last);
+        TEST_ASSERT_EQUAL(DALI_CMD_FRAME_24BIT_INST, by_id->frame_kind);
+        TEST_ASSERT_EQUAL(DALI_RESP_UINT8, by_id->response_kind);
+        TEST_ASSERT_FALSE(by_id->send_twice);
+        TEST_ASSERT_TRUE(by_id->implemented);
+
+        TEST_ASSERT_NOT_NULL(by_opcode);
+        TEST_ASSERT_EQUAL(vectors[i].id, by_opcode->id);
+    }
+}
+
 void test_command_lookup_special_commands_are_builder_implemented(void)
 {
     const DaliCommandId special_commands[] = {
@@ -992,6 +1031,7 @@ int main(void)
     RUN_TEST(test_command_lookup_addressed_queries_are_implemented);
     RUN_TEST(test_command_lookup_config_commands_are_implemented);
     RUN_TEST(test_command_lookup_dali2_input_value);
+    RUN_TEST(test_command_lookup_dali2_generic_instance_queries);
     RUN_TEST(test_command_lookup_special_commands_are_builder_implemented);
     RUN_TEST(test_command_metadata_table_covers_all_standard_ids);
     RUN_TEST(test_command_lookup_keeps_vendor_specific_opcodes_out_of_standard_table);

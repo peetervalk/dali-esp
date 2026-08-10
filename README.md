@@ -100,7 +100,7 @@ sensor:
     name: "Hallway Occupancy"
     address: 0
     instance: 1
-    poll_interval: 5          # DT303 raw state: 0 / 85 / 170 / 255
+    poll_interval: 5          # Part 303/type 3 raw state: 0 / 85 / 170 / 255
 
 # Optional: free-text DALI console for diagnostics from HA
 text:

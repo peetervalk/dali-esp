@@ -77,6 +77,21 @@ DaliError dali_input_build_query_resolution(uint8_t addr, uint8_t instance, Dali
 DaliError dali_input_build_query_instance_error(uint8_t addr, uint8_t instance, DaliFrame *out);
 DaliError dali_input_build_query_instance_status(uint8_t addr, uint8_t instance, DaliFrame *out);
 DaliError dali_input_build_query_instance_enabled(uint8_t addr, uint8_t instance, DaliFrame *out);
+DaliError dali_input_build_query_event_priority(uint8_t addr, uint8_t instance, DaliFrame *out);
+DaliError dali_input_build_query_primary_instance_group(uint8_t addr, uint8_t instance, DaliFrame *out);
+DaliError dali_input_build_query_instance_group1(uint8_t addr, uint8_t instance, DaliFrame *out);
+DaliError dali_input_build_query_instance_group2(uint8_t addr, uint8_t instance, DaliFrame *out);
+DaliError dali_input_build_query_event_scheme(uint8_t addr, uint8_t instance, DaliFrame *out);
+DaliError dali_input_build_query_event_filter_zero(uint8_t addr, uint8_t instance, DaliFrame *out);
+DaliError dali_input_build_query_event_filter_one(uint8_t addr, uint8_t instance, DaliFrame *out);
+DaliError dali_input_build_query_event_filter_two(uint8_t addr, uint8_t instance, DaliFrame *out);
+/* DTR0 selects the configuration index. DTR2:DTR1 holds the selected 16-bit
+ * value; the backward byte repeats its least-significant byte. */
+DaliError dali_input_build_query_instance_configuration(uint8_t addr, uint8_t instance, DaliFrame *out);
+
+/* The backward byte and DTR2:DTR1:DTR0 together form the 32-bit available-type
+ * bitmap. Reading the complete value requires an atomic follow-up DTR read. */
+DaliError dali_input_build_query_available_instance_types(uint8_t addr, uint8_t instance, DaliFrame *out);
 
 DaliError dali_input_classify_instance(uint8_t instance,
                                        uint8_t type,

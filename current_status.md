@@ -60,6 +60,11 @@ adding broad new device support.
   external component through `_local/dali_diag.yaml`; dispatch schema boundary
   and backwards-compatibility cases also pass.
 - The ESPHome protocol wrapper set matches the 19 reusable C source files.
+- The input-device configuration opcode audit is complete against Part 103:2022,
+  Part 301:2017, and the Part 303/304 2017+AMD1:2024 command tables. Incorrect
+  generic timer aliases and non-standard Part 301/304 commands have been removed
+  from the supported surface; independent golden vectors cover the corrected
+  command frames.
 - Tracked source and documentation files are valid UTF-8; no active mojibake
   cleanup is required.
 
@@ -96,8 +101,13 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
   and protocol layers.
 - Part 103 events are decoded into canonical source fields, reject command and
   reserved frames, preserve all ten event-information bits, and use the sparse
-  DT301 event values. Independent vectors cover all five normal source schemes;
-  additional standard-derived cases cover power notifications and malformed data.
+  Part 301/type 1 event values. Independent vectors cover all five normal source
+  schemes; additional standard-derived cases cover power notifications and
+  malformed data.
+- Part 103 generic instance configuration plus Part 301/type 1, Part 303/type 3,
+  and Part 304/type 4 configuration/query builders have an independently audited
+  opcode surface. This is software-level evidence only; configuration writes have
+  not yet completed hardware read/write/read-back validation.
 - DT6 and DT8 builder APIs exist and are host-tested, but are not yet fully
   surfaced through the native CLI or comprehensively hardware-verified.
 - DT1 and other specialized/legacy device types remain intentionally unimplemented.
@@ -135,6 +145,15 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
 - ESPHome exposes discovery, not a guarded commissioning workflow.
 - `esphome/dali_esphome.h` is an unused legacy placeholder.
 
+### Next-release input-configuration migration
+
+The corrected input-configuration surface intentionally removes invalid generic
+timer/hysteresis/deadtime aliases and non-standard Part 301/304 APIs. C callers
+must migrate to the explicit `pb`, `occ`, and `light` type-specific builders.
+ESPHome callers must use the `pb-*` and `light-*` names; the established Part 303
+occupancy names remain available. This is a source/API migration, not evidence of
+hardware write verification.
+
 ## Installation State
 
 The three active firmware configurations pin their external component to
@@ -170,10 +189,6 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 
 ### P0 — Protocol correctness and conformance
 
-- Audit every `dali_input_config` opcode against the applicable standard edition.
-  Remove or correct generic and DT301 setters/queries that collide with other
-  defined commands. Do not perform further configuration writes until this audit
-  is complete.
 - Update memory identity handling to the applicable DALI-2 Bank 0 layout, remove
   the unsupported duplicate Bank 1 identity model, and validate short addresses.
 - Correct multi-device-type discovery sentinel handling and add tests for
@@ -254,7 +269,8 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 
 - Map DT8 to Home Assistant colour-temperature, XY, and appropriate RGB/RGBWAF
   light traits after native CLI and hardware validation.
-- Add typed DT303 occupancy/binary-sensor and DT304 illuminance profiles.
+- Add typed Part 303/type 3 occupancy/binary-sensor and Part 304/type 4
+  illuminance profiles.
 - Add guarded commissioning to ESPHome only after shared commissioning is robust;
   otherwise retain commissioning as a native diagnostic workflow.
 - Improve scene/fade UX, targeted deferred refresh, and post-transition final
@@ -270,8 +286,8 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 - The controller has no proven collision-detection/arbitration strategy. Existing
   direct-control couplers work on the installed buses, but simultaneous
   transmissions remain a risk.
-- Treat input-device configuration writes as experimental until the opcode audit
-  and read/write/read-back validation are complete.
+- Treat input-device configuration writes as experimental until real-bus
+  read/write/read-back validation is complete.
 - Use COM6 only for hardware work. If COM6 is unavailable, stop.
 - Do not use GPIO16 or GPIO17 on the WROVER-E target.
 

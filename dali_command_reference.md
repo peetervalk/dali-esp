@@ -4,7 +4,7 @@ This is the project command/protocol reference for the native CLI, ESPHome
 command console, and reusable protocol builders. It is not a replacement for
 IEC 62386.
 
-**Last reviewed:** 2026-06-26
+**Last reviewed:** 2026-08-10
 
 ## Current Implementation Status
 
@@ -15,15 +15,24 @@ IEC 62386.
 - Commissioning, memory-bank reads, DT6 helpers, DT8 helpers, input-device
   queries, input polling, and input-device configuration frame builders are
   implemented.
-- `dali_input_config` SET builders exist, but real-bus writes still require
-  cautious validation. Read the current value first, write one parameter, then
-  read back before broader use.
+- The input-configuration opcode surface has been independently audited against
+  the current Part 103, 301, 303, and 304 command tables. Real-bus configuration
+  writes remain unverified: read the current value first, write one parameter,
+  then read it back before broader use.
 - ESPHome command console supports the practical subset needed from HA:
   `off`, `max`, `min`, `level`, `query`, `config`, `iquery`, and `iconfig`.
 - Active code gaps and cleanup work live in `current_status.md`.
 
 ## Sources
 
+- IEC 62386-103:2022 publication record:
+  https://webstore.iec.ch/en/publication/67776
+- IEC 62386-301:2017 publication record:
+  https://webstore.iec.ch/en/publication/28605
+- IEC 62386-303:2017+AMD1:2024 consolidated publication record:
+  https://webstore.iec.ch/en/publication/94036
+- IEC 62386-304:2017+AMD1:2024 consolidated publication record:
+  https://webstore.iec.ch/en/publication/94037
 - Microchip DALI command table:
   https://onlinedocs.microchip.com/oxy/GUID-0CDBB4BA-5972-4F58-98B2-3F0408F3E10B-en-US-1/GUID-DA5EBBA5-6A56-4135-AF78-FB1F780EF475.html
 - Microchip TB3200:
@@ -298,19 +307,128 @@ helpers.
 
 ## DALI-2 Input Device Commands
 
-Generic query builders live in `dali_input_device`; configuration/query builders
-for IEC 62386-103 plus DT301/DT303/DT304 live in `dali_input_config`.
+Input devices use instance types rather than control-gear DT numbers. Part 301
+defines push-button instance type 1, Part 303 defines occupancy instance type 3,
+and Part 304 defines light-sensor instance type 4.
 
-| Instance byte | Opcode | Name | Status |
+Generic Part 103 queries live in `dali_input_device`; common configuration and
+type-specific Part 301/303/304 builders live in `dali_input_config`. Configuration
+instructions marked “twice” require two identical addressed frames inside the
+send-twice window. A DTR load is a separate 24-bit special command and is not
+itself duplicated.
+
+### Generic Part 103 instance configuration
+
+| Opcode | Command | DTR requirement | Sends | ESPHome `iconfig` name |
+|---:|---|---|---:|---|
+| `0x61` | SET EVENT PRIORITY | DTR0 | twice | `set-event-priority` |
+| `0x62` | ENABLE INSTANCE | none | twice | `enable-instance` |
+| `0x63` | DISABLE INSTANCE | none | twice | `disable-instance` |
+| `0x64` | SET PRIMARY INSTANCE GROUP | DTR0 | twice | `set-primary-group` |
+| `0x65` | SET INSTANCE GROUP 1 | DTR0 | twice | `set-instance-group-1` |
+| `0x66` | SET INSTANCE GROUP 2 | DTR0 | twice | `set-instance-group-2` |
+| `0x67` | SET EVENT SCHEME | DTR0 | twice | `set-event-scheme` |
+| `0x68` | SET EVENT FILTER | DTR2:DTR1:DTR0 | twice | Not exposed; shared builder only |
+| `0x69` | SET INSTANCE TYPE | DTR0 | twice | Not exposed; Part 103:2022 shared builder |
+| `0x6A` | SET INSTANCE CONFIGURATION | DTR0 and DTR2:DTR1 | twice | Not exposed; Part 103:2022 shared builder |
+
+Opcodes `0x6E`, `0x6F`, and `0x70` are reserved in Part 103:2022. They are not
+generic report-timer, hysteresis, or deadtime setters.
+
+### Generic Part 103 instance queries
+
+These are single-send commands and expect an 8-bit backward-frame reply.
+
+| Instance byte | Opcode | Query | ESPHome `iquery` name |
 |---:|---:|---|---|
-| `0xFE` | `0x35` | QUERY NUMBER OF INSTANCES | Implemented |
-| instance | `0x80` | QUERY INSTANCE TYPE | Implemented |
-| instance | `0x81` | QUERY RESOLUTION | Implemented |
-| instance | `0x82` | QUERY INSTANCE ERROR | Implemented |
-| instance | `0x83` | QUERY INSTANCE STATUS | Implemented |
-| instance | `0x86` | QUERY INSTANCE ENABLED | Implemented |
-| instance | `0x8C` | QUERY INPUT VALUE | Implemented |
-| instance | `0x8D` | QUERY INPUT VALUE LATCH | Implemented |
+| `0xFE` | `0x35` | QUERY NUMBER OF INSTANCES | Discovery/device path |
+| instance | `0x80` | QUERY INSTANCE TYPE | `instance-type` |
+| instance | `0x81` | QUERY RESOLUTION | `resolution` |
+| instance | `0x82` | QUERY INSTANCE ERROR | `instance-error` |
+| instance | `0x83` | QUERY INSTANCE STATUS | `instance-status` |
+| instance | `0x84` | QUERY EVENT PRIORITY | `event-priority` |
+| instance | `0x86` | QUERY INSTANCE ENABLED | `instance-enabled` |
+| instance | `0x88` | QUERY PRIMARY INSTANCE GROUP | `primary-group` |
+| instance | `0x89` | QUERY INSTANCE GROUP 1 | `instance-group-1` |
+| instance | `0x8A` | QUERY INSTANCE GROUP 2 | `instance-group-2` |
+| instance | `0x8B` | QUERY EVENT SCHEME | `event-scheme` |
+| instance | `0x8C` | QUERY INPUT VALUE | `input-value` |
+| instance | `0x8D` | QUERY INPUT VALUE LATCH | `input-value-latch` |
+| feature selector | `0x8E` | QUERY FEATURE TYPE | Not implemented; feature-address selector required |
+| feature selector | `0x8F` | QUERY NEXT FEATURE TYPE | Not implemented; feature-address selector required |
+| instance | `0x90` | QUERY EVENT FILTER 0-7 | `event-filter-0` |
+| instance | `0x91` | QUERY EVENT FILTER 8-15 | `event-filter-1` |
+| instance | `0x92` | QUERY EVENT FILTER 16-23 | `event-filter-2` |
+| instance | `0x93` | QUERY INSTANCE CONFIGURATION | Shared frame builder; DTR0 selects the value and DTR2:DTR1 hold the 16-bit result |
+| instance | `0x94` | QUERY AVAILABLE INSTANCE TYPES | Shared frame builder; DTR2:DTR1:DTR0 complete the 32-bit result |
+
+The former generic `hysteresis`, `deadtime-gen`, and report-timer aliases at
+`0x82`/`0x83`/`0x84` were incorrect. Those opcodes have only the query meanings
+shown above.
+
+Feature queries are deliberately not exposed until the shared addressing layer
+can encode Part 103 feature selectors. The `0x93` and `0x94` builders construct
+only the addressed query frame; a complete typed operation must keep the query
+and its dependent DTR reads atomic.
+
+### Part 301 push button, instance type 1
+
+| Opcode | Command | DTR | Sends/reply | ESPHome name |
+|---:|---|---|---|---|
+| `0x00` | SET SHORT TIMER | DTR0 | twice | `pb-set-short-timer` |
+| `0x01` | SET DOUBLE TIMER | DTR0 | twice | `pb-set-double-timer` |
+| `0x02` | SET REPEAT TIMER | DTR0 | twice | `pb-set-repeat-timer` |
+| `0x03` | SET STUCK TIMER | DTR0 | twice | `pb-set-stuck-timer` |
+| `0x0A` | QUERY SHORT TIMER | none | reply | `pb-short-timer` |
+| `0x0B` | QUERY SHORT TIMER MIN | none | reply | `pb-short-timer-min` |
+| `0x0C` | QUERY DOUBLE TIMER | none | reply | `pb-double-timer` |
+| `0x0D` | QUERY DOUBLE TIMER MIN | none | reply | `pb-double-timer-min` |
+| `0x0E` | QUERY REPEAT TIMER | none | reply | `pb-repeat-timer` |
+| `0x0F` | QUERY STUCK TIMER | none | reply | `pb-stuck-timer` |
+
+Short, double, and repeat timer values use 20 ms units; the stuck timer uses
+1 s units. The old `0xE0..0xE4` push-button builders were non-standard and have
+been removed.
+
+### Part 303 occupancy sensor, instance type 3
+
+| Opcode | Command | DTR | Sends/reply | ESPHome name |
+|---:|---|---|---|---|
+| `0x20` | CATCH MOVEMENT | none | once | `catch-movement` |
+| `0x21` | SET HOLD TIMER | DTR0 | twice | `set-hold-timer` |
+| `0x22` | SET REPORT TIMER | DTR0 | twice | `set-report-timer` |
+| `0x23` | SET DEADTIME TIMER | DTR0 | twice | `set-deadtime` |
+| `0x24` | CANCEL HOLD TIMER | none | once | `cancel-hold-timer` |
+| `0x25` | SET DETECTION RANGE | DTR0 | twice | `set-detection-range` |
+| `0x26` | SET SENSITIVITY | DTR0 | twice | `set-sensitivity` |
+| `0x29` | QUERY INSTANCE CAPABILITIES | none | reply | `occupancy-capabilities` |
+| `0x2A` | QUERY DETECTION RANGE | none | reply | `detection-range` |
+| `0x2B` | QUERY SENSITIVITY | none | reply | `sensitivity` |
+| `0x2C` | QUERY DEADTIME TIMER | none | reply | `deadtime` |
+| `0x2D` | QUERY HOLD TIMER | none | reply | `hold-timer` |
+| `0x2E` | QUERY REPORT TIMER | none | reply | `report-timer` |
+| `0x2F` | QUERY CATCHING | none | reply | `catching` |
+
+Hold, report, and deadtime timer values use 10 s, 1 s, and 50 ms units
+respectively. Opcodes `0x25`, `0x26`, and `0x29..0x2B` are the
+IEC 62386-303:2017/AMD1:2024 additions and can be capability-dependent.
+
+### Part 304 light sensor, instance type 4
+
+| Opcode | Command | DTR | Sends/reply | ESPHome name |
+|---:|---|---|---|---|
+| `0x30` | SET REPORT TIMER | DTR0 | twice | `light-set-report-timer` |
+| `0x31` | SET HYSTERESIS | DTR0 | twice | `light-set-hysteresis` |
+| `0x32` | SET DEADTIME TIMER | DTR0 | twice | `light-set-deadtime` |
+| `0x33` | SET HYSTERESIS MIN | DTR0 | twice | `light-set-hysteresis-min` |
+| `0x3C` | QUERY HYSTERESIS MIN | none | reply | `light-hysteresis-min` |
+| `0x3D` | QUERY DEADTIME TIMER | none | reply | `light-deadtime` |
+| `0x3E` | QUERY REPORT TIMER | none | reply | `light-report-timer` |
+| `0x3F` | QUERY HYSTERESIS | none | reply | `light-hysteresis` |
+
+Report and deadtime values use 1 s and 50 ms units. Hysteresis is a percentage
+in the range `0..25`; `hysteresisMin` is the absolute minimum band height in
+input-value units. It is not a generic “deadband”.
 
 ESPHome `iquery` names:
 
@@ -318,33 +436,66 @@ ESPHome `iquery` names:
 |---|---|
 | `instance-type` | Input instance type |
 | `resolution` | Bit resolution |
+| `instance-error` | Part/type-specific instance error byte |
 | `instance-enabled` | Whether the instance is active |
 | `instance-status` | Status byte |
-| `hysteresis` | Generic input hysteresis |
-| `deadtime-gen` | Generic deadtime timer |
-| `hold-timer` | DT303 occupancy hold timer (`0x2D`) |
-| `report-timer` | DT303 occupancy report timer (`0x2E`) |
-| `deadtime` | DT303 occupancy deadtime (`0x2C`) |
+| `event-priority` | Configured event priority |
+| `primary-group` | Primary instance-group assignment |
+| `instance-group-1`, `instance-group-2` | Additional instance-group assignments |
+| `event-scheme` | Configured Part 103 event source scheme |
+| `event-filter-0`, `event-filter-1`, `event-filter-2` | Event-filter bytes 0-7, 8-15, and 16-23 |
+| `input-value`, `input-value-latch` | Current and latched input values |
+| `pb-short-timer`, `pb-short-timer-min` | Part 301 short timer and physical minimum |
+| `pb-double-timer`, `pb-double-timer-min` | Part 301 double timer and physical minimum |
+| `pb-repeat-timer`, `pb-stuck-timer` | Part 301 repeat and stuck timers |
+| `hold-timer`, `report-timer`, `deadtime` | Part 303 occupancy timers (`0x2D`, `0x2E`, `0x2C`) |
+| `occupancy-capabilities` | Part 303 occupancy capability byte |
+| `detection-range`, `sensitivity`, `catching` | Part 303 range, sensitivity, and catch state |
+| `light-report-timer`, `light-deadtime` | Part 304 light-sensor timers |
+| `light-hysteresis`, `light-hysteresis-min` | Part 304 light-sensor hysteresis values |
 
 ESPHome `iconfig` names:
 
 > **Warning — hardware validation incomplete.**
-> `iconfig` SET commands are implemented and reviewed against DALI-2 Part 103 but have not
-> been round-trip validated on hardware for every parameter. A wrong encoding or instance
-> address silently does nothing or corrupts an adjacent parameter. Always follow the sequence:
-> read with `iquery` first, write one parameter with `iconfig`, then verify with `iquery`
-> again. Do not write multiple parameters in a single session until each is individually
-> confirmed.
+> The opcode mapping has been independently audited, but these configuration
+> writes have not been round-trip validated on the project hardware. Read with
+> `iquery`, change one parameter, and read it back before another write. Do not
+> treat successful queueing as proof that the device accepted the value.
 
-| Name | Meaning |
-|---|---|
-| `enable-instance` | Enable the selected instance |
-| `disable-instance` | Disable the selected instance |
-| `set-hysteresis` | Set generic hysteresis from DTR0 |
-| `set-deadtime-gen` | Set generic deadtime from DTR0 |
-| `set-hold-timer` | Set DT303 hold timer from control-device DTR0 (`0x21`) |
-| `set-report-timer` | Set DT303 report timer from control-device DTR0 (`0x22`) |
-| `set-deadtime` | Set DT303 deadtime from control-device DTR0 (`0x23`) |
+| Name | Value | Meaning |
+|---|---|---|
+| `enable-instance` | none | Enable the selected instance |
+| `disable-instance` | none | Disable the selected instance |
+| `set-event-priority` | DTR0 | Set generic Part 103 event priority |
+| `set-primary-group` | DTR0 | Set the primary instance group |
+| `set-instance-group-1` | DTR0 | Set additional instance group 1 |
+| `set-instance-group-2` | DTR0 | Set additional instance group 2 |
+| `set-event-scheme` | DTR0 | Set the Part 103 event source scheme |
+| `pb-set-short-timer` | DTR0 | Set the Part 301 short timer |
+| `pb-set-double-timer` | DTR0 | Set the Part 301 double timer |
+| `pb-set-repeat-timer` | DTR0 | Set the Part 301 repeat timer |
+| `pb-set-stuck-timer` | DTR0 | Set the Part 301 stuck timer |
+| `catch-movement` | none | Start Part 303 movement catching; single send |
+| `cancel-hold-timer` | none | Cancel the Part 303 hold timer; single send |
+| `set-hold-timer` | DTR0 | Set the Part 303 hold timer (`0x21`) |
+| `set-report-timer` | DTR0 | Set the Part 303 report timer (`0x22`) |
+| `set-deadtime` | DTR0 | Set the Part 303 deadtime (`0x23`) |
+| `set-detection-range` | DTR0 | Set Part 303 detection range if supported |
+| `set-sensitivity` | DTR0 | Set Part 303 sensitivity if supported |
+| `light-set-report-timer` | DTR0 | Set the Part 304 report timer |
+| `light-set-hysteresis` | DTR0 | Set Part 304 hysteresis |
+| `light-set-deadtime` | DTR0 | Set the Part 304 deadtime timer |
+| `light-set-hysteresis-min` | DTR0 | Set the Part 304 absolute hysteresis minimum |
+
+For Part 301 timer writes, query `pb-short-timer-min` and
+`pb-double-timer-min` first. A device may reject values below its reported
+physical minimum even when they are inside the console's standard-wide range.
+
+The next release intentionally removes the incorrect generic timer/hysteresis/
+deadtime and non-standard Part 301/304 C builders and console aliases. Migrate
+C callers to the explicit `pb`, `occ`, and `light` type-specific APIs. ESPHome
+uses explicit `pb-*` and `light-*` names while retaining the established Part 303
+occupancy names shown above.
 
 ## Vendor-Specific Instance Queries
 
@@ -385,7 +536,7 @@ it from discovery/configuration rather than infer it from the event value.
 Power notifications use the reserved Part 103 prefix and are represented as a
 separate frame kind.
 
-DT301 push-button event information uses sparse standard values: released
+Part 301/type 1 push-button event information uses sparse standard values: released
 `0x000`, pressed `0x001`, short press `0x002`, double press `0x005`, long-press
 start/repeat/stop `0x009`/`0x00B`/`0x00C`, free `0x00E`, and stuck `0x00F`.
 

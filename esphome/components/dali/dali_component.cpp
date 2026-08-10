@@ -958,41 +958,117 @@ static const ConfigEntry s_config_table[] = {
     { "save-persistent",      DALI_CMD_SAVE_PERSISTENT_VARIABLES,      false },
 };
 
-/* Lookup table for 24-bit instance config commands (send_twice; DTR0 optional). */
+/* Lookup table for 24-bit instance configuration and control commands.
+ *
+ * Type-specific names are deliberately explicit except for the three Part 303
+ * timer names retained for backwards compatibility with the installed site.
+ * DTR0 ranges come from the applicable Part 103/3xx command definition. */
 typedef DaliFrame (*IConfigBuilder)(uint8_t addr, uint8_t instance);
-struct IConfigEntry { const char *name; IConfigBuilder builder; bool needs_dtr0; };
-static const IConfigEntry s_iconfig_table[] = {
-    { "set-hold-timer",    dali_input_occ_build_set_hold_timer,   true  },
-    { "set-deadtime",      dali_input_occ_build_set_deadtime,     true  },
-    { "set-hysteresis",    dali_input_build_set_hysteresis,       true  },
-    { "set-report-timer",  dali_input_occ_build_set_report_timer, true  },
-    { "set-deadtime-gen",  dali_input_build_set_deadtime_timer,   true  },
-    { "enable-instance",   dali_input_build_enable_instance,      false },
-    { "disable-instance",  dali_input_build_disable_instance,     false },
+enum IConfigParamKind : uint8_t {
+    ICONFIG_NO_PARAM = 0,
+    ICONFIG_DTR0,
 };
+struct IConfigEntry {
+    const char       *name;
+    IConfigBuilder    builder;
+    IConfigParamKind  param_kind;
+    uint8_t           min_value;
+    uint8_t           max_value;
+    bool              allow_zero;
+    bool              allow_mask;
+    bool              send_twice;
+};
+static const IConfigEntry s_iconfig_table[] = {
+    { "set-event-priority",   dali_input_build_set_event_priority,         ICONFIG_DTR0,     2u,   5u, false, false, true  },
+    { "set-primary-group",    dali_input_build_set_primary_group,          ICONFIG_DTR0,     0u,  31u, false, true,  true  },
+    { "set-instance-group-1", dali_input_build_set_instance_group1,        ICONFIG_DTR0,     0u,  31u, false, true,  true  },
+    { "set-instance-group-2", dali_input_build_set_instance_group2,        ICONFIG_DTR0,     0u,  31u, false, true,  true  },
+    { "set-event-scheme",     dali_input_build_set_event_scheme,           ICONFIG_DTR0,     0u,   4u, false, false, true  },
+    { "enable-instance",      dali_input_build_enable_instance,            ICONFIG_NO_PARAM, 0u,   0u, false, false, true  },
+    { "disable-instance",     dali_input_build_disable_instance,           ICONFIG_NO_PARAM, 0u,   0u, false, false, true  },
+
+    { "pb-set-short-timer",   dali_input_pb_build_set_short_timer,         ICONFIG_DTR0,    10u, 255u, false, false, true  },
+    { "pb-set-double-timer",  dali_input_pb_build_set_double_timer,        ICONFIG_DTR0,    10u, 100u, true,  false, true  },
+    { "pb-set-repeat-timer",  dali_input_pb_build_set_repeat_timer,        ICONFIG_DTR0,     5u, 100u, false, false, true  },
+    { "pb-set-stuck-timer",   dali_input_pb_build_set_stuck_timer,         ICONFIG_DTR0,     5u, 255u, false, false, true  },
+
+    { "catch-movement",       dali_input_occ_build_catch_movement,         ICONFIG_NO_PARAM, 0u,   0u, false, false, false },
+    { "set-hold-timer",       dali_input_occ_build_set_hold_timer,         ICONFIG_DTR0,     0u, 254u, false, false, true  },
+    { "set-report-timer",     dali_input_occ_build_set_report_timer,       ICONFIG_DTR0,     0u, 255u, false, false, true  },
+    { "set-deadtime",         dali_input_occ_build_set_deadtime,           ICONFIG_DTR0,     0u, 255u, false, false, true  },
+    { "cancel-hold-timer",    dali_input_occ_build_cancel_hold_timer,      ICONFIG_NO_PARAM, 0u,   0u, false, false, false },
+    { "set-detection-range",  dali_input_occ_build_set_detection_range,    ICONFIG_DTR0,     0u, 100u, false, false, true  },
+    { "set-sensitivity",      dali_input_occ_build_set_sensitivity,        ICONFIG_DTR0,     0u, 100u, false, false, true  },
+
+    { "light-set-report-timer",   dali_input_light_build_set_report_timer,   ICONFIG_DTR0, 0u, 255u, false, false, true },
+    { "light-set-hysteresis",     dali_input_light_build_set_hysteresis,     ICONFIG_DTR0, 0u,  25u, false, false, true },
+    { "light-set-deadtime",       dali_input_light_build_set_deadtime,       ICONFIG_DTR0, 0u, 255u, false, false, true },
+    { "light-set-hysteresis-min", dali_input_light_build_set_hysteresis_min, ICONFIG_DTR0, 0u, 255u, false, false, true },
+};
+
+static bool iconfig_value_valid(const IConfigEntry &entry, unsigned long value)
+{
+    if (value >= entry.min_value && value <= entry.max_value) return true;
+    if (entry.allow_zero && value == 0u) return true;
+    if (entry.allow_mask && value == 0xFFu) return true;
+    return false;
+}
 
 /* Adapters: dali_input_device.h uses DaliError+out-ptr; iquery table needs DaliFrame return. */
 static DaliFrame s_qry_instance_type(uint8_t a, uint8_t i)    { DaliFrame f={}; dali_input_build_query_instance_type(a,i,&f);    return f; }
 static DaliFrame s_qry_resolution(uint8_t a, uint8_t i)       { DaliFrame f={}; dali_input_build_query_resolution(a,i,&f);        return f; }
+static DaliFrame s_qry_instance_error(uint8_t a, uint8_t i)   { DaliFrame f={}; dali_input_build_query_instance_error(a,i,&f);   return f; }
 static DaliFrame s_qry_instance_status(uint8_t a, uint8_t i)  { DaliFrame f={}; dali_input_build_query_instance_status(a,i,&f);   return f; }
 static DaliFrame s_qry_instance_enabled(uint8_t a, uint8_t i) { DaliFrame f={}; dali_input_build_query_instance_enabled(a,i,&f);  return f; }
+static DaliFrame s_qry_event_priority(uint8_t a, uint8_t i)   { DaliFrame f={}; dali_input_build_query_event_priority(a,i,&f);   return f; }
+static DaliFrame s_qry_primary_group(uint8_t a, uint8_t i)    { DaliFrame f={}; dali_input_build_query_primary_instance_group(a,i,&f); return f; }
+static DaliFrame s_qry_instance_group1(uint8_t a, uint8_t i)  { DaliFrame f={}; dali_input_build_query_instance_group1(a,i,&f); return f; }
+static DaliFrame s_qry_instance_group2(uint8_t a, uint8_t i)  { DaliFrame f={}; dali_input_build_query_instance_group2(a,i,&f); return f; }
+static DaliFrame s_qry_event_scheme(uint8_t a, uint8_t i)     { DaliFrame f={}; dali_input_build_query_event_scheme(a,i,&f);     return f; }
+static DaliFrame s_qry_event_filter0(uint8_t a, uint8_t i)    { DaliFrame f={}; dali_input_build_query_event_filter_zero(a,i,&f); return f; }
+static DaliFrame s_qry_event_filter1(uint8_t a, uint8_t i)    { DaliFrame f={}; dali_input_build_query_event_filter_one(a,i,&f); return f; }
+static DaliFrame s_qry_event_filter2(uint8_t a, uint8_t i)    { DaliFrame f={}; dali_input_build_query_event_filter_two(a,i,&f); return f; }
 static DaliFrame s_qry_input_value(uint8_t a, uint8_t i)      { DaliFrame f={}; dali_build_instance_command(a,i,DALI_CMD_QUERY_INPUT_VALUE,&f);       return f; }
 static DaliFrame s_qry_input_value_latch(uint8_t a, uint8_t i){ DaliFrame f={}; dali_build_instance_command(a,i,DALI_CMD_QUERY_INPUT_VALUE_LATCH,&f); return f; }
 
 /* Lookup table for 24-bit instance query commands (single send, expects reply). */
 struct IQueryEntry { const char *name; IConfigBuilder builder; };
 static const IQueryEntry s_iquery_table[] = {
-    { "hold-timer",          dali_input_occ_build_query_hold_timer       },
-    { "deadtime",            dali_input_occ_build_query_deadtime         },
-    { "hysteresis",          dali_input_build_query_hysteresis           },
-    { "deadtime-gen",        dali_input_build_query_deadtime_timer       },
-    { "report-timer",        dali_input_occ_build_query_report_timer     },
     { "instance-type",       s_qry_instance_type     },
     { "resolution",          s_qry_resolution        },
-    { "instance-enabled",    s_qry_instance_enabled  },
+    { "instance-error",      s_qry_instance_error    },
     { "instance-status",     s_qry_instance_status   },
+    { "instance-enabled",    s_qry_instance_enabled  },
+    { "event-priority",      s_qry_event_priority    },
+    { "primary-group",       s_qry_primary_group     },
+    { "instance-group-1",    s_qry_instance_group1   },
+    { "instance-group-2",    s_qry_instance_group2   },
+    { "event-scheme",        s_qry_event_scheme      },
+    { "event-filter-0",      s_qry_event_filter0     },
+    { "event-filter-1",      s_qry_event_filter1     },
+    { "event-filter-2",      s_qry_event_filter2     },
     { "input-value",         s_qry_input_value       },
     { "input-value-latch",   s_qry_input_value_latch },
+
+    { "pb-short-timer",      dali_input_pb_build_query_short_timer      },
+    { "pb-short-timer-min",  dali_input_pb_build_query_short_timer_min  },
+    { "pb-double-timer",     dali_input_pb_build_query_double_timer     },
+    { "pb-double-timer-min", dali_input_pb_build_query_double_timer_min },
+    { "pb-repeat-timer",     dali_input_pb_build_query_repeat_timer     },
+    { "pb-stuck-timer",      dali_input_pb_build_query_stuck_timer      },
+
+    { "hold-timer",          dali_input_occ_build_query_hold_timer       },
+    { "deadtime",            dali_input_occ_build_query_deadtime         },
+    { "report-timer",        dali_input_occ_build_query_report_timer     },
+    { "occupancy-capabilities", dali_input_occ_build_query_capabilities   },
+    { "detection-range",     dali_input_occ_build_query_detection_range  },
+    { "sensitivity",         dali_input_occ_build_query_sensitivity      },
+    { "catching",            dali_input_occ_build_query_catching         },
+
+    { "light-hysteresis-min", dali_input_light_build_query_hysteresis_min },
+    { "light-deadtime",       dali_input_light_build_query_deadtime       },
+    { "light-report-timer",   dali_input_light_build_query_report_timer   },
+    { "light-hysteresis",     dali_input_light_build_query_hysteresis     },
 };
 
 void DaliComponent::execute_command(const std::string &cmd_str)
@@ -1132,22 +1208,27 @@ void DaliComponent::execute_command(const std::string &cmd_str)
 
         for (const auto &e : s_iconfig_table) {
             if (strcmp(tok[2], e.name) == 0) {
-                if (e.needs_dtr0 && ntok < 4u) { set_cmd_result("needs dtr0 value"); return; }
                 DaliFrame cfg_frame = e.builder(addr, inst);
                 DaliSequence seq = {};
-                if (e.needs_dtr0) {
+                if (e.param_kind == ICONFIG_DTR0) {
+                    if (ntok != 4u) { set_cmd_result("iconfig: needs one value"); return; }
                     unsigned long dtr0v;
-                    if (!parse_uint(tok[3], 0u, 255u, &dtr0v)) { set_cmd_result("bad dtr0 value"); return; }
+                    if (!parse_uint(tok[3], 0u, 255u, &dtr0v) ||
+                        !iconfig_value_valid(e, dtr0v)) {
+                        set_cmd_result("iconfig: value out of range");
+                        return;
+                    }
                     DaliFrame dtr_frame = dali_cmd_control_device_dtr0_data((uint8_t)dtr0v);
                     seq.steps[0] = { dtr_frame, false, false, 0u };
-                    seq.steps[1] = { cfg_frame, false, true,  0u };
+                    seq.steps[1] = { cfg_frame, false, e.send_twice, 0u };
                     seq.step_count = 2u;
                 } else {
-                    seq.steps[0] = { cfg_frame, false, true, 0u };
+                    if (ntok != 3u) { set_cmd_result("iconfig: unexpected value"); return; }
+                    seq.steps[0] = { cfg_frame, false, e.send_twice, 0u };
                     seq.step_count = 1u;
                 }
                 DaliError err = dali_sched_enqueue_sequence(&seq);
-                set_cmd_result(err == DALI_OK ? "OK" : "err");
+                set_cmd_result(err == DALI_OK ? "OK" : "queue full");
                 return;
             }
         }

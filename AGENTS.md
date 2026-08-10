@@ -59,9 +59,11 @@ the control/protocol APIs.
 | DT8 | IEC 62386-209 | Implemented (`dali_gear_dt8`) |
 | DT1 | IEC 62386-202 | Not implemented; add when needed following the DT6/DT8 pattern |
 
-Input device instance types DT301 (push button), DT303 (occupancy), and DT304
-(light sensor) are covered by `dali_input_config` for configuration commands.
-Query commands for all instance types are in `dali_input_device`.
+Input devices use instance types, not control-gear DT numbers. IEC 62386-301
+push buttons are instance type 1, Part 303 occupancy sensors are instance type 3,
+and Part 304 light sensors are instance type 4. Their type-specific configuration
+builders are in `dali_input_config`; common Part 103 queries are in
+`dali_input_device`.
 
 ## Timing And ISR Rules
 

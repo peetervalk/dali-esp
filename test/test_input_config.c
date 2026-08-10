@@ -1,268 +1,132 @@
 #include "unity.h"
 #include "dali_input_config.h"
-#include "dali_protocol.h"
 
 void setUp(void) {}
 void tearDown(void) {}
 
-/* ---------------------------------------------------------------------------
- * Helpers
- * --------------------------------------------------------------------------*/
+/*
+ * Independent standard vectors use short address A = 5 and instance number
+ * N = 2. Their complete 24-bit prefix is therefore 0x0B02; expected values
+ * below are literals rather than values derived with the production encoder.
+ */
+#define TEST_ADDR      5u
+#define TEST_INSTANCE  2u
 
-/* 24-bit instance command frame for addr, instance, opcode */
-static uint32_t expected_instance_frame(uint8_t addr, uint8_t instance, uint8_t opcode)
-{
-    uint8_t addr_byte = (uint8_t)((addr << 1u) | 1u);
-    return ((uint32_t)addr_byte << 16u) | ((uint32_t)instance << 8u) | opcode;
-}
-
-static void assert_instance_frame(DaliFrame frame,
-                                  uint8_t addr,
-                                  uint8_t instance,
-                                  uint8_t opcode)
+static void assert_full_frame(DaliFrame frame, uint32_t expected)
 {
     TEST_ASSERT_EQUAL_UINT8(DALI_EXTENDED_FRAME_BITS, frame.bit_length);
-    TEST_ASSERT_EQUAL_HEX32(expected_instance_frame(addr, instance, opcode), frame.data);
+    TEST_ASSERT_EQUAL_HEX32(expected, frame.data);
 }
 
-/* ---------------------------------------------------------------------------
- * Generic IEC 62386-103 instance configuration
- * --------------------------------------------------------------------------*/
-
-void test_set_event_priority_frame(void)
+void test_part_103_common_configuration_vectors(void)
 {
-    DaliFrame f = dali_input_build_set_event_priority(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0x61u);
+    assert_full_frame(dali_input_build_set_event_priority(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0261u);
+    assert_full_frame(dali_input_build_enable_instance(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0262u);
+    assert_full_frame(dali_input_build_disable_instance(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0263u);
+    assert_full_frame(dali_input_build_set_primary_group(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0264u);
+    assert_full_frame(dali_input_build_set_instance_group1(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0265u);
+    assert_full_frame(dali_input_build_set_instance_group2(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0266u);
+    assert_full_frame(dali_input_build_set_event_scheme(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0267u);
+    assert_full_frame(dali_input_build_set_event_filter(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0268u);
+    assert_full_frame(dali_input_build_set_instance_type(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0269u);
+    assert_full_frame(dali_input_build_set_instance_configuration(TEST_ADDR, TEST_INSTANCE),
+                      0x0B026Au);
 }
 
-void test_enable_instance_frame(void)
+void test_part_301_instance_type_1_vectors(void)
 {
-    DaliFrame f = dali_input_build_enable_instance(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0x62u);
+    assert_full_frame(dali_input_pb_build_set_short_timer(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0200u);
+    assert_full_frame(dali_input_pb_build_set_double_timer(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0201u);
+    assert_full_frame(dali_input_pb_build_set_repeat_timer(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0202u);
+    assert_full_frame(dali_input_pb_build_set_stuck_timer(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0203u);
+
+    assert_full_frame(dali_input_pb_build_query_short_timer(TEST_ADDR, TEST_INSTANCE),
+                      0x0B020Au);
+    assert_full_frame(dali_input_pb_build_query_short_timer_min(TEST_ADDR, TEST_INSTANCE),
+                      0x0B020Bu);
+    assert_full_frame(dali_input_pb_build_query_double_timer(TEST_ADDR, TEST_INSTANCE),
+                      0x0B020Cu);
+    assert_full_frame(dali_input_pb_build_query_double_timer_min(TEST_ADDR, TEST_INSTANCE),
+                      0x0B020Du);
+    assert_full_frame(dali_input_pb_build_query_repeat_timer(TEST_ADDR, TEST_INSTANCE),
+                      0x0B020Eu);
+    assert_full_frame(dali_input_pb_build_query_stuck_timer(TEST_ADDR, TEST_INSTANCE),
+                      0x0B020Fu);
 }
 
-void test_disable_instance_frame(void)
+void test_part_303_instance_type_3_vectors(void)
 {
-    DaliFrame f = dali_input_build_disable_instance(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0x63u);
+    assert_full_frame(dali_input_occ_build_catch_movement(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0220u);
+    assert_full_frame(dali_input_occ_build_set_hold_timer(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0221u);
+    assert_full_frame(dali_input_occ_build_set_report_timer(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0222u);
+    assert_full_frame(dali_input_occ_build_set_deadtime(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0223u);
+    assert_full_frame(dali_input_occ_build_cancel_hold_timer(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0224u);
+    assert_full_frame(dali_input_occ_build_set_detection_range(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0225u);
+    assert_full_frame(dali_input_occ_build_set_sensitivity(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0226u);
+
+    assert_full_frame(dali_input_occ_build_query_capabilities(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0229u);
+    assert_full_frame(dali_input_occ_build_query_detection_range(TEST_ADDR, TEST_INSTANCE),
+                      0x0B022Au);
+    assert_full_frame(dali_input_occ_build_query_sensitivity(TEST_ADDR, TEST_INSTANCE),
+                      0x0B022Bu);
+    assert_full_frame(dali_input_occ_build_query_deadtime(TEST_ADDR, TEST_INSTANCE),
+                      0x0B022Cu);
+    assert_full_frame(dali_input_occ_build_query_hold_timer(TEST_ADDR, TEST_INSTANCE),
+                      0x0B022Du);
+    assert_full_frame(dali_input_occ_build_query_report_timer(TEST_ADDR, TEST_INSTANCE),
+                      0x0B022Eu);
+    assert_full_frame(dali_input_occ_build_query_catching(TEST_ADDR, TEST_INSTANCE),
+                      0x0B022Fu);
 }
 
-void test_set_primary_group_frame(void)
+void test_part_304_instance_type_4_vectors(void)
 {
-    DaliFrame f = dali_input_build_set_primary_group(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0x64u);
-}
+    assert_full_frame(dali_input_light_build_set_report_timer(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0230u);
+    assert_full_frame(dali_input_light_build_set_hysteresis(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0231u);
+    assert_full_frame(dali_input_light_build_set_deadtime(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0232u);
+    assert_full_frame(dali_input_light_build_set_hysteresis_min(TEST_ADDR, TEST_INSTANCE),
+                      0x0B0233u);
 
-void test_set_instance_group1_frame(void)
-{
-    DaliFrame f = dali_input_build_set_instance_group1(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0x65u);
-}
-
-void test_set_instance_group2_frame(void)
-{
-    DaliFrame f = dali_input_build_set_instance_group2(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0x66u);
-}
-
-void test_set_event_scheme_frame(void)
-{
-    DaliFrame f = dali_input_build_set_event_scheme(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0x67u);
-}
-
-void test_set_event_filter_frame(void)
-{
-    DaliFrame f = dali_input_build_set_event_filter(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0x68u);
-}
-
-void test_set_report_timer_frame(void)
-{
-    DaliFrame f = dali_input_build_set_report_timer(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0x6Eu);
-}
-
-void test_set_hysteresis_frame(void)
-{
-    DaliFrame f = dali_input_build_set_hysteresis(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0x6Fu);
-}
-
-void test_set_deadtime_timer_frame(void)
-{
-    DaliFrame f = dali_input_build_set_deadtime_timer(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0x70u);
-}
-
-/* opcodes must be distinct within the generic range */
-void test_generic_opcodes_are_all_distinct(void)
-{
-    uint8_t addr = 0u, inst = 0u;
-    DaliFrame frames[] = {
-        dali_input_build_set_event_priority(addr, inst),
-        dali_input_build_enable_instance(addr, inst),
-        dali_input_build_disable_instance(addr, inst),
-        dali_input_build_set_primary_group(addr, inst),
-        dali_input_build_set_instance_group1(addr, inst),
-        dali_input_build_set_instance_group2(addr, inst),
-        dali_input_build_set_event_scheme(addr, inst),
-        dali_input_build_set_event_filter(addr, inst),
-        dali_input_build_set_report_timer(addr, inst),
-        dali_input_build_set_hysteresis(addr, inst),
-        dali_input_build_set_deadtime_timer(addr, inst),
-    };
-    uint8_t n = (uint8_t)(sizeof(frames) / sizeof(frames[0]));
-    for (uint8_t i = 0u; i < n; i++) {
-        for (uint8_t j = (uint8_t)(i + 1u); j < n; j++) {
-            TEST_ASSERT_NOT_EQUAL(frames[i].data, frames[j].data);
-        }
-    }
-}
-
-/* address and instance are encoded independently */
-void test_address_and_instance_encoding(void)
-{
-    DaliFrame f0 = dali_input_build_enable_instance(0u, 0u);
-    DaliFrame f1 = dali_input_build_enable_instance(1u, 0u);
-    DaliFrame f2 = dali_input_build_enable_instance(0u, 1u);
-
-    TEST_ASSERT_NOT_EQUAL(f0.data, f1.data);
-    TEST_ASSERT_NOT_EQUAL(f0.data, f2.data);
-    TEST_ASSERT_NOT_EQUAL(f1.data, f2.data);
-
-    /* addr=5, inst=2, opcode=0x62 */
-    DaliFrame f5_2 = dali_input_build_enable_instance(5u, 2u);
-    assert_instance_frame(f5_2, 5u, 2u, 0x62u);
-}
-
-/* ---------------------------------------------------------------------------
- * DT301 push-button type-specific
- * --------------------------------------------------------------------------*/
-
-void test_pb_set_hysteresis_frame(void)
-{
-    DaliFrame f = dali_input_pb_build_set_hysteresis(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0xE0u);
-}
-
-void test_pb_set_deadtime_frame(void)
-{
-    DaliFrame f = dali_input_pb_build_set_deadtime(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0xE1u);
-}
-
-void test_pb_set_double_click_priority_frame(void)
-{
-    DaliFrame f = dali_input_pb_build_set_double_click_priority(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0xE2u);
-}
-
-void test_pb_set_repeat_period_frame(void)
-{
-    DaliFrame f = dali_input_pb_build_set_repeat_period(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0xE3u);
-}
-
-void test_pb_set_hold_timer_frame(void)
-{
-    DaliFrame f = dali_input_pb_build_set_hold_timer(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0xE4u);
-}
-
-/* ---------------------------------------------------------------------------
- * DT303 occupancy type-specific
- * --------------------------------------------------------------------------*/
-
-void test_occ_set_deadtime_frame(void)
-{
-    DaliFrame f = dali_input_occ_build_set_deadtime(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0x23u);
-}
-
-void test_occ_set_report_timer_frame(void)
-{
-    DaliFrame f = dali_input_occ_build_set_report_timer(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0x22u);
-}
-
-void test_occ_set_hold_timer_frame(void)
-{
-    DaliFrame f = dali_input_occ_build_set_hold_timer(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0x21u);
-}
-
-void test_occ_query_timer_frames(void)
-{
-    assert_instance_frame(dali_input_occ_build_query_deadtime(5u, 0u), 5u, 0u, 0x2Cu);
-    assert_instance_frame(dali_input_occ_build_query_hold_timer(5u, 0u), 5u, 0u, 0x2Du);
-    assert_instance_frame(dali_input_occ_build_query_report_timer(5u, 0u), 5u, 0u, 0x2Eu);
-}
-
-/* ---------------------------------------------------------------------------
- * DT304 light sensor type-specific
- * --------------------------------------------------------------------------*/
-
-void test_light_set_hysteresis_frame(void)
-{
-    DaliFrame f = dali_input_light_build_set_hysteresis(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0xE0u);
-}
-
-void test_light_set_deadband_frame(void)
-{
-    DaliFrame f = dali_input_light_build_set_deadband(5u, 0u);
-    assert_instance_frame(f, 5u, 0u, 0xE1u);
-}
-
-/* ---------------------------------------------------------------------------
- * Cross-type isolation: same opcode is intentional for type-specific commands
- * but generic vs type-specific must differ
- * --------------------------------------------------------------------------*/
-
-void test_generic_and_type_specific_use_different_opcodes(void)
-{
-    /* Generic SetEventPriority (0x61) != PB hysteresis (0xE0) */
-    DaliFrame generic_prio = dali_input_build_set_event_priority(5u, 0u);
-    DaliFrame pb_hys       = dali_input_pb_build_set_hysteresis(5u, 0u);
-    TEST_ASSERT_NOT_EQUAL(generic_prio.data, pb_hys.data);
-
-    /* Generic SetEventPriority (0x61) != light hysteresis (0xE0) */
-    DaliFrame light_hys    = dali_input_light_build_set_hysteresis(5u, 0u);
-    TEST_ASSERT_NOT_EQUAL(generic_prio.data, light_hys.data);
-
-    /* Equal names are not reusable across IEC 62386-3xx instance types. */
-    TEST_ASSERT_NOT_EQUAL(dali_input_occ_build_set_deadtime(5u, 0u).data,
-                          dali_input_light_build_set_hysteresis(5u, 0u).data);
+    assert_full_frame(dali_input_light_build_query_hysteresis_min(TEST_ADDR, TEST_INSTANCE),
+                      0x0B023Cu);
+    assert_full_frame(dali_input_light_build_query_deadtime(TEST_ADDR, TEST_INSTANCE),
+                      0x0B023Du);
+    assert_full_frame(dali_input_light_build_query_report_timer(TEST_ADDR, TEST_INSTANCE),
+                      0x0B023Eu);
+    assert_full_frame(dali_input_light_build_query_hysteresis(TEST_ADDR, TEST_INSTANCE),
+                      0x0B023Fu);
 }
 
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_set_event_priority_frame);
-    RUN_TEST(test_enable_instance_frame);
-    RUN_TEST(test_disable_instance_frame);
-    RUN_TEST(test_set_primary_group_frame);
-    RUN_TEST(test_set_instance_group1_frame);
-    RUN_TEST(test_set_instance_group2_frame);
-    RUN_TEST(test_set_event_scheme_frame);
-    RUN_TEST(test_set_event_filter_frame);
-    RUN_TEST(test_set_report_timer_frame);
-    RUN_TEST(test_set_hysteresis_frame);
-    RUN_TEST(test_set_deadtime_timer_frame);
-    RUN_TEST(test_generic_opcodes_are_all_distinct);
-    RUN_TEST(test_address_and_instance_encoding);
-    RUN_TEST(test_pb_set_hysteresis_frame);
-    RUN_TEST(test_pb_set_deadtime_frame);
-    RUN_TEST(test_pb_set_double_click_priority_frame);
-    RUN_TEST(test_pb_set_repeat_period_frame);
-    RUN_TEST(test_pb_set_hold_timer_frame);
-    RUN_TEST(test_occ_set_deadtime_frame);
-    RUN_TEST(test_occ_set_report_timer_frame);
-    RUN_TEST(test_occ_set_hold_timer_frame);
-    RUN_TEST(test_occ_query_timer_frames);
-    RUN_TEST(test_light_set_hysteresis_frame);
-    RUN_TEST(test_light_set_deadband_frame);
-    RUN_TEST(test_generic_and_type_specific_use_different_opcodes);
+    RUN_TEST(test_part_103_common_configuration_vectors);
+    RUN_TEST(test_part_301_instance_type_1_vectors);
+    RUN_TEST(test_part_303_instance_type_3_vectors);
+    RUN_TEST(test_part_304_instance_type_4_vectors);
     return UNITY_END();
 }

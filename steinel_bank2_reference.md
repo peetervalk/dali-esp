@@ -143,12 +143,12 @@ iquery a0:1 input-value   # 0=Unoccupied  85=Movement  170=Present  255=Present+
 ### Verify Section 3 factory settings
 
 Steinel section 3 lists optimized occupancy defaults: hold timer `1`, report
-timer `5`, and event filter `7`. Corrected firmware maps the DT303 `iquery`
+timer `5`, and event filter `7`. Corrected firmware maps the Part 303/type 3 `iquery`
 timer helpers to the same opcodes as these raw commands.
 
 ```
-raw 01012D len=24 wait   # DT303 query hold timer; expected 1 = 10 seconds
-raw 01012E len=24 wait   # DT303 query report timer; expected 5 = 5 seconds
+raw 01012D len=24 wait   # Part 303/type 3 query hold timer; expected 1 = 10 seconds
+raw 01012E len=24 wait   # Part 303/type 3 query report timer; expected 5 = 5 seconds
 raw 010190 len=24 wait   # Part 103 query event filter bits 0-7; expected 7
 ```
 
@@ -159,7 +159,7 @@ To restore the Steinel report timer to 5 seconds:
 
 ```
 raw  C13005 len=24       # DTR0 = 5
-raw2 010122 len=24       # DT303 set report timer from DTR0; send twice
+raw2 010122 len=24       # Part 303/type 3 set report timer from DTR0; send twice
 raw  01012E len=24 wait  # verify report timer; expected 5
 ```
 
@@ -256,18 +256,18 @@ devquery a0 55           # 0x37 = QUERY CONTENT DTR1
    Defines universal special commands (DTR0/1/2 SET, WRITE MEMORY LOCATION) that
    apply to both control gear and control devices.
 
-4. **IEC 62386-103:2014** — *Digital addressable lighting interface — Part 103:
+4. **IEC 62386-103:2022** — *Digital addressable lighting interface — Part 103:
    General requirements — Control devices*  
    Defines the 24-bit device command frame format, ENABLE WRITE MEMORY (opcode
    `0x15`), READ MEMORY LOCATION (opcode `0x3C`), and the memory bank write gate
    (send-twice requirement).
 
-5. **IEC 62386-303** — *Occupancy sensor* device type  
-   Defines the DT303 instance type, hold timer, deadtime, and the bit-replicated
+5. **IEC 62386-303** — occupancy-sensor input-device requirements
+   Defines instance type 3, its hold timer, deadtime, and the bit-replicated
    output encoding (0 / 85 / 170 / 255).
 
-6. **IEC 62386-304** — *Light sensor* device type  
-   Defines the DT304 instance type used by Steinel instance 0 (lux).
+6. **IEC 62386-304** — light-sensor input-device requirements
+   Defines instance type 4, used by Steinel instance 0 (lux).
 
 7. **python-dali** (github.com/sde1000/python-dali)  
    Open-source Python implementation of IEC 62386. Used to verify command

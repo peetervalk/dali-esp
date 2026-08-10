@@ -251,22 +251,49 @@ config a0 save-persistent
 ### `iquery <instance-target> <query-name>`
 
 Sends a 24-bit DALI-2 input-instance query and waits for one reply byte.
+Run `iquery <target> instance-type` first and use Part 301, 303, or 304 names only
+on an instance of type 1, 3, or 4 respectively.
 
 Available `iquery` names:
 
-| Query name | Meaning |
-|---|---|
-| `hold-timer` | DT303 occupancy hold timer. |
-| `deadtime` | DT303 occupancy deadtime. |
-| `hysteresis` | Generic input hysteresis. |
-| `deadtime-gen` | Generic input deadtime timer. |
-| `report-timer` | DT303 occupancy report timer. |
-| `instance-type` | Input instance type. |
-| `resolution` | Input resolution. |
-| `instance-enabled` | Whether the instance is enabled. |
-| `instance-status` | Instance status byte. |
-| `input-value` | Current input value. |
-| `input-value-latch` | Latched input value. |
+| Query name | Part / opcode | Meaning |
+|---|---:|---|
+| `instance-type` | 103 / `0x80` | Input instance type. |
+| `resolution` | 103 / `0x81` | Input resolution. |
+| `instance-error` | 103 / `0x82` | Part/type-specific instance error byte. |
+| `instance-status` | 103 / `0x83` | Instance status byte. |
+| `event-priority` | 103 / `0x84` | Configured event priority. |
+| `instance-enabled` | 103 / `0x86` | Whether the instance is enabled. |
+| `primary-group` | 103 / `0x88` | Primary instance-group assignment. |
+| `instance-group-1` | 103 / `0x89` | Additional instance-group assignment 1. |
+| `instance-group-2` | 103 / `0x8A` | Additional instance-group assignment 2. |
+| `event-scheme` | 103 / `0x8B` | Configured event source scheme. |
+| `input-value` | 103 / `0x8C` | Current input value. |
+| `input-value-latch` | 103 / `0x8D` | Latched input value. |
+| `event-filter-0` | 103 / `0x90` | Event-filter bits 0 through 7. |
+| `event-filter-1` | 103 / `0x91` | Event-filter bits 8 through 15. |
+| `event-filter-2` | 103 / `0x92` | Event-filter bits 16 through 23. |
+| `pb-short-timer` | 301 / `0x0A` | Push-button short timer. |
+| `pb-short-timer-min` | 301 / `0x0B` | Push-button physical short-timer minimum. |
+| `pb-double-timer` | 301 / `0x0C` | Push-button double-press timer. |
+| `pb-double-timer-min` | 301 / `0x0D` | Push-button physical double-timer minimum. |
+| `pb-repeat-timer` | 301 / `0x0E` | Push-button long-press repeat timer. |
+| `pb-stuck-timer` | 301 / `0x0F` | Push-button stuck timer. |
+| `deadtime` | 303 / `0x2C` | Occupancy deadtime. |
+| `hold-timer` | 303 / `0x2D` | Occupancy hold timer. |
+| `report-timer` | 303 / `0x2E` | Occupancy report timer. |
+| `occupancy-capabilities` | 303 / `0x29` | Range/sensitivity capability bits. |
+| `detection-range` | 303 / `0x2A` | Configured detection range. |
+| `sensitivity` | 303 / `0x2B` | Configured detection sensitivity. |
+| `catching` | 303 / `0x2F` | Whether movement catching is active. |
+| `light-hysteresis-min` | 304 / `0x3C` | Absolute minimum hysteresis-band height. |
+| `light-deadtime` | 304 / `0x3D` | Light-sensor deadtime timer. |
+| `light-report-timer` | 304 / `0x3E` | Light-sensor report timer. |
+| `light-hysteresis` | 304 / `0x3F` | Light-sensor hysteresis percentage. |
+
+The removed `hysteresis` and `deadtime-gen` names were not generic Part 103
+queries: opcodes `0x82` and `0x83` are QUERY INSTANCE ERROR and QUERY INSTANCE
+STATUS. Use the `light-*` names for Part 304 values.
 
 Examples:
 
@@ -274,30 +301,59 @@ Examples:
 iquery a0:1 instance-type
 iquery a0:1 input-value
 iquery a0:1 hold-timer
+iquery a0:1 occupancy-capabilities
 ```
 
 ## Input Instance Config Verb
 
 ### `iconfig <instance-target> <config-name> [dtr0]`
 
-Sends a 24-bit DALI-2 input-instance configuration command. All `iconfig`
-SET commands use the send-twice path.
+Sends a 24-bit DALI-2 input-instance configuration or control command. Commands
+that consume DTR0 load it first and then use the send-twice path. The two Part
+303 control instructions, `catch-movement` and `cancel-hold-timer`, are sent once
+and do not consume DTR0.
 
-Warning: the `iconfig` SET paths are implemented, but not every parameter has
-been round-trip validated on hardware. For field testing, read first, write one
-parameter, then read it back before making another change.
+Warning: the opcode surface has been independently audited, but these writes have
+not been round-trip validated on the project hardware. For field testing, read
+first, write one parameter, and read it back before making another change. `OK`
+means the sequence was queued; it does not prove that the device accepted it.
 
 Available `iconfig` names:
 
-| Config name | DTR0 | Meaning |
-|---|---|---|
-| `set-hold-timer` | required, `0-255` | Set DT303 occupancy hold timer. |
-| `set-deadtime` | required, `0-255` | Set DT303 occupancy deadtime. |
-| `set-hysteresis` | required, `0-255` | Set generic input hysteresis. |
-| `set-report-timer` | required, `0-255` | Set DT303 occupancy report timer. |
-| `set-deadtime-gen` | required, `0-255` | Set generic deadtime timer. |
-| `enable-instance` | none | Enable the selected instance. |
-| `disable-instance` | none | Disable the selected instance. |
+| Config name | Part / opcode | Value | Meaning |
+|---|---:|---|---|
+| `enable-instance` | 103 / `0x62` | none | Enable the selected instance. |
+| `disable-instance` | 103 / `0x63` | none | Disable the selected instance. |
+| `set-event-priority` | 103 / `0x61` | DTR0 `2-5` | Set event priority. |
+| `set-primary-group` | 103 / `0x64` | DTR0 `0-31` or `255` | Set or clear the primary instance group. |
+| `set-instance-group-1` | 103 / `0x65` | DTR0 `0-31` or `255` | Set or clear instance group 1. |
+| `set-instance-group-2` | 103 / `0x66` | DTR0 `0-31` or `255` | Set or clear instance group 2. |
+| `set-event-scheme` | 103 / `0x67` | DTR0 `0-4` | Set the event source scheme. |
+| `pb-set-short-timer` | 301 / `0x00` | DTR0 `10-255` | Set the push-button short timer; 20 ms units. |
+| `pb-set-double-timer` | 301 / `0x01` | DTR0 `0` or `10-100` | Set the double-press timer; 20 ms units. |
+| `pb-set-repeat-timer` | 301 / `0x02` | DTR0 `5-100` | Set the long-press repeat timer; 20 ms units. |
+| `pb-set-stuck-timer` | 301 / `0x03` | DTR0 `5-255` | Set the stuck timer; 1 s units. |
+| `catch-movement` | 303 / `0x20` | none | Start movement catching; single send. |
+| `set-hold-timer` | 303 / `0x21` | DTR0 `0-254` | Set occupancy hold timer; `0` selects 1 s, otherwise 10 s units. |
+| `set-report-timer` | 303 / `0x22` | DTR0 `0-255` | Set occupancy report timer; 1 s units, `0` disables it. |
+| `set-deadtime` | 303 / `0x23` | DTR0 `0-255` | Set occupancy deadtime; 50 ms units, `0` disables it. |
+| `cancel-hold-timer` | 303 / `0x24` | none | Cancel the hold timer; single send. |
+| `set-detection-range` | 303 / `0x25` | DTR0 `0-100` | Set detection range if supported. |
+| `set-sensitivity` | 303 / `0x26` | DTR0 `0-100` | Set detection sensitivity if supported. |
+| `light-set-report-timer` | 304 / `0x30` | DTR0 `0-255` | Set light report timer; 1 s units, `0` disables it. |
+| `light-set-hysteresis` | 304 / `0x31` | DTR0 `0-25` | Set light hysteresis percentage. |
+| `light-set-deadtime` | 304 / `0x32` | DTR0 `0-255` | Set light deadtime; 50 ms units, `0` disables it. |
+| `light-set-hysteresis-min` | 304 / `0x33` | DTR0 `0-255` | Set the absolute minimum hysteresis-band height. |
+
+Before setting a Part 301 short or double timer, query `pb-short-timer-min` or
+`pb-double-timer-min`. The console enforces the standard-wide floor, but a device
+may reject a value below its own reported physical minimum.
+
+Generic Part 103 `SET EVENT FILTER` is not exposed by `iconfig`: it consumes
+DTR2:DTR1:DTR0 and requires a three-register atomic transaction. Part 103:2022
+SET INSTANCE TYPE and SET INSTANCE CONFIGURATION are also shared C builders only.
+The old generic `set-hysteresis`/`set-deadtime-gen` aliases and non-standard
+Part 301/304 setters are intentionally removed.
 
 Recommended test pattern:
 
@@ -305,6 +361,14 @@ Recommended test pattern:
 iquery a0:1 hold-timer
 iconfig a0:1 set-hold-timer 20
 iquery a0:1 hold-timer
+```
+
+Example Part 301 query/write/read-back sequence:
+
+```text
+iquery a0:0 pb-short-timer
+iconfig a0:0 pb-set-short-timer 25
+iquery a0:0 pb-short-timer
 ```
 
 ## Control-Device Memory Verbs
