@@ -260,6 +260,13 @@ Run `query-list` on the native CLI for the authoritative list. Common names:
 | `memory` | READ MEMORY LOCATION |
 | `extended-version` | QUERY EXTENDED VERSION NUMBER |
 
+For control-gear device-type discovery, `QUERY DEVICE TYPE` returns `0x00..0xFD`
+for one type, `0xFE` when no device type is implemented, or `0xFF` (MASK) when
+multiple types are implemented. Only the MASK result starts `QUERY NEXT DEVICE
+TYPE` enumeration. Each next query returns a strictly increasing type value;
+`0xFE` or no reply ends the list. The reusable discovery inventory retains up to
+four types and marks the result as truncated if it observes a fifth valid type.
+
 ### ESPHome command-console query names
 
 | Query name | Underlying command |

@@ -37,7 +37,7 @@ typedef struct {
     bool                     has_groups;
     uint16_t                 groups;        /* bitmask: bit N set means member of group N */
     bool                     has_device_type;
-    uint8_t                  device_type;           /* primary — same as device_types[0] */
+    uint8_t                  device_type;   /* legacy first/lowest type; same as device_types[0] */
     uint8_t                  device_type_count;
     uint8_t                  device_types[DALI_DISCOVERY_MAX_DEVICE_TYPES];
     bool                     has_version;
@@ -61,6 +61,9 @@ typedef struct {
     uint8_t                  dt8_gear_features;
     uint8_t                  dt8_colour_status;
     uint8_t                  dt8_colour_type_features;
+    /* True only when a valid fifth type was observed; false can still mean a
+     * partial list if enumeration ended on timeout or a malformed reply. */
+    bool                     device_types_truncated;
 } DaliDiscoveryDeviceInfo;
 
 typedef struct {

@@ -65,6 +65,10 @@ adding broad new device support.
   generic timer aliases and non-standard Part 301/304 commands have been removed
   from the supported surface; independent golden vectors cover the corrected
   command frames.
+- Control-gear device-type discovery now distinguishes the DALI-2 single,
+  multiple, and no-type/end replies, rejects malformed enumeration, and reports
+  fixed-list truncation. Host vectors cover the sentinel and capacity boundaries;
+  this path has not been re-verified on hardware.
 - Tracked source and documentation files are valid UTF-8; no active mojibake
   cleanup is required.
 
@@ -191,8 +195,6 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 
 - Update memory identity handling to the applicable DALI-2 Bank 0 layout, remove
   the unsupported duplicate Bank 1 identity model, and validate short addresses.
-- Correct multi-device-type discovery sentinel handling and add tests for
-  single-type, multi-type, no-type, malformed reply, and truncation cases.
 - Enforce send-twice and interframe timing boundaries. Strengthen commissioning
   RANDOMIZE timing, collision handling, equal-random-address recovery, and the
   separation of gear and control-device address spaces.

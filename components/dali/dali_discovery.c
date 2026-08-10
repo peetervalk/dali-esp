@@ -5,7 +5,10 @@
 
 #include <string.h>
 
-#define DALI_DISCOVERY_QUERY_RETRIES_LEFT 1u
+/* DALI-2 QUERY DEVICE TYPE / QUERY NEXT DEVICE TYPE sentinel replies. */
+#define DALI_DISCOVERY_QUERY_RETRIES_LEFT      1u
+#define DALI_DISCOVERY_DEVICE_TYPE_NONE_OR_END 0xFEu
+#define DALI_DISCOVERY_DEVICE_TYPE_MULTIPLE    0xFFu
 
 typedef DaliError (*DaliDiscoveryInputQueryBuilder)(uint8_t addr,
                                                     uint8_t instance,
@@ -286,6 +289,62 @@ const char *dali_discovery_device_type_name(uint8_t type)
     }
 }
 
+static void discovery_store_device_type(DaliDiscoveryDeviceInfo *device,
+                                        uint8_t type)
+{
+    if (device->device_type_count >= DALI_DISCOVERY_MAX_DEVICE_TYPES) {
+        device->device_types_truncated = true;
+        return;
+    }
+
+    device->device_types[device->device_type_count++] = type;
+    if (!device->has_device_type) {
+        device->has_device_type = true;
+        device->device_type = type;
+    }
+}
+
+static void discovery_enrich_device_types(const DaliDiscoveryTransport *transport,
+                                          uint8_t addr,
+                                          DaliDiscoveryDeviceInfo *device)
+{
+    uint8_t type = 0u;
+    if (dali_discovery_query_device_type(transport, addr, &type) != DALI_OK ||
+        type == DALI_DISCOVERY_DEVICE_TYPE_NONE_OR_END) {
+        return;
+    }
+
+    if (type != DALI_DISCOVERY_DEVICE_TYPE_MULTIPLE) {
+        discovery_store_device_type(device, type);
+        return;
+    }
+
+    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = addr };
+    DaliFrame next_query;
+    if (dali_control_build_query(target, DALI_CMD_QUERY_NEXT_DEVICE_TYPE,
+                                 0u, &next_query) != DALI_OK) {
+        return;
+    }
+
+    for (;;) {
+        uint8_t next_type = 0u;
+        if (dali_discovery_query_u8(transport, &next_query, &next_type) != DALI_OK ||
+            next_type == DALI_DISCOVERY_DEVICE_TYPE_NONE_OR_END ||
+            next_type == DALI_DISCOVERY_DEVICE_TYPE_MULTIPLE) {
+            return;
+        }
+        if (device->device_type_count > 0u &&
+            next_type <= device->device_types[device->device_type_count - 1u]) {
+            return;
+        }
+
+        discovery_store_device_type(device, next_type);
+        if (device->device_types_truncated) {
+            return;
+        }
+    }
+}
+
 static void discovery_enrich_device(const DaliDiscoveryTransport *transport,
                                     uint8_t addr,
                                     DaliDiscoveryDeviceInfo *device)
@@ -298,28 +357,7 @@ static void discovery_enrich_device(const DaliDiscoveryTransport *transport,
         device->groups = groups;
     }
 
-    /* Device type — query primary then loop for additional types. */
-    uint8_t type = 0u;
-    if (dali_discovery_query_device_type(transport, addr, &type) == DALI_OK) {
-        device->has_device_type = true;
-        device->device_type = type;
-        device->device_type_count = 1u;
-        device->device_types[0] = type;
-
-        DaliFrame next_q;
-        while (device->device_type_count < DALI_DISCOVERY_MAX_DEVICE_TYPES) {
-            if (dali_control_build_query(target, DALI_CMD_QUERY_NEXT_DEVICE_TYPE,
-                                         0u, &next_q) != DALI_OK) {
-                break;
-            }
-            uint8_t next_type = 0u;
-            if (dali_discovery_query_u8(transport, &next_q, &next_type) != DALI_OK ||
-                next_type == 0xFFu) {
-                break;
-            }
-            device->device_types[device->device_type_count++] = next_type;
-        }
-    }
+    discovery_enrich_device_types(transport, addr, device);
 
     uint8_t version = 0u;
     if (dali_discovery_query_version(transport, addr, &version) == DALI_OK) {

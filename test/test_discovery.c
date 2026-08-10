@@ -9,6 +9,7 @@ typedef struct {
     bool      malformed[DALI_SHORT_ADDRESS_COUNT];
     int       bus_error_addr;
     uint32_t  tx_count;
+    uint32_t  query_next_device_type_count;
     uint32_t  found_cb_count;
     uint8_t   found_cb_last_addr;
 } MockDiscoveryBus;
@@ -79,6 +80,10 @@ static DaliError mock_transact(const DaliFrame *frame,
     TEST_ASSERT_NOT_NULL(frame);
     TEST_ASSERT_FALSE(send_twice);
     bus->tx_count++;
+    if (frame->bit_length == DALI_FORWARD_FRAME_BITS &&
+        (uint8_t)(frame->data & 0xFFu) == 0xA7u) {
+        bus->query_next_device_type_count++;
+    }
 
     /* No-reply frames (e.g. DTR1/DTR0 memory setup) — just accept and return. */
     if (!needs_reply) {
@@ -416,6 +421,10 @@ void test_scan_stores_device_type_version_and_level(void)
     TEST_ASSERT_NOT_NULL(device);
     TEST_ASSERT_TRUE(device->has_device_type);
     TEST_ASSERT_EQUAL_UINT8(8u, device->device_type);
+    TEST_ASSERT_EQUAL_UINT8(1u, device->device_type_count);
+    TEST_ASSERT_EQUAL_UINT8(8u, device->device_types[0]);
+    TEST_ASSERT_FALSE(device->device_types_truncated);
+    TEST_ASSERT_EQUAL_UINT32(0u, s_bus.query_next_device_type_count);
     TEST_ASSERT_TRUE(device->has_version);
     TEST_ASSERT_EQUAL_UINT8(4u, device->version);
     TEST_ASSERT_TRUE(device->has_actual_level);
@@ -669,16 +678,17 @@ void test_has_device_type_helper(void)
 
 void test_scan_enriches_multi_device_type_gear(void)
 {
-    /* addr 5 reports primary type=6 and secondary type=8 via QUERY_NEXT_DEVICE_TYPE.
-     * QUERY_NEXT_DEVICE_TYPE opcode=0xA7, addr 5 address byte=0x0B → frame 0x0BA7 */
+    /* A QUERY DEVICE TYPE reply of MASK (0xFF) means multiple types. The gear
+     * then returns each type through QUERY NEXT DEVICE TYPE and 0xFE at end. */
     DaliDiscoveryInventory inventory;
     uint8_t found = 0u;
     s_bus.present[5] = true;
     s_bus.status[5] = 0x00u;
 
-    add_reply(0x0B99u, DALI_FORWARD_FRAME_BITS, DALI_OK, 6u,    DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B99u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0xFFu, DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 6u,    DALI_BACKWARD_FRAME_BITS);
     add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 8u,    DALI_BACKWARD_FRAME_BITS);
-    add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0xFFu, DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0xFEu, DALI_BACKWARD_FRAME_BITS);
 
     DaliDiscoveryTransport t = transport();
     TEST_ASSERT_EQUAL(DALI_OK,
@@ -692,9 +702,194 @@ void test_scan_enriches_multi_device_type_gear(void)
     TEST_ASSERT_EQUAL_UINT8(2u, device->device_type_count);
     TEST_ASSERT_EQUAL_UINT8(6u, device->device_types[0]);
     TEST_ASSERT_EQUAL_UINT8(8u, device->device_types[1]);
+    TEST_ASSERT_FALSE(device->device_types_truncated);
+    TEST_ASSERT_EQUAL_UINT32(3u, s_bus.query_next_device_type_count);
     TEST_ASSERT_TRUE(dali_discovery_has_device_type(device, 6u));
     TEST_ASSERT_TRUE(dali_discovery_has_device_type(device, 8u));
     TEST_ASSERT_FALSE(dali_discovery_has_device_type(device, 0u));
+}
+
+void test_scan_handles_gear_with_no_device_types(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+    s_bus.present[5] = true;
+
+    /* DALI-2 defines 0xFE from QUERY DEVICE TYPE as "no device types". */
+    add_reply(0x0B99u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0xFEu,
+              DALI_BACKWARD_FRAME_BITS);
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    const DaliDiscoveryDeviceInfo *device =
+        dali_discovery_inventory_get(&inventory, 5u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_FALSE(device->has_device_type);
+    TEST_ASSERT_EQUAL_UINT8(0u, device->device_type_count);
+    TEST_ASSERT_FALSE(device->device_types_truncated);
+    TEST_ASSERT_EQUAL_UINT32(0u, s_bus.query_next_device_type_count);
+}
+
+void test_scan_ignores_malformed_device_type_reply(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+    s_bus.present[5] = true;
+
+    add_reply(0x0B99u, DALI_FORWARD_FRAME_BITS, DALI_OK, 6u,
+              DALI_FORWARD_FRAME_BITS);
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    const DaliDiscoveryDeviceInfo *device =
+        dali_discovery_inventory_get(&inventory, 5u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_FALSE(device->has_device_type);
+    TEST_ASSERT_EQUAL_UINT8(0u, device->device_type_count);
+    TEST_ASSERT_EQUAL_UINT32(0u, s_bus.query_next_device_type_count);
+}
+
+void test_scan_stops_on_invalid_next_device_type_mask(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+    s_bus.present[5] = true;
+
+    add_reply(0x0B99u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0xFFu,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 1u,
+              DALI_BACKWARD_FRAME_BITS);
+    /* MASK is only valid as the initial "multiple types" result. */
+    add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0xFFu,
+              DALI_BACKWARD_FRAME_BITS);
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    const DaliDiscoveryDeviceInfo *device =
+        dali_discovery_inventory_get(&inventory, 5u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_TRUE(device->has_device_type);
+    TEST_ASSERT_EQUAL_UINT8(1u, device->device_type_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, device->device_type);
+    TEST_ASSERT_FALSE(device->device_types_truncated);
+    TEST_ASSERT_EQUAL_UINT32(2u, s_bus.query_next_device_type_count);
+}
+
+void test_scan_stops_on_malformed_next_device_type_reply(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+    s_bus.present[5] = true;
+
+    add_reply(0x0B99u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0xFFu,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 1u,
+              DALI_FORWARD_FRAME_BITS);
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    const DaliDiscoveryDeviceInfo *device =
+        dali_discovery_inventory_get(&inventory, 5u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_FALSE(device->has_device_type);
+    TEST_ASSERT_EQUAL_UINT8(0u, device->device_type_count);
+    TEST_ASSERT_FALSE(device->device_types_truncated);
+    TEST_ASSERT_EQUAL_UINT32(1u, s_bus.query_next_device_type_count);
+}
+
+void test_scan_stops_on_non_increasing_device_types(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+    s_bus.present[5] = true;
+
+    add_reply(0x0B99u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0xFFu,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 3u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 2u,
+              DALI_BACKWARD_FRAME_BITS);
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    const DaliDiscoveryDeviceInfo *device =
+        dali_discovery_inventory_get(&inventory, 5u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_TRUE(device->has_device_type);
+    TEST_ASSERT_EQUAL_UINT8(1u, device->device_type_count);
+    TEST_ASSERT_EQUAL_UINT8(3u, device->device_type);
+    TEST_ASSERT_FALSE(device->device_types_truncated);
+    TEST_ASSERT_EQUAL_UINT32(2u, s_bus.query_next_device_type_count);
+}
+
+void test_scan_marks_excess_device_types_truncated(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+    s_bus.present[5] = true;
+
+    add_reply(0x0B99u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0xFFu,
+              DALI_BACKWARD_FRAME_BITS);
+    for (uint8_t type = 0u; type <= DALI_DISCOVERY_MAX_DEVICE_TYPES; type++) {
+        add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, type,
+                  DALI_BACKWARD_FRAME_BITS);
+    }
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    const DaliDiscoveryDeviceInfo *device =
+        dali_discovery_inventory_get(&inventory, 5u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_TRUE(device->has_device_type);
+    TEST_ASSERT_EQUAL_UINT8(DALI_DISCOVERY_MAX_DEVICE_TYPES,
+                            device->device_type_count);
+    for (uint8_t type = 0u; type < DALI_DISCOVERY_MAX_DEVICE_TYPES; type++) {
+        TEST_ASSERT_EQUAL_UINT8(type, device->device_types[type]);
+    }
+    TEST_ASSERT_TRUE(device->device_types_truncated);
+    TEST_ASSERT_EQUAL_UINT32(DALI_DISCOVERY_MAX_DEVICE_TYPES + 1u,
+                             s_bus.query_next_device_type_count);
+}
+
+void test_scan_does_not_mark_exact_device_type_capacity_truncated(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+    s_bus.present[5] = true;
+
+    add_reply(0x0B99u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0xFFu,
+              DALI_BACKWARD_FRAME_BITS);
+    for (uint8_t type = 0u; type < DALI_DISCOVERY_MAX_DEVICE_TYPES; type++) {
+        add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, type,
+                  DALI_BACKWARD_FRAME_BITS);
+    }
+    add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0xFEu,
+              DALI_BACKWARD_FRAME_BITS);
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    const DaliDiscoveryDeviceInfo *device =
+        dali_discovery_inventory_get(&inventory, 5u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_EQUAL_UINT8(DALI_DISCOVERY_MAX_DEVICE_TYPES,
+                            device->device_type_count);
+    TEST_ASSERT_FALSE(device->device_types_truncated);
+    TEST_ASSERT_EQUAL_UINT32(DALI_DISCOVERY_MAX_DEVICE_TYPES + 1u,
+                             s_bus.query_next_device_type_count);
 }
 
 void test_scan_records_scene_levels(void)
@@ -866,6 +1061,13 @@ int main(void)
     RUN_TEST(test_scan_skips_identity_when_bank0_absent);
     RUN_TEST(test_has_device_type_helper);
     RUN_TEST(test_scan_enriches_multi_device_type_gear);
+    RUN_TEST(test_scan_handles_gear_with_no_device_types);
+    RUN_TEST(test_scan_ignores_malformed_device_type_reply);
+    RUN_TEST(test_scan_stops_on_invalid_next_device_type_mask);
+    RUN_TEST(test_scan_stops_on_malformed_next_device_type_reply);
+    RUN_TEST(test_scan_stops_on_non_increasing_device_types);
+    RUN_TEST(test_scan_marks_excess_device_types_truncated);
+    RUN_TEST(test_scan_does_not_mark_exact_device_type_capacity_truncated);
     RUN_TEST(test_scan_records_scene_levels);
     RUN_TEST(test_scan_reads_bank1_identity);
     RUN_TEST(test_invalid_arguments_are_rejected);
