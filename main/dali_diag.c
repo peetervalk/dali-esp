@@ -732,6 +732,37 @@ static bool diag_input_cache_lookup(uint8_t addr, DaliDiscoveryInputDevice *out)
     return found;
 }
 
+static bool diag_event_is_switch_candidate(const DaliInputEvent *event)
+{
+    if (dali_event_is_switch_mapping_candidate(event)) {
+        return true;
+    }
+    if (event == NULL ||
+        event->frame_kind != DALI_EVENT_FRAME_INPUT_24BIT ||
+        event->source.scheme != DALI_EVENT_SOURCE_DEVICE_INSTANCE ||
+        !event->source.has_device_address ||
+        !event->source.has_instance ||
+        event->event_information != DALI_DT301_EVENT_DOUBLE_PRESS) {
+        return false;
+    }
+
+    /* Device/Instance events omit instance type. Resolve it from the most
+     * recent input-device discovery rather than guessing from the event value. */
+    DaliDiscoveryInputDevice input;
+    if (!diag_input_cache_lookup(event->source.device_address, &input) ||
+        !input.device.has_instance_count ||
+        event->source.instance >= input.device.instance_count ||
+        event->source.instance >= DALI_INPUT_MAX_INSTANCES) {
+        return false;
+    }
+
+    uint8_t instance = event->source.instance;
+    const DaliInputInstanceInfo *info = &input.device.instances[instance];
+    return input.instance_type_errors[instance] == DALI_OK &&
+           info->has_type &&
+           info->type == DALI_INPUT_INSTANCE_TYPE_PUSH_BUTTON;
+}
+
 static bool diag_event_same_source(const DaliInputEvent *a, const DaliInputEvent *b)
 {
     return a != NULL && b != NULL &&
@@ -935,22 +966,54 @@ static void diag_print_event_json_fields(const DaliInputEvent *event)
 
     printf(", \"frame_kind\": \"%s\"",
            dali_event_frame_kind_name(event->frame_kind));
-    printf(", \"address_byte\": %u, \"address_byte_hex\": \"0x%02X\"",
-           (unsigned)event->address_byte,
-           (unsigned)event->address_byte);
-    printf(", \"address_kind\": \"%s\"",
-           dali_event_address_kind_name(event->address_kind));
-    if (event->address_kind == DALI_EVENT_ADDRESS_SHORT ||
-        event->address_kind == DALI_EVENT_ADDRESS_GROUP) {
-        printf(", \"address\": %u", (unsigned)event->address);
+
+    if (event->frame_kind == DALI_EVENT_FRAME_LEGACY_16BIT) {
+        printf(", \"address_byte\": %u, \"address_byte_hex\": \"0x%02X\"",
+               (unsigned)event->address_byte,
+               (unsigned)event->address_byte);
+        printf(", \"address_kind\": \"%s\"",
+               dali_event_address_kind_name(event->address_kind));
+        if (event->address_kind == DALI_EVENT_ADDRESS_SHORT ||
+            event->address_kind == DALI_EVENT_ADDRESS_GROUP) {
+            printf(", \"address\": %u", (unsigned)event->address);
+        }
+        printf(", \"selector\": %s",
+               event->address_selector ? "true" : "false");
+        printf(", \"action_code\": %u", (unsigned)event->legacy_data);
+        printf(", \"action_hex\": \"0x%02X\"",
+               (unsigned)event->legacy_data);
+        printf(", \"action\": \"%s\"", dali_event_action_name(event));
+        return;
     }
-    printf(", \"selector\": %s",
-           event->address_selector ? "true" : "false");
-    if (event->has_instance) {
-        printf(", \"instance\": %u", (unsigned)event->instance);
+
+    printf(", \"source_scheme\": \"%s\"",
+           dali_event_source_scheme_name(event->source.scheme));
+    if (event->source.has_device_address) {
+        printf(", \"device_address\": %u",
+               (unsigned)event->source.device_address);
     }
-    printf(", \"action_code\": %u", (unsigned)event->event_code);
-    printf(", \"action_hex\": \"0x%02X\"", (unsigned)event->event_code);
+    if (event->source.has_device_group) {
+        printf(", \"device_group\": %u",
+               (unsigned)event->source.device_group);
+    }
+    if (event->source.has_instance) {
+        printf(", \"instance\": %u", (unsigned)event->source.instance);
+    }
+    if (event->source.has_instance_group) {
+        printf(", \"instance_group\": %u",
+               (unsigned)event->source.instance_group);
+    }
+    if (event->source.has_instance_type) {
+        printf(", \"instance_type\": %u",
+               (unsigned)event->source.instance_type);
+    }
+
+    if (event->frame_kind == DALI_EVENT_FRAME_INPUT_24BIT) {
+        printf(", \"event_information\": %u",
+               (unsigned)event->event_information);
+        printf(", \"event_information_hex\": \"0x%03X\"",
+               (unsigned)event->event_information);
+    }
     printf(", \"action\": \"%s\"", dali_event_action_name(event));
 }
 
@@ -1000,28 +1063,54 @@ static void diag_print_event_record(const char *prefix,
     }
 
     const DaliInputEvent *event = &record->event;
-    printf("%sraw=0x%0*" PRIX32 " frame=%s addr_byte=0x%02X kind=%s",
+    printf("%sraw=0x%0*" PRIX32 " frame=%s",
            prefix,
            diag_frame_hex_width(&event->raw),
            event->raw.data,
-           dali_event_frame_kind_name(event->frame_kind),
-           (unsigned)event->address_byte,
-           dali_event_address_kind_name(event->address_kind));
+           dali_event_frame_kind_name(event->frame_kind));
 
-    if (event->address_kind == DALI_EVENT_ADDRESS_SHORT ||
-        event->address_kind == DALI_EVENT_ADDRESS_GROUP) {
-        printf(" addr=%u", (unsigned)event->address);
+    if (event->frame_kind == DALI_EVENT_FRAME_LEGACY_16BIT) {
+        printf(" addr_byte=0x%02X kind=%s",
+               (unsigned)event->address_byte,
+               dali_event_address_kind_name(event->address_kind));
+        if (event->address_kind == DALI_EVENT_ADDRESS_SHORT ||
+            event->address_kind == DALI_EVENT_ADDRESS_GROUP) {
+            printf(" addr=%u", (unsigned)event->address);
+        }
+        printf(" selector=%u", event->address_selector ? 1u : 0u);
+        printf(" action=0x%02X %s time=%" PRIu32 "us\r\n",
+               (unsigned)event->legacy_data,
+               dali_event_action_name(event),
+               record->timestamp_us);
+        return;
     }
 
-    printf(" selector=%u", event->address_selector ? 1u : 0u);
-    if (event->has_instance) {
-        printf(" inst=%u", (unsigned)event->instance);
+    printf(" source=%s",
+           dali_event_source_scheme_name(event->source.scheme));
+    if (event->source.has_device_address) {
+        printf(" device_address=%u", (unsigned)event->source.device_address);
+    }
+    if (event->source.has_device_group) {
+        printf(" device_group=%u", (unsigned)event->source.device_group);
+    }
+    if (event->source.has_instance) {
+        printf(" instance=%u", (unsigned)event->source.instance);
+    }
+    if (event->source.has_instance_group) {
+        printf(" instance_group=%u", (unsigned)event->source.instance_group);
+    }
+    if (event->source.has_instance_type) {
+        printf(" instance_type=%u", (unsigned)event->source.instance_type);
     }
 
-    printf(" action=0x%02X %s time=%" PRIu32 "us\r\n",
-           (unsigned)event->event_code,
-           dali_event_action_name(event),
-           record->timestamp_us);
+    if (event->frame_kind == DALI_EVENT_FRAME_INPUT_24BIT) {
+        printf(" event_information=0x%03X %s",
+               (unsigned)event->event_information,
+               dali_event_action_name(event));
+    } else {
+        printf(" %s", dali_event_action_name(event));
+    }
+    printf(" time=%" PRIu32 "us\r\n", record->timestamp_us);
 }
 
 static void diag_event_cb(const DaliFrame *frame, void *cb_ctx)
@@ -2519,6 +2608,7 @@ static void cmd_find(const char *args)
 
     printf("find switches: listening for %u seconds; double-press DALI-2 switches or trigger legacy coupler actions.\r\n",
            seconds);
+    printf("Run 'discover' first so Device/Instance switch types can be resolved safely.\r\n");
 
     TickType_t start = xTaskGetTickCount();
     TickType_t duration = pdMS_TO_TICKS(seconds * 1000u);
@@ -2527,7 +2617,7 @@ static void cmd_find(const char *args)
     while ((xTaskGetTickCount() - start) < duration) {
         while (diag_event_pop(&record)) {
             diag_print_event_record("event: ", &record);
-            if (dali_event_is_switch_mapping_candidate(&record.event)) {
+            if (diag_event_is_switch_candidate(&record.event)) {
                 bool recorded = diag_record_switch_mapping(&record);
                 if (recorded) {
                     uint8_t order = diag_switch_mappings_snapshot(NULL, 0u);
@@ -2540,7 +2630,7 @@ static void cmd_find(const char *args)
 
     while (diag_event_pop(&record)) {
         diag_print_event_record("event: ", &record);
-        if (dali_event_is_switch_mapping_candidate(&record.event)) {
+        if (diag_event_is_switch_candidate(&record.event)) {
             bool recorded = diag_record_switch_mapping(&record);
             if (recorded) {
                 uint8_t order = diag_switch_mappings_snapshot(NULL, 0u);

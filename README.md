@@ -2,13 +2,13 @@
 
 DALI-2 lighting controller for ESP32, built for [ESPHome](https://esphome.io) and Home Assistant.
 
-A reusable C protocol stack (`components/dali`) drives the bus — PHY, scheduler, discovery, commissioning, DT6/DT8 control gear, and DALI-2 input devices — with an ESPHome external component (`esphome/components/dali`) on top. A native ESP-IDF diagnostic CLI (`main/`) exposes the full stack over serial for bus debugging.
+A reusable C protocol stack (`components/dali`) drives the bus — PHY, scheduler, discovery, commissioning, DT6/DT8 control gear, and DALI-2 input devices — with an ESPHome external component (`esphome/components/dali`) on top. A native ESP-IDF diagnostic CLI (`main/`) provides serial workflows for common control, discovery, commissioning, capture, and bus debugging.
 
 ## Features
 
-- Lights by group, short address, or broadcast, with real state readback (`QUERY ACTUAL LEVEL`)
-- Bus scan, discovery, and commissioning from Home Assistant
-- DALI-2 input devices: occupancy, lux, temperature, humidity — polled, with unsolicited event push for 1-byte instances
+- Lights by group, short address, or broadcast, with query-based state readback when a short-address query target is available (`QUERY ACTUAL LEVEL`)
+- Bus scan and discovery from Home Assistant; control-gear commissioning through the native CLI
+- DALI-2 input devices: occupancy, lux, temperature, humidity — authoritative polling, with matching Device/Instance events requesting an immediate poll
 - Passive observation of existing pushbutton couplers (`headless_dispatch`): couplers keep commanding the lamps, ESP32 keeps HA state in sync
 - Free-text DALI command console in HA: queries, config, memory bank read/write, raw 16/24-bit frames
 - Protocol core is plain C with no ESPHome dependency, covered by 19 host test suites (run in CI)
@@ -21,7 +21,7 @@ A reusable C protocol stack (`components/dali`) drives the bus — PHY, schedule
 | DALI interface | MikroE [DALI 2 Click](https://www.mikroe.com/dali-2-click) |
 | Wiring | TX → GPIO18, RX → GPIO19 |
 
-Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The ESP32 has no transmit collision detection — it must be the **only master** on the bus (existing DALI-1 pushbutton couplers in direct-control mode are fine; see `headless_dispatch`).
+Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The controller has no proven collision-detection/arbitration strategy. Existing DALI-1 pushbutton couplers in direct-control mode coexist on the installed buses, but simultaneous transmissions remain a risk; see `headless_dispatch`.
 
 ## Getting started
 
@@ -31,6 +31,10 @@ Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The ESP32 has no t
 ### Example configuration
 
 A bus with two lamp groups, one individually addressed lamp, and a DALI-2 multi-sensor (e.g. Steinel HF 360 II) at short address 0:
+
+The example intentionally pins the known-working `v1.0.1` deployment baseline.
+Development-branch changes should be compiled and tested separately before use on
+an installation.
 
 ```yaml
 esp32:
@@ -42,7 +46,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/peetervalk/dali-esp.git
-      ref: main
+      ref: v1.0.1
     components: [dali]
 
 dali:
@@ -116,7 +120,8 @@ text:
 ## Scope and limitations
 
 - Control gear: DT6 (LED) and DT8 (colour) are implemented. Other device types (DT0 fluorescent, DT1 emergency, …) are not.
-- Single bus, single master.
+- One DALI bus per controller. Direct-control couplers are additional transmitters;
+  simultaneous traffic is not collision-safe.
 - This is an independent project. It implements and is tested against useful parts of IEC 62386, but it is **not** a DALI Alliance certified product. DALI and DALI-2 are trademarks of the Digital Illumination Interface Alliance.
 
 ## Development

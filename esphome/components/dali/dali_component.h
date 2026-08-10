@@ -116,7 +116,7 @@ class DaliComponent : public Component {
   void register_input_sensor(DaliBusSensor *sensor);
   // Called once per headless_dispatch entry during codegen init (Core 0 setup phase).
   void add_dispatch_entry(uint8_t frame_kind, uint8_t address_kind, uint8_t address,
-                          uint8_t event_code, uint8_t instance,
+                          uint16_t event_information, uint8_t instance,
                           uint8_t output_type, uint8_t output_address,
                           uint8_t action, uint8_t scene);
 
@@ -162,7 +162,7 @@ class DaliComponent : public Component {
 
   // Find couplers timer (Core 0); active flag is the module-level atomic.
   uint32_t find_couplers_end_ms_{0};
-  bool     find_couplers_collect_{false};  // one-tick drain gate
+  bool     find_couplers_collect_{false};  // waits for DALI-task stop acknowledgement
 
   // Input sensor boot query (Core 0 only).
   bool boot_sensor_query_done_{false};

@@ -113,6 +113,7 @@ struct SensorEntry {
     DaliBusSensor    *sensor;
     uint8_t           pending_msb;
     std::atomic<bool> seq_in_flight;
+    std::atomic<bool> poll_requested;
 };
 
 static SensorEntry s_sensor_registry[MAX_INPUT_SENSORS];
@@ -148,23 +149,25 @@ static void on_input_value_msb(DaliError result, const DaliFrame *reply, void *c
     txn.cb_ctx      = e;
     if (dali_sched_enqueue(&txn) != DALI_OK) {
         e->seq_in_flight.store(false, std::memory_order_release);
-        ESP_LOGW(TAG, "sensor LSB enqueue failed; poll will retry at next interval");
+        e->poll_requested.store(true, std::memory_order_release);
+        ESP_LOGW(TAG, "sensor LSB enqueue failed; poll retry requested");
     }
 }
 
 static void on_input_value_1byte(DaliError result, const DaliFrame *reply, void *ctx)
 {
     SensorEntry *e = static_cast<SensorEntry *>(ctx);
+    e->seq_in_flight.store(false, std::memory_order_release);
     if (result != DALI_OK || reply == nullptr) return;
     e->sensor->mark_raw_value((uint16_t)(reply->data & 0xFFu));
 }
 
-static void enqueue_sensor_poll(SensorEntry *e, uint32_t now_ms)
+static bool enqueue_sensor_poll(SensorEntry *e, uint32_t now_ms)
 {
     bool two_byte = (e->sensor->get_value_bytes() == 2u);
-    if (two_byte && e->seq_in_flight.load(std::memory_order_acquire)) {
-        ESP_LOGD(TAG, "sensor 2-byte poll: previous sequence still in flight, skipping");
-        return;
+    if (e->seq_in_flight.exchange(true, std::memory_order_acq_rel)) {
+        ESP_LOGD(TAG, "sensor poll: previous query still in flight, skipping");
+        return false;
     }
     DaliFrame frame;
     dali_build_instance_command(e->sensor->get_address(), e->sensor->get_instance(),
@@ -175,11 +178,12 @@ static void enqueue_sensor_poll(SensorEntry *e, uint32_t now_ms)
     txn.on_complete = two_byte ? on_input_value_msb : on_input_value_1byte;
     txn.cb_ctx      = e;
     if (dali_sched_enqueue(&txn) == DALI_OK) {
-        if (two_byte)
-            e->seq_in_flight.store(true, std::memory_order_release);
         e->sensor->set_last_poll_ms(now_ms);
+        return true;
     } else {
+        e->seq_in_flight.store(false, std::memory_order_release);
         ESP_LOGW(TAG, "sensor poll enqueue failed (queue full); will retry next interval");
+        return false;
     }
 }
 
@@ -330,16 +334,11 @@ static void on_raw2_done(DaliError result, const DaliFrame *reply, void * /*ctx*
 
 /* ── Find-couplers recording (Core 1 writes, Core 0 reads) ──────────────── */
 
-struct CouplerFrame {
-    uint8_t frame_kind;
-    uint8_t addr_kind;
-    uint8_t address;
-    uint8_t event_code;
-};
 static constexpr uint8_t    MAX_COUPLER_FRAMES = 32u;
-static CouplerFrame          s_coupler_frames[MAX_COUPLER_FRAMES];
+static DaliInputEvent        s_coupler_frames[MAX_COUPLER_FRAMES];
 static std::atomic<uint8_t>  s_coupler_count_{0};
 static std::atomic<bool>     s_find_couplers_active_{false};
+static std::atomic<bool>     s_find_couplers_stopped_ack_{true};
 
 /* ── Scan result pending (Core 1 → Core 0 via scan_done_ gate) ──────────── */
 
@@ -384,39 +383,81 @@ static void format_target(char *buf, size_t len, DaliTarget target)
 
 static void format_event(char *buf, size_t len, const DaliInputEvent *e)
 {
-    const char *pfx = (e->address_kind == DALI_EVENT_ADDRESS_GROUP)     ? "g"
-                    : (e->address_kind == DALI_EVENT_ADDRESS_BROADCAST)  ? "bc"
-                                                                         : "a";
-    if (e->frame_kind == DALI_EVENT_FRAME_LEGACY_16BIT && !e->address_selector) {
-        if (e->address_kind == DALI_EVENT_ADDRESS_BROADCAST)
-            snprintf(buf, len, "bc dapc %u", (unsigned)e->event_code);
-        else
-            snprintf(buf, len, "%s%u dapc %u", pfx, (unsigned)e->address,
-                     (unsigned)e->event_code);
+    if (e->frame_kind == DALI_EVENT_FRAME_LEGACY_16BIT) {
+        const char *pfx = (e->address_kind == DALI_EVENT_ADDRESS_GROUP) ? "g"
+                        : (e->address_kind == DALI_EVENT_ADDRESS_BROADCAST) ? "bc"
+                                                                             : "a";
+        if (!e->address_selector) {
+            if (e->address_kind == DALI_EVENT_ADDRESS_BROADCAST)
+                snprintf(buf, len, "bc dapc %u", (unsigned)e->legacy_data);
+            else
+                snprintf(buf, len, "%s%u dapc %u", pfx, (unsigned)e->address,
+                         (unsigned)e->legacy_data);
+        } else if (e->address_kind == DALI_EVENT_ADDRESS_BROADCAST) {
+            snprintf(buf, len, "bc %s", opcode_name(e->legacy_data));
+        } else {
+            snprintf(buf, len, "%s%u %s", pfx, (unsigned)e->address,
+                     opcode_name(e->legacy_data));
+        }
         return;
     }
-    /* 24-bit input-device event: decode instance/scheme/event_code directly.
-     * Do NOT run this through opcode_name() — that table is legacy 16-bit
-     * command names and is meaningless for input-device event data (it was
-     * previously mislabeling these as e.g. "up"/"cmd", which is bogus). */
+
+    if (e->frame_kind == DALI_EVENT_FRAME_POWER_NOTIFICATION_24BIT) {
+        if (e->source.has_device_group && e->source.has_device_address) {
+            snprintf(buf, len, "power dg%u a%u", (unsigned)e->source.device_group,
+                     (unsigned)e->source.device_address);
+        } else if (e->source.has_device_group) {
+            snprintf(buf, len, "power dg%u", (unsigned)e->source.device_group);
+        } else if (e->source.has_device_address) {
+            snprintf(buf, len, "power a%u", (unsigned)e->source.device_address);
+        } else {
+            snprintf(buf, len, "power");
+        }
+        return;
+    }
+
     if (e->frame_kind == DALI_EVENT_FRAME_INPUT_24BIT) {
-        uint8_t scheme = e->instance & 0x03u;
-        uint8_t inst   = (e->instance >> 2u) & 0x1Fu;
-        if (e->address_kind == DALI_EVENT_ADDRESS_BROADCAST)
-            snprintf(buf, len, "bc inst=%u scheme=%u evt=%u",
-                     (unsigned)inst, (unsigned)scheme, (unsigned)e->event_code);
-        else
-            snprintf(buf, len, "%s%u inst=%u scheme=%u evt=%u", pfx,
-                     (unsigned)e->address, (unsigned)inst, (unsigned)scheme,
-                     (unsigned)e->event_code);
+        switch (e->source.scheme) {
+            case DALI_EVENT_SOURCE_DEVICE:
+                snprintf(buf, len, "a%u type=%u evt=%u",
+                         (unsigned)e->source.device_address,
+                         (unsigned)e->source.instance_type,
+                         (unsigned)e->event_information);
+                break;
+            case DALI_EVENT_SOURCE_DEVICE_INSTANCE:
+                snprintf(buf, len, "a%u inst=%u evt=%u",
+                         (unsigned)e->source.device_address,
+                         (unsigned)e->source.instance,
+                         (unsigned)e->event_information);
+                break;
+            case DALI_EVENT_SOURCE_DEVICE_GROUP:
+                snprintf(buf, len, "dg%u type=%u evt=%u",
+                         (unsigned)e->source.device_group,
+                         (unsigned)e->source.instance_type,
+                         (unsigned)e->event_information);
+                break;
+            case DALI_EVENT_SOURCE_INSTANCE:
+                snprintf(buf, len, "type=%u inst=%u evt=%u",
+                         (unsigned)e->source.instance_type,
+                         (unsigned)e->source.instance,
+                         (unsigned)e->event_information);
+                break;
+            case DALI_EVENT_SOURCE_INSTANCE_GROUP:
+                snprintf(buf, len, "ig%u type=%u evt=%u",
+                         (unsigned)e->source.instance_group,
+                         (unsigned)e->source.instance_type,
+                         (unsigned)e->event_information);
+                break;
+            default:
+                snprintf(buf, len, "event scheme=%u evt=%u",
+                         (unsigned)e->source.scheme,
+                         (unsigned)e->event_information);
+                break;
+        }
         return;
     }
-    if (e->address_kind == DALI_EVENT_ADDRESS_BROADCAST) {
-        snprintf(buf, len, "bc %s", opcode_name(e->event_code));
-    } else {
-        snprintf(buf, len, "%s%u %s", pfx, (unsigned)e->address,
-                 opcode_name(e->event_code));
-    }
+
+    snprintf(buf, len, "invalid");
 }
 
 /* ── Unsolicited-RX callback (runs on Core 1, in the DALI task) ─────────── */
@@ -437,23 +478,18 @@ static void on_dali_unsolicited(const DaliFrame *frame, void * /*ctx*/)
     ESP_LOGD(TAG, "rx %s", monitor_copy);
 
     /* Find-couplers: record unique frames while the window is open. */
-    if (s_find_couplers_active_.load(std::memory_order_relaxed)) {
+    if (s_find_couplers_active_.load(std::memory_order_acquire)) {
         uint8_t cnt = s_coupler_count_.load(std::memory_order_relaxed);
         bool dup = false;
         for (uint8_t i = 0u; i < cnt; i++) {
-            if (s_coupler_frames[i].frame_kind == (uint8_t)event.frame_kind &&
-                s_coupler_frames[i].addr_kind  == (uint8_t)event.address_kind &&
-                s_coupler_frames[i].address    == event.address &&
-                s_coupler_frames[i].event_code == event.event_code) {
+            if (s_coupler_frames[i].raw.bit_length == event.raw.bit_length &&
+                s_coupler_frames[i].raw.data == event.raw.data) {
                 dup = true;
                 break;
             }
         }
         if (!dup && cnt < MAX_COUPLER_FRAMES) {
-            s_coupler_frames[cnt].frame_kind  = (uint8_t)event.frame_kind;
-            s_coupler_frames[cnt].addr_kind   = (uint8_t)event.address_kind;
-            s_coupler_frames[cnt].address     = event.address;
-            s_coupler_frames[cnt].event_code  = event.event_code;
+            s_coupler_frames[cnt] = event;
             /* Release ensures all field writes are visible before the count. */
             s_coupler_count_.store(cnt + 1u, std::memory_order_release);
         }
@@ -465,45 +501,23 @@ static void on_dali_unsolicited(const DaliFrame *frame, void * /*ctx*/)
     rec.timestamp_us = 0u;
     dali_event_queue_push(&s_event_queue, &rec);
 
-    /* Event-driven sensor update for 1-byte input sensors (e.g. occupancy).
-     * IEC 62386-103 instance byte: bit7=source, bits6:2=instance, bits1:0=scheme.
-     * For 2-byte sensors the event_code is only 8 bits wide — polling remains
-     * the source of truth for those.
-     *
-     * Confirmed on live hardware (2026-06-30): the Steinel's autonomous event
-     * report on the occupancy instance does NOT carry the DT303 bit-replicated
-     * state (0/85/170/255). It's a raw HF motion signal/diagnostic value that idles
-     * around ~12 and swings both above and below that baseline during real
-     * motion (observed 8-15 while moving in front of the sensor) — i.e. it's
-     * telemetry from the sensor's analog front end, not the debounced
-     * occupancy state. Only QUERY_INPUT_VALUE (the poll) returns the actual
-     * DT303 state on this device. So: only accept a pushed event value when it
-     * happens to equal one of the four valid states (harmless coincidence
-     * guard); everything else is the HF telemetry channel and is correctly
-     * ignored, with the poll remaining the sole source of truth. */
+    /* Device/instance events identify one configured query target exactly.
+     * Treat the event as a change notification only: QUERY INPUT VALUE remains
+     * authoritative for both one- and two-byte sensor entities. Other Part-103
+     * source schemes need type/group metadata that the current YAML does not
+     * carry, so do not guess a target for them. */
     if (event.frame_kind == DALI_EVENT_FRAME_INPUT_24BIT &&
-        event.address_kind == DALI_EVENT_ADDRESS_SHORT) {
-        uint8_t decoded_instance = (event.instance >> 2u) & 0x1Fu;
-        uint8_t code = event.event_code;
-        bool valid_dt303_state = (code == 0u || code == 85u || code == 170u || code == 255u);
+        event.source.scheme == DALI_EVENT_SOURCE_DEVICE_INSTANCE &&
+        event.source.has_device_address && event.source.has_instance) {
         for (uint8_t i = 0u; i < s_sensor_count; i++) {
             SensorEntry &e = s_sensor_registry[i];
-            if (e.sensor->get_value_bytes() == 1u &&
-                e.sensor->get_address()     == event.address &&
-                e.sensor->get_instance()    == decoded_instance) {
-                if (!valid_dt303_state) {
-                    ESP_LOGD(TAG, "event update ignored (not a DT303 state): addr=%u inst=%u val=%u raw=%06X",
-                             (unsigned)event.address,
-                             (unsigned)decoded_instance,
-                             (unsigned)code,
-                             (unsigned)event.raw.data);
-                    continue;
-                }
-                e.sensor->mark_raw_value((uint16_t)code);
-                ESP_LOGD(TAG, "event update: addr=%u inst=%u val=%u raw=%06X",
-                         (unsigned)event.address,
-                         (unsigned)decoded_instance,
-                         (unsigned)code,
+            if (e.sensor->get_address()  == event.source.device_address &&
+                e.sensor->get_instance() == event.source.instance) {
+                e.poll_requested.store(true, std::memory_order_release);
+                ESP_LOGD(TAG, "event poll requested: addr=%u inst=%u info=%u raw=%06X",
+                         (unsigned)event.source.device_address,
+                         (unsigned)event.source.instance,
+                         (unsigned)event.event_information,
                          (unsigned)event.raw.data);
             }
         }
@@ -519,6 +533,12 @@ static void dali_task(void *)
         dali_phy_rx_process();
         dali_sched_run();
 
+        /* Acknowledge a stop only after scheduler callbacks from this task have
+         * finished, so Core 0 cannot drain while a capture write is pending. */
+        if (!s_find_couplers_active_.load(std::memory_order_acquire)) {
+            s_find_couplers_stopped_ack_.store(true, std::memory_order_release);
+        }
+
         /* Always drain the event queue to prevent overflow.
          * Only dispatch if a headless table is loaded. */
         DaliInputEventRecord rec;
@@ -530,12 +550,7 @@ static void dali_task(void *)
                 DaliError err = dali_dispatch(s_dispatch_table, s_dispatch_count,
                                               &rec.event, &s_toggle_state, &result);
                 if (err != DALI_OK) {
-                    ESP_LOGD(TAG, "dispatch err %d (fk=%d ak=%d a=%d op=0x%02x)",
-                             (int)err,
-                             (int)rec.event.frame_kind,
-                             (int)rec.event.address_kind,
-                             (int)rec.event.address,
-                             (int)rec.event.event_code);
+                    ESP_LOGD(TAG, "dispatch err %d (%s)", (int)err, event_str);
                 } else if (result.matched) {
                     char tgt[8];
                     format_target(tgt, sizeof(tgt), result.target);
@@ -647,7 +662,17 @@ void DaliComponent::loop()
             bool due = !boot_sensor_query_done_ ||
                        (uint32_t)(now - e.sensor->get_last_poll_ms()) >=
                            e.sensor->get_poll_interval_s() * 1000u;
-            if (due) enqueue_sensor_poll(&e, now);
+            bool requested = e.poll_requested.load(std::memory_order_acquire);
+            if ((!due && !requested) ||
+                e.seq_in_flight.load(std::memory_order_acquire)) {
+                continue;
+            }
+
+            bool consumed_request =
+                e.poll_requested.exchange(false, std::memory_order_acq_rel);
+            if (!enqueue_sensor_poll(&e, now) && consumed_request) {
+                e.poll_requested.store(true, std::memory_order_release);
+            }
         }
         boot_sensor_query_done_ = true;
     }
@@ -747,22 +772,26 @@ void DaliComponent::loop()
     /* ── Find-couplers timer ── */
     /* Overflow-safe elapsed check: underflows to a large value before end_ms_
      * passes, wraps to a small value after — so < 0x80000000u means elapsed. */
-    if (s_find_couplers_active_.load(std::memory_order_relaxed) &&
+    if (s_find_couplers_active_.load(std::memory_order_acquire) &&
         (uint32_t)(millis() - find_couplers_end_ms_) < 0x80000000u) {
-        /* Timer elapsed: stop recording, arm one-tick drain. */
+        /* Timer elapsed: request stop; drain only after the DALI task acks it. */
+        s_find_couplers_stopped_ack_.store(false, std::memory_order_relaxed);
         s_find_couplers_active_.store(false, std::memory_order_release);
         find_couplers_collect_ = true;
         if (scan_status_) scan_status_->publish_state("Coupler scan done");
-    } else if (find_couplers_collect_) {
-        /* One tick after clearing active — Core 1 has definitely seen the flag. */
+    } else if (find_couplers_collect_ &&
+               s_find_couplers_stopped_ack_.load(std::memory_order_acquire)) {
         find_couplers_collect_ = false;
         uint8_t cnt = s_coupler_count_.load(std::memory_order_acquire);
 
         /* Build coupler group bitmask from captured frames. */
         uint16_t gmask = 0u;
         for (uint8_t i = 0u; i < cnt; i++) {
-            if (s_coupler_frames[i].addr_kind == (uint8_t)DALI_EVENT_ADDRESS_GROUP)
-                gmask |= (uint16_t)(1u << s_coupler_frames[i].address);
+            const DaliInputEvent &event = s_coupler_frames[i];
+            if (event.frame_kind == DALI_EVENT_FRAME_LEGACY_16BIT &&
+                event.address_kind == DALI_EVENT_ADDRESS_GROUP) {
+                gmask |= (uint16_t)(1u << event.address);
+            }
         }
         s_coupler_group_mask_.store(gmask, std::memory_order_release);
 
@@ -772,16 +801,14 @@ void DaliComponent::loop()
             } else {
                 char buf[128] = {};
                 for (uint8_t i = 0u; i < cnt; i++) {
-                    const CouplerFrame &cf = s_coupler_frames[i];
-                    char entry[24];
-                    const char *pfx = (cf.addr_kind == (uint8_t)DALI_EVENT_ADDRESS_GROUP) ? "g"
-                                    : (cf.addr_kind == (uint8_t)DALI_EVENT_ADDRESS_BROADCAST) ? "bc"
-                                                                                               : "a";
-                    if (cf.addr_kind == (uint8_t)DALI_EVENT_ADDRESS_BROADCAST)
-                        snprintf(entry, sizeof(entry), "bc/%s ", opcode_name(cf.event_code));
-                    else
-                        snprintf(entry, sizeof(entry), "%s%u/%s ", pfx,
-                                 (unsigned)cf.address, opcode_name(cf.event_code));
+                    const DaliInputEvent &event = s_coupler_frames[i];
+                    char entry[48];
+                    format_event(entry, sizeof(entry), &event);
+                    ESP_LOGI(TAG, "coupler[%u] %s raw=%0*X", (unsigned)i,
+                             entry, event.raw.bit_length == 24u ? 6 : 4,
+                             (unsigned)event.raw.data);
+                    if (i > 0u)
+                        strncat(buf, "; ", sizeof(buf) - strlen(buf) - 1u);
                     strncat(buf, entry, sizeof(buf) - strlen(buf) - 1u);
                 }
                 couplers_result_->publish_state(buf);
@@ -1324,14 +1351,15 @@ void DaliComponent::register_input_sensor(DaliBusSensor *sensor)
         SensorEntry &e = s_sensor_registry[s_sensor_count++];
         e.sensor      = sensor;
         e.pending_msb = 0u;
-        // seq_in_flight is zero-initialized for global-static storage
+        e.seq_in_flight.store(false, std::memory_order_relaxed);
+        e.poll_requested.store(false, std::memory_order_relaxed);
     } else {
         ESP_LOGW(TAG, "sensor registry full — increase MAX_INPUT_SENSORS");
     }
 }
 
 void DaliComponent::add_dispatch_entry(uint8_t frame_kind, uint8_t address_kind,
-                                       uint8_t address, uint8_t event_code,
+                                       uint8_t address, uint16_t event_information,
                                        uint8_t instance, uint8_t output_type,
                                        uint8_t output_address, uint8_t action,
                                        uint8_t scene)
@@ -1344,7 +1372,7 @@ void DaliComponent::add_dispatch_entry(uint8_t frame_kind, uint8_t address_kind,
     e.key.frame_kind   = static_cast<DaliEventFrameKind>(frame_kind);
     e.key.address_kind = static_cast<DaliEventAddressKind>(address_kind);
     e.key.address      = address;
-    e.key.event_code   = event_code;
+    e.key.event_information = event_information;
     e.key.instance     = instance;
     e.output.type      = static_cast<DaliAddressType>(output_type);
     e.output.address   = output_address;
@@ -1400,6 +1428,7 @@ void DaliComponent::start_find_couplers()
     }
     ESP_LOGI(TAG, "Find couplers: listening for 30 s");
     s_coupler_count_.store(0u, std::memory_order_relaxed);
+    s_find_couplers_stopped_ack_.store(true, std::memory_order_relaxed);
     find_couplers_collect_  = false;
     find_couplers_end_ms_   = millis() + 30000u;
     s_find_couplers_active_.store(true, std::memory_order_release);

@@ -367,15 +367,29 @@ are not generic IEC 62386-103 input-device commands.
 
 ## Event Frames
 
-`dali_event` keeps unsolicited frames raw-first and decodes:
+`dali_event` keeps unsolicited frames raw-first. For IEC 62386-103 24-bit
+input-device traffic it rejects command frames (`bit 16 = 1`), preserves all
+ten event-information bits (`bits 9:0`), and decodes the five standard source
+schemes:
 
-- DALI-2 24-bit input-device event frames:
+| Source scheme | Encoded source fields |
+|---|---|
+| Instance | instance type, instance number |
+| Device | device short address, instance type |
+| Device/Instance | device short address, instance number |
+| Device Group | device-group number, instance type |
+| Instance Group | instance-group number, instance type |
 
-```text
-data = (address_byte << 16) | (instance_byte << 8) | event_byte
-```
+Device/Instance frames do not contain an instance type; consumers must obtain
+it from discovery/configuration rather than infer it from the event value.
+Power notifications use the reserved Part 103 prefix and are represented as a
+separate frame kind.
 
-- Legacy/DALI-1 pushbutton coupler frames:
+DT301 push-button event information uses sparse standard values: released
+`0x000`, pressed `0x001`, short press `0x002`, double press `0x005`, long-press
+start/repeat/stop `0x009`/`0x00B`/`0x00C`, free `0x00E`, and stuck `0x00F`.
+
+Legacy/DALI-1 pushbutton coupler frames remain decoded as:
 
 ```text
 data = (target_address_byte << 8) | command_or_level_byte

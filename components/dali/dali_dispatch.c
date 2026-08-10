@@ -3,14 +3,46 @@
 
 static bool key_matches(const DaliDispatchKey *key, const DaliInputEvent *event)
 {
-    if (key->frame_kind   != event->frame_kind)   return false;
-    if (key->address_kind != event->address_kind) return false;
-    if (key->address      != event->address)      return false;
-    if (key->event_code   != DALI_DISPATCH_OPCODE_ANY &&
-        key->event_code   != event->event_code)   return false;
-    if (event->frame_kind == DALI_EVENT_FRAME_INPUT_24BIT &&
-        key->instance     != DALI_DISPATCH_INSTANCE_ANY &&
-        key->instance     != event->instance)     return false;
+    if (key->frame_kind != event->frame_kind) return false;
+
+    uint16_t event_information;
+    if (event->frame_kind == DALI_EVENT_FRAME_LEGACY_16BIT) {
+        if (key->address_kind != event->address_kind) return false;
+        if (key->address != event->address) return false;
+        event_information = event->legacy_data;
+    } else {
+        switch (key->address_kind) {
+            case DALI_EVENT_ADDRESS_SHORT:
+                if (!event->source.has_device_address ||
+                    key->address != event->source.device_address) return false;
+                break;
+            case DALI_EVENT_ADDRESS_GROUP:
+                if (event->source.has_device_group) {
+                    if (key->address != event->source.device_group) return false;
+                } else if (event->source.has_instance_group) {
+                    if (key->address != event->source.instance_group) return false;
+                } else {
+                    return false;
+                }
+                break;
+            case DALI_EVENT_ADDRESS_INVALID:
+                if (event->source.has_device_address ||
+                    event->source.has_device_group ||
+                    event->source.has_instance_group) return false;
+                break;
+            case DALI_EVENT_ADDRESS_BROADCAST:
+            default:
+                return false;
+        }
+
+        event_information = event->event_information;
+        if (key->instance != DALI_DISPATCH_INSTANCE_ANY &&
+            (!event->source.has_instance ||
+             key->instance != event->source.instance)) return false;
+    }
+
+    if (key->event_information != DALI_DISPATCH_EVENT_ANY &&
+        key->event_information != event_information) return false;
     return true;
 }
 
@@ -49,13 +81,13 @@ static DaliError apply_mirror(const DaliInputEvent    *event,
                               DaliDispatchToggleState *state)
 {
     if (!event->address_selector) {
-        uint8_t level = event->event_code;
+        uint8_t level = event->legacy_data;
         if (level == 0xFFu) return DALI_ERR_INVALID;
         toggle_set(state, out, level != 0u);
         return dali_control_set_level(out, level);
     }
 
-    uint8_t op = event->event_code;
+    uint8_t op = event->legacy_data;
     switch (op) {
         case 0x00u:
             toggle_set(state, out, false);
@@ -125,7 +157,7 @@ static DaliError observe_legacy(const DaliInputEvent    *event,
                                 DaliDispatchResult      *result_out)
 {
     if (!event->address_selector) {
-        uint8_t level = event->event_code;
+        uint8_t level = event->legacy_data;
         if (level == 0xFFu) {
             result_unknown(result_out, out);
             return DALI_OK;
@@ -135,7 +167,7 @@ static DaliError observe_legacy(const DaliInputEvent    *event,
         return DALI_OK;
     }
 
-    uint8_t op = event->event_code;
+    uint8_t op = event->legacy_data;
     switch (op) {
         case 0x00u:
             toggle_set(state, out, false);
@@ -191,9 +223,13 @@ DaliError dali_dispatch(const DaliDispatchEntry  *table,
         DaliError err;
         switch (e->action) {
             case DALI_DISPATCH_ACTION_OBSERVE:
+                if (event->frame_kind != DALI_EVENT_FRAME_LEGACY_16BIT)
+                    return DALI_ERR_INVALID;
                 return observe_legacy(event, e->output, toggle_state, result_out);
 
             case DALI_DISPATCH_ACTION_MIRROR: {
+                if (event->frame_kind != DALI_EVENT_FRAME_LEGACY_16BIT)
+                    return DALI_ERR_INVALID;
                 err = apply_mirror(event, e->output, NULL);
                 if (err == DALI_OK) {
                     observe_legacy(event, e->output, toggle_state, result_out);
