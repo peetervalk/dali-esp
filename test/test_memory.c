@@ -199,6 +199,168 @@ void test_build_control_device_write_sequence_rejects_invalid_inputs(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * Read sequence builders
+ *
+ * Independent frame vectors, address 5 / bank 2 / offset 0x10:
+ *   control gear   DTR1 = 0xC3 0x02, DTR0 = 0xA3 0x10, READ = 0x0B 0xC5
+ *   control device DTR1 = 0xC1 0x31 0x02, DTR0 = 0xC1 0x30 0x10,
+ *                  READ = 0x0B 0xFE 0x3C
+ * --------------------------------------------------------------------------*/
+
+static DaliSequenceResult make_read_result(const uint8_t *bytes, uint8_t count)
+{
+    DaliSequenceResult result = {
+        .result      = DALI_OK,
+        .failed_step = DALI_SEQUENCE_NO_FAILED_STEP,
+        .steps_run   = (uint8_t)(DALI_MEMORY_READ_SETUP_STEPS + count),
+    };
+
+    for (uint8_t i = 0u; i < count; i++) {
+        uint8_t step = (uint8_t)(DALI_MEMORY_READ_SETUP_STEPS + i);
+        result.replies[step] = (DaliFrame){
+            .data       = bytes[i],
+            .bit_length = DALI_BACKWARD_FRAME_BITS,
+        };
+        result.reply_mask |= (uint8_t)(1u << step);
+    }
+    return result;
+}
+
+void test_build_read_sequence_matches_control_gear_frames(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_memory_build_read_sequence(5u, 2u, 0x10u, 1u, &seq));
+    TEST_ASSERT_EQUAL_UINT8(3u, seq.step_count);
+    TEST_ASSERT_NULL(seq.on_complete);
+
+    TEST_ASSERT_EQUAL_HEX32(0xC302u, seq.steps[0].frame.data);
+    TEST_ASSERT_EQUAL_HEX32(0xA310u, seq.steps[1].frame.data);
+    TEST_ASSERT_EQUAL_HEX32(0x0BC5u, seq.steps[2].frame.data);
+    for (uint8_t i = 0u; i < 3u; i++) {
+        TEST_ASSERT_EQUAL_UINT8(DALI_FORWARD_FRAME_BITS, seq.steps[i].frame.bit_length);
+        TEST_ASSERT_FALSE(seq.steps[i].send_twice);
+    }
+    TEST_ASSERT_FALSE(seq.steps[0].needs_reply);
+    TEST_ASSERT_FALSE(seq.steps[1].needs_reply);
+    TEST_ASSERT_TRUE(seq.steps[2].needs_reply);
+    /* A repeated READ would land on the next location — never auto-retry. */
+    TEST_ASSERT_EQUAL_UINT8(0u, seq.steps[2].retries_left);
+}
+
+void test_build_read_sequence_repeats_read_for_a_block(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_memory_build_read_sequence(
+                          5u, 2u, 0x10u, DALI_MEMORY_MAX_SEQUENCE_READ_BYTES, &seq));
+    TEST_ASSERT_EQUAL_UINT8(DALI_SEQUENCE_MAX_STEPS, seq.step_count);
+
+    /* One DTR1/DTR0 setup, then the same READ frame per byte. */
+    for (uint8_t i = DALI_MEMORY_READ_SETUP_STEPS; i < seq.step_count; i++) {
+        TEST_ASSERT_EQUAL_HEX32(0x0BC5u, seq.steps[i].frame.data);
+        TEST_ASSERT_TRUE(seq.steps[i].needs_reply);
+    }
+}
+
+void test_build_control_device_read_sequence_matches_standard_frames(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_memory_build_control_device_read_sequence(
+                          5u, 2u, 0x10u, 1u, &seq));
+    TEST_ASSERT_EQUAL_UINT8(3u, seq.step_count);
+
+    TEST_ASSERT_EQUAL_HEX32(0xC13102u, seq.steps[0].frame.data);
+    TEST_ASSERT_EQUAL_HEX32(0xC13010u, seq.steps[1].frame.data);
+    TEST_ASSERT_EQUAL_HEX32(0x0BFE3Cu, seq.steps[2].frame.data);
+    for (uint8_t i = 0u; i < 3u; i++) {
+        TEST_ASSERT_EQUAL_UINT8(DALI_EXTENDED_FRAME_BITS, seq.steps[i].frame.bit_length);
+    }
+    TEST_ASSERT_TRUE(seq.steps[2].needs_reply);
+    TEST_ASSERT_EQUAL_UINT8(0u, seq.steps[2].retries_left);
+}
+
+void test_build_read_sequences_reject_invalid_inputs(void)
+{
+    DaliSequence seq;
+    memset(&seq, 0xA5, sizeof(seq));
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_memory_build_read_sequence(64u, 0u, 0u, 1u, &seq));
+    TEST_ASSERT_EQUAL_HEX8(0xA5u, ((const uint8_t *)&seq)[0]);
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_memory_build_read_sequence(5u, 0u, 0u, 0u, &seq));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_memory_build_read_sequence(
+                          5u, 0u, 0u, DALI_MEMORY_MAX_SEQUENCE_READ_BYTES + 1u, &seq));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_memory_build_read_sequence(5u, 0u, 0u, 1u, NULL));
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_memory_build_control_device_read_sequence(64u, 0u, 0u, 1u, &seq));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_memory_build_control_device_read_sequence(5u, 0u, 0u, 0u, &seq));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_memory_build_control_device_read_sequence(5u, 0u, 0u, 1u, NULL));
+}
+
+void test_read_from_sequence_collects_reply_bytes(void)
+{
+    const uint8_t bytes[3] = { 0xDEu, 0xADu, 0xBEu };
+    DaliSequenceResult result = make_read_result(bytes, 3u);
+    uint8_t buf[3] = {0u, 0u, 0u};
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_memory_read_from_sequence(&result, 3u, buf));
+    TEST_ASSERT_EQUAL_HEX8(0xDEu, buf[0]);
+    TEST_ASSERT_EQUAL_HEX8(0xADu, buf[1]);
+    TEST_ASSERT_EQUAL_HEX8(0xBEu, buf[2]);
+
+    /* Reading fewer bytes than the sequence returned stops at the request. */
+    uint8_t one = 0u;
+    TEST_ASSERT_EQUAL(DALI_OK, dali_memory_read_from_sequence(&result, 1u, &one));
+    TEST_ASSERT_EQUAL_HEX8(0xDEu, one);
+}
+
+void test_read_from_sequence_rejects_partial_and_failed_reads(void)
+{
+    const uint8_t bytes[3] = { 0xDEu, 0xADu, 0xBEu };
+    uint8_t buf[3] = {0u, 0u, 0u};
+
+    /* Only the first read replied — never hand back a half-filled buffer. */
+    DaliSequenceResult partial = make_read_result(bytes, 1u);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_memory_read_from_sequence(&partial, 2u, buf));
+
+    DaliSequenceResult failed = make_read_result(bytes, 1u);
+    failed.result      = DALI_ERR_TIMEOUT;
+    failed.failed_step = 3u;
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT,
+                      dali_memory_read_from_sequence(&failed, 2u, buf));
+
+    /* A forward frame in a reply slot is not a backward reply. */
+    DaliSequenceResult wrong_width = make_read_result(bytes, 1u);
+    wrong_width.replies[DALI_MEMORY_READ_SETUP_STEPS].bit_length =
+        DALI_FORWARD_FRAME_BITS;
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_memory_read_from_sequence(&wrong_width, 1u, buf));
+
+    DaliSequenceResult ok = make_read_result(bytes, 1u);
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_memory_read_from_sequence(NULL, 1u, buf));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_memory_read_from_sequence(&ok, 1u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_memory_read_from_sequence(&ok, 0u, buf));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_memory_read_from_sequence(
+                          &ok, DALI_MEMORY_MAX_SEQUENCE_READ_BYTES + 1u, buf));
+}
+
+/* ---------------------------------------------------------------------------
  * dali_memory_read_byte — transaction sequence
  * --------------------------------------------------------------------------*/
 
@@ -508,6 +670,13 @@ int main(void)
     RUN_TEST(test_build_control_device_write_sequence_matches_standard_frames);
     RUN_TEST(test_build_control_device_write_sequence_accepts_boundary_values);
     RUN_TEST(test_build_control_device_write_sequence_rejects_invalid_inputs);
+
+    RUN_TEST(test_build_read_sequence_matches_control_gear_frames);
+    RUN_TEST(test_build_read_sequence_repeats_read_for_a_block);
+    RUN_TEST(test_build_control_device_read_sequence_matches_standard_frames);
+    RUN_TEST(test_build_read_sequences_reject_invalid_inputs);
+    RUN_TEST(test_read_from_sequence_collects_reply_bytes);
+    RUN_TEST(test_read_from_sequence_rejects_partial_and_failed_reads);
 
     RUN_TEST(test_read_byte_sends_three_frames);
     RUN_TEST(test_read_byte_first_two_frames_no_reply);

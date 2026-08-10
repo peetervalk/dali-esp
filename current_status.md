@@ -66,8 +66,19 @@ adding broad new device support.
   bus traffic, and a full queue can no longer strand a half-finished read.
   Independent vectors cover the frame layout, argument boundaries, MSB-first
   assembly, and the partial and failed cases.
-- All 21 host test executables pass, with 43 cases in the scheduler suite and 7
-  in the input-poll suite.
+- Memory reads have typed sequence builders for both forms:
+  `dali_memory_build_read_sequence()` for Part 102 control gear and
+  `dali_memory_build_control_device_read_sequence()` for Part 103 control
+  devices, each emitting DTR1, DTR0, then one READ MEMORY LOCATION per byte,
+  with `dali_memory_read_from_sequence()` collecting the bytes only when every
+  read replied. Read steps deliberately carry no retry budget because READ
+  MEMORY LOCATION advances DTR0. A block is capped at
+  `DALI_MEMORY_MAX_SEQUENCE_READ_BYTES` (5), the space left after the two setup
+  steps. The ESPHome console `memread` now uses the typed control-device builder
+  instead of a hand-assembled `0x3C` frame. Independent frame vectors cover both
+  forms, the block layout, argument boundaries, and the partial and failed cases.
+- All 21 host test executables pass, with 43 cases in the scheduler suite, 7 in
+  the input-poll suite, and 39 in the memory suite.
 - The ignored compile-test configuration builds the working-tree component with
   ESPHome 2026.7.4, warning-free, at 34.9% RAM and 49.7% flash. This is a newer
   ESPHome than the 2026.6.2 recorded below; the three pinned YAMLs were not
@@ -87,7 +98,7 @@ adding broad new device support.
 - All three pinned YAMLs pass `esphome config` with ESPHome 2026.6.2 and
   resolve the published `v1.0.1` external component.
 - The current `dev` worktree compiles and links as a local ESPHome 2026.6.2
-  external component through `_local/dali_diag_local.yaml`; dispatch schema boundary
+  external component through `_local/dali-diag-local.yaml`; dispatch schema boundary
   and backwards-compatibility cases also pass.
 - The ESPHome protocol wrapper set matches the 19 reusable C source files.
 - The input-device configuration opcode audit is complete against Part 103:2022,
@@ -292,7 +303,7 @@ The three active firmware configurations pin their external component to
 | `_local/dali-2k.yaml` | Second-floor site firmware; group 0 lighting, HA console, and Steinel HF 360 II polling |
 
 The entire `_local` directory is deliberately ignored by Git. This checkout also
-contains `_local/dali_diag_local.yaml`, a compile-test copy of the tracked diagnostic
+contains `_local/dali-diag-local.yaml`, a compile-test copy of the tracked diagnostic
 configuration, and `_local/secrets.yaml`, whose values are explicitly marked
 dummy/compile-only and must not be deployed. Inspect and back up any real site
 files separately; normal `git status` does not show changes under `_local`.
@@ -338,9 +349,13 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 - Add a scheduler-level atomic transaction/session facility for DTR operations,
   ENABLE DEVICE TYPE sequences, memory access, DT8 multi-byte queries,
   send-twice commands, discovery, and commissioning. Sequences already execute
-  contiguously and report a reply per step, and multi-byte input polling now uses
-  them; the remaining work is to route discovery, commissioning, and memory reads
-  the same way.
+  contiguously and report a reply per step; multi-byte input polling and both
+  memory-read forms are built on them. The remaining work is a sequence-capable
+  transport so discovery and commissioning can run atomic groups too, since they
+  reach the bus through the one-frame-at-a-time `DaliDiscoveryTransport`. That
+  transport is also what the Bank 0 identity read needs before it can move off
+  independent transactions, because 18 bytes exceed one sequence and must be
+  chunked into reads that each re-issue their own DTR1/DTR0 setup.
 - Give `dali_sched_reset()` a defined contract: complete every queued and active
   transaction with an error before clearing state instead of dropping their
   callbacks. The native CLI `reset` verb currently orphans its diagnostic sync
@@ -357,6 +372,14 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   gives every reply-bearing transaction `DALI_MAX_RETRIES`, so a semantically
   negative or absent-device answer costs four reply windows (about 140 ms).
   Refresh passes and scans pay that for every silent address.
+- Stop retrying READ MEMORY LOCATION in the transport-based memory helpers.
+  `transact_read()` passes `DALI_MEMORY_QUERY_RETRIES`, but the command advances
+  DTR0 on the device, so a command that arrived and lost only its reply leaves
+  the retry reading the *next* location. The retried byte is then silently wrong
+  and every later byte of a block read is shifted. This reaches the Bank 0
+  identity read that discovery performs for each control gear. The new sequence
+  builders already use no retries; the transport path still needs the same
+  treatment, or whole-sequence retry that re-establishes DTR0.
 - Handle remaining non-console enqueue failures in identify, diagnostic, and
   headless-dispatch paths, and expose queue depth/high-water/drop diagnostics.
 - Update light-command deduplication only after confirmed transmission, or
@@ -392,8 +415,10 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   event/capture path retains these fields, but the five-field rule key does not.
 - Replace the 128-byte Find Couplers summary with a paged/exportable result; all
   canonical captures are logged, but the Home Assistant aggregate can truncate.
-- Move raw opcodes and memory/DTR sequences out of `dali_component.cpp` into
-  reusable typed C APIs.
+- Move the remaining raw opcodes out of `dali_component.cpp` into reusable typed
+  C APIs. The console `memread` path is now the typed control-device read
+  sequence, but `dtrcheck` still hand-builds the QUERY CONTENT DTR0/DTR1 device
+  opcodes `0x36`/`0x37`, and `iconfig` still assembles its own DTR0 setup step.
 - Use board-aware ESPHome GPIO schemas, reject TX=RX and invalid output pins, and
   honor the documented WROVER-E restrictions. The schema currently accepts
   input-only GPIO34-39 as TX and accepts TX equal to RX. Propagate hardware
@@ -461,7 +486,7 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 | `main/dali_diag.c/.h` | App-specific serial CLI |
 | `esphome/components/dali` | Active ESPHome external component |
 | `dali_diag.yaml` | Tracked diagnostic/discovery firmware |
-| `_local/dali_diag_local.yaml` | Ignored compile-test copy of the diagnostic firmware |
+| `_local/dali-diag-local.yaml` | Ignored compile-test copy of the diagnostic firmware |
 | `_local/secrets.yaml` | Ignored dummy compile-only secrets; never deploy |
 | `_local/dali-1k.yaml` | Ignored first-floor site firmware |
 | `_local/dali-2k.yaml` | Ignored second-floor site firmware |
@@ -475,7 +500,7 @@ ESPHome configuration/build:
 
 ```powershell
 esphome compile dali_diag.yaml
-esphome compile _local/dali_diag_local.yaml  # ignored compile-test copy; dummy secrets
+esphome compile _local/dali-diag-local.yaml  # ignored compile-test copy; dummy secrets
 esphome compile _local/dali-1k.yaml
 esphome compile _local/dali-2k.yaml
 ```

@@ -5,11 +5,14 @@
     ((uint8_t)((offset) - DALI_MEMORY_BANK0_IDENTITY_FIRST))
 
 #define CONTROL_DEVICE_ENABLE_WRITE_MEMORY_OPCODE 0x15u
+#define CONTROL_DEVICE_READ_MEMORY_OPCODE         0x3Cu
 #define MEMORY_BANK_LOCK_OFFSET                   0x02u
 #define MEMORY_BANK_UNLOCK_VALUE                  0x55u
 
 _Static_assert(DALI_SEQUENCE_MAX_STEPS >= DALI_MEMORY_CONTROL_DEVICE_WRITE_STEPS,
                "scheduler sequence capacity must fit a control-device memory write");
+_Static_assert(DALI_MEMORY_MAX_SEQUENCE_READ_BYTES >= 1u,
+               "a sequence must fit its DTR setup plus at least one read");
 
 DaliFrame dali_memory_build_dtr1_bank(uint8_t bank)
 {
@@ -60,6 +63,98 @@ DaliError dali_memory_build_control_device_write_sequence(uint8_t short_addr,
     out->steps[6].frame =
         dali_cmd_control_device_write_memory_location_no_reply(value);
     out->step_count = DALI_MEMORY_CONTROL_DEVICE_WRITE_STEPS;
+    return DALI_OK;
+}
+
+static DaliError memory_build_read_sequence(uint8_t short_addr,
+                                            uint8_t bank,
+                                            uint8_t offset,
+                                            uint8_t count,
+                                            bool control_device,
+                                            DaliSequence *out)
+{
+    if (out == NULL ||
+        short_addr >= DALI_SHORT_ADDRESS_COUNT ||
+        count == 0u ||
+        count > DALI_MEMORY_MAX_SEQUENCE_READ_BYTES) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliFrame dtr1;
+    DaliFrame dtr0;
+    DaliFrame read;
+
+    if (control_device) {
+        dtr1 = dali_cmd_control_device_dtr1_data(bank);
+        dtr0 = dali_cmd_control_device_dtr0_data(offset);
+        read = dali_cmd_device(short_addr, CONTROL_DEVICE_READ_MEMORY_OPCODE);
+    } else {
+        dtr1 = dali_memory_build_dtr1_bank(bank);
+        dtr0 = dali_memory_build_dtr0_offset(offset);
+        read = dali_memory_build_read(short_addr);
+    }
+
+    if (dtr1.bit_length == 0u || dtr0.bit_length == 0u || read.bit_length == 0u) {
+        return DALI_ERR_INVALID;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->steps[0].frame = dtr1;
+    out->steps[1].frame = dtr0;
+
+    /* No retries: a repeated READ would return the following location because
+     * the device has already advanced DTR0. Retry the whole sequence instead. */
+    for (uint8_t i = 0u; i < count; i++) {
+        DaliSequenceStep *step = &out->steps[DALI_MEMORY_READ_SETUP_STEPS + i];
+        step->frame       = read;
+        step->needs_reply = true;
+    }
+
+    out->step_count = (uint8_t)(DALI_MEMORY_READ_SETUP_STEPS + count);
+    return DALI_OK;
+}
+
+DaliError dali_memory_build_read_sequence(uint8_t short_addr,
+                                          uint8_t bank,
+                                          uint8_t offset,
+                                          uint8_t count,
+                                          DaliSequence *out)
+{
+    return memory_build_read_sequence(short_addr, bank, offset, count, false, out);
+}
+
+DaliError dali_memory_build_control_device_read_sequence(uint8_t short_addr,
+                                                         uint8_t bank,
+                                                         uint8_t offset,
+                                                         uint8_t count,
+                                                         DaliSequence *out)
+{
+    return memory_build_read_sequence(short_addr, bank, offset, count, true, out);
+}
+
+DaliError dali_memory_read_from_sequence(const DaliSequenceResult *result,
+                                         uint8_t                   count,
+                                         uint8_t                  *buf)
+{
+    if (result == NULL || buf == NULL ||
+        count == 0u ||
+        count > DALI_MEMORY_MAX_SEQUENCE_READ_BYTES) {
+        return DALI_ERR_INVALID;
+    }
+    if (result->result != DALI_OK) {
+        return result->result;
+    }
+
+    for (uint8_t i = 0u; i < count; i++) {
+        DaliFrame reply;
+        uint8_t   step = (uint8_t)(DALI_MEMORY_READ_SETUP_STEPS + i);
+        if (!dali_sequence_result_reply(result, step, &reply) ||
+            reply.bit_length != DALI_BACKWARD_FRAME_BITS) {
+            return DALI_ERR_MALFORMED;
+        }
+        buf[i] = (uint8_t)(reply.data & 0xFFu);
+    }
+
     return DALI_OK;
 }
 

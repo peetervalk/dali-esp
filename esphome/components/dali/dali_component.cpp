@@ -1322,17 +1322,16 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         unsigned long bankv, offv;
         if (!parse_uint(tok[2], 0u, 255u, &bankv)) { set_cmd_result("bad bank");   return; }
         if (!parse_uint(tok[3], 0u, 255u, &offv))  { set_cmd_result("bad offset"); return; }
-        /* READ MEMORY LOCATION for a 103 control device uses 24-bit control-device
-         * DTR setup plus a 24-bit device command. */
-        DaliSequence seq = {};
-        seq.steps[0] = { dali_cmd_control_device_dtr1_data((uint8_t)bankv), false, false, 0u };
-        seq.steps[1] = { dali_cmd_control_device_dtr0_data((uint8_t)offv),  false, false, 0u };
-        seq.steps[2] = { dali_cmd_device(memtgt.address, 0x3Cu),            true,  false, 0u };
-        seq.step_count  = 3u;
-        seq.on_complete = on_memread_done;
-        seq.cb_ctx      = cmd_ctx;
-        set_cmd_result("pending");
-        set_cmd_enqueue_error(dali_sched_enqueue_sequence(&seq));
+        DaliSequence seq;
+        DaliError err = dali_memory_build_control_device_read_sequence(
+            memtgt.address, (uint8_t)bankv, (uint8_t)offv, 1u, &seq);
+        if (err == DALI_OK) {
+            seq.on_complete = on_memread_done;
+            seq.cb_ctx      = cmd_ctx;
+            set_cmd_result("pending");
+            err = dali_sched_enqueue_sequence(&seq);
+        }
+        set_cmd_enqueue_error(err);
         return;
     }
 

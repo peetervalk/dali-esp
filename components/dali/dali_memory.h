@@ -23,6 +23,11 @@
 
 #define DALI_MEMORY_CONTROL_DEVICE_WRITE_STEPS 7u
 
+/* A block read spends two steps on DTR1/DTR0 before the first READ frame. */
+#define DALI_MEMORY_READ_SETUP_STEPS 2u
+#define DALI_MEMORY_MAX_SEQUENCE_READ_BYTES \
+    (DALI_SEQUENCE_MAX_STEPS - DALI_MEMORY_READ_SETUP_STEPS)
+
 /* ---------------------------------------------------------------------------
  * Bank 0 — mandatory identity bank (IEC 62386-102:2022 §9.10.7)
  *
@@ -110,6 +115,48 @@ DaliError dali_memory_build_control_device_write_sequence(uint8_t       short_ad
                                                           uint8_t       offset,
                                                           uint8_t       value,
                                                           DaliSequence *out);
+
+/*
+ * Build a control-gear (Part 102) block read as one sequence: DTR1 = bank,
+ * DTR0 = offset, then count READ MEMORY LOCATION frames that each expect a
+ * reply. Running the setup and the reads as one sequence stops other traffic
+ * from redirecting DTR0/DTR1 midway through the read.
+ *
+ * count must be 1..DALI_MEMORY_MAX_SEQUENCE_READ_BYTES. Longer blocks must be
+ * split into chunks that each re-issue their own DTR1/DTR0 setup.
+ *
+ * Read steps carry no retry budget on purpose: READ MEMORY LOCATION increments
+ * DTR0 on the device, so re-sending it after a lost reply would return the byte
+ * after the one requested. A caller that wants to retry must re-run the whole
+ * sequence so the offset is re-established.
+ */
+DaliError dali_memory_build_read_sequence(uint8_t       short_addr,
+                                          uint8_t       bank,
+                                          uint8_t       offset,
+                                          uint8_t       count,
+                                          DaliSequence *out);
+
+/*
+ * Part 103 control-device equivalent of dali_memory_build_read_sequence(). Uses
+ * the 24-bit control-device DTR frames and the addressed device READ MEMORY
+ * LOCATION command rather than the 16-bit control-gear forms. Multi-byte reads
+ * rely on the same DTR0 auto-increment and are not hardware-verified here.
+ */
+DaliError dali_memory_build_control_device_read_sequence(uint8_t       short_addr,
+                                                         uint8_t       bank,
+                                                         uint8_t       offset,
+                                                         uint8_t       count,
+                                                         DaliSequence *out);
+
+/*
+ * Copy the bytes returned by a sequence from either read builder into buf.
+ * Every read step must have produced a backward frame, so a partially executed
+ * sequence never yields a half-filled buffer. A failed sequence returns its own
+ * error. buf must hold at least count bytes.
+ */
+DaliError dali_memory_read_from_sequence(const DaliSequenceResult *result,
+                                         uint8_t                   count,
+                                         uint8_t                  *buf);
 
 /* ---------------------------------------------------------------------------
  * Read helpers — use the transport to issue frames and collect replies
