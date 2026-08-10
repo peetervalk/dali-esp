@@ -17,10 +17,13 @@
 #define DALI_BIT_US                 833u    /* nominal bit period (µs)         */
 
 /* Confirmed from IEC 62386-101 */
-#define DALI_SETTLE_MS                2u    /* PHY bus-settle after TX (ms); reply window opens at 7 ms per spec */
+#define DALI_SETTLE_MS                2u    /* RX self-echo suppression after TX */
 #define DALI_REPLY_TIMEOUT_MS        25u    /* max wait for backward frame (ms) — 22 ms spec + 3 ms margin */
 #define DALI_MAX_RETRIES              3u    /* send attempts before offline    */
 #define DALI_SEND_TWICE_WINDOW_MS   100u    /* max gap between repeated sends  */
+/* DALI_HALF_BIT_US rounds nominal Te upward, making this 22 Te guard 9174 µs. */
+#define DALI_FORWARD_INTERFRAME_US (DALI_HALF_BIT_US * 22u)
+#define DALI_SEND_TWICE_WINDOW_US  (DALI_SEND_TWICE_WINDOW_MS * 1000u)
 #define DALI_BUS_IDLE_GUARD_US   (DALI_BIT_US * 2u) /* idle high before TX      */
 #define DALI_BUS_IDLE_TIMEOUT_US (DALI_BIT_US * 40u) /* ~33 ms; outlasts any 24-bit frame from input devices */
 
@@ -79,6 +82,7 @@ typedef enum {
     DALI_ERR_OVERFLOW   = 5,    /* ring buffer full — event dropped in ISR    */
     DALI_ERR_BUSY       = 6,    /* PHY TX already in progress                 */
     DALI_ERR_INVALID    = 7,    /* bad argument (e.g. bit_length == 0)        */
+    DALI_ERR_TIMING     = 8,    /* required protocol timing window was missed */
 } DaliError;
 
 /* ---------------------------------------------------------------------------

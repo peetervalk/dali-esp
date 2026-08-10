@@ -1,17 +1,21 @@
 #pragma once
 
 /*
- * dali_scheduler.h — DALI bus arbitration and transaction management
+ * dali_scheduler.h — DALI transaction timing and queue management
  *
  * Responsibilities:
  *   - Transaction queue (DALI_CMD_QUEUE_SIZE entries)
  *   - Fixed-size transaction sequences for DTR setup and dependent commands
  *   - Send-twice expansion into adjacent forward frames
+ *   - Minimum spacing between locally transmitted forward frames
+ *   - Send-twice 100 ms deadline validation
  *   - Reply timeout (DALI_REPLY_TIMEOUT_MS) and retry (retries_left)
  *   - TX/RX handoff with DaliPhy via injected ops
  *   - Optional task-context trace callbacks for diagnostics
  *
  * All functions run in task context — never called from ISR.
+ * DALI-2 priority/backoff, collision detection, and multi-master arbitration
+ * are not implemented here.
  *
  * Testability:
  *   PHY calls and time source are injected via DaliSchedOps so the scheduler
@@ -107,7 +111,7 @@ typedef struct {
     DaliError (*tx)(const DaliFrame *frame);
     void      (*set_rx_callback)(DaliPhyRxCallback cb, void *ctx);
     uint32_t  (*get_tick_ms)(void);
-    uint32_t  (*get_time_us)(void); /* optional; falls back to get_tick_ms */
+    uint32_t  (*get_time_us)(void); /* optional; device uses this for µs guards */
 } DaliSchedOps;
 
 /* ---------------------------------------------------------------------------
@@ -152,7 +156,7 @@ DaliError dali_sched_set_event_callback(DaliSchedEventCb cb, void *cb_ctx);
  */
 DaliError dali_sched_set_trace_callback(DaliSchedTraceCb cb, void *cb_ctx);
 
-/* Reset scheduler: clear queue and return to IDLE. */
+/* Reset scheduler: clear queue and return to IDLE; preserve the active TX gap. */
 DaliError dali_sched_reset(void);
 
 /* Return current state (for diagnostics/tests). */
@@ -161,7 +165,7 @@ DaliSchedState dali_sched_state(void);
 #ifndef DALI_HOST_BUILD
 /*
  * Convenience initialiser for on-device use.
- * Wires dali_phy_tx, dali_phy_set_rx_callback, and esp_timer milliseconds.
+ * Wires the DALI PHY plus esp_timer millisecond and microsecond clocks.
  */
 DaliError dali_sched_init_device(void);
 #endif

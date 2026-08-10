@@ -31,6 +31,11 @@ static void mock_set_rx_callback(DaliPhyRxCallback cb, void *ctx)
 
 static uint32_t mock_get_tick_ms(void) { return s_tick_ms; }
 
+static void advance_to_next_forward(void)
+{
+    s_tick_ms += (DALI_FORWARD_INTERFRAME_US + 999u) / 1000u;
+}
+
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
 static DaliInputEvent make_legacy(DaliEventAddressKind kind,
@@ -392,14 +397,14 @@ void test_toggle_starts_off_and_flips(void)
 
     /* Second press: on → off → OFF */
     TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(table, 1u, &ev, &state, NULL));
-    s_tick_ms += DALI_SETTLE_MS;
+    advance_to_next_forward();
     dali_sched_run();
     TEST_ASSERT_EQUAL_UINT8(2u, s_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0x8100u, s_last_tx.data); /* group 0 OFF */
 
     /* Third press: back to on */
     TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(table, 1u, &ev, &state, NULL));
-    s_tick_ms += DALI_SETTLE_MS;
+    advance_to_next_forward();
     dali_sched_run();
     TEST_ASSERT_EQUAL_UINT8(3u, s_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0x8105u, s_last_tx.data); /* group 0 RECALL MAX */

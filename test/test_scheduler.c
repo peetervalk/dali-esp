@@ -19,6 +19,8 @@ static DaliFrame       g_mock_tx_history[MOCK_TX_HISTORY_SIZE];
 static int             g_mock_tx_count;
 static DaliError       g_mock_tx_result;
 static int             g_mock_tx_fail_on_count;
+static int             g_mock_tx_advance_on_count;
+static uint32_t        g_mock_tx_advance_us;
 static DaliPhyRxCallback g_mock_rx_cb;
 static void           *g_mock_rx_ctx;
 static uint32_t        g_mock_tick_ms;
@@ -31,6 +33,10 @@ static DaliError mock_tx(const DaliFrame *frame)
         g_mock_tx_history[g_mock_tx_count] = *frame;
     }
     g_mock_tx_count++;
+    if (g_mock_tx_advance_on_count == g_mock_tx_count) {
+        g_mock_time_us += g_mock_tx_advance_us;
+        g_mock_tick_ms += (g_mock_tx_advance_us + 999u) / 1000u;
+    }
     if (g_mock_tx_fail_on_count == g_mock_tx_count) {
         return g_mock_tx_result;
     }
@@ -135,6 +141,18 @@ static void advance_past_settle(void)
     g_mock_time_us += (uint32_t)DALI_SETTLE_MS * 1000u;
 }
 
+static void advance_time_ms(uint32_t delta_ms)
+{
+    g_mock_tick_ms += delta_ms;
+    g_mock_time_us += delta_ms * 1000u;
+}
+
+static void advance_to_next_forward(void)
+{
+    g_mock_tick_ms += (DALI_FORWARD_INTERFRAME_US + 999u) / 1000u;
+    g_mock_time_us += DALI_FORWARD_INTERFRAME_US;
+}
+
 static void inject_reply(uint32_t data, uint8_t bits)
 {
     DaliFrame f = { .data = data, .bit_length = bits };
@@ -159,6 +177,8 @@ void setUp(void)
     g_mock_tx_count  = 0;
     g_mock_tx_result = DALI_OK;
     g_mock_tx_fail_on_count = 0;
+    g_mock_tx_advance_on_count = 0;
+    g_mock_tx_advance_us = 0u;
     g_mock_tick_ms   = 0u;
     g_mock_time_us   = 0u;
     g_mock_rx_cb     = NULL;
@@ -308,8 +328,8 @@ void test_send_twice(void)
     TEST_ASSERT_EQUAL(1, g_mock_tx_count);
     TEST_ASSERT_EQUAL(SCHED_WAIT_SETTLE, dali_sched_state());
 
-    /* After first settle: second TX */
-    advance_past_settle();
+    /* The repeat waits for both RX handoff and the forward-frame gap. */
+    advance_to_next_forward();
     dali_sched_run();
     TEST_ASSERT_EQUAL(2, g_mock_tx_count);
     TEST_ASSERT_EQUAL(SCHED_WAIT_SETTLE, dali_sched_state());
@@ -373,7 +393,7 @@ void test_stray_rx_while_idle_is_ignored(void)
     dali_sched_run();
     TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
 
-    g_mock_tick_ms += DALI_REPLY_TIMEOUT_MS;
+    advance_time_ms(DALI_REPLY_TIMEOUT_MS);
     dali_sched_run();
 
     TEST_ASSERT_EQUAL(1, g_cb_count);
@@ -432,7 +452,7 @@ void test_reply_accepted_when_run_delayed_past_window(void)
     /* PHY delivers reply while scheduler is still in WAIT_REPLY */
     inject_reply(0xAFu, 8u);
     /* Simulated task sleep: run() is called past the timeout boundary */
-    g_mock_tick_ms += DALI_REPLY_TIMEOUT_MS;
+    advance_time_ms(DALI_REPLY_TIMEOUT_MS);
     dali_sched_run();
 
     TEST_ASSERT_EQUAL(1, g_cb_count);
@@ -459,7 +479,7 @@ void test_late_rx_after_reply_timeout_is_ignored(void)
     TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
 
     /* Tick crosses boundary and run() fires the timeout — no reply injected */
-    g_mock_tick_ms += DALI_REPLY_TIMEOUT_MS;
+    advance_time_ms(DALI_REPLY_TIMEOUT_MS);
     dali_sched_run();
     TEST_ASSERT_EQUAL(1, g_cb_count);
     TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT, g_cb_result);
@@ -619,7 +639,7 @@ void test_reply_timeout_then_retry_succeeds(void)
     dali_sched_run();                           /* → WAIT_REPLY */
 
     /* Timeout → retry → TX(2) → WAIT_SETTLE, all in one run() call */
-    g_mock_tick_ms += DALI_REPLY_TIMEOUT_MS;
+    advance_time_ms(DALI_REPLY_TIMEOUT_MS);
     dali_sched_run();
     TEST_ASSERT_EQUAL(2, g_mock_tx_count);
     TEST_ASSERT_EQUAL(0, g_cb_count);
@@ -652,7 +672,7 @@ void test_reply_timeout_exhausted(void)
     advance_past_settle();
     dali_sched_run();   /* → WAIT_REPLY */
 
-    g_mock_tick_ms += DALI_REPLY_TIMEOUT_MS;
+    advance_time_ms(DALI_REPLY_TIMEOUT_MS);
     dali_sched_run();   /* → ERR_TIMEOUT → IDLE */
 
     TEST_ASSERT_EQUAL(1, g_cb_count);
@@ -699,19 +719,19 @@ void test_sequence_runs_all_steps_before_next_queue_entry(void)
     TEST_ASSERT_EQUAL_HEX32(0xA3C8u, g_mock_last_tx.data);
     TEST_ASSERT_EQUAL(0, g_seq_count);
 
-    advance_past_settle();
+    advance_to_next_forward();
     dali_sched_run();
     TEST_ASSERT_EQUAL(2, g_mock_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0x0B2Au, g_mock_last_tx.data);
     TEST_ASSERT_EQUAL(0, g_seq_count);
 
-    advance_past_settle();
+    advance_to_next_forward();
     dali_sched_run();
     TEST_ASSERT_EQUAL(3, g_mock_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0x0B2Au, g_mock_last_tx.data);
     TEST_ASSERT_EQUAL(0, g_seq_count);
 
-    advance_past_settle();
+    advance_to_next_forward();
     dali_sched_run();
     TEST_ASSERT_EQUAL(4, g_mock_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0xFF00u, g_mock_last_tx.data);
@@ -765,7 +785,7 @@ void test_seven_step_sequence_stays_contiguous_before_next_queue_entry(void)
 
     dali_sched_run();
     for (uint8_t i = 1u; i < 10u; i++) {
-        advance_past_settle();
+        advance_to_next_forward();
         dali_sched_run();
     }
 
@@ -781,11 +801,457 @@ void test_seven_step_sequence_stays_contiguous_before_next_queue_entry(void)
     TEST_ASSERT_EQUAL_PTR(&g_seq_marker, g_seq_ctx);
     TEST_ASSERT_EQUAL(0, g_cb_count);
 
-    advance_past_settle();
+    advance_to_next_forward();
     dali_sched_run();
     TEST_ASSERT_EQUAL(1, g_cb_count);
     TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
     TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+}
+
+void test_next_forward_waits_for_minimum_gap(void)
+{
+    DaliTransaction first = {
+        .frame = { .data = 0x1111u, .bit_length = 16u },
+        .on_complete = on_complete,
+    };
+    DaliTransaction second = {
+        .frame = { .data = 0x2222u, .bit_length = 16u },
+        .on_complete = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&first));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&second));
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(SCHED_TX, dali_sched_state());
+
+    g_mock_time_us = DALI_FORWARD_INTERFRAME_US - 1u;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    g_mock_time_us++;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x2222u, g_mock_last_tx.data);
+}
+
+void test_forward_gap_handles_microsecond_clock_wrap(void)
+{
+    const uint32_t first_done_us = UINT32_MAX - 1000u;
+    DaliTransaction txn = {
+        .frame = { .data = 0x1111u, .bit_length = 16u },
+    };
+    DaliTransaction next = {
+        .frame = { .data = 0x2222u, .bit_length = 16u },
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&next));
+
+    g_mock_time_us = first_done_us;
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(SCHED_TX, dali_sched_state());
+
+    g_mock_time_us = first_done_us + DALI_FORWARD_INTERFRAME_US - 1u;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    g_mock_time_us++;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x2222u, g_mock_last_tx.data);
+}
+
+void test_forward_gap_does_not_reappear_after_full_us_wrap(void)
+{
+    const uint32_t first_done_us = 12345u;
+    DaliTransaction first = {
+        .frame = { .data = 0x1111u, .bit_length = 16u },
+    };
+    DaliTransaction second = {
+        .frame = { .data = 0x2222u, .bit_length = 16u },
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&first));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&second));
+
+    g_mock_time_us = first_done_us;
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    /* A full uint32-us epoch plus 5 ms looks younger than the guard in us.
+     * The slower millisecond clock proves that the guard expired long ago. */
+    g_mock_time_us = first_done_us + 5000u;
+    g_mock_tick_ms = (UINT32_MAX / 1000u) + 1u;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x2222u, g_mock_last_tx.data);
+}
+
+void test_send_twice_accepts_exact_100ms_window(void)
+{
+    const uint32_t first_started_us = 5000u;
+    DaliTransaction txn = {
+        .frame = { .data = 0xFF00u, .bit_length = 16u },
+        .send_twice = true,
+        .on_complete = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    g_mock_time_us = first_started_us;
+    g_mock_tick_ms = first_started_us / 1000u;
+    g_mock_tx_advance_on_count = 1;
+    g_mock_tx_advance_us = 20000u;
+    dali_sched_run();
+
+    /* The first blocking call consumes 20 ms. Start the second after 99 ms
+     * total and let it consume the final 1 ms, completing exactly at 100 ms. */
+    g_mock_time_us = first_started_us + DALI_SEND_TWICE_WINDOW_US - 1000u;
+    g_mock_tick_ms = first_started_us / 1000u +
+                     DALI_SEND_TWICE_WINDOW_MS - 1u;
+    g_mock_tx_advance_on_count = 2;
+    g_mock_tx_advance_us = 1000u;
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(0, g_cb_count);
+    TEST_ASSERT_EQUAL(SCHED_WAIT_SETTLE, dali_sched_state());
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+}
+
+void test_send_twice_exact_window_handles_microsecond_clock_wrap(void)
+{
+    const uint32_t first_started_us = UINT32_MAX - 50000u;
+    DaliTransaction txn = {
+        .frame = { .data = 0xFF00u, .bit_length = 16u },
+        .send_twice = true,
+        .on_complete = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    g_mock_time_us = first_started_us;
+    g_mock_tick_ms = 100u;
+    dali_sched_run();
+    g_mock_time_us = first_started_us + DALI_SEND_TWICE_WINDOW_US - 1000u;
+    g_mock_tick_ms += DALI_SEND_TWICE_WINDOW_MS - 1u;
+    g_mock_tx_advance_on_count = 2;
+    g_mock_tx_advance_us = 1000u;
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+}
+
+void test_send_twice_rejects_repeat_start_at_deadline(void)
+{
+    const uint32_t first_started_us = 5000u;
+    DaliTransaction txn = {
+        .frame = { .data = 0xFF00u, .bit_length = 16u },
+        .send_twice = true,
+        .on_complete = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    g_mock_time_us = first_started_us;
+    g_mock_tick_ms = first_started_us / 1000u;
+    dali_sched_run();
+    g_mock_time_us = first_started_us + DALI_SEND_TWICE_WINDOW_US;
+    g_mock_tick_ms += DALI_SEND_TWICE_WINDOW_MS;
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMING, g_cb_result);
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+}
+
+void test_send_twice_rejects_late_repeat_before_phy(void)
+{
+    const uint32_t first_started_us = 5000u;
+    DaliTransaction txn = {
+        .frame = { .data = 0xFF00u, .bit_length = 16u },
+        .send_twice = true,
+        .on_complete = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    g_mock_time_us = first_started_us;
+    g_mock_tick_ms = first_started_us / 1000u;
+    dali_sched_run();
+    g_mock_time_us = first_started_us + DALI_SEND_TWICE_WINDOW_US + 1u;
+    g_mock_tick_ms += DALI_SEND_TWICE_WINDOW_MS + 1u;
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMING, g_cb_result);
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+}
+
+void test_send_twice_rejects_delay_after_microsecond_clock_wrap(void)
+{
+    const uint32_t first_done_us = 12345u;
+    DaliTransaction txn = {
+        .frame = { .data = 0xFF00u, .bit_length = 16u },
+        .send_twice = true,
+        .on_complete = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    g_mock_time_us = first_done_us;
+    dali_sched_run();
+
+    /* More than one full 32-bit-us epoch later, the us value looks only 5 ms
+     * newer. The slower millisecond clock must still reject the repeat. */
+    g_mock_time_us = first_done_us + 5000u;
+    g_mock_tick_ms = (UINT32_MAX / 1000u) + 1u;
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMING, g_cb_result);
+}
+
+void test_send_twice_detects_phy_crossing_deadline(void)
+{
+    const uint32_t first_done_us = 5000u;
+    DaliTransaction txn = {
+        .frame = { .data = 0xFF00u, .bit_length = 16u },
+        .send_twice = true,
+        .on_complete = on_complete,
+    };
+    DaliTransaction next = {
+        .frame = { .data = 0x2222u, .bit_length = 16u },
+        .on_complete = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_set_trace_callback(on_trace, NULL));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&next));
+
+    g_mock_time_us = first_done_us;
+    g_mock_tick_ms = first_done_us / 1000u;
+    dali_sched_run();
+    g_mock_time_us = first_done_us + DALI_FORWARD_INTERFRAME_US;
+    g_mock_tick_ms += (DALI_FORWARD_INTERFRAME_US + 999u) / 1000u;
+    g_mock_tx_advance_on_count = 2;
+    g_mock_tx_advance_us = DALI_SEND_TWICE_WINDOW_US -
+                           DALI_FORWARD_INTERFRAME_US + 1u;
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(2, g_trace_count);
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMING, g_cb_result);
+    TEST_ASSERT_EQUAL(SCHED_TX, dali_sched_state());
+
+    const uint32_t second_done_us = first_done_us +
+                                    DALI_SEND_TWICE_WINDOW_US + 1u;
+    g_mock_time_us = second_done_us + DALI_FORWARD_INTERFRAME_US - 1u;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    g_mock_time_us = second_done_us + DALI_FORWARD_INTERFRAME_US;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(3, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x2222u, g_mock_last_tx.data);
+}
+
+void test_send_twice_phy_error_takes_precedence_over_late_completion(void)
+{
+    const uint32_t first_done_us = 5000u;
+    DaliTransaction txn = {
+        .frame = { .data = 0xFF00u, .bit_length = 16u },
+        .send_twice = true,
+        .on_complete = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    g_mock_time_us = first_done_us;
+    g_mock_tick_ms = first_done_us / 1000u;
+    dali_sched_run();
+    g_mock_time_us = first_done_us + DALI_FORWARD_INTERFRAME_US;
+    g_mock_tick_ms += (DALI_FORWARD_INTERFRAME_US + 999u) / 1000u;
+    g_mock_tx_fail_on_count = 2;
+    g_mock_tx_result = DALI_ERR_BUS_STUCK;
+    g_mock_tx_advance_on_count = 2;
+    g_mock_tx_advance_us = DALI_SEND_TWICE_WINDOW_US -
+                           DALI_FORWARD_INTERFRAME_US + 1u;
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK, g_cb_result);
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+}
+
+void test_phy_error_arms_gap_before_following_transaction(void)
+{
+    const uint32_t failed_tx_duration_us = 4000u;
+    DaliTransaction first = {
+        .frame = { .data = 0x1111u, .bit_length = 16u },
+        .on_complete = on_complete,
+    };
+    DaliTransaction second = {
+        .frame = { .data = 0x2222u, .bit_length = 16u },
+    };
+    g_mock_tx_result = DALI_ERR_BUS_STUCK;
+    g_mock_tx_advance_on_count = 1;
+    g_mock_tx_advance_us = failed_tx_duration_us;
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&first));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&second));
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK, g_cb_result);
+    TEST_ASSERT_EQUAL(SCHED_TX, dali_sched_state());
+
+    g_mock_tx_result = DALI_OK;
+    g_mock_time_us = failed_tx_duration_us +
+                     DALI_FORWARD_INTERFRAME_US - 1u;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    g_mock_time_us++;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x2222u, g_mock_last_tx.data);
+}
+
+void test_send_twice_retry_starts_a_fresh_window(void)
+{
+    DaliTransaction txn = {
+        .frame = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply = true,
+        .send_twice = true,
+        .retries_left = 1u,
+        .on_complete = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_to_next_forward();
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+
+    /* Delay well beyond the original pair's deadline before retrying. */
+    advance_time_ms(DALI_SEND_TWICE_WINDOW_MS + 1u);
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(3, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.tx_retries);
+
+    advance_to_next_forward();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(4, g_mock_tx_count);
+    advance_past_settle();
+    dali_sched_run();
+    inject_reply(0xAFu, 8u);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+    TEST_ASSERT_EQUAL_HEX32(0xAFu, g_cb_reply.data);
+}
+
+void test_sequence_reports_send_twice_timing_failure(void)
+{
+    DaliSequence seq = {
+        .steps = {
+            { .frame = { .data = 0x1111u, .bit_length = 16u } },
+            {
+                .frame = { .data = 0x2222u, .bit_length = 16u },
+                .send_twice = true,
+            },
+            { .frame = { .data = 0x3333u, .bit_length = 16u } },
+        },
+        .step_count = 3u,
+        .on_complete = on_sequence_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue_sequence(&seq));
+
+    dali_sched_run();
+    advance_to_next_forward();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x2222u, g_mock_last_tx.data);
+
+    g_mock_time_us += DALI_SEND_TWICE_WINDOW_US + 1u;
+    g_mock_tick_ms += DALI_SEND_TWICE_WINDOW_MS + 1u;
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(1, g_seq_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMING, g_seq_result);
+    TEST_ASSERT_EQUAL_UINT8(1u, g_seq_failed_step);
+    TEST_ASSERT_FALSE(g_seq_has_reply);
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+}
+
+void test_reset_preserves_active_forward_gap(void)
+{
+    DaliTransaction first = {
+        .frame = { .data = 0x1111u, .bit_length = 16u },
+    };
+    DaliTransaction second = {
+        .frame = { .data = 0x2222u, .bit_length = 16u },
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&first));
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_reset());
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&second));
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(SCHED_TX, dali_sched_state());
+
+    g_mock_time_us = DALI_FORWARD_INTERFRAME_US - 1u;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    g_mock_time_us++;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x2222u, g_mock_last_tx.data);
+}
+
+void test_coarse_clock_rejects_ambiguous_100ms_repeat(void)
+{
+    DaliSchedOps coarse_ops = {
+        .tx = mock_tx,
+        .set_rx_callback = mock_set_rx_callback,
+        .get_tick_ms = mock_get_tick_ms,
+        .get_time_us = NULL,
+    };
+    DaliTransaction txn = {
+        .frame = { .data = 0xFF00u, .bit_length = 16u },
+        .send_twice = true,
+        .on_complete = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_init(&coarse_ops));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    g_mock_tick_ms = DALI_SEND_TWICE_WINDOW_MS;
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMING, g_cb_result);
 }
 
 void test_seven_step_sequence_uses_one_queue_entry(void)
@@ -850,7 +1316,7 @@ void test_sequence_aborts_later_steps_on_tx_error(void)
     TEST_ASSERT_EQUAL(1, g_mock_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0x1111u, g_mock_last_tx.data);
 
-    advance_past_settle();
+    advance_to_next_forward();
     dali_sched_run();
     TEST_ASSERT_EQUAL(2, g_mock_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0x2222u, g_mock_last_tx.data);
@@ -894,6 +1360,11 @@ void test_sequence_keeps_last_reply_for_completion_callback(void)
     TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
 
     inject_reply(0x5Au, 8u);
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(SCHED_TX, dali_sched_state());
+
+    advance_to_next_forward();
     dali_sched_run();
     TEST_ASSERT_EQUAL(2, g_mock_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0xA312u, g_mock_last_tx.data);
@@ -977,13 +1448,13 @@ void test_multiple_transactions_in_order(void)
     TEST_ASSERT_EQUAL_HEX32(1u, g_mock_last_tx.data);
 
     /* Settle(1) → TX(2) within the same run() call */
-    advance_past_settle();
+    advance_to_next_forward();
     dali_sched_run();
     TEST_ASSERT_EQUAL(2, g_mock_tx_count);
     TEST_ASSERT_EQUAL_HEX32(2u, g_mock_last_tx.data);
 
     /* Settle(2) → TX(3) */
-    advance_past_settle();
+    advance_to_next_forward();
     dali_sched_run();
     TEST_ASSERT_EQUAL(3, g_mock_tx_count);
     TEST_ASSERT_EQUAL_HEX32(3u, g_mock_last_tx.data);
@@ -1006,6 +1477,21 @@ int main(void)
     RUN_TEST(test_trace_callback_reports_tx_from_task_context);
     RUN_TEST(test_trace_callback_reports_rx_time_since_last_tx);
     RUN_TEST(test_send_twice);
+    RUN_TEST(test_next_forward_waits_for_minimum_gap);
+    RUN_TEST(test_forward_gap_handles_microsecond_clock_wrap);
+    RUN_TEST(test_forward_gap_does_not_reappear_after_full_us_wrap);
+    RUN_TEST(test_send_twice_accepts_exact_100ms_window);
+    RUN_TEST(test_send_twice_exact_window_handles_microsecond_clock_wrap);
+    RUN_TEST(test_send_twice_rejects_repeat_start_at_deadline);
+    RUN_TEST(test_send_twice_rejects_late_repeat_before_phy);
+    RUN_TEST(test_send_twice_rejects_delay_after_microsecond_clock_wrap);
+    RUN_TEST(test_send_twice_detects_phy_crossing_deadline);
+    RUN_TEST(test_send_twice_phy_error_takes_precedence_over_late_completion);
+    RUN_TEST(test_phy_error_arms_gap_before_following_transaction);
+    RUN_TEST(test_send_twice_retry_starts_a_fresh_window);
+    RUN_TEST(test_sequence_reports_send_twice_timing_failure);
+    RUN_TEST(test_reset_preserves_active_forward_gap);
+    RUN_TEST(test_coarse_clock_rejects_ambiguous_100ms_repeat);
     RUN_TEST(test_reply_received);
     RUN_TEST(test_stray_rx_while_idle_is_ignored);
     RUN_TEST(test_stale_duplicate_rx_does_not_overwrite_latched_reply);

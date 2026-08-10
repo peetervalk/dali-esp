@@ -37,6 +37,10 @@ IEC 62386.
   https://onlinedocs.microchip.com/oxy/GUID-0CDBB4BA-5972-4F58-98B2-3F0408F3E10B-en-US-1/GUID-DA5EBBA5-6A56-4135-AF78-FB1F780EF475.html
 - Microchip TB3200:
   https://ww1.microchip.com/downloads/en/Appnotes/90003200A.pdf
+- Espressif DALI driver timing notes:
+  https://docs.espressif.com/projects/esp-iot-solution/en/latest/electrical_lighting_solution/dali.html
+- Beckhoff DALI frame timing and send-twice notes:
+  https://infosys.beckhoff.com/content/1033/tcplclib_tc3_dali/12346803211.html
 - Beckhoff DALI-2 Query Input Value:
   https://infosys.beckhoff.com/content/1033/tcplclib_tc2_dali/4346134027.html
 - Lunatone DALI-2 instance guide:
@@ -180,7 +184,18 @@ iconfig a0:1 set-hold-timer 20
 
 `raw2` uses the scheduler send-twice path for commands that must be transmitted
 twice inside the DALI timing window. It avoids relying on Home Assistant to send
-the same text entity state twice.
+the same text entity state twice. The scheduler keeps the local pair adjacent,
+waits the local forward-frame gap, and conservatively brackets the pair from
+before the first blocking PHY call until after the second. When both PHY calls
+succeed, it reports `DALI_ERR_TIMING` if that interval exceeds 100 ms; a PHY
+error takes precedence. The pre-call check avoids knowingly starting a repeat
+with no remaining time budget. If the second PHY call itself crosses the
+deadline, the late frame may already be on the wire before the error is reported.
+
+All locally generated forward frames share the same rounded 22 Te minimum gap.
+This is not full DALI-2 priority/backoff or multi-master arbitration. The
+scheduler cannot yet prove that an external command did not intervene, and it
+does not derive backward/external-frame gaps from a PHY frame-end timestamp.
 
 ## Control-Gear Command Groups
 

@@ -34,6 +34,11 @@ static uint32_t mock_get_tick_ms(void)
     return s_tick_ms;
 }
 
+static void advance_to_next_forward(void)
+{
+    s_tick_ms += (DALI_FORWARD_INTERFRAME_US + 999u) / 1000u;
+}
+
 /* ---------------------------------------------------------------------------
  * Completion capture
  * --------------------------------------------------------------------------*/
@@ -479,7 +484,7 @@ void test_config_enqueue_sends_twice(void)
     TEST_ASSERT_EQUAL_UINT8(16u, s_last_tx.bit_length);
     TEST_ASSERT_EQUAL(SCHED_WAIT_SETTLE, dali_sched_state());
 
-    s_tick_ms += DALI_SETTLE_MS;
+    advance_to_next_forward();
     dali_sched_run();
     TEST_ASSERT_EQUAL_UINT8(2u, s_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0x0B20u, s_last_tx.data);
@@ -521,13 +526,13 @@ void test_config_with_dtr0_sequences_load_before_send_twice_config(void)
     TEST_ASSERT_EQUAL_HEX32(0xA3C8u, s_last_tx.data);
     TEST_ASSERT_EQUAL_UINT8(16u, s_last_tx.bit_length);
 
-    s_tick_ms += DALI_SETTLE_MS;
+    advance_to_next_forward();
     dali_sched_run();
     TEST_ASSERT_EQUAL_UINT8(2u, s_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0x0B2Au, s_last_tx.data);
     TEST_ASSERT_EQUAL_UINT8(16u, s_last_tx.bit_length);
 
-    s_tick_ms += DALI_SETTLE_MS;
+    advance_to_next_forward();
     dali_sched_run();
     TEST_ASSERT_EQUAL_UINT8(3u, s_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0x0B2Au, s_last_tx.data);

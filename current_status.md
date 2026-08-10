@@ -95,6 +95,14 @@ adding broad new device support.
   query their own target by default, and a successful scan requests fresh state
   using the rebuilt group map. Portable cursor tests cover retries, skips, and
   coalescing; the ESPHome integration compiles, but hardware is not re-verified.
+- Scheduler RX handoff and transmit spacing are now independent. Locally generated
+  forward frames wait a rounded 22 Te guard after a local transmit attempt.
+  Send-twice operations conservatively bracket both blocking PHY calls and, when
+  both PHY calls succeed, fail with `DALI_ERR_TIMING` if the second call returns
+  beyond 100 ms. A PHY error takes precedence. Pre- and post-PHY checks detect
+  both delayed scheduler service and a blocking transmit that crosses the
+  deadline. Host tests cover exact scheduler boundaries, clock wrap, retry/reset
+  state, and sequence failure; hardware is not re-verified.
 - Tracked source and documentation files are valid UTF-8; no active mojibake
   cleanup is required.
 
@@ -216,6 +224,9 @@ write fits in one queue entry. This changes the public `DaliSequence` layout and
 requires all callers to rebuild. In the ESP32 build, the active-sequence and
 16-entry scheduler queue storage increase by 612 bytes in total.
 
+`DaliError` adds `DALI_ERR_TIMING = 8`. Existing numeric values remain unchanged;
+callers with exhaustive error handling should add the new scheduler result.
+
 ## Installation State
 
 The three active firmware configurations pin their external component to
@@ -251,9 +262,14 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 
 ### P0 — Protocol correctness and conformance
 
-- Enforce send-twice and interframe timing boundaries. Strengthen commissioning
-  RANDOMIZE timing, collision handling, equal-random-address recovery, and the
-  separation of gear and control-device address spaces.
+- Complete bus timing beyond the local own-forward-frame guard: export reliable
+  backward/external frame-end timestamps, implement DALI-2 priority/backoff and
+  collision/intervening-frame handling, and add a deadline-aware PHY call if a
+  repeat that crosses the 100 ms limit must be suppressed rather than transmitted
+  and reported late.
+- Strengthen commissioning RANDOMIZE timing, collision handling,
+  equal-random-address recovery, and the separation of gear and control-device
+  address spaces.
 
 ### P0 — Transaction and runtime reliability
 
@@ -329,8 +345,8 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   otherwise retain commissioning as a native diagnostic workflow.
 - Improve scene/fade UX, targeted deferred refresh, and post-transition final
   readback.
-- Add capture replay, parser fuzzing, scheduler timing tests, and hardware-in-loop
-  tests for collisions, queue pressure, bus faults, and power restoration.
+- Add capture replay, parser fuzzing, and hardware-in-loop tests for timing,
+  collisions, queue pressure, bus faults, and power restoration.
 - Add DT1 and other device types only when an installation requires them, following
   the shared DT6/DT8 module pattern.
 

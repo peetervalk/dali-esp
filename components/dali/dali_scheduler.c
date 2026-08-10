@@ -70,6 +70,11 @@ static DaliSchedTraceCb s_trace_cb;
 static void            *s_trace_cb_ctx;
 static uint32_t         s_last_tx_us;
 static bool             s_have_last_tx_us;
+static uint32_t         s_tx_guard_started_us;
+static uint32_t         s_tx_guard_started_ms;
+static uint32_t         s_tx_guard_duration_us;
+static uint32_t         s_send_twice_first_started_us;
+static uint32_t         s_send_twice_first_started_ms;
 
 /* ---------------------------------------------------------------------------
  * Internal helpers
@@ -86,6 +91,53 @@ static uint32_t sched_now_us(void)
         return s_ops.get_time_us();
     }
     return s_ops.get_tick_ms() * 1000u;
+}
+
+static bool sched_tx_guard_active(uint32_t now_us)
+{
+    if (s_tx_guard_duration_us == 0u) {
+        return false;
+    }
+
+    uint32_t elapsed_guard_ms = s_ops.get_tick_ms() - s_tx_guard_started_ms;
+    uint32_t guard_ceiling_ms = (s_tx_guard_duration_us + 999u) / 1000u;
+    if (elapsed_guard_ms > guard_ceiling_ms ||
+        now_us - s_tx_guard_started_us >= s_tx_guard_duration_us) {
+        s_tx_guard_duration_us = 0u;
+        return false;
+    }
+    return true;
+}
+
+static bool sched_send_twice_window_missed(uint32_t now_us,
+                                           bool before_repeat)
+{
+    uint32_t elapsed_us = now_us - s_send_twice_first_started_us;
+    uint32_t pair_elapsed_ms =
+        s_ops.get_tick_ms() - s_send_twice_first_started_ms;
+
+    /* The millisecond clock disambiguates a delayed repeat after the 32-bit
+     * microsecond clock wraps. */
+    if (pair_elapsed_ms > DALI_SEND_TWICE_WINDOW_MS) {
+        return true;
+    }
+
+    /* A millisecond-only clock cannot prove the inclusive 100 ms boundary.
+     * Reject its 100 ms tick conservatively; the device path uses esp_timer. */
+    if (s_ops.get_time_us == NULL) {
+        return pair_elapsed_ms >= DALI_SEND_TWICE_WINDOW_MS;
+    }
+    /* Completion exactly at 100 ms is valid, but starting a blocking PHY call
+     * at that boundary cannot complete within the window. */
+    return before_repeat ? elapsed_us >= DALI_SEND_TWICE_WINDOW_US
+                         : elapsed_us > DALI_SEND_TWICE_WINDOW_US;
+}
+
+static void sched_arm_tx_gap(uint32_t frame_done_us, uint32_t gap_us)
+{
+    s_tx_guard_started_us = frame_done_us;
+    s_tx_guard_started_ms = s_ops.get_tick_ms();
+    s_tx_guard_duration_us = gap_us;
 }
 
 static void sched_complete_transaction(DaliError result, const DaliFrame *reply)
@@ -148,6 +200,8 @@ static bool sched_finish_active_step(DaliError result, const DaliFrame *reply)
 
     sched_load_sequence_step(s_active_sequence_step);
     s_send_count = 0u;
+    s_send_twice_first_started_us = 0u;
+    s_send_twice_first_started_ms = 0u;
     s_reply_received = false;
     return true;
 }
@@ -287,6 +341,11 @@ DaliError dali_sched_init(const DaliSchedOps *ops)
     s_trace_cb_ctx    = NULL;
     s_last_tx_us      = 0u;
     s_have_last_tx_us = false;
+    s_tx_guard_started_us = 0u;
+    s_tx_guard_started_ms = 0u;
+    s_tx_guard_duration_us = 0u;
+    s_send_twice_first_started_us = 0u;
+    s_send_twice_first_started_ms = 0u;
     s_initialized = true;
 
     s_ops.set_rx_callback(phy_rx_handler, NULL);
@@ -349,15 +408,42 @@ next:
                 s_active_is_sequence = false;
             }
             s_send_count = 0u;
+            s_send_twice_first_started_us = 0u;
+            s_send_twice_first_started_ms = 0u;
             s_reply_received = false;
             s_state = SCHED_TX;
             goto next;
         }
 
         case SCHED_TX: {
+            uint32_t now_us = sched_now_us();
+            if (s_active.send_twice && s_send_count == 1u &&
+                sched_send_twice_window_missed(now_us, true)) {
+                ESP_LOGE(TAG, "send-twice window missed");
+                if (sched_finish_active_step(DALI_ERR_TIMING, NULL)) {
+                    s_state = SCHED_TX;
+                } else {
+                    s_state = SCHED_IDLE;
+                }
+                goto next;
+            }
+            if (sched_tx_guard_active(now_us)) {
+                return;
+            }
+
+            if (s_active.send_twice && s_send_count == 0u) {
+                /* Bracket the physical pair conservatively: the first anchor is
+                 * before the blocking PHY call; the final check is after it. */
+                s_send_twice_first_started_us = now_us;
+                s_send_twice_first_started_ms = s_ops.get_tick_ms();
+            }
+
             DaliError err = s_ops.tx(&s_active.frame);
             if (err != DALI_OK) {
                 ESP_LOGE(TAG, "phy_tx failed: %d", (int)err);
+                /* An error may follow a partial waveform. Delay the next attempt
+                 * when the PHY cannot say how much of the frame reached the bus. */
+                sched_arm_tx_gap(sched_now_us(), DALI_FORWARD_INTERFRAME_US);
                 if (sched_finish_active_step(err, NULL)) {
                     s_state = SCHED_TX;
                 } else {
@@ -369,7 +455,18 @@ next:
             s_last_tx_us = tx_done_us;
             s_have_last_tx_us = true;
             sched_trace(DALI_SCHED_TRACE_TX, &s_active.frame, tx_done_us);
+            sched_arm_tx_gap(tx_done_us, DALI_FORWARD_INTERFRAME_US);
             s_send_count++;
+            if (s_active.send_twice && s_send_count == 2u &&
+                sched_send_twice_window_missed(tx_done_us, false)) {
+                ESP_LOGE(TAG, "send-twice window crossed during phy_tx");
+                if (sched_finish_active_step(DALI_ERR_TIMING, NULL)) {
+                    s_state = SCHED_TX;
+                } else {
+                    s_state = SCHED_IDLE;
+                }
+                goto next;
+            }
             s_state_entered_ms = s_ops.get_tick_ms();
             s_state = SCHED_WAIT_SETTLE;
             return;   /* wait for settle period before proceeding */
@@ -416,6 +513,8 @@ next:
                     s_active.retries_left--;
                     g_dali_stats.tx_retries++;
                     s_send_count = 0u;
+                    s_send_twice_first_started_us = 0u;
+                    s_send_twice_first_started_ms = 0u;
                     s_state = SCHED_TX;
                     goto next;
                 }
@@ -486,6 +585,8 @@ DaliError dali_sched_reset(void)
     memset(&s_reply_frame, 0, sizeof(s_reply_frame));
     s_state            = SCHED_IDLE;
     s_send_count       = 0u;
+    s_send_twice_first_started_us = 0u;
+    s_send_twice_first_started_ms = 0u;
     s_state_entered_ms = 0u;
     s_reply_received   = false;
     s_active_is_sequence = false;
@@ -493,6 +594,7 @@ DaliError dali_sched_reset(void)
     s_sequence_has_reply = false;
     s_last_tx_us       = 0u;
     s_have_last_tx_us  = false;
+    /* Preserve the physical-bus TX guard across a logical scheduler reset. */
     SCHED_EXIT_CRITICAL();
     return DALI_OK;
 }
