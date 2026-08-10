@@ -7,6 +7,7 @@
 #include "dali_input_poll.h"
 #include "dali_event.h"
 #include "dali_discovery.h"
+#include "dali_transport.h"
 #include "dali_commissioning.h"
 
 #ifndef DALI_HOST_BUILD
@@ -382,7 +383,9 @@ static DaliError diag_sched_sequence_sync(DaliSequence *seq,
         return err;
     }
 
-    TickType_t wait_ticks = pdMS_TO_TICKS(DIAG_SYNC_WAIT_MS);
+    /* A multi-step sequence can outlast the single-frame wait several times
+     * over, so size the budget from the sequence itself. */
+    TickType_t wait_ticks = pdMS_TO_TICKS(dali_transport_sequence_timeout_ms(seq));
     TickType_t start_tick = xTaskGetTickCount();
     while (!diag_sync_complete(ctx)) {
         TickType_t elapsed = xTaskGetTickCount() - start_tick;
@@ -437,10 +440,28 @@ static DaliError diag_discovery_transact(const DaliFrame *frame,
                            reply_out);
 }
 
+/* Atomic-group half of the transport: shared protocol code that needs a DTR
+ * setup and its consuming command to stay together gets that here too, not just
+ * in the ESPHome scan task. */
+static DaliError diag_discovery_sequence_transact(const DaliSequence *seq,
+                                                  DaliSequenceResult *result_out,
+                                                  void *ctx)
+{
+    (void)ctx;
+    if (seq == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    /* diag_sched_sequence_sync installs its own completion callback. */
+    DaliSequence local = *seq;
+    return diag_sched_sequence_sync(&local, result_out);
+}
+
 static DaliDiscoveryTransport diag_discovery_transport(void)
 {
     return (DaliDiscoveryTransport){
         .transact = diag_discovery_transact,
+        .transact_sequence = diag_discovery_sequence_transact,
         .ctx = NULL,
     };
 }

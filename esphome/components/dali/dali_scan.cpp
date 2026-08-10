@@ -13,6 +13,7 @@
 extern "C" {
 #include "../../../components/dali/dali_discovery.h"
 #include "../../../components/dali/dali_scheduler.h"
+#include "../../../components/dali/dali_transport.h"
 #include "../../../components/dali/dali_group_map.h"
 }
 
@@ -43,6 +44,8 @@ struct ScanSyncCtx {
     DaliError    result;
     DaliFrame    reply;
     bool         has_reply;
+    DaliSequenceResult sequence;
+    bool         has_sequence;
     bool         in_use;
     bool         complete;
 };
@@ -55,14 +58,35 @@ static void scan_sync_cb(DaliError result, const DaliFrame *reply, void *raw_ctx
     TaskHandle_t notify_task = nullptr;
 
     taskENTER_CRITICAL(&s_scan_mux);
-    ctx->result    = result;
-    ctx->has_reply = (reply != nullptr);
+    ctx->result       = result;
+    ctx->has_reply    = (reply != nullptr);
+    ctx->has_sequence = false;
     if (reply) ctx->reply = *reply;
     ctx->complete  = true;
     if (ctx->waiting_task != nullptr) {
         notify_task = ctx->waiting_task;
     } else {
         // Caller timed out and cleared waiting_task; release slot here.
+        ctx->in_use = false;
+    }
+    taskEXIT_CRITICAL(&s_scan_mux);
+
+    if (notify_task) xTaskNotifyGive(notify_task);
+}
+
+static void scan_sync_sequence_cb(const DaliSequenceResult *result, void *raw_ctx) {
+    ScanSyncCtx *ctx = static_cast<ScanSyncCtx *>(raw_ctx);
+    TaskHandle_t notify_task = nullptr;
+
+    taskENTER_CRITICAL(&s_scan_mux);
+    ctx->result       = (result != nullptr) ? result->result : DALI_ERR_INVALID;
+    ctx->has_sequence = (result != nullptr);
+    if (result != nullptr) ctx->sequence = *result;
+    ctx->has_reply = false;
+    ctx->complete  = true;
+    if (ctx->waiting_task != nullptr) {
+        notify_task = ctx->waiting_task;
+    } else {
         ctx->in_use = false;
     }
     taskEXIT_CRITICAL(&s_scan_mux);
@@ -78,29 +102,80 @@ static bool scan_sync_complete() {
     return done;
 }
 
-static DaliError scan_sync_transact(const DaliFrame *frame,
-                                    bool             needs_reply,
-                                    uint8_t          retries_left,
-                                    bool             send_twice,
-                                    DaliFrame       *reply_out,
-                                    void *           /*transport_ctx*/) {
-    // Guard against a previous transaction's callback not having fired yet.
-    // Under normal conditions in_use clears within microseconds of a timeout.
+// Reserve the shared slot for this task. False when a previous transaction's
+// callback has not released it yet.
+static bool scan_sync_acquire() {
     taskENTER_CRITICAL(&s_scan_mux);
     if (s_scan_slot.in_use) {
         taskEXIT_CRITICAL(&s_scan_mux);
-        return DALI_ERR_BUSY;
+        return false;
     }
     s_scan_slot.waiting_task = xTaskGetCurrentTaskHandle();
     s_scan_slot.result       = DALI_ERR_TIMEOUT;
     s_scan_slot.reply        = {};
     s_scan_slot.has_reply    = false;
+    s_scan_slot.sequence     = {};
+    s_scan_slot.sequence.failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
+    s_scan_slot.has_sequence = false;
     s_scan_slot.in_use       = true;
     s_scan_slot.complete     = false;
     taskEXIT_CRITICAL(&s_scan_mux);
 
     // Flush any stale task notification before we start waiting.
     ulTaskNotifyTake(pdTRUE, 0);
+    return true;
+}
+
+// Give the slot back when the work was never handed to the scheduler.
+static void scan_sync_release_unused() {
+    taskENTER_CRITICAL(&s_scan_mux);
+    s_scan_slot.in_use = false;
+    taskEXIT_CRITICAL(&s_scan_mux);
+}
+
+// Block until the callback runs or the budget expires, then take the slot's
+// contents. Returns false on timeout, leaving the slot reserved for the late
+// callback to release.
+static bool scan_sync_wait(uint32_t wait_ms, ScanSyncCtx *taken) {
+    const TickType_t wait_ticks = pdMS_TO_TICKS(wait_ms);
+    const TickType_t start      = xTaskGetTickCount();
+    while (!scan_sync_complete()) {
+        TickType_t elapsed = xTaskGetTickCount() - start;
+        if (elapsed >= wait_ticks) break;
+        ulTaskNotifyTake(pdTRUE, wait_ticks - elapsed);
+    }
+
+    bool completed = false;
+    taskENTER_CRITICAL(&s_scan_mux);
+    completed = s_scan_slot.complete;
+    if (completed) {
+        *taken = s_scan_slot;
+        s_scan_slot.waiting_task = nullptr;
+        s_scan_slot.in_use       = false;
+        s_scan_slot.complete     = false;
+    } else {
+        // Clear waiting_task so the callback knows not to notify us and will
+        // clear in_use itself when it eventually fires.
+        s_scan_slot.waiting_task = nullptr;
+    }
+    taskEXIT_CRITICAL(&s_scan_mux);
+    return completed;
+}
+
+// One DALI round-trip is ~50 ms; 500 ms leaves ample headroom for a single frame.
+static constexpr uint32_t SCAN_SYNC_FRAME_WAIT_MS = 500u;
+
+static DaliError scan_sync_transact(const DaliFrame *frame,
+                                    bool             needs_reply,
+                                    uint8_t          retries_left,
+                                    bool             send_twice,
+                                    DaliFrame       *reply_out,
+                                    void *           /*transport_ctx*/) {
+    if (frame == nullptr) return DALI_ERR_INVALID;
+
+    // Guard against a previous transaction's callback not having fired yet.
+    // Under normal conditions in_use clears within microseconds of a timeout.
+    if (!scan_sync_acquire()) return DALI_ERR_BUSY;
 
     DaliTransaction txn = {
         .frame        = *frame,
@@ -113,46 +188,44 @@ static DaliError scan_sync_transact(const DaliFrame *frame,
 
     DaliError enq = dali_sched_enqueue(&txn);
     if (enq != DALI_OK) {
-        taskENTER_CRITICAL(&s_scan_mux);
-        s_scan_slot.in_use = false;
-        taskEXIT_CRITICAL(&s_scan_mux);
+        scan_sync_release_unused();
         return enq;
     }
 
-    // Wait up to 500 ms. Re-check complete after each wakeup to handle
-    // spurious notifications. 500 ms >> longest DALI round-trip (~50 ms).
-    const TickType_t wait_ticks = pdMS_TO_TICKS(500);
-    const TickType_t start      = xTaskGetTickCount();
-    while (!scan_sync_complete()) {
-        TickType_t elapsed = xTaskGetTickCount() - start;
-        if (elapsed >= wait_ticks) break;
-        ulTaskNotifyTake(pdTRUE, wait_ticks - elapsed);
+    ScanSyncCtx taken = {};
+    if (!scan_sync_wait(SCAN_SYNC_FRAME_WAIT_MS, &taken)) return DALI_ERR_TIMEOUT;
+
+    if (reply_out != nullptr && taken.has_reply) *reply_out = taken.reply;
+    return taken.result;
+}
+
+// Atomic-group half of the transport: the whole sequence occupies the scheduler
+// with nothing interleaved, which is what discovery and memory reads need so a
+// DTR setup cannot be redirected before the command that consumes it.
+static DaliError scan_sync_sequence_transact(const DaliSequence *seq,
+                                             DaliSequenceResult *result_out,
+                                             void *              /*transport_ctx*/) {
+    if (seq == nullptr) return DALI_ERR_INVALID;
+
+    if (!scan_sync_acquire()) return DALI_ERR_BUSY;
+
+    DaliSequence local = *seq;
+    local.on_complete  = scan_sync_sequence_cb;
+    local.cb_ctx       = &s_scan_slot;
+
+    DaliError enq = dali_sched_enqueue_sequence(&local);
+    if (enq != DALI_OK) {
+        scan_sync_release_unused();
+        return enq;
     }
 
-    // Read result and perform two-phase release under the spinlock.
-    DaliError result = DALI_ERR_TIMEOUT;
-    DaliFrame reply  = {};
-    bool      has_reply = false;
-    bool      completed = false;
-
-    taskENTER_CRITICAL(&s_scan_mux);
-    completed = s_scan_slot.complete;
-    if (completed) {
-        result    = s_scan_slot.result;
-        has_reply = s_scan_slot.has_reply;
-        reply     = s_scan_slot.reply;
-        s_scan_slot.waiting_task = nullptr;
-        s_scan_slot.in_use       = false;
-        s_scan_slot.complete     = false;
-    } else {
-        // Timed out. Clear waiting_task so the callback knows not to notify us
-        // and will clear in_use itself when it eventually fires.
-        s_scan_slot.waiting_task = nullptr;
+    ScanSyncCtx taken = {};
+    if (!scan_sync_wait(dali_transport_sequence_timeout_ms(seq), &taken)) {
+        return DALI_ERR_TIMEOUT;
     }
-    taskEXIT_CRITICAL(&s_scan_mux);
 
-    if (completed && reply_out && has_reply) *reply_out = reply;
-    return result;
+    if (result_out != nullptr && taken.has_sequence) *result_out = taken.sequence;
+    return taken.result;
 }
 
 // ---------------------------------------------------------------------------
@@ -331,8 +404,9 @@ static void scan_task(void *arg) {
     static DaliDiscoveryInventory inventory;  // static: several KB, keep off task stack
 
     DaliDiscoveryTransport transport = {
-        .transact = scan_sync_transact,
-        .ctx      = nullptr,
+        .transact          = scan_sync_transact,
+        .transact_sequence = scan_sync_sequence_transact,
+        .ctx               = nullptr,
     };
 
     ESP_LOGI(TAG, "Scanning DALI bus...");

@@ -643,13 +643,23 @@ void test_bank0_identity_rejects_invalid_short_address_without_traffic(void)
 
 void test_bank0_identity_total_frame_count(void)
 {
-    /* DTR1 + DTR0 + 18 READs = 20 frames */
+    /* 18 bytes exceed one sequence, so the read is split into chunks of
+     * DALI_MEMORY_MAX_SEQUENCE_READ_BYTES that each re-issue DTR1 + DTR0:
+     * ceil(18/5) = 4 chunks → 4*2 setup frames + 18 READs = 26 frames. The
+     * extra setup is what lets a chunk boundary re-establish the offset. */
     push_bank0_identity_vector();
 
     DaliMemoryBank0Identity id;
-    dali_memory_read_bank0_identity(&s_transport, 0u, &id);
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_memory_read_bank0_identity(&s_transport, 0u, &id));
 
-    TEST_ASSERT_EQUAL_UINT8(20u, s_frame_count);
+    uint8_t chunks = (uint8_t)((DALI_MEMORY_BANK0_IDENTITY_SIZE +
+                                DALI_MEMORY_MAX_SEQUENCE_READ_BYTES - 1u) /
+                               DALI_MEMORY_MAX_SEQUENCE_READ_BYTES);
+    TEST_ASSERT_EQUAL_UINT8(
+        (uint8_t)(chunks * DALI_MEMORY_READ_SETUP_STEPS +
+                  DALI_MEMORY_BANK0_IDENTITY_SIZE),
+        s_frame_count);
 }
 
 /* ---------------------------------------------------------------------------

@@ -158,60 +158,13 @@ DaliError dali_memory_read_from_sequence(const DaliSequenceResult *result,
     return DALI_OK;
 }
 
-static bool mem_transport_valid(const DaliMemoryTransport *transport)
-{
-    return transport != NULL && transport->transact != NULL;
-}
-
-static DaliError transact_no_reply(const DaliMemoryTransport *transport,
-                                   const DaliFrame *frame)
-{
-    return transport->transact(frame, false, 0u, false, NULL, transport->ctx);
-}
-
-static DaliError transact_read(const DaliMemoryTransport *transport,
-                               const DaliFrame *frame,
-                               uint8_t *out)
-{
-    DaliFrame reply = {0u, 0u};
-    DaliError err = transport->transact(frame, true, DALI_MEMORY_QUERY_RETRIES,
-                                        false, &reply, transport->ctx);
-    if (err != DALI_OK) {
-        return err;
-    }
-    if (reply.bit_length != DALI_BACKWARD_FRAME_BITS) {
-        return DALI_ERR_MALFORMED;
-    }
-    *out = (uint8_t)(reply.data & 0xFFu);
-    return DALI_OK;
-}
-
 DaliError dali_memory_read_byte(const DaliMemoryTransport *transport,
                                 uint8_t short_addr,
                                 uint8_t bank,
                                 uint8_t offset,
                                 uint8_t *out)
 {
-    if (!mem_transport_valid(transport) ||
-        short_addr >= DALI_SHORT_ADDRESS_COUNT ||
-        out == NULL) {
-        return DALI_ERR_INVALID;
-    }
-
-    DaliFrame dtr1 = dali_memory_build_dtr1_bank(bank);
-    DaliError err = transact_no_reply(transport, &dtr1);
-    if (err != DALI_OK) {
-        return err;
-    }
-
-    DaliFrame dtr0 = dali_memory_build_dtr0_offset(offset);
-    err = transact_no_reply(transport, &dtr0);
-    if (err != DALI_OK) {
-        return err;
-    }
-
-    DaliFrame read = dali_memory_build_read(short_addr);
-    return transact_read(transport, &read, out);
+    return dali_memory_read_bytes(transport, short_addr, bank, offset, out, 1u);
 }
 
 DaliError dali_memory_read_bytes(const DaliMemoryTransport *transport,
@@ -221,7 +174,7 @@ DaliError dali_memory_read_bytes(const DaliMemoryTransport *transport,
                                  uint8_t *buf,
                                  uint8_t count)
 {
-    if (!mem_transport_valid(transport) ||
+    if (!dali_transport_valid(transport) ||
         short_addr >= DALI_SHORT_ADDRESS_COUNT ||
         buf == NULL) {
         return DALI_ERR_INVALID;
@@ -229,26 +182,42 @@ DaliError dali_memory_read_bytes(const DaliMemoryTransport *transport,
     if (count == 0u) {
         return DALI_OK;
     }
-
-    DaliFrame dtr1 = dali_memory_build_dtr1_bank(bank);
-    DaliError err = transact_no_reply(transport, &dtr1);
-    if (err != DALI_OK) {
-        return err;
+    /* The block must stay inside the 8-bit address space DTR0 can express. */
+    if ((uint32_t)offset + (uint32_t)count > 256u) {
+        return DALI_ERR_INVALID;
     }
 
-    DaliFrame dtr0 = dali_memory_build_dtr0_offset(offset);
-    err = transact_no_reply(transport, &dtr0);
-    if (err != DALI_OK) {
-        return err;
-    }
+    /* Read in sequence-sized chunks. Each chunk re-issues its own DTR1/DTR0, so
+     * a chunk boundary re-establishes the offset instead of trusting that the
+     * device's auto-increment survived whatever ran in between. */
+    uint8_t done = 0u;
+    while (done < count) {
+        uint8_t chunk = (uint8_t)(count - done);
+        if (chunk > DALI_MEMORY_MAX_SEQUENCE_READ_BYTES) {
+            chunk = DALI_MEMORY_MAX_SEQUENCE_READ_BYTES;
+        }
 
-    DaliFrame read = dali_memory_build_read(short_addr);
-    for (uint8_t i = 0u; i < count; i++) {
-        err = transact_read(transport, &read, &buf[i]);
+        DaliSequence seq;
+        DaliError err = dali_memory_build_read_sequence(
+            short_addr, bank, (uint8_t)(offset + done), chunk, &seq);
         if (err != DALI_OK) {
             return err;
         }
+
+        DaliSequenceResult result;
+        err = dali_transport_run_sequence(transport, &seq, &result);
+        if (err != DALI_OK) {
+            return err;
+        }
+
+        err = dali_memory_read_from_sequence(&result, chunk, &buf[done]);
+        if (err != DALI_OK) {
+            return err;
+        }
+
+        done = (uint8_t)(done + chunk);
     }
+
     return DALI_OK;
 }
 
@@ -256,7 +225,7 @@ DaliError dali_memory_read_bank0_identity(const DaliMemoryTransport *transport,
                                           uint8_t short_addr,
                                           DaliMemoryBank0Identity *out)
 {
-    if (!mem_transport_valid(transport) || out == NULL) {
+    if (!dali_transport_valid(transport) || out == NULL) {
         return DALI_ERR_INVALID;
     }
 

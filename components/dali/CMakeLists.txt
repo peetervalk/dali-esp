@@ -4,6 +4,7 @@ idf_component_register(
         "dali_phy.c"
         "dali_scheduler.c"
         "dali_protocol.c"
+        "dali_transport.c"
         "dali_input_device.c"
         "dali_input_poll.c"
         "dali_event.c"

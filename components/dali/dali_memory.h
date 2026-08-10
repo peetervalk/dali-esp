@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include "dali_protocol.h"
 #include "dali_scheduler.h"
+#include "dali_transport.h"
 
 #define DALI_MEMORY_CONTROL_DEVICE_WRITE_STEPS 7u
 
@@ -59,23 +60,13 @@
 /* Bank 1 is optional OEM/part-specific data, not a second identity bank. */
 #define DALI_MEMORY_BANK1                   1u
 
-#define DALI_MEMORY_QUERY_RETRIES           1u
 
 /* ---------------------------------------------------------------------------
- * Transport abstraction — same call shape as DaliDiscoveryTransactionFn so
- * the same mock or real implementation can be cast and reused.
+ * Transport abstraction — these are the shared DaliTransport under old names,
+ * so a transport built for discovery can be passed here directly.
  * --------------------------------------------------------------------------*/
-typedef DaliError (*DaliMemoryTransactionFn)(const DaliFrame *frame,
-                                             bool             needs_reply,
-                                             uint8_t          retries_left,
-                                             bool             send_twice,
-                                             DaliFrame       *reply_out,
-                                             void            *ctx);
-
-typedef struct {
-    DaliMemoryTransactionFn transact;
-    void                   *ctx;
-} DaliMemoryTransport;
+typedef DaliTransactionFn DaliMemoryTransactionFn;
+typedef DaliTransport     DaliMemoryTransport;
 
 /* ---------------------------------------------------------------------------
  * Identity struct for Bank 0
@@ -174,9 +165,12 @@ DaliError dali_memory_read_byte(const DaliMemoryTransport *transport,
 
 /*
  * Read count consecutive bytes starting at bank:offset into buf for short_addr
- * 0..63.
- * Issues DTR1 + DTR0 once, then count READ_MEMORY_LOCATION frames.
- * buf must be at least count bytes.
+ * 0..63. buf must be at least count bytes.
+ *
+ * Runs through dali_transport_run_sequence() in chunks of at most
+ * DALI_MEMORY_MAX_SEQUENCE_READ_BYTES, each chunk re-issuing its own DTR1/DTR0
+ * setup. On a transport that supports atomic sequences each chunk is
+ * uninterruptible; otherwise the frames are the same but may be interleaved.
  */
 DaliError dali_memory_read_bytes(const DaliMemoryTransport *transport,
                                  uint8_t                    short_addr,

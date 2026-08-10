@@ -14,15 +14,6 @@ typedef DaliError (*DaliDiscoveryInputQueryBuilder)(uint8_t addr,
                                                     uint8_t instance,
                                                     DaliFrame *out);
 
-/* Bridge to DaliMemoryTransport — signatures are identical so the cast is safe. */
-static DaliMemoryTransport to_memory_transport(const DaliDiscoveryTransport *dt)
-{
-    DaliMemoryTransport mt;
-    mt.transact = (DaliMemoryTransactionFn)dt->transact;
-    mt.ctx      = dt->ctx;
-    return mt;
-}
-
 /* Send ENABLE DEVICE TYPE N (no reply) then a query, return the byte. */
 static DaliError discovery_query_dt_typed(const DaliDiscoveryTransport *transport,
                                           DaliFrame enable,
@@ -383,9 +374,8 @@ static void discovery_enrich_device(const DaliDiscoveryTransport *transport,
     }
 
     if (device->has_control_gear) {
-        DaliMemoryTransport mem = to_memory_transport(transport);
         DaliMemoryBank0Identity identity;
-        if (dali_memory_read_bank0_identity(&mem, addr, &identity) == DALI_OK) {
+        if (dali_memory_read_bank0_identity(transport, addr, &identity) == DALI_OK) {
             device->has_identity = true;
             device->identity = identity;
         }

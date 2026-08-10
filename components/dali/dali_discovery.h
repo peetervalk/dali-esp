@@ -13,17 +13,11 @@
 
 #define DALI_DISCOVERY_MAX_DEVICE_TYPES  4u
 
-typedef DaliError (*DaliDiscoveryTransactionFn)(const DaliFrame *frame,
-                                                bool needs_reply,
-                                                uint8_t retries_left,
-                                                bool send_twice,
-                                                DaliFrame *reply_out,
-                                                void *ctx);
-
-typedef struct {
-    DaliDiscoveryTransactionFn transact;
-    void                      *ctx;
-} DaliDiscoveryTransport;
+/* The shared DaliTransport under its discovery-era names. Discovery, memory,
+ * commissioning, and input polling all take the same struct, so one transport
+ * value serves every module without conversion. */
+typedef DaliTransactionFn DaliDiscoveryTransactionFn;
+typedef DaliTransport     DaliDiscoveryTransport;
 
 typedef struct {
     DaliInputDeviceInfo device;

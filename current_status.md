@@ -77,12 +77,35 @@ adding broad new device support.
   steps. The ESPHome console `memread` now uses the typed control-device builder
   instead of a hand-assembled `0x3C` frame. Independent frame vectors cover both
   forms, the block layout, argument boundaries, and the partial and failed cases.
-- All 21 host test executables pass, with 43 cases in the scheduler suite, 7 in
-  the input-poll suite, and 39 in the memory suite.
+- `components/dali/dali_transport.c` is the new home of the bus abstraction that
+  discovery, commissioning, memory, and input polling share. `DaliTransport`
+  keeps the existing per-frame `transact` and adds an optional
+  `transact_sequence` that runs a whole `DaliSequence` with nothing interleaved.
+  `dali_transport_run_sequence()` uses it when present and otherwise issues the
+  steps individually — same frames, no atomicity — and
+  `dali_transport_supports_atomic_sequence()` lets a caller tell the two apart.
+  The ESPHome scan task and the native CLI both provide the atomic form.
+- `DaliDiscoveryTransport` and `DaliMemoryTransport` are now the same type, so
+  the hand-rolled struct conversion in discovery is gone and one transport value
+  serves every module.
+- Blocking callers size their wait with `dali_transport_sequence_timeout_ms()`
+  instead of a single-frame constant. The native CLI previously waited 200 ms for
+  a whole sequence, which a seven-step sequence can exceed several times over.
+- Memory reads run through the transport in chunks of at most five bytes, each
+  chunk re-issuing its own DTR1/DTR0. This removes the READ MEMORY LOCATION retry
+  hazard recorded below: read steps carry no retry budget, so a lost reply now
+  fails the read instead of silently returning the following location. The Bank 0
+  identity read that discovery performs costs six extra setup frames (26 instead
+  of 20) in exchange for a re-established offset at every chunk boundary.
+- All 22 host test executables pass, with 43 cases in the scheduler suite, 7 in
+  the input-poll suite, 39 in the memory suite, and 9 in the new transport suite
+  covering capability reporting, the atomic and fallback paths, failure
+  truncation, reply retention, argument handling, and the wait budget.
+- The ESPHome protocol wrapper set matches the 20 reusable C source files.
 - The ignored compile-test configuration builds the working-tree component with
-  ESPHome 2026.7.4, warning-free, at 34.9% RAM and 49.7% flash. This is a newer
-  ESPHome than the 2026.6.2 recorded below; the three pinned YAMLs were not
-  re-checked against it.
+  ESPHome 2026.7.4, warning-free, at 34.9% RAM (63112 bytes) and 49.7% flash.
+  This is a newer ESPHome than the 2026.6.2 recorded below; the three pinned
+  YAMLs were not re-checked against it.
 - The native ESP-IDF firmware builds warning-free with ESP-IDF 6.0.1; the
   application binary uses 22% of its partition.
 - A C++ translation unit mirroring the ESPHome memory-read callback compiles
@@ -174,8 +197,12 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
 ### Shared DALI stack
 
 - `components/dali` contains the reusable plain-C PHY, RX ring buffer, scheduler,
-  protocol/control APIs, discovery, control-gear commissioning, memory helpers,
-  DT6/DT8 builders, input-device support, events, mapping, and dispatch.
+  transport, protocol/control APIs, discovery, control-gear commissioning, memory
+  helpers, DT6/DT8 builders, input-device support, events, mapping, and dispatch.
+- `dali_transport` is the single bus abstraction the higher modules share. It
+  offers per-frame and whole-sequence entry points; only the sequence form is
+  atomic, and it is optional, so callers that require atomicity must ask via
+  `dali_transport_supports_atomic_sequence()` rather than assume it.
 - Static allocation and the buffer-first ISR model are preserved in the timing
   and protocol layers.
 - Scheduler sequences run contiguously and report a `DaliSequenceResult` holding
@@ -291,6 +318,15 @@ that the next sequence overwrites, so a callback must copy anything it keeps.
 Transaction callbacks (`DaliSchedCompletionCb`) are unchanged; only sequence
 callers need migrating.
 
+`DaliDiscoveryTransport` and `DaliMemoryTransport` are now aliases of the shared
+`DaliTransport` in the new `dali_transport.h`, and `DaliDiscoveryTransactionFn`
+and `DaliMemoryTransactionFn` alias `DaliTransactionFn`. Existing code keeps
+compiling, and a transport built for one module can now be passed to another
+without conversion. The struct gains an optional `transact_sequence` member
+between `transact` and `ctx`: designated initialisers are unaffected, but any
+positional initialiser must be updated. `DALI_MEMORY_QUERY_RETRIES` is removed,
+because memory reads no longer retry individual READ MEMORY LOCATION frames.
+
 ## Installation State
 
 The three active firmware configurations pin their external component to
@@ -349,13 +385,13 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 - Add a scheduler-level atomic transaction/session facility for DTR operations,
   ENABLE DEVICE TYPE sequences, memory access, DT8 multi-byte queries,
   send-twice commands, discovery, and commissioning. Sequences already execute
-  contiguously and report a reply per step; multi-byte input polling and both
-  memory-read forms are built on them. The remaining work is a sequence-capable
-  transport so discovery and commissioning can run atomic groups too, since they
-  reach the bus through the one-frame-at-a-time `DaliDiscoveryTransport`. That
-  transport is also what the Bank 0 identity read needs before it can move off
-  independent transactions, because 18 bytes exceed one sequence and must be
-  chunked into reads that each re-issue their own DTR1/DTR0 setup.
+  contiguously and report a reply per step; multi-byte input polling and memory
+  reads are built on them, and `DaliTransport` now carries an atomic-sequence
+  entry point that both real transports implement. The remaining work is to move
+  the workflows themselves across: discovery's ENABLE DEVICE TYPE pairs, its
+  two-frame group query, and commissioning's SEARCH ADDRH/M/L triple plus its
+  PROGRAM/VERIFY pair all still issue independent transactions even though the
+  transport can now group them.
 - Give `dali_sched_reset()` a defined contract: complete every queued and active
   transaction with an error before clearing state instead of dropping their
   callbacks. The native CLI `reset` verb currently orphans its diagnostic sync
@@ -372,14 +408,11 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   gives every reply-bearing transaction `DALI_MAX_RETRIES`, so a semantically
   negative or absent-device answer costs four reply windows (about 140 ms).
   Refresh passes and scans pay that for every silent address.
-- Stop retrying READ MEMORY LOCATION in the transport-based memory helpers.
-  `transact_read()` passes `DALI_MEMORY_QUERY_RETRIES`, but the command advances
-  DTR0 on the device, so a command that arrived and lost only its reply leaves
-  the retry reading the *next* location. The retried byte is then silently wrong
-  and every later byte of a block read is shifted. This reaches the Bank 0
-  identity read that discovery performs for each control gear. The new sequence
-  builders already use no retries; the transport path still needs the same
-  treatment, or whole-sequence retry that re-establishes DTR0.
+- Audit the remaining retry budgets for commands that mutate device state the
+  way READ MEMORY LOCATION advances DTR0. That specific case is fixed — memory
+  reads now run as sequences whose read steps have no retries — but
+  `dali_discovery_query_u8()` still retries every query it issues, which is only
+  safe while those queries stay idempotent.
 - Handle remaining non-console enqueue failures in identify, diagnostic, and
   headless-dispatch paths, and expose queue depth/high-water/drop diagnostics.
 - Update light-command deduplication only after confirmed transmission, or

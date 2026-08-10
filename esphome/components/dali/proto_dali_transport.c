@@ -1,0 +1,2 @@
+#include <stddef.h>
+#include "../../../components/dali/dali_transport.c.inc"
