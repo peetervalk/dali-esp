@@ -267,6 +267,15 @@ TYPE` enumeration. Each next query returns a strictly increasing type value;
 `0xFE` or no reply ends the list. The reusable discovery inventory retains up to
 four types and marks the result as truncated if it observes a fifth valid type.
 
+The shared Part 102 memory helper reads control-gear Bank 0 identity locations
+`0x03..0x14`: GTIN, firmware version, the eight-byte identification number, and
+hardware version. Location `0x01` is reserved/not implemented and is not read;
+location `0x02` reports the last accessible bank and is not identity data. Bank 1
+remains available through generic byte reads but has no common identity parser,
+because its contents are optional OEM/part-specific data. Memory transactions are
+not yet protected by a scheduler-level session, and this layout correction has
+not been hardware-verified.
+
 ### ESPHome command-console query names
 
 | Query name | Underlying command |

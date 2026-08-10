@@ -10,6 +10,7 @@ typedef struct {
     int       bus_error_addr;
     uint32_t  tx_count;
     uint32_t  query_next_device_type_count;
+    uint32_t  gear_memory_read_count;
     uint32_t  found_cb_count;
     uint8_t   found_cb_last_addr;
 } MockDiscoveryBus;
@@ -83,6 +84,10 @@ static DaliError mock_transact(const DaliFrame *frame,
     if (frame->bit_length == DALI_FORWARD_FRAME_BITS &&
         (uint8_t)(frame->data & 0xFFu) == 0xA7u) {
         bus->query_next_device_type_count++;
+    }
+    if (frame->bit_length == DALI_FORWARD_FRAME_BITS &&
+        (uint8_t)(frame->data & 0xFFu) == 0xC5u) {
+        bus->gear_memory_read_count++;
     }
 
     /* No-reply frames (e.g. DTR1/DTR0 memory setup) — just accept and return. */
@@ -182,11 +187,11 @@ void test_scan_records_responders_and_callback(void)
     TEST_ASSERT_EQUAL_UINT8(2u, inventory.found_count);
     /* 64 status + per found device (all queries timeout):
      *  groups-0-7(1), device_type(1), version(1), actual_level(1), num_instances(1),
-     *  bank0: DTR1(1)+DTR0(1)+READ(1),
-     *  bank1: DTR1(1)+DTR0(1)+READ(1),
+     *  bank0 identity attempt: DTR1(1)+DTR0(1)+READ(1),
      *  scene-levels: QUERY_SCENE_LEVEL 0-15(16)
      * + 62 QUERY_NUMBER_OF_INSTANCES probes for the 62 absent addresses */
-    TEST_ASSERT_EQUAL_UINT32(2u * DALI_SHORT_ADDRESS_COUNT + 2u * 27u - 2u, s_bus.tx_count);
+    TEST_ASSERT_EQUAL_UINT32(2u * DALI_SHORT_ADDRESS_COUNT + 2u * 24u - 2u,
+                             s_bus.tx_count);
     TEST_ASSERT_EQUAL_UINT32(2u, s_bus.found_cb_count);
     TEST_ASSERT_EQUAL_UINT8(12u, s_bus.found_cb_last_addr);
 
@@ -519,6 +524,7 @@ void test_scan_detects_pure_input_device_without_gear_status(void)
     TEST_ASSERT_TRUE(device->has_input_device);
     TEST_ASSERT_TRUE(device->has_instance_count);
     TEST_ASSERT_EQUAL_UINT8(3u, device->instance_count);
+    TEST_ASSERT_EQUAL_UINT32(0u, s_bus.gear_memory_read_count);
 }
 
 void test_scan_tolerates_group_query_timeout(void)
@@ -918,88 +924,32 @@ void test_scan_records_scene_levels(void)
     TEST_ASSERT_EQUAL_UINT8(200u,  device->scene_levels[7]);
 }
 
-void test_scan_reads_bank1_identity(void)
-{
-    /* addr 5: bank0 and bank1 both present.
-     * Both reads use the same READ_MEMORY_LOCATION frame (0x0BC5) — the mock
-     * consumes entries in order so bank0 reads take the first 18, bank1 takes the next 20. */
-    DaliDiscoveryInventory inventory;
-    uint8_t found = 0u;
-    s_bus.present[5] = true;
-    s_bus.status[5] = 0x00u;
-
-    const uint8_t gtin[6]   = {0x04u, 0x00u, 0x78u, 0x1Au, 0x00u, 0x01u};
-    const uint8_t serial[8] = {0xAAu, 0xBBu, 0xCCu, 0xDDu,
-                                0x11u, 0x22u, 0x33u, 0x44u};
-    const uint32_t read_frame = 0x0BC5u;
-
-    /* Bank 0 — 18 bytes (offsets 0x00..0x11) */
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 0x11u, DALI_BACKWARD_FRAME_BITS);
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, DALI_MEMORY_BANK_IMPLEMENTED, DALI_BACKWARD_FRAME_BITS);
-    for (uint8_t i = 0u; i < 6u; i++) {
-        add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, gtin[i], DALI_BACKWARD_FRAME_BITS);
-    }
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 2u, DALI_BACKWARD_FRAME_BITS);  /* fw_major */
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 5u, DALI_BACKWARD_FRAME_BITS);  /* fw_minor */
-    for (uint8_t i = 0u; i < 8u; i++) {
-        add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, serial[i], DALI_BACKWARD_FRAME_BITS);
-    }
-
-    /* Bank 1 — 20 bytes (offsets 0x00..0x13), same identity + hw version */
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 0x13u, DALI_BACKWARD_FRAME_BITS);
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, DALI_MEMORY_BANK_IMPLEMENTED, DALI_BACKWARD_FRAME_BITS);
-    for (uint8_t i = 0u; i < 6u; i++) {
-        add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, gtin[i], DALI_BACKWARD_FRAME_BITS);
-    }
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 2u, DALI_BACKWARD_FRAME_BITS);  /* fw_major */
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 5u, DALI_BACKWARD_FRAME_BITS);  /* fw_minor */
-    for (uint8_t i = 0u; i < 8u; i++) {
-        add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, serial[i], DALI_BACKWARD_FRAME_BITS);
-    }
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 1u, DALI_BACKWARD_FRAME_BITS);  /* hw_major */
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 0u, DALI_BACKWARD_FRAME_BITS);  /* hw_minor */
-
-    DaliDiscoveryTransport t = transport();
-    TEST_ASSERT_EQUAL(DALI_OK,
-                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
-
-    const DaliDiscoveryDeviceInfo *device = dali_discovery_inventory_get(&inventory, 5u);
-    TEST_ASSERT_NOT_NULL(device);
-    TEST_ASSERT_TRUE(device->has_identity);
-    TEST_ASSERT_TRUE(device->has_bank1);
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(gtin,   device->bank1.gtin,   6u);
-    TEST_ASSERT_EQUAL_UINT8(2u, device->bank1.fw_major);
-    TEST_ASSERT_EQUAL_UINT8(5u, device->bank1.fw_minor);
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(serial, device->bank1.serial, 8u);
-    TEST_ASSERT_EQUAL_UINT8(1u, device->bank1.hw_major);
-    TEST_ASSERT_EQUAL_UINT8(0u, device->bank1.hw_minor);
-}
-
 void test_scan_reads_bank0_identity(void)
 {
-    /* addr 5 present. Bank 0 read: offset 0x00..0x11 via READ_MEMORY_LOCATION (0x0BC5).
+    /* addr 5 present. Bank 0 identity read: offsets 0x03..0x14 via 0x0BC5.
      * DTR1/DTR0 setup frames are no-reply and handled by the mock without scripting. */
     DaliDiscoveryInventory inventory;
     uint8_t found = 0u;
     s_bus.present[5] = true;
     s_bus.status[5] = 0x00u;
 
-    const uint8_t gtin[6]   = {0x04u, 0x00u, 0x78u, 0x1Au, 0x00u, 0x01u};
-    const uint8_t serial[8] = {0xAAu, 0xBBu, 0xCCu, 0xDDu,
-                                0x11u, 0x22u, 0x33u, 0x44u};
+    const uint8_t identity_bytes[18] = {
+        0x01u, 0x23u, 0x45u, 0x67u, 0x89u, 0xABu,
+        0x02u, 0x05u,
+        0x10u, 0x32u, 0x54u, 0x76u, 0x98u, 0xBAu, 0xDCu, 0xFEu,
+        0x03u, 0x07u,
+    };
+    const uint8_t expected_gtin[6] = {
+        0x01u, 0x23u, 0x45u, 0x67u, 0x89u, 0xABu,
+    };
+    const uint8_t expected_identification[8] = {
+        0x10u, 0x32u, 0x54u, 0x76u, 0x98u, 0xBAu, 0xDCu, 0xFEu,
+    };
 
     /* READ_MEMORY_LOCATION at addr 5: address byte = (5<<1)|1 = 0x0B, opcode = 0xC5 */
-    uint32_t read_frame = 0x0BC5u;
-    /* 18 bytes: last_addr, indicator=0xFF, GTIN(6), fw_major, fw_minor, serial(8) */
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 0x11u, DALI_BACKWARD_FRAME_BITS);
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, DALI_MEMORY_BANK_IMPLEMENTED, DALI_BACKWARD_FRAME_BITS);
-    for (uint8_t i = 0u; i < 6u; i++) {
-        add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, gtin[i], DALI_BACKWARD_FRAME_BITS);
-    }
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 2u, DALI_BACKWARD_FRAME_BITS);  /* fw_major */
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 5u, DALI_BACKWARD_FRAME_BITS);  /* fw_minor */
-    for (uint8_t i = 0u; i < 8u; i++) {
-        add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, serial[i], DALI_BACKWARD_FRAME_BITS);
+    for (uint8_t i = 0u; i < (uint8_t)sizeof(identity_bytes); i++) {
+        add_reply(0x0BC5u, DALI_FORWARD_FRAME_BITS, DALI_OK, identity_bytes[i],
+                  DALI_BACKWARD_FRAME_BITS);
     }
 
     DaliDiscoveryTransport t = transport();
@@ -1010,10 +960,14 @@ void test_scan_reads_bank0_identity(void)
     const DaliDiscoveryDeviceInfo *device = dali_discovery_inventory_get(&inventory, 5u);
     TEST_ASSERT_NOT_NULL(device);
     TEST_ASSERT_TRUE(device->has_identity);
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(gtin,   device->identity.gtin,   6u);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected_gtin, device->identity.gtin, 6u);
     TEST_ASSERT_EQUAL_UINT8(2u, device->identity.fw_major);
     TEST_ASSERT_EQUAL_UINT8(5u, device->identity.fw_minor);
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(serial, device->identity.serial, 8u);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected_identification,
+                                  device->identity.serial, 8u);
+    TEST_ASSERT_EQUAL_UINT8(3u, device->identity.hw_major);
+    TEST_ASSERT_EQUAL_UINT8(7u, device->identity.hw_minor);
+    TEST_ASSERT_EQUAL_UINT32(18u, s_bus.gear_memory_read_count);
 }
 
 void test_scan_skips_identity_when_bank0_absent(void)
@@ -1022,8 +976,8 @@ void test_scan_skips_identity_when_bank0_absent(void)
     uint8_t found = 0u;
     s_bus.present[3] = true;
     s_bus.status[3] = 0x00u;
-    /* No READ_MEMORY_LOCATION replies scripted — all 18 reads will timeout.
-     * The first read timeout causes read_bank0_identity to return early,
+    /* No READ_MEMORY_LOCATION replies scripted. The first 0x03 read timeout
+     * causes read_bank0_identity to return early,
      * leaving has_identity false. */
 
     DaliDiscoveryTransport t = transport();
@@ -1034,6 +988,7 @@ void test_scan_skips_identity_when_bank0_absent(void)
     TEST_ASSERT_NOT_NULL(device);
     TEST_ASSERT_TRUE(device->present);
     TEST_ASSERT_FALSE(device->has_identity);
+    TEST_ASSERT_EQUAL_UINT32(1u, s_bus.gear_memory_read_count);
 }
 
 int main(void)
@@ -1069,7 +1024,6 @@ int main(void)
     RUN_TEST(test_scan_marks_excess_device_types_truncated);
     RUN_TEST(test_scan_does_not_mark_exact_device_type_capacity_truncated);
     RUN_TEST(test_scan_records_scene_levels);
-    RUN_TEST(test_scan_reads_bank1_identity);
     RUN_TEST(test_invalid_arguments_are_rejected);
     return UNITY_END();
 }

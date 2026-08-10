@@ -128,6 +128,24 @@ void test_build_read_matches_build_command(void)
     }
 }
 
+void test_build_read_accepts_max_short_address(void)
+{
+    DaliFrame frame = dali_memory_build_read(63u);
+    TEST_ASSERT_EQUAL_UINT8(DALI_FORWARD_FRAME_BITS, frame.bit_length);
+    TEST_ASSERT_EQUAL_HEX32(0x7FC5u, frame.data);
+}
+
+void test_build_read_rejects_invalid_short_addresses(void)
+{
+    DaliFrame frame = dali_memory_build_read(64u);
+    TEST_ASSERT_EQUAL_UINT8(0u, frame.bit_length);
+    TEST_ASSERT_EQUAL_UINT32(0u, frame.data);
+
+    frame = dali_memory_build_read(255u);
+    TEST_ASSERT_EQUAL_UINT8(0u, frame.bit_length);
+    TEST_ASSERT_EQUAL_UINT32(0u, frame.data);
+}
+
 /* ---------------------------------------------------------------------------
  * dali_memory_read_byte — transaction sequence
  * --------------------------------------------------------------------------*/
@@ -210,6 +228,17 @@ void test_read_byte_null_transport_returns_invalid(void)
     TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID, err);
 }
 
+void test_read_byte_rejects_invalid_short_addresses_without_traffic(void)
+{
+    uint8_t out = 0xA5u;
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
+                          dali_memory_read_byte(&s_transport, 64u, 0u, 0u, &out));
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
+                          dali_memory_read_byte(&s_transport, 255u, 0u, 0u, &out));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_frame_count);
+    TEST_ASSERT_EQUAL_UINT8(0xA5u, out);
+}
+
 /* ---------------------------------------------------------------------------
  * dali_memory_read_bytes — block read with auto-increment
  * --------------------------------------------------------------------------*/
@@ -290,72 +319,88 @@ void test_read_bytes_null_buf_returns_invalid(void)
     TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID, err);
 }
 
+void test_read_bytes_rejects_invalid_short_addresses_without_traffic(void)
+{
+    uint8_t buf[2] = {0xA5u, 0x5Au};
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
+                          dali_memory_read_bytes(&s_transport, 64u, 0u, 0u,
+                                                 buf, 2u));
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
+                          dali_memory_read_bytes(&s_transport, 255u, 0u, 0u,
+                                                 buf, 0u));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_frame_count);
+    TEST_ASSERT_EQUAL_HEX8(0xA5u, buf[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x5Au, buf[1]);
+}
+
 /* ---------------------------------------------------------------------------
  * dali_memory_read_bank0_identity
  * --------------------------------------------------------------------------*/
 
-/* Push 18 bytes for a full Bank 0 read (offsets 0x00..0x11) */
-static void push_bank0(uint8_t last_addr,
-                       uint8_t indicator,
-                       const uint8_t gtin[6],
-                       uint8_t fw_major,
-                       uint8_t fw_minor,
-                       const uint8_t serial[8])
+/* Standard-derived bytes at Bank 0 locations 0x03..0x14. Keep this literal
+ * independent of the production offset constants. */
+static const uint8_t s_bank0_identity_vector[18] = {
+    0x01u, 0x23u, 0x45u, 0x67u, 0x89u, 0xABu, /* GTIN, 0x03..0x08 */
+    0x02u, 0x05u,                               /* firmware, 0x09..0x0A */
+    0x10u, 0x32u, 0x54u, 0x76u, 0x98u, 0xBAu, 0xDCu, 0xFEu,
+                                                    /* identification, 0x0B..0x12 */
+    0x03u, 0x07u,                               /* hardware, 0x13..0x14 */
+};
+
+static void push_bank0_identity_vector(void)
 {
-    push_reply(last_addr);
-    push_reply(indicator);
-    for (uint8_t i = 0u; i < 6u; i++) { push_reply(gtin[i]);   }
-    push_reply(fw_major);
-    push_reply(fw_minor);
-    for (uint8_t i = 0u; i < 8u; i++) { push_reply(serial[i]); }
+    for (uint8_t i = 0u; i < (uint8_t)sizeof(s_bank0_identity_vector); i++) {
+        push_reply(s_bank0_identity_vector[i]);
+    }
 }
 
-void test_bank0_identity_parses_correctly(void)
+void test_bank0_identity_layout_constants_match_standard_locations(void)
 {
-    const uint8_t gtin[6]   = {0x04u, 0x00u, 0x78u, 0x1Au, 0x00u, 0x01u};
-    const uint8_t serial[8] = {0x01u, 0x02u, 0x03u, 0x04u,
-                                0x05u, 0x06u, 0x07u, 0x08u};
-    push_bank0(0x11u, DALI_MEMORY_BANK_IMPLEMENTED, gtin, 2u, 5u, serial);
+    TEST_ASSERT_EQUAL_HEX8(0x00u, DALI_MEMORY_BANK0_OFFSET_LAST_ADDR);
+    TEST_ASSERT_EQUAL_HEX8(0x02u, DALI_MEMORY_BANK0_OFFSET_LAST_BANK);
+    TEST_ASSERT_EQUAL_HEX8(0x03u, DALI_MEMORY_BANK0_OFFSET_GTIN);
+    TEST_ASSERT_EQUAL_HEX8(0x09u, DALI_MEMORY_BANK0_OFFSET_FW_MAJOR);
+    TEST_ASSERT_EQUAL_HEX8(0x0Au, DALI_MEMORY_BANK0_OFFSET_FW_MINOR);
+    TEST_ASSERT_EQUAL_HEX8(0x0Bu, DALI_MEMORY_BANK0_OFFSET_IDENTIFICATION);
+    TEST_ASSERT_EQUAL_HEX8(0x13u, DALI_MEMORY_BANK0_OFFSET_HW_MAJOR);
+    TEST_ASSERT_EQUAL_HEX8(0x14u, DALI_MEMORY_BANK0_OFFSET_HW_MINOR);
+    TEST_ASSERT_EQUAL_UINT8(18u, DALI_MEMORY_BANK0_IDENTITY_SIZE);
+}
+
+void test_bank0_identity_parses_standard_vector(void)
+{
+    const uint8_t expected_gtin[6] = {
+        0x01u, 0x23u, 0x45u, 0x67u, 0x89u, 0xABu,
+    };
+    const uint8_t expected_identification[8] = {
+        0x10u, 0x32u, 0x54u, 0x76u, 0x98u, 0xBAu, 0xDCu, 0xFEu,
+    };
+    push_bank0_identity_vector();
 
     DaliMemoryBank0Identity id;
     memset(&id, 0, sizeof(id));
     DaliError err = dali_memory_read_bank0_identity(&s_transport, 3u, &id);
 
     TEST_ASSERT_EQUAL_INT(DALI_OK, err);
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(gtin,   id.gtin,   6u);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected_gtin, id.gtin, 6u);
     TEST_ASSERT_EQUAL_UINT8(2u, id.fw_major);
     TEST_ASSERT_EQUAL_UINT8(5u, id.fw_minor);
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(serial, id.serial, 8u);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected_identification, id.serial, 8u);
+    TEST_ASSERT_EQUAL_UINT8(3u, id.hw_major);
+    TEST_ASSERT_EQUAL_UINT8(7u, id.hw_minor);
 }
 
-void test_bank0_identity_reads_correct_bank_and_offset(void)
+void test_bank0_identity_starts_at_0x03_and_skips_reserved_0x01(void)
 {
-    const uint8_t gtin[6]   = {0u};
-    const uint8_t serial[8] = {0u};
-    push_bank0(0x11u, DALI_MEMORY_BANK_IMPLEMENTED, gtin, 0u, 0u, serial);
+    push_bank0_identity_vector();
 
     DaliMemoryBank0Identity id;
     dali_memory_read_bank0_identity(&s_transport, 0u, &id);
 
-    /* Frame 0 must be DTR1 for bank 0 */
-    DaliFrame exp_dtr1 = dali_memory_build_dtr1_bank(DALI_MEMORY_BANK0);
-    TEST_ASSERT_EQUAL_UINT32(exp_dtr1.data, s_frames[0].data);
-
-    /* Frame 1 must be DTR0 for offset 0x00 */
-    DaliFrame exp_dtr0 = dali_memory_build_dtr0_offset(DALI_MEMORY_BANK0_OFFSET_LAST_ADDR);
-    TEST_ASSERT_EQUAL_UINT32(exp_dtr0.data, s_frames[1].data);
-}
-
-void test_bank0_identity_bad_indicator_returns_invalid(void)
-{
-    const uint8_t gtin[6]   = {0u};
-    const uint8_t serial[8] = {0u};
-    push_bank0(0x11u, 0x00u /* not 0xFF */, gtin, 0u, 0u, serial);
-
-    DaliMemoryBank0Identity id;
-    DaliError err = dali_memory_read_bank0_identity(&s_transport, 0u, &id);
-
-    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID, err);
+    TEST_ASSERT_EQUAL_HEX32(0xC300u, s_frames[0].data); /* DTR1 = Bank 0 */
+    TEST_ASSERT_EQUAL_HEX32(0xA303u, s_frames[1].data); /* DTR0 = 0x03 */
+    TEST_ASSERT_FALSE(s_needs_reply[0]);
+    TEST_ASSERT_FALSE(s_needs_reply[1]);
 }
 
 void test_bank0_identity_transport_error_propagates(void)
@@ -374,17 +419,23 @@ void test_bank0_identity_null_out_returns_invalid(void)
     TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID, err);
 }
 
+void test_bank0_identity_rejects_invalid_short_address_without_traffic(void)
+{
+    DaliMemoryBank0Identity id;
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
+                          dali_memory_read_bank0_identity(&s_transport, 64u, &id));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_frame_count);
+}
+
 void test_bank0_identity_total_frame_count(void)
 {
     /* DTR1 + DTR0 + 18 READs = 20 frames */
-    const uint8_t gtin[6]   = {0u};
-    const uint8_t serial[8] = {0u};
-    push_bank0(0x11u, DALI_MEMORY_BANK_IMPLEMENTED, gtin, 0u, 0u, serial);
+    push_bank0_identity_vector();
 
     DaliMemoryBank0Identity id;
     dali_memory_read_bank0_identity(&s_transport, 0u, &id);
 
-    TEST_ASSERT_EQUAL_UINT8(2u + DALI_MEMORY_BANK0_IDENTITY_SIZE, s_frame_count);
+    TEST_ASSERT_EQUAL_UINT8(20u, s_frame_count);
 }
 
 /* ---------------------------------------------------------------------------
@@ -400,6 +451,8 @@ int main(void)
     RUN_TEST(test_build_dtr0_offset_matches_dtr0_data);
     RUN_TEST(test_build_read_is_16bit);
     RUN_TEST(test_build_read_matches_build_command);
+    RUN_TEST(test_build_read_accepts_max_short_address);
+    RUN_TEST(test_build_read_rejects_invalid_short_addresses);
 
     RUN_TEST(test_read_byte_sends_three_frames);
     RUN_TEST(test_read_byte_first_two_frames_no_reply);
@@ -409,6 +462,7 @@ int main(void)
     RUN_TEST(test_read_byte_timeout_propagates);
     RUN_TEST(test_read_byte_null_out_returns_invalid);
     RUN_TEST(test_read_byte_null_transport_returns_invalid);
+    RUN_TEST(test_read_byte_rejects_invalid_short_addresses_without_traffic);
 
     RUN_TEST(test_read_bytes_sends_dtr_once_then_n_reads);
     RUN_TEST(test_read_bytes_same_read_frame_reused);
@@ -416,12 +470,14 @@ int main(void)
     RUN_TEST(test_read_bytes_count_zero_sends_no_frames);
     RUN_TEST(test_read_bytes_mid_sequence_error_propagates);
     RUN_TEST(test_read_bytes_null_buf_returns_invalid);
+    RUN_TEST(test_read_bytes_rejects_invalid_short_addresses_without_traffic);
 
-    RUN_TEST(test_bank0_identity_parses_correctly);
-    RUN_TEST(test_bank0_identity_reads_correct_bank_and_offset);
-    RUN_TEST(test_bank0_identity_bad_indicator_returns_invalid);
+    RUN_TEST(test_bank0_identity_layout_constants_match_standard_locations);
+    RUN_TEST(test_bank0_identity_parses_standard_vector);
+    RUN_TEST(test_bank0_identity_starts_at_0x03_and_skips_reserved_0x01);
     RUN_TEST(test_bank0_identity_transport_error_propagates);
     RUN_TEST(test_bank0_identity_null_out_returns_invalid);
+    RUN_TEST(test_bank0_identity_rejects_invalid_short_address_without_traffic);
     RUN_TEST(test_bank0_identity_total_frame_count);
 
     return UNITY_END();

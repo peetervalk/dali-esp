@@ -18,48 +18,36 @@
 #include "dali_protocol.h"
 
 /* ---------------------------------------------------------------------------
- * Bank 0 — mandatory identity bank (IEC 62386-102 §9.10.6)
+ * Bank 0 — mandatory identity bank (IEC 62386-102:2022 §9.10.7)
+ *
+ * Location 0x01 is not implemented and must not be included in a contiguous
+ * read. Location 0x02 reports the last accessible memory bank; the common
+ * identity fields occupy 0x03..0x14.
  * --------------------------------------------------------------------------*/
 #define DALI_MEMORY_BANK0                   0u
 
 #define DALI_MEMORY_BANK0_OFFSET_LAST_ADDR  0x00u   /* last addressable location */
-#define DALI_MEMORY_BANK0_OFFSET_INDICATOR  0x01u   /* 0xFF when bank present    */
-#define DALI_MEMORY_BANK0_OFFSET_GTIN       0x02u   /* 6-byte GTIN, MSB first    */
+#define DALI_MEMORY_BANK0_OFFSET_LAST_BANK  0x02u   /* last accessible bank      */
+#define DALI_MEMORY_BANK0_OFFSET_GTIN       0x03u   /* 6-byte GTIN, MSB first    */
 #define DALI_MEMORY_BANK0_GTIN_LEN          6u
-#define DALI_MEMORY_BANK0_OFFSET_FW_MAJOR   0x08u
-#define DALI_MEMORY_BANK0_OFFSET_FW_MINOR   0x09u
-#define DALI_MEMORY_BANK0_OFFSET_SERIAL     0x0Au   /* 8-byte serial number      */
-#define DALI_MEMORY_BANK0_SERIAL_LEN        8u
-#define DALI_MEMORY_BANK0_IDENTITY_LAST     0x11u   /* last byte of standard block */
-#define DALI_MEMORY_BANK0_IDENTITY_SIZE     18u     /* bytes from 0x00 to 0x11   */
+#define DALI_MEMORY_BANK0_OFFSET_FW_MAJOR   0x09u
+#define DALI_MEMORY_BANK0_OFFSET_FW_MINOR   0x0Au
+#define DALI_MEMORY_BANK0_OFFSET_IDENTIFICATION 0x0Bu
+#define DALI_MEMORY_BANK0_IDENTIFICATION_LEN    8u
+#define DALI_MEMORY_BANK0_OFFSET_HW_MAJOR   0x13u
+#define DALI_MEMORY_BANK0_OFFSET_HW_MINOR   0x14u
+#define DALI_MEMORY_BANK0_IDENTITY_FIRST    DALI_MEMORY_BANK0_OFFSET_GTIN
+#define DALI_MEMORY_BANK0_IDENTITY_LAST     DALI_MEMORY_BANK0_OFFSET_HW_MINOR
+#define DALI_MEMORY_BANK0_IDENTITY_SIZE     \
+    (DALI_MEMORY_BANK0_IDENTITY_LAST - DALI_MEMORY_BANK0_IDENTITY_FIRST + 1u)
 
-/* ---------------------------------------------------------------------------
- * Bank 1 — extended identity (DALI-2 gear, IEC 62386-102 Annex A)
- * Superset of bank 0: adds hardware version at offsets 0x12-0x13.
- * --------------------------------------------------------------------------*/
+/* Backwards-compatible names for the standard 8-byte identification number. */
+#define DALI_MEMORY_BANK0_OFFSET_SERIAL     DALI_MEMORY_BANK0_OFFSET_IDENTIFICATION
+#define DALI_MEMORY_BANK0_SERIAL_LEN        DALI_MEMORY_BANK0_IDENTIFICATION_LEN
+
+/* Bank 1 is optional OEM/part-specific data, not a second identity bank. */
 #define DALI_MEMORY_BANK1                   1u
 
-#define DALI_MEMORY_BANK1_OFFSET_INDICATOR  0x01u
-#define DALI_MEMORY_BANK1_OFFSET_GTIN       0x02u
-#define DALI_MEMORY_BANK1_GTIN_LEN          6u
-#define DALI_MEMORY_BANK1_OFFSET_FW_MAJOR   0x08u
-#define DALI_MEMORY_BANK1_OFFSET_FW_MINOR   0x09u
-#define DALI_MEMORY_BANK1_OFFSET_SERIAL     0x0Au
-#define DALI_MEMORY_BANK1_SERIAL_LEN        8u
-#define DALI_MEMORY_BANK1_OFFSET_HW_MAJOR   0x12u
-#define DALI_MEMORY_BANK1_OFFSET_HW_MINOR   0x13u
-#define DALI_MEMORY_BANK1_IDENTITY_SIZE     20u   /* bytes 0x00 to 0x13 */
-
-typedef struct {
-    uint8_t gtin[DALI_MEMORY_BANK1_GTIN_LEN];
-    uint8_t fw_major;
-    uint8_t fw_minor;
-    uint8_t serial[DALI_MEMORY_BANK1_SERIAL_LEN];
-    uint8_t hw_major;
-    uint8_t hw_minor;
-} DaliMemoryBank1Identity;
-
-#define DALI_MEMORY_BANK_IMPLEMENTED        0xFFu   /* indicator value when present */
 #define DALI_MEMORY_QUERY_RETRIES           1u
 
 /* ---------------------------------------------------------------------------
@@ -85,7 +73,10 @@ typedef struct {
     uint8_t gtin[DALI_MEMORY_BANK0_GTIN_LEN];
     uint8_t fw_major;
     uint8_t fw_minor;
-    uint8_t serial[DALI_MEMORY_BANK0_SERIAL_LEN];
+    /* Standard identification number, MSB first; retained name for compatibility. */
+    uint8_t serial[DALI_MEMORY_BANK0_IDENTIFICATION_LEN];
+    uint8_t hw_major;
+    uint8_t hw_minor;
 } DaliMemoryBank0Identity;
 
 /* ---------------------------------------------------------------------------
@@ -98,7 +89,8 @@ DaliFrame dali_memory_build_dtr1_bank(uint8_t bank);
 /* Build a DTR0 = offset special broadcast frame. */
 DaliFrame dali_memory_build_dtr0_offset(uint8_t offset);
 
-/* Build a READ_MEMORY_LOCATION frame addressed to short_addr. */
+/* Build READ_MEMORY_LOCATION for short_addr 0..63. Invalid addresses return a
+ * zero-length frame; the transaction helpers reject them before bus traffic. */
 DaliFrame dali_memory_build_read(uint8_t short_addr);
 
 /* ---------------------------------------------------------------------------
@@ -106,7 +98,7 @@ DaliFrame dali_memory_build_read(uint8_t short_addr);
  * --------------------------------------------------------------------------*/
 
 /*
- * Read one byte from bank:offset on short_addr.
+ * Read one byte from bank:offset on short_addr (0..63).
  * Issues DTR1, DTR0, then READ_MEMORY_LOCATION.
  */
 DaliError dali_memory_read_byte(const DaliMemoryTransport *transport,
@@ -116,7 +108,8 @@ DaliError dali_memory_read_byte(const DaliMemoryTransport *transport,
                                 uint8_t                   *out);
 
 /*
- * Read count consecutive bytes starting at bank:offset into buf.
+ * Read count consecutive bytes starting at bank:offset into buf for short_addr
+ * 0..63.
  * Issues DTR1 + DTR0 once, then count READ_MEMORY_LOCATION frames.
  * buf must be at least count bytes.
  */
@@ -128,18 +121,9 @@ DaliError dali_memory_read_bytes(const DaliMemoryTransport *transport,
                                  uint8_t                    count);
 
 /*
- * Read the standard Bank 0 identity block (18 bytes: offsets 0x00..0x11).
- * Returns DALI_ERR_INVALID if the indicator byte is not 0xFF.
+ * Read the standard Bank 0 identity block (18 bytes: offsets 0x03..0x14).
+ * The reserved/not-implemented location 0x01 is deliberately not queried.
  */
 DaliError dali_memory_read_bank0_identity(const DaliMemoryTransport *transport,
                                           uint8_t                    short_addr,
                                           DaliMemoryBank0Identity   *out);
-
-/*
- * Read the Bank 1 identity block (20 bytes: offsets 0x00..0x13).
- * Superset of bank 0 — adds hardware major/minor version at 0x12/0x13.
- * Returns DALI_ERR_INVALID if the indicator byte is not 0xFF.
- */
-DaliError dali_memory_read_bank1_identity(const DaliMemoryTransport *transport,
-                                          uint8_t                    short_addr,
-                                          DaliMemoryBank1Identity   *out);

@@ -48,10 +48,8 @@ typedef struct {
     bool                     has_input_device;
     bool                     has_instance_count;
     uint8_t                  instance_count;
-    bool                     has_identity;
+    bool                     has_identity;  /* Part 102 control-gear Bank 0 */
     DaliMemoryBank0Identity  identity;
-    bool                     has_bank1;
-    DaliMemoryBank1Identity  bank1;
     bool                     has_scene_levels;
     uint8_t                  scene_levels[DALI_SCENE_COUNT];
     bool                     has_dt6;

@@ -327,7 +327,7 @@ static void scan_task(void *arg) {
     DaliComponent *component = args->component;
     delete args;
 
-    static DaliDiscoveryInventory inventory;  // static: ~7 KB, keep off task stack
+    static DaliDiscoveryInventory inventory;  // static: several KB, keep off task stack
 
     DaliDiscoveryTransport transport = {
         .transact = scan_sync_transact,

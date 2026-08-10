@@ -382,18 +382,13 @@ static void discovery_enrich_device(const DaliDiscoveryTransport *transport,
         }
     }
 
-    DaliMemoryTransport mem = to_memory_transport(transport);
-
-    DaliMemoryBank0Identity identity;
-    if (dali_memory_read_bank0_identity(&mem, addr, &identity) == DALI_OK) {
-        device->has_identity = true;
-        device->identity = identity;
-    }
-
-    DaliMemoryBank1Identity bank1;
-    if (dali_memory_read_bank1_identity(&mem, addr, &bank1) == DALI_OK) {
-        device->has_bank1 = true;
-        device->bank1 = bank1;
+    if (device->has_control_gear) {
+        DaliMemoryTransport mem = to_memory_transport(transport);
+        DaliMemoryBank0Identity identity;
+        if (dali_memory_read_bank0_identity(&mem, addr, &identity) == DALI_OK) {
+            device->has_identity = true;
+            device->identity = identity;
+        }
     }
 
     /* Scene levels — 0xFF means scene not configured ("MASK"). */

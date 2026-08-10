@@ -69,6 +69,11 @@ adding broad new device support.
   multiple, and no-type/end replies, rejects malformed enumeration, and reports
   fixed-list truncation. Host vectors cover the sentinel and capacity boundaries;
   this path has not been re-verified on hardware.
+- Part 102 control-gear identity discovery now reads the DALI-2 Bank 0 identity
+  fields at `0x03..0x14`, including hardware version, without touching reserved
+  location `0x01`. The unsupported duplicate Bank 1 identity model is removed,
+  and invalid short addresses are rejected before bus traffic. Independent host
+  vectors cover the layout and address boundaries; hardware is not re-verified.
 - Tracked source and documentation files are valid UTF-8; no active mojibake
   cleanup is required.
 
@@ -112,6 +117,10 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
   and Part 304/type 4 configuration/query builders have an independently audited
   opcode surface. This is software-level evidence only; configuration writes have
   not yet completed hardware read/write/read-back validation.
+- The Part 102 memory helper reads the common Bank 0 identity block, including
+  firmware and hardware versions. Discovery performs this 16-bit read only for
+  confirmed control gear; pure Part 103 devices require a future typed 24-bit
+  memory path. Generic byte access to optional Bank 1 remains available.
 - DT6 and DT8 builder APIs exist and are host-tested, but are not yet fully
   surfaced through the native CLI or comprehensively hardware-verified.
 - DT1 and other specialized/legacy device types remain intentionally unimplemented.
@@ -149,7 +158,7 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
 - ESPHome exposes discovery, not a guarded commissioning workflow.
 - `esphome/dali_esphome.h` is an unused legacy placeholder.
 
-### Next-release input-configuration migration
+### Next-release API migrations
 
 The corrected input-configuration surface intentionally removes invalid generic
 timer/hysteresis/deadtime aliases and non-standard Part 301/304 APIs. C callers
@@ -157,6 +166,17 @@ must migrate to the explicit `pb`, `occ`, and `light` type-specific builders.
 ESPHome callers must use the `pb-*` and `light-*` names; the established Part 303
 occupancy names remain available. This is a source/API migration, not evidence of
 hardware write verification.
+
+The corrected memory identity API removes `DaliMemoryBank1Identity`,
+`dali_memory_read_bank1_identity()`, the Bank 1 identity-layout macros, and the
+`has_bank1`/`bank1` discovery fields. It also removes
+`DALI_MEMORY_BANK0_OFFSET_INDICATOR` and `DALI_MEMORY_BANK_IMPLEMENTED`;
+`DALI_MEMORY_BANK0_OFFSET_SERIAL` remains as an alias but changes from `0x0A` to
+the correct `0x0B`. `DaliMemoryBank0Identity` gains `hw_major`/`hw_minor`; its
+existing `serial` member remains the standard eight-byte identification number.
+This changes the layouts of `DaliMemoryBank0Identity`, `DaliDiscoveryDeviceInfo`,
+and `DaliDiscoveryInventory`. Callers using the removed typed Bank 1 model must
+migrate to generic bank access.
 
 ## Installation State
 
@@ -193,8 +213,6 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 
 ### P0 — Protocol correctness and conformance
 
-- Update memory identity handling to the applicable DALI-2 Bank 0 layout, remove
-  the unsupported duplicate Bank 1 identity model, and validate short addresses.
 - Enforce send-twice and interframe timing boundaries. Strengthen commissioning
   RANDOMIZE timing, collision handling, equal-random-address recovery, and the
   separation of gear and control-device address spaces.
