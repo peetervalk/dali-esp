@@ -41,13 +41,22 @@ Results are short strings:
 | Result | Meaning |
 |---|---|
 | `OK` | Command or helper sequence was queued successfully. |
-| `err` | The DALI stack rejected the command or sequence. |
+| `pending` | An asynchronous command was queued and has not completed yet. |
+| `err` | The DALI stack rejected the command or its execution later failed. |
 | `queue full` | The scheduler queue was full; retry after bus traffic settles. |
 | `no reply` | A query expected a reply but none arrived. |
 | `N (0xHH)` | Query reply byte in decimal and hex. |
 | `TX OK` / `TX2 OK` | Raw frame sent once / twice without waiting for a reply. |
+| `TX ERR N` / `TX2 ERR N` | Raw transmission failed with DALI error code `N`. |
 | `RX N (0xHH)` | Raw frame sent with `wait` and received reply byte. |
 | `RX timeout` | Raw frame sent with `wait`, but no reply arrived. |
+
+Every console path reports scheduler admission failures immediately. An
+asynchronous command publishes `pending` until its completion callback replaces
+the result. Only the newest submitted command may update the result, so a delayed
+callback from an older command cannot overwrite a newer result. `OK` means queued,
+not that a no-reply command has already executed or been accepted by the target
+device.
 
 ## Target Parameters
 

@@ -262,74 +262,123 @@ static void on_diag_refresh_reply(DaliError result, const DaliFrame *reply, void
 
 static char              s_cmd_result_str[64] = {};
 static std::atomic<bool> s_cmd_result_dirty_{false};
+static std::atomic<uint32_t> s_cmd_generation_{0u};
+
+static void set_cmd_result_locked(const char *str)
+{
+    strncpy(s_cmd_result_str, str, sizeof(s_cmd_result_str) - 1u);
+    s_cmd_result_str[sizeof(s_cmd_result_str) - 1u] = '\0';
+    s_cmd_result_dirty_.store(true, std::memory_order_relaxed);
+}
 
 static void set_cmd_result(const char *str)
 {
     portENTER_CRITICAL(&s_string_mux);
-    strncpy(s_cmd_result_str, str, sizeof(s_cmd_result_str) - 1u);
-    s_cmd_result_str[sizeof(s_cmd_result_str) - 1u] = '\0';
-    s_cmd_result_dirty_.store(true, std::memory_order_relaxed);
+    set_cmd_result_locked(str);
     portEXIT_CRITICAL(&s_string_mux);
 }
 
-static void on_cmd_query_reply(DaliError result, const DaliFrame *reply, void * /*ctx*/)
+static const char *cmd_enqueue_result_text(DaliError result)
+{
+    if (result == DALI_OK) return "OK";
+    if (result == DALI_ERR_QUEUE_FULL) return "queue full";
+    return "err";
+}
+
+static void set_cmd_enqueue_result(DaliError result)
+{
+    set_cmd_result(cmd_enqueue_result_text(result));
+}
+
+static void set_cmd_enqueue_error(DaliError result)
+{
+    if (result != DALI_OK) set_cmd_enqueue_result(result);
+}
+
+static void *cmd_generation_ctx(uint32_t generation)
+{
+    return reinterpret_cast<void *>(static_cast<uintptr_t>(generation));
+}
+
+static uint32_t begin_cmd_generation()
+{
+    portENTER_CRITICAL(&s_string_mux);
+    uint32_t generation = s_cmd_generation_.load(std::memory_order_relaxed) + 1u;
+    if (generation == 0u) generation = 1u;
+    s_cmd_generation_.store(generation, std::memory_order_relaxed);
+    portEXIT_CRITICAL(&s_string_mux);
+    return generation;
+}
+
+static void set_cmd_result_for_generation(const char *str, void *ctx)
+{
+    uint32_t generation = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(ctx));
+    portENTER_CRITICAL(&s_string_mux);
+    if (generation == s_cmd_generation_.load(std::memory_order_relaxed)) {
+        set_cmd_result_locked(str);
+    }
+    portEXIT_CRITICAL(&s_string_mux);
+}
+
+static void on_cmd_query_reply(DaliError result, const DaliFrame *reply, void *ctx)
 {
     if (result != DALI_OK || reply == nullptr) {
-        set_cmd_result("no reply");
+        set_cmd_result_for_generation(result == DALI_ERR_TIMEOUT ? "no reply" : "err", ctx);
     } else {
         char buf[16];
         snprintf(buf, sizeof(buf), "%u (0x%02X)", (unsigned)(reply->data & 0xFFu),
                  (unsigned)(reply->data & 0xFFu));
-        set_cmd_result(buf);
+        set_cmd_result_for_generation(buf, ctx);
     }
 }
 
 static void on_memread_done(DaliError result, uint8_t /*failed_step*/,
-                            const DaliFrame *reply, void * /*ctx*/)
+                            const DaliFrame *reply, void *ctx)
 {
     if (result != DALI_OK || reply == nullptr) {
-        set_cmd_result("no reply");
+        set_cmd_result_for_generation(result == DALI_ERR_TIMEOUT ? "no reply" : "err", ctx);
     } else {
         char buf[16];
         snprintf(buf, sizeof(buf), "%u (0x%02X)", (unsigned)(reply->data & 0xFFu),
                  (unsigned)(reply->data & 0xFFu));
-        set_cmd_result(buf);
+        set_cmd_result_for_generation(buf, ctx);
     }
 }
 
-static void set_raw_result(DaliError result, const DaliFrame *reply, bool sent_twice)
+static void set_raw_result(DaliError result, const DaliFrame *reply, bool sent_twice,
+                           void *ctx)
 {
     if (result == DALI_OK && reply != nullptr) {
         char buf[16];
         snprintf(buf, sizeof(buf), "RX %u (0x%02X)", (unsigned)(reply->data & 0xFFu),
                  (unsigned)(reply->data & 0xFFu));
-        set_cmd_result(buf);
+        set_cmd_result_for_generation(buf, ctx);
         return;
     }
 
     if (result == DALI_ERR_TIMEOUT) {
-        set_cmd_result("RX timeout");
+        set_cmd_result_for_generation("RX timeout", ctx);
         return;
     }
 
     if (result == DALI_OK) {
-        set_cmd_result(sent_twice ? "TX2 OK" : "TX OK");
+        set_cmd_result_for_generation(sent_twice ? "TX2 OK" : "TX OK", ctx);
         return;
     }
 
     char buf[20];
     snprintf(buf, sizeof(buf), sent_twice ? "TX2 ERR %d" : "TX ERR %d", (int)result);
-    set_cmd_result(buf);
+    set_cmd_result_for_generation(buf, ctx);
 }
 
-static void on_raw_done(DaliError result, const DaliFrame *reply, void * /*ctx*/)
+static void on_raw_done(DaliError result, const DaliFrame *reply, void *ctx)
 {
-    set_raw_result(result, reply, false);
+    set_raw_result(result, reply, false, ctx);
 }
 
-static void on_raw2_done(DaliError result, const DaliFrame *reply, void * /*ctx*/)
+static void on_raw2_done(DaliError result, const DaliFrame *reply, void *ctx)
 {
-    set_raw_result(result, reply, true);
+    set_raw_result(result, reply, true, ctx);
 }
 
 /* ── Find-couplers recording (Core 1 writes, Core 0 reads) ──────────────── */
@@ -1076,6 +1125,7 @@ void DaliComponent::execute_command(const std::string &cmd_str)
     /* Tokenise into 5 command tokens plus one overflow sentinel. */
     char buf[96];
     if (cmd_str.size() >= sizeof(buf)) {
+        begin_cmd_generation();
         set_cmd_result("command too long");
         return;
     }
@@ -1095,6 +1145,8 @@ void DaliComponent::execute_command(const std::string &cmd_str)
     if (ntok == 0u) return;
 
     const char *verb = tok[0];
+    uint32_t cmd_generation = begin_cmd_generation();
+    void *cmd_ctx = cmd_generation_ctx(cmd_generation);
 
     /* Raw frame: raw/raw2 <hex> len=<16|24> [wait]. */
     if (strcmp(verb, "raw") == 0 || strcmp(verb, "raw2") == 0) {
@@ -1121,8 +1173,9 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         txn.needs_reply = wait_reply;
         txn.send_twice  = send_twice;
         txn.on_complete = send_twice ? on_raw2_done : on_raw_done;
-        txn.cb_ctx      = nullptr;
-        if (dali_sched_enqueue(&txn) != DALI_OK) set_cmd_result("queue full");
+        txn.cb_ctx      = cmd_ctx;
+        set_cmd_result("pending");
+        set_cmd_enqueue_error(dali_sched_enqueue(&txn));
         return;
     }
 
@@ -1131,10 +1184,11 @@ void DaliComponent::execute_command(const std::string &cmd_str)
     if ((strcmp(verb, "off") == 0 || strcmp(verb, "max") == 0 ||
          strcmp(verb, "min") == 0) && ntok >= 2u) {
         if (!parse_target(tok[1], &tgt)) { set_cmd_result("bad target"); return; }
-        if (strcmp(verb, "off") == 0) dali_control_off(tgt);
-        else if (strcmp(verb, "max") == 0) dali_control_recall_max(tgt);
-        else dali_control_recall_min(tgt);
-        set_cmd_result("OK");
+        DaliError err;
+        if (strcmp(verb, "off") == 0) err = dali_control_off(tgt);
+        else if (strcmp(verb, "max") == 0) err = dali_control_recall_max(tgt);
+        else err = dali_control_recall_min(tgt);
+        set_cmd_enqueue_result(err);
         return;
     }
 
@@ -1142,8 +1196,7 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         if (!parse_target(tok[1], &tgt)) { set_cmd_result("bad target"); return; }
         unsigned long lv;
         if (!parse_uint(tok[2], 0u, 254u, &lv)) { set_cmd_result("level 0-254"); return; }
-        dali_control_set_level(tgt, (uint8_t)lv);
-        set_cmd_result("OK");
+        set_cmd_enqueue_result(dali_control_set_level(tgt, (uint8_t)lv));
         return;
     }
 
@@ -1152,7 +1205,9 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         if (!parse_target(tok[1], &tgt)) { set_cmd_result("bad target"); return; }
         for (const auto &e : s_query_table) {
             if (strcmp(tok[2], e.name) == 0) {
-                dali_control_query(tgt, e.id, 0u, on_cmd_query_reply, nullptr);
+                set_cmd_result("pending");
+                set_cmd_enqueue_error(
+                    dali_control_query(tgt, e.id, 0u, on_cmd_query_reply, cmd_ctx));
                 return;
             }
         }
@@ -1189,7 +1244,7 @@ void DaliComponent::execute_command(const std::string &cmd_str)
                     set_cmd_result("needs dtr0 value");
                     return;
                 }
-                set_cmd_result(err == DALI_OK ? "OK" : "err");
+                set_cmd_enqueue_result(err);
                 return;
             }
         }
@@ -1231,8 +1286,7 @@ void DaliComponent::execute_command(const std::string &cmd_str)
                     seq.steps[0] = { cfg_frame, false, e.send_twice, 0u };
                     seq.step_count = 1u;
                 }
-                DaliError err = dali_sched_enqueue_sequence(&seq);
-                set_cmd_result(err == DALI_OK ? "OK" : "queue full");
+                set_cmd_enqueue_result(dali_sched_enqueue_sequence(&seq));
                 return;
             }
         }
@@ -1260,9 +1314,9 @@ void DaliComponent::execute_command(const std::string &cmd_str)
                 txn.frame       = frame;
                 txn.needs_reply = true;
                 txn.on_complete = on_cmd_query_reply;
-                txn.cb_ctx      = nullptr;
-                DaliError err = dali_sched_enqueue(&txn);
-                if (err != DALI_OK) set_cmd_result("queue full");
+                txn.cb_ctx      = cmd_ctx;
+                set_cmd_result("pending");
+                set_cmd_enqueue_error(dali_sched_enqueue(&txn));
                 return;
             }
         }
@@ -1288,8 +1342,9 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         seq.steps[2] = { dali_cmd_device(memtgt.address, 0x3Cu),            true,  false, 0u };
         seq.step_count  = 3u;
         seq.on_complete = on_memread_done;
-        seq.cb_ctx      = nullptr;
-        if (dali_sched_enqueue_sequence(&seq) != DALI_OK) set_cmd_result("queue full");
+        seq.cb_ctx      = cmd_ctx;
+        set_cmd_result("pending");
+        set_cmd_enqueue_error(dali_sched_enqueue_sequence(&seq));
         return;
     }
 
@@ -1311,8 +1366,9 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         txn.frame       = dali_cmd_device(tgt.address, (uint8_t)opcv);
         txn.needs_reply = true;
         txn.on_complete = on_cmd_query_reply;
-        txn.cb_ctx      = nullptr;
-        if (dali_sched_enqueue(&txn) != DALI_OK) set_cmd_result("queue full");
+        txn.cb_ctx      = cmd_ctx;
+        set_cmd_result("pending");
+        set_cmd_enqueue_error(dali_sched_enqueue(&txn));
         return;
     }
 
@@ -1338,8 +1394,9 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         seq.steps[1] = { dali_cmd_device(tgt.address, query_opc),         true,  false, 0u };
         seq.step_count  = 2u;
         seq.on_complete = on_memread_done;
-        seq.cb_ctx      = nullptr;
-        if (dali_sched_enqueue_sequence(&seq) != DALI_OK) set_cmd_result("queue full");
+        seq.cb_ctx      = cmd_ctx;
+        set_cmd_result("pending");
+        set_cmd_enqueue_error(dali_sched_enqueue_sequence(&seq));
         return;
     }
 
@@ -1368,8 +1425,7 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         if (err == DALI_OK) {
             err = dali_sched_enqueue_sequence(&seq);
         }
-        set_cmd_result(err == DALI_OK ? "OK" :
-                       err == DALI_ERR_QUEUE_FULL ? "queue full" : "err");
+        set_cmd_enqueue_result(err);
         return;
     }
 

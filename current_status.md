@@ -83,6 +83,12 @@ adding broad new device support.
   so on/off and level cannot be mixed across updates and a newer publish cannot
   be erased by the consumer. A portable C++ host suite covers empty, coherent,
   coalesced, and successive publish/take behavior; hardware is not re-verified.
+- Every ESPHome command-console path now reports scheduler admission failures
+  consistently: queue pressure is `queue full`, other rejections are `err`, and
+  direct commands publish `OK` only after successful enqueue. Async commands
+  publish `pending`, and generation-gated callbacks prevent an older completion
+  from overwriting the newest command result. This is compile-verified; the
+  console parser/result layer still has no direct host test.
 - Tracked source and documentation files are valid UTF-8; no active mojibake
   cleanup is required.
 
@@ -160,6 +166,10 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
 - The command console includes `raw`, `raw2`, memory, DTR, instance-query, and
   instance-configuration helpers. These do not imply equivalent native CLI or
   hardware validation.
+- Console enqueue results are mapped consistently. Async commands publish
+  `pending`, replace it on completion, and ignore callbacks belonging to an older
+  submitted command. `OK` still means queued rather than execution- or
+  device-level confirmation.
 - Control-device `memwrite` is one scheduler-contiguous sequence and cannot be
   partially enqueued. Its `OK` result means queued, not device-acknowledged or
   read-back verified, and it does not exclude another physical bus master.
@@ -242,8 +252,8 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   ENABLE DEVICE TYPE sequences, memory access, DT8 multi-byte queries,
   send-twice commands, discovery, and commissioning.
 - Make scans exclusive or explicitly pause/reject normal polling and HA traffic.
-- Handle every enqueue result. Never report `OK` for a dropped command; pace full
-  refresh, retry missed entries, and expose queue depth/high-water/drop diagnostics.
+- Handle remaining non-console enqueue failures; pace full refresh, retry missed
+  entries, and expose queue depth/high-water/drop diagnostics.
 - Update light-command deduplication only after confirmed transmission, or
   invalidate its cached state after TX/bus errors, so a failed command can be retried.
 - Correct observed-state semantics for RECALL MAX, STEP DOWN AND OFF, TOGGLE, and
