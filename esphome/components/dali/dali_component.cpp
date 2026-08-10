@@ -22,6 +22,7 @@ extern "C" {
 #include "../../../components/dali/dali_protocol.h"
 #include "../../../components/dali/dali_input_device.h"
 #include "../../../components/dali/dali_input_config.h"
+#include "../../../components/dali/dali_input_poll.h"
 #include "../../../components/dali/dali_memory.h"
 #include "../../../components/dali/dali_group_map.h"
 }
@@ -112,7 +113,6 @@ static constexpr uint8_t MAX_INPUT_SENSORS = 16u;
 
 struct SensorEntry {
     DaliBusSensor    *sensor;
-    uint8_t           pending_msb;
     std::atomic<bool> seq_in_flight;
     std::atomic<bool> poll_requested;
 };
@@ -120,72 +120,49 @@ struct SensorEntry {
 static SensorEntry s_sensor_registry[MAX_INPUT_SENSORS];
 static uint8_t     s_sensor_count = 0u;
 
-/* Async completion callbacks — run on Core 1 (DALI task). */
+/* Async completion callback — runs on Core 1 (DALI task). */
 
-static void on_input_value_lsb(DaliError result, const DaliFrame *reply, void *ctx)
+static void on_input_value_done(const DaliSequenceResult *result, void *ctx)
 {
     SensorEntry *e = static_cast<SensorEntry *>(ctx);
-    e->seq_in_flight.store(false, std::memory_order_release);
-    if (result != DALI_OK || reply == nullptr) return;
-    uint8_t  lsb = (uint8_t)(reply->data & 0xFFu);
-    uint16_t raw = ((uint16_t)e->pending_msb << 8) | lsb;
-    e->sensor->mark_raw_value(raw);
-}
-
-static void on_input_value_msb(DaliError result, const DaliFrame *reply, void *ctx)
-{
-    SensorEntry *e = static_cast<SensorEntry *>(ctx);
-    if (result != DALI_OK || reply == nullptr) {
-        e->seq_in_flight.store(false, std::memory_order_release);
-        return;
+    DaliInputValue value;
+    /* Rejects a failed or partially executed sequence, so a reading is only
+     * published once every byte of that one latched value arrived. */
+    if (result != nullptr &&
+        dali_input_poll_value_from_sequence(
+            result, e->sensor->get_value_bytes(), &value) == DALI_OK) {
+        e->sensor->mark_raw_value((uint16_t)value.value);
     }
-    e->pending_msb = (uint8_t)(reply->data & 0xFFu);
-    DaliFrame frame;
-    dali_build_instance_command(e->sensor->get_address(), e->sensor->get_instance(),
-                                DALI_CMD_QUERY_INPUT_VALUE_LATCH, &frame);
-    DaliTransaction txn = {};
-    txn.frame       = frame;
-    txn.needs_reply = true;
-    txn.on_complete = on_input_value_lsb;
-    txn.cb_ctx      = e;
-    if (dali_sched_enqueue(&txn) != DALI_OK) {
-        e->seq_in_flight.store(false, std::memory_order_release);
-        e->poll_requested.store(true, std::memory_order_release);
-        ESP_LOGW(TAG, "sensor LSB enqueue failed; poll retry requested");
-    }
-}
-
-static void on_input_value_1byte(DaliError result, const DaliFrame *reply, void *ctx)
-{
-    SensorEntry *e = static_cast<SensorEntry *>(ctx);
     e->seq_in_flight.store(false, std::memory_order_release);
-    if (result != DALI_OK || reply == nullptr) return;
-    e->sensor->mark_raw_value((uint16_t)(reply->data & 0xFFu));
 }
 
 static bool enqueue_sensor_poll(SensorEntry *e, uint32_t now_ms)
 {
-    bool two_byte = (e->sensor->get_value_bytes() == 2u);
     if (e->seq_in_flight.exchange(true, std::memory_order_acq_rel)) {
         ESP_LOGD(TAG, "sensor poll: previous query still in flight, skipping");
         return false;
     }
-    DaliFrame frame;
-    dali_build_instance_command(e->sensor->get_address(), e->sensor->get_instance(),
-                                DALI_CMD_QUERY_INPUT_VALUE, &frame);
-    DaliTransaction txn = {};
-    txn.frame       = frame;
-    txn.needs_reply = true;
-    txn.on_complete = two_byte ? on_input_value_msb : on_input_value_1byte;
-    txn.cb_ctx      = e;
-    if (dali_sched_enqueue(&txn) == DALI_OK) {
+
+    /* One sequence keeps the bytes of a reading adjacent on the bus and makes
+     * admission all-or-nothing, so no half-finished read can be left queued. */
+    DaliSequence seq;
+    DaliError err = dali_input_poll_build_value_sequence(
+        e->sensor->get_address(), e->sensor->get_instance(),
+        e->sensor->get_value_bytes(), &seq);
+    if (err == DALI_OK) {
+        seq.on_complete = on_input_value_done;
+        seq.cb_ctx      = e;
+        err = dali_sched_enqueue_sequence(&seq);
+    }
+    if (err == DALI_OK) {
         e->sensor->set_last_poll_ms(now_ms);
         return true;
-    } else {
-        e->seq_in_flight.store(false, std::memory_order_release);
-        ESP_LOGW(TAG, "sensor poll enqueue failed (queue full); will retry next interval");
-        return false;
     }
+
+    e->seq_in_flight.store(false, std::memory_order_release);
+    ESP_LOGW(TAG, "sensor poll enqueue failed (%d); will retry next interval",
+             (int)err);
+    return false;
 }
 
 static void notify_lights(const DaliDispatchResult *res)
@@ -1490,7 +1467,6 @@ void DaliComponent::register_input_sensor(DaliBusSensor *sensor)
     if (s_sensor_count < MAX_INPUT_SENSORS) {
         SensorEntry &e = s_sensor_registry[s_sensor_count++];
         e.sensor      = sensor;
-        e.pending_msb = 0u;
         e.seq_in_flight.store(false, std::memory_order_relaxed);
         e.poll_requested.store(false, std::memory_order_relaxed);
     } else {

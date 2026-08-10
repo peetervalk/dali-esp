@@ -56,11 +56,24 @@ adding broad new device support.
   sequence only, so the 16-entry queue does not grow; the native CLI's four
   synchronous slots grow by about 64 bytes each.
 - Host vectors cover per-step capture, retention of replies gathered before a
-  later step aborts, and the accessor boundaries. All 21 host test executables
-  pass, with 43 cases in the scheduler suite.
-- `_local/dali_diag_local.yaml` compiles the working-tree component with ESPHome
-  2026.7.4 (RAM 34.9%, flash 49.7%). This is a newer ESPHome than the 2026.6.2
-  recorded below; the three pinned YAMLs were not re-checked against it.
+  later step aborts, and the accessor boundaries.
+- Multi-byte input polling is the first workflow moved onto that primitive.
+  `dali_input_poll_build_value_sequence()` emits QUERY INPUT VALUE followed by
+  one QUERY INPUT VALUE LATCH per remaining byte, and
+  `dali_input_poll_value_from_sequence()` assembles the reading only when every
+  step replied. The ESPHome sensor path no longer chains two independent
+  transactions, so the bytes of one latched reading cannot be separated by other
+  bus traffic, and a full queue can no longer strand a half-finished read.
+  Independent vectors cover the frame layout, argument boundaries, MSB-first
+  assembly, and the partial and failed cases.
+- All 21 host test executables pass, with 43 cases in the scheduler suite and 7
+  in the input-poll suite.
+- The ignored compile-test configuration builds the working-tree component with
+  ESPHome 2026.7.4, warning-free, at 34.9% RAM and 49.7% flash. This is a newer
+  ESPHome than the 2026.6.2 recorded below; the three pinned YAMLs were not
+  re-checked against it.
+- The native ESP-IDF firmware builds warning-free with ESP-IDF 6.0.1; the
+  application binary uses 22% of its partition.
 - A C++ translation unit mirroring the ESPHome memory-read callback compiles
   against the new API, confirming the signature and accessors work from C++.
 - This change is host- and compile-verified only; it has not been run on hardware.
@@ -157,8 +170,9 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
 - Scheduler sequences run contiguously and report a `DaliSequenceResult` holding
   the overall error, the failing step, the steps attempted, and one backward
   frame per reply-bearing step. This is the primitive the atomic transaction
-  facility needs; discovery, commissioning, memory reads, and the two-byte sensor
-  poll still issue independent transactions and have not been moved onto it.
+  facility needs. Multi-byte input polling is built on it through
+  `dali_input_poll_build_value_sequence()`; discovery, commissioning, and memory
+  reads still issue independent transactions.
 - Part 103 events are decoded into canonical source fields, reject command and
   reserved frames, preserve all ten event-information bits, and use the sparse
   Part 301/type 1 event values. Independent vectors cover all five normal source
@@ -219,6 +233,9 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
   enqueuing, so a scan is not an exclusive bus session.
 - Matching Device/Instance events request an immediate authoritative sensor
   poll; event information is never published as a generic sensor value.
+- A sensor reading is one scheduler sequence, so a two-byte instance cannot have
+  its latching query and its latch read separated by other traffic. Admission is
+  all-or-nothing, and a rejected poll simply retries on the next interval.
 - Bus monitoring and Find Couplers retain and format the canonical Part 103
   source scheme, selectors, and full event information.
 - ESPHome exposes discovery, not a guarded commissioning workflow.
@@ -321,9 +338,9 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 - Add a scheduler-level atomic transaction/session facility for DTR operations,
   ENABLE DEVICE TYPE sequences, memory access, DT8 multi-byte queries,
   send-twice commands, discovery, and commissioning. Sequences already execute
-  contiguously and now report a reply per step, so the remaining work is to route
-  discovery, commissioning, memory reads, and the two-byte sensor poll through
-  sequences instead of independent transactions.
+  contiguously and report a reply per step, and multi-byte input polling now uses
+  them; the remaining work is to route discovery, commissioning, and memory reads
+  the same way.
 - Give `dali_sched_reset()` a defined contract: complete every queued and active
   transaction with an error before clearing state instead of dropping their
   callbacks. The native CLI `reset` verb currently orphans its diagnostic sync
@@ -464,7 +481,7 @@ esphome compile _local/dali-2k.yaml
 ```
 
 For an uncommitted/dev component compile, use the ignored
-`_local/dali_diag_local.yaml` source with `type: local` and
+`_local/dali-diag-local.yaml` source with `type: local` and
 `path: ../esphome/components`. Keep the
 tracked deployment configuration pinned to the release tag.
 

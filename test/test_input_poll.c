@@ -100,11 +100,147 @@ void test_poll_value_rejects_invalid_args(void)
                       dali_input_poll_value(&transport, 5u, 0u, 1u, NULL));
 }
 
+/* Independent frame vectors: address byte (addr << 1 | 1), instance byte, then
+ * QUERY INPUT VALUE (0x8C) or QUERY INPUT VALUE LATCH (0x8D). */
+#define POLL_SEQ_ADDR      5u
+#define POLL_SEQ_INSTANCE  2u
+#define POLL_SEQ_FRAME_MSB   0x0B028Cu
+#define POLL_SEQ_FRAME_LATCH 0x0B028Du
+
+static DaliSequenceResult make_poll_result(const uint8_t *bytes, uint8_t count)
+{
+    DaliSequenceResult result = {
+        .result      = DALI_OK,
+        .failed_step = DALI_SEQUENCE_NO_FAILED_STEP,
+        .steps_run   = count,
+    };
+
+    for (uint8_t i = 0u; i < count; i++) {
+        result.replies[i] = (DaliFrame){
+            .data       = bytes[i],
+            .bit_length = DALI_BACKWARD_FRAME_BITS,
+        };
+        result.reply_mask |= (uint8_t)(1u << i);
+    }
+    return result;
+}
+
+void test_build_value_sequence_latches_then_reads_remaining_bytes(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_input_poll_build_value_sequence(
+                          POLL_SEQ_ADDR, POLL_SEQ_INSTANCE, 2u, &seq));
+    TEST_ASSERT_EQUAL_UINT8(2u, seq.step_count);
+
+    TEST_ASSERT_EQUAL_HEX32(POLL_SEQ_FRAME_MSB, seq.steps[0].frame.data);
+    TEST_ASSERT_EQUAL_UINT8(DALI_EXTENDED_FRAME_BITS, seq.steps[0].frame.bit_length);
+    TEST_ASSERT_TRUE(seq.steps[0].needs_reply);
+    TEST_ASSERT_FALSE(seq.steps[0].send_twice);
+    TEST_ASSERT_EQUAL_UINT8(0u, seq.steps[0].retries_left);
+
+    TEST_ASSERT_EQUAL_HEX32(POLL_SEQ_FRAME_LATCH, seq.steps[1].frame.data);
+    TEST_ASSERT_EQUAL_UINT8(DALI_EXTENDED_FRAME_BITS, seq.steps[1].frame.bit_length);
+    TEST_ASSERT_TRUE(seq.steps[1].needs_reply);
+
+    /* A one-byte instance needs the latching query only. */
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_input_poll_build_value_sequence(
+                          POLL_SEQ_ADDR, POLL_SEQ_INSTANCE, 1u, &seq));
+    TEST_ASSERT_EQUAL_UINT8(1u, seq.step_count);
+    TEST_ASSERT_EQUAL_HEX32(POLL_SEQ_FRAME_MSB, seq.steps[0].frame.data);
+
+    /* The widest supported reading still fits one sequence. */
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_input_poll_build_value_sequence(
+                          POLL_SEQ_ADDR, POLL_SEQ_INSTANCE,
+                          DALI_INPUT_POLL_MAX_BYTES, &seq));
+    TEST_ASSERT_EQUAL_UINT8(DALI_INPUT_POLL_MAX_BYTES, seq.step_count);
+    TEST_ASSERT_EQUAL_HEX32(POLL_SEQ_FRAME_LATCH,
+                            seq.steps[DALI_INPUT_POLL_MAX_BYTES - 1u].frame.data);
+}
+
+void test_build_value_sequence_rejects_invalid_args(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_input_poll_build_value_sequence(5u, 0u, 1u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_input_poll_build_value_sequence(64u, 0u, 1u, &seq));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_input_poll_build_value_sequence(5u, 32u, 1u, &seq));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_input_poll_build_value_sequence(5u, 0u, 0u, &seq));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_input_poll_build_value_sequence(
+                          5u, 0u, DALI_INPUT_POLL_MAX_BYTES + 1u, &seq));
+}
+
+void test_value_from_sequence_combines_bytes_msb_first(void)
+{
+    const uint8_t bytes[2] = { 0x12u, 0x34u };
+    DaliSequenceResult result = make_poll_result(bytes, 2u);
+    DaliInputValue value;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_input_poll_value_from_sequence(&result, 2u, &value));
+    TEST_ASSERT_EQUAL_UINT32(0x1234u, value.value);
+    TEST_ASSERT_EQUAL_UINT8(2u, value.byte_count);
+    TEST_ASSERT_TRUE(value.complete);
+
+    /* Reading fewer bytes than the sequence returned stops at the request. */
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_input_poll_value_from_sequence(&result, 1u, &value));
+    TEST_ASSERT_EQUAL_UINT32(0x12u, value.value);
+    TEST_ASSERT_TRUE(value.complete);
+}
+
+void test_value_from_sequence_rejects_partial_and_failed_reads(void)
+{
+    const uint8_t bytes[2] = { 0x12u, 0x34u };
+    DaliInputValue value;
+
+    /* Only the latching step replied — never publish a half-formed reading. */
+    DaliSequenceResult partial = make_poll_result(bytes, 1u);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_input_poll_value_from_sequence(&partial, 2u, &value));
+
+    /* A failed sequence reports its own error rather than a value. */
+    DaliSequenceResult failed = make_poll_result(bytes, 1u);
+    failed.result      = DALI_ERR_TIMEOUT;
+    failed.failed_step = 1u;
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT,
+                      dali_input_poll_value_from_sequence(&failed, 2u, &value));
+
+    /* A forward frame in a reply slot is not a backward reply. */
+    DaliSequenceResult wrong_width = make_poll_result(bytes, 2u);
+    wrong_width.replies[1].bit_length = DALI_FORWARD_FRAME_BITS;
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_input_poll_value_from_sequence(&wrong_width, 2u, &value));
+
+    DaliSequenceResult ok = make_poll_result(bytes, 2u);
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_input_poll_value_from_sequence(NULL, 2u, &value));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_input_poll_value_from_sequence(&ok, 2u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_input_poll_value_from_sequence(&ok, 0u, &value));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_input_poll_value_from_sequence(
+                          &ok, DALI_INPUT_POLL_MAX_BYTES + 1u, &value));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_bytes_for_resolution_clamps_to_one_to_four);
     RUN_TEST(test_poll_value_reads_msb_then_latch_bytes);
     RUN_TEST(test_poll_value_rejects_invalid_args);
+    RUN_TEST(test_build_value_sequence_latches_then_reads_remaining_bytes);
+    RUN_TEST(test_build_value_sequence_rejects_invalid_args);
+    RUN_TEST(test_value_from_sequence_combines_bytes_msb_first);
+    RUN_TEST(test_value_from_sequence_rejects_partial_and_failed_reads);
     return UNITY_END();
 }
