@@ -20,6 +20,8 @@ static const char *TAG = "DALI-SCHED";
 
 _Static_assert((DALI_CMD_QUEUE_SIZE & (DALI_CMD_QUEUE_SIZE - 1u)) == 0u,
                "DALI_CMD_QUEUE_SIZE must be a power of two");
+_Static_assert(DALI_SEQUENCE_MAX_STEPS <= 8u,
+               "DaliSequenceResult.reply_mask holds one bit per step");
 
 /* ---------------------------------------------------------------------------
  * Module state
@@ -54,8 +56,7 @@ static uint32_t        s_state_entered_ms;
 static bool            s_active_is_sequence;
 static DaliSequence    s_active_sequence;
 static uint8_t         s_active_sequence_step;
-static bool            s_sequence_has_reply;
-static DaliFrame       s_sequence_last_reply;
+static DaliSequenceResult s_sequence_result;
 
 /* Reply notification — written by notify_rx, read by dali_sched_run */
 static volatile bool   s_reply_received;
@@ -164,14 +165,18 @@ static void sched_complete_sequence(DaliError result, uint8_t failed_step)
 {
     DaliSequenceCompletionCb cb = s_active_sequence.on_complete;
     void *cb_ctx = s_active_sequence.cb_ctx;
-    const DaliFrame *reply = s_sequence_has_reply ? &s_sequence_last_reply : NULL;
+
+    s_sequence_result.result      = result;
+    s_sequence_result.failed_step = failed_step;
+    s_sequence_result.steps_run   = failed_step == DALI_SEQUENCE_NO_FAILED_STEP
+                                  ? s_active_sequence.step_count
+                                  : (uint8_t)(failed_step + 1u);
 
     s_active_is_sequence = false;
     s_active_sequence_step = 0u;
-    s_sequence_has_reply = false;
 
     if (cb != NULL) {
-        cb(result, failed_step, reply, cb_ctx);
+        cb(&s_sequence_result, cb_ctx);
     }
 }
 
@@ -182,9 +187,9 @@ static bool sched_finish_active_step(DaliError result, const DaliFrame *reply)
         return false;
     }
 
-    if (reply != NULL) {
-        s_sequence_last_reply = *reply;
-        s_sequence_has_reply = true;
+    if (reply != NULL && s_active_sequence_step < DALI_SEQUENCE_MAX_STEPS) {
+        s_sequence_result.replies[s_active_sequence_step] = *reply;
+        s_sequence_result.reply_mask |= (uint8_t)(1u << s_active_sequence_step);
     }
 
     if (result != DALI_OK) {
@@ -332,9 +337,9 @@ DaliError dali_sched_init(const DaliSchedOps *ops)
     s_reply_received = false;
     s_active_is_sequence = false;
     s_active_sequence_step = 0u;
-    s_sequence_has_reply = false;
     memset(&s_active_sequence, 0, sizeof(s_active_sequence));
-    memset(&s_sequence_last_reply, 0, sizeof(s_sequence_last_reply));
+    memset(&s_sequence_result, 0, sizeof(s_sequence_result));
+    s_sequence_result.failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
     s_event_cb        = NULL;
     s_event_cb_ctx    = NULL;
     s_trace_cb        = NULL;
@@ -400,8 +405,8 @@ next:
                 s_active_sequence = entry.item.sequence;
                 s_active_is_sequence = true;
                 s_active_sequence_step = 0u;
-                s_sequence_has_reply = false;
-                memset(&s_sequence_last_reply, 0, sizeof(s_sequence_last_reply));
+                memset(&s_sequence_result, 0, sizeof(s_sequence_result));
+                s_sequence_result.failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
                 sched_load_sequence_step(0u);
             } else {
                 s_active = entry.item.txn;
@@ -553,6 +558,34 @@ void dali_sched_notify_rx(const DaliFrame *frame)
     sched_route_unsolicited_or_ignore(frame);
 }
 
+bool dali_sequence_result_reply(const DaliSequenceResult *result,
+                                uint8_t step,
+                                DaliFrame *out)
+{
+    if (result == NULL || out == NULL || step >= DALI_SEQUENCE_MAX_STEPS ||
+        ((result->reply_mask >> step) & 1u) == 0u) {
+        return false;
+    }
+
+    *out = result->replies[step];
+    return true;
+}
+
+bool dali_sequence_result_last_reply(const DaliSequenceResult *result,
+                                     DaliFrame *out)
+{
+    if (result == NULL || out == NULL) {
+        return false;
+    }
+
+    for (uint8_t step = DALI_SEQUENCE_MAX_STEPS; step > 0u; step--) {
+        if (dali_sequence_result_reply(result, (uint8_t)(step - 1u), out)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 DaliError dali_sched_set_event_callback(DaliSchedEventCb cb, void *cb_ctx)
 {
     if (!s_initialized) {
@@ -581,7 +614,8 @@ DaliError dali_sched_reset(void)
     s_q_count = 0u;
     memset(&s_active, 0, sizeof(s_active));
     memset(&s_active_sequence, 0, sizeof(s_active_sequence));
-    memset(&s_sequence_last_reply, 0, sizeof(s_sequence_last_reply));
+    memset(&s_sequence_result, 0, sizeof(s_sequence_result));
+    s_sequence_result.failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
     memset(&s_reply_frame, 0, sizeof(s_reply_frame));
     s_state            = SCHED_IDLE;
     s_send_count       = 0u;
@@ -591,7 +625,6 @@ DaliError dali_sched_reset(void)
     s_reply_received   = false;
     s_active_is_sequence = false;
     s_active_sequence_step = 0u;
-    s_sequence_has_reply = false;
     s_last_tx_us       = 0u;
     s_have_last_tx_us  = false;
     /* Preserve the physical-bus TX guard across a logical scheduler reset. */

@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-08-10
+**Last updated:** 2026-08-11
 
 **Known-working deployment/component baseline:** `v1.0.1` (`0302d70`), for
 the two recorded site configurations; this is not a conformance claim.
@@ -47,6 +47,23 @@ The next development phase should prioritize protocol and state correctness befo
 adding broad new device support.
 
 ## Verification Baseline
+
+### Verified locally on 2026-08-11
+
+- Scheduler sequences now record one backward frame per reply-bearing step, so a
+  workflow needing replies from several steps fits in one atomic queue entry.
+  Replies live in a single 64-byte `DaliSequenceResult` held for the active
+  sequence only, so the 16-entry queue does not grow; the native CLI's four
+  synchronous slots grow by about 64 bytes each.
+- Host vectors cover per-step capture, retention of replies gathered before a
+  later step aborts, and the accessor boundaries. All 21 host test executables
+  pass, with 43 cases in the scheduler suite.
+- `_local/dali_diag_local.yaml` compiles the working-tree component with ESPHome
+  2026.7.4 (RAM 34.9%, flash 49.7%). This is a newer ESPHome than the 2026.6.2
+  recorded below; the three pinned YAMLs were not re-checked against it.
+- A C++ translation unit mirroring the ESPHome memory-read callback compiles
+  against the new API, confirming the signature and accessors work from C++.
+- This change is host- and compile-verified only; it has not been run on hardware.
 
 ### Verified locally on 2026-08-10
 
@@ -137,6 +154,11 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
   DT6/DT8 builders, input-device support, events, mapping, and dispatch.
 - Static allocation and the buffer-first ISR model are preserved in the timing
   and protocol layers.
+- Scheduler sequences run contiguously and report a `DaliSequenceResult` holding
+  the overall error, the failing step, the steps attempted, and one backward
+  frame per reply-bearing step. This is the primitive the atomic transaction
+  facility needs; discovery, commissioning, memory reads, and the two-byte sensor
+  poll still issue independent transactions and have not been moved onto it.
 - Part 103 events are decoded into canonical source fields, reject command and
   reserved frames, preserve all ten event-information bits, and use the sparse
   Part 301/type 1 event values. Independent vectors cover all five normal source
@@ -192,6 +214,9 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
 - Boot, periodic, deferred, and post-scan light refreshes share a one-query-at-a-
   time pump. Queue-full leaves the current light pending for retry, and refresh
   requests arriving during a pass coalesce into one additional pass.
+- Light refresh is the only traffic source that pauses for a bus scan. Sensor
+  polls, identify, headless dispatch, and Home Assistant light writes keep
+  enqueuing, so a scan is not an exclusive bus session.
 - Matching Device/Instance events request an immediate authoritative sensor
   poll; event information is never published as a generic sensor value.
 - Bus monitoring and Find Couplers retain and format the canonical Part 103
@@ -226,6 +251,17 @@ requires all callers to rebuild. In the ESP32 build, the active-sequence and
 
 `DaliError` adds `DALI_ERR_TIMING = 8`. Existing numeric values remain unchanged;
 callers with exhaustive error handling should add the new scheduler result.
+
+`DaliSequenceCompletionCb` changes from
+`(DaliError, uint8_t failed_step, const DaliFrame *last_reply, void *cb_ctx)` to
+`(const DaliSequenceResult *result, void *cb_ctx)`. The new result carries the
+overall error, the failed step, the number of steps attempted, and one backward
+frame per reply-bearing step, read through `dali_sequence_result_reply()` and
+`dali_sequence_result_last_reply()`. Replies collected before a failing step are
+retained rather than discarded. The pointer refers to scheduler-owned storage
+that the next sequence overwrites, so a callback must copy anything it keeps.
+Transaction callbacks (`DaliSchedCompletionCb`) are unchanged; only sequence
+callers need migrating.
 
 ## Installation State
 
@@ -267,6 +303,15 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   collision/intervening-frame handling, and add a deadline-aware PHY call if a
   repeat that crosses the 100 ms limit must be suppressed rather than transmitted
   and reported late.
+- Fix the COMPARE collision inversion. When two or more unaddressed devices
+  answer COMPARE at once, the overlapping backward frames usually fail Manchester
+  decode; the PHY drops them before the scheduler sees anything, so the reply
+  window times out and `dali_commissioning_compare()` reports NO. The binary
+  search then walks past real devices, which makes commissioning dependable only
+  with a single unaddressed device on the bus. IEC 62386-102 requires undecodable
+  reply-window activity to count as YES, so this needs a new PHY signal for
+  "activity detected but not decodable" that the scheduler can surface as a
+  distinct result.
 - Strengthen commissioning RANDOMIZE timing, collision handling,
   equal-random-address recovery, and the separation of gear and control-device
   address spaces.
@@ -275,8 +320,26 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 
 - Add a scheduler-level atomic transaction/session facility for DTR operations,
   ENABLE DEVICE TYPE sequences, memory access, DT8 multi-byte queries,
-  send-twice commands, discovery, and commissioning.
-- Make scans exclusive or explicitly pause/reject normal polling and HA traffic.
+  send-twice commands, discovery, and commissioning. Sequences already execute
+  contiguously and now report a reply per step, so the remaining work is to route
+  discovery, commissioning, memory reads, and the two-byte sensor poll through
+  sequences instead of independent transactions.
+- Give `dali_sched_reset()` a defined contract: complete every queued and active
+  transaction with an error before clearing state instead of dropping their
+  callbacks. The native CLI `reset` verb currently orphans its diagnostic sync
+  slots, which stay `in_use` permanently and make every synchronous CLI verb
+  return BUSY until reboot. The planned ESPHome bus-fault recovery would hit the
+  same trap through the console `pending` results and the refresh in-flight flag.
+- Make scans exclusive. Only the light-refresh pump observes `scan_running_`
+  today; sensor polls, identify blinking, headless dispatch actions, and Home
+  Assistant light writes all keep enqueuing during a scan. Because discovery
+  sends ENABLE DEVICE TYPE and its follow-up query as two separate transactions,
+  an interleaved frame clears the enabled device type, so DT6 and DT8 enrichment
+  bytes recorded during a busy scan can be wrong.
+- Make the reply retry budget a per-call-site decision. `dali_control_query()`
+  gives every reply-bearing transaction `DALI_MAX_RETRIES`, so a semantically
+  negative or absent-device answer costs four reply windows (about 140 ms).
+  Refresh passes and scans pay that for every silent address.
 - Handle remaining non-console enqueue failures in identify, diagnostic, and
   headless-dispatch paths, and expose queue depth/high-water/drop diagnostics.
 - Update light-command deduplication only after confirmed transmission, or
@@ -300,6 +363,13 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 
 - Replace the blanket ten-second startup write suppression with logic that
   distinguishes restore/default writes from intentional user commands.
+- Give input-sensor values the same packed single-word mailbox the lights use.
+  `DaliInputSensor` still keeps separate `pending_raw_` and `dirty_` atomics and
+  clears `dirty_` before reading the value, so a Core 1 publish landing between
+  the two is discarded with its flag already consumed. The next poll recovers the
+  value, but this is the lost-update pattern the light handoff removed.
+- Reject trailing tokens in the ESPHome console parser. Verb handlers test
+  `ntok >= N` and ignore the remainder, so `level a1 100 junk` is accepted.
 - Extend the compact Part 103 dispatch key if a site needs to distinguish
   Device-Group from Instance-Group sources or match instance type; the canonical
   event/capture path retains these fields, but the five-field rule key does not.
@@ -308,7 +378,12 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 - Move raw opcodes and memory/DTR sequences out of `dali_component.cpp` into
   reusable typed C APIs.
 - Use board-aware ESPHome GPIO schemas, reject TX=RX and invalid output pins, and
-  honor the documented WROVER-E restrictions.
+  honor the documented WROVER-E restrictions. The schema currently accepts
+  input-only GPIO34-39 as TX and accepts TX equal to RX. Propagate hardware
+  failures out of `dali_phy_init()` as well: both `gpio_config()` calls,
+  `gpio_isr_handler_add()`, and the GPTIMER alarm, callback, and enable calls are
+  issued without checking their return, so a PHY that cannot drive its transmit
+  pin still reports success and the component starts up looking healthy.
 - Check the remaining DALI-task creation result and remove or validate hard-coded
   Core 1 assumptions, particularly for single-core ESP32 targets. Scan-task
   allocation/creation failure is now reported and releases scan/refresh state.
@@ -358,7 +433,6 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   transmissions remain a risk.
 - Treat input-device configuration writes as experimental until real-bus
   read/write/read-back validation is complete.
-- Use COM6 only for hardware work. If COM6 is unavailable, stop.
 - Do not use GPIO16 or GPIO17 on the WROVER-E target.
 
 ## Source Layout
@@ -370,7 +444,7 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 | `main/dali_diag.c/.h` | App-specific serial CLI |
 | `esphome/components/dali` | Active ESPHome external component |
 | `dali_diag.yaml` | Tracked diagnostic/discovery firmware |
-| `_local/dali_diag.yaml` | Ignored compile-test copy of the diagnostic firmware |
+| `_local/dali_diag_local.yaml` | Ignored compile-test copy of the diagnostic firmware |
 | `_local/secrets.yaml` | Ignored dummy compile-only secrets; never deploy |
 | `_local/dali-1k.yaml` | Ignored first-floor site firmware |
 | `_local/dali-2k.yaml` | Ignored second-floor site firmware |
@@ -384,14 +458,14 @@ ESPHome configuration/build:
 
 ```powershell
 esphome compile dali_diag.yaml
-esphome compile _local/dali_diag.yaml  # ignored compile-test copy; dummy secrets
+esphome compile _local/dali_diag_local.yaml  # ignored compile-test copy; dummy secrets
 esphome compile _local/dali-1k.yaml
 esphome compile _local/dali-2k.yaml
 ```
 
-For an uncommitted/dev component compile, change only the ignored
-`_local/dali_diag.yaml` source to `type: local` with
-`path: ../esphome/components`, then restore it from the tracked YAML. Keep the
+For an uncommitted/dev component compile, use the ignored
+`_local/dali_diag_local.yaml` source with `type: local` and
+`path: ../esphome/components`. Keep the
 tracked deployment configuration pinned to the release tag.
 
 Native ESP-IDF:

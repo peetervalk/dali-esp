@@ -91,9 +91,23 @@ typedef struct {
     uint8_t   retries_left;
 } DaliSequenceStep;
 
-typedef void (*DaliSequenceCompletionCb)(DaliError result,
-                                         uint8_t failed_step,
-                                         const DaliFrame *last_reply,
+/*
+ * Outcome of one sequence, including a backward frame per reply-bearing step.
+ * `replies[i]` is meaningful only when bit i of `reply_mask` is set. Steps after
+ * a failure never run, so they are never present in the mask.
+ *
+ * The pointer handed to the completion callback refers to scheduler-owned
+ * storage that is reused by the next sequence; copy anything needed later.
+ */
+typedef struct {
+    DaliError result;       /* DALI_OK, or the error that ended the sequence  */
+    uint8_t   failed_step;  /* DALI_SEQUENCE_NO_FAILED_STEP when result is OK */
+    uint8_t   steps_run;    /* steps attempted, including a failing one       */
+    uint8_t   reply_mask;   /* bit i set = replies[i] holds a backward frame  */
+    DaliFrame replies[DALI_SEQUENCE_MAX_STEPS];
+} DaliSequenceResult;
+
+typedef void (*DaliSequenceCompletionCb)(const DaliSequenceResult *result,
                                          void *cb_ctx);
 
 typedef struct {
@@ -131,6 +145,18 @@ DaliError dali_sched_enqueue(const DaliTransaction *txn);
  * success, failed_step is DALI_SEQUENCE_NO_FAILED_STEP.
  */
 DaliError dali_sched_enqueue_sequence(const DaliSequence *seq);
+
+/*
+ * Copy the backward frame captured for `step`. Returns false when the step did
+ * not run or produced no reply.
+ */
+bool dali_sequence_result_reply(const DaliSequenceResult *result,
+                                uint8_t step,
+                                DaliFrame *out);
+
+/* Copy the reply from the highest-numbered step that produced one. */
+bool dali_sequence_result_last_reply(const DaliSequenceResult *result,
+                                     DaliFrame *out);
 
 /*
  * Advance the state machine.  Call periodically from the DALI task loop.

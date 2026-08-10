@@ -59,7 +59,8 @@ typedef struct {
     DaliError    result;
     DaliFrame    reply;
     bool         has_reply;
-    uint8_t      failed_step;
+    DaliSequenceResult sequence;
+    bool         has_sequence;
     bool         in_use;
     bool         complete;
 } DiagSyncCtx;
@@ -169,7 +170,8 @@ static DiagSyncCtx *diag_sync_alloc_slot(TaskHandle_t waiting_task)
                 .result       = DALI_ERR_TIMEOUT,
                 .reply        = {0u, 0u},
                 .has_reply    = false,
-                .failed_step  = DALI_SEQUENCE_NO_FAILED_STEP,
+                .sequence     = { .failed_step = DALI_SEQUENCE_NO_FAILED_STEP },
+                .has_sequence = false,
                 .in_use       = true,
                 .complete     = false,
             };
@@ -205,9 +207,9 @@ static void diag_sync_cb(DaliError result, const DaliFrame *reply, void *cb_ctx)
     TaskHandle_t notify_task = NULL;
 
     taskENTER_CRITICAL(&s_diag_sync_mux);
-    ctx->result    = result;
-    ctx->has_reply = (reply != NULL);
-    ctx->failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
+    ctx->result       = result;
+    ctx->has_reply    = (reply != NULL);
+    ctx->has_sequence = false;
     if (reply != NULL) {
         ctx->reply = *reply;
     }
@@ -224,25 +226,20 @@ static void diag_sync_cb(DaliError result, const DaliFrame *reply, void *cb_ctx)
     }
 }
 
-static void diag_sequence_sync_cb(DaliError result,
-                                  uint8_t failed_step,
-                                  const DaliFrame *last_reply,
-                                  void *cb_ctx)
+static void diag_sequence_sync_cb(const DaliSequenceResult *result, void *cb_ctx)
 {
     DiagSyncCtx *ctx = (DiagSyncCtx *)cb_ctx;
-    if (ctx == NULL) {
+    if (ctx == NULL || result == NULL) {
         return;
     }
 
     TaskHandle_t notify_task = NULL;
 
     taskENTER_CRITICAL(&s_diag_sync_mux);
-    ctx->result = result;
-    ctx->failed_step = failed_step;
-    ctx->has_reply = (last_reply != NULL);
-    if (last_reply != NULL) {
-        ctx->reply = *last_reply;
-    }
+    ctx->result       = result->result;
+    ctx->sequence     = *result;
+    ctx->has_sequence = true;
+    ctx->has_reply    = dali_sequence_result_last_reply(result, &ctx->reply);
     ctx->complete = true;
     if (ctx->waiting_task != NULL) {
         notify_task = ctx->waiting_task;
@@ -337,10 +334,31 @@ static DaliError diag_sched_sync(const DaliFrame *frame, bool needs_reply,
     return result;
 }
 
-static DaliError diag_sched_sequence_sync(DaliSequence *seq,
-                                          DaliFrame *reply_out,
-                                          uint8_t *failed_step_out)
+/* Fill an outcome that never reached a completion callback. */
+static void diag_sequence_result_init(DaliSequenceResult *result_out,
+                                      DaliError result)
 {
+    if (result_out == NULL) {
+        return;
+    }
+
+    *result_out = (DaliSequenceResult){
+        .result      = result,
+        .failed_step = DALI_SEQUENCE_NO_FAILED_STEP,
+    };
+}
+
+/*
+ * Enqueue a sequence and wait for it. result_out receives the per-step outcome,
+ * including any backward frame each step produced; pass NULL when only the
+ * overall error matters. result_out is written on every path, so callers may
+ * read it whatever this returns.
+ */
+static DaliError diag_sched_sequence_sync(DaliSequence *seq,
+                                          DaliSequenceResult *result_out)
+{
+    diag_sequence_result_init(result_out, DALI_ERR_INVALID);
+
     if (seq == NULL) {
         return DALI_ERR_INVALID;
     }
@@ -350,6 +368,7 @@ static DaliError diag_sched_sequence_sync(DaliSequence *seq,
 
     DiagSyncCtx *ctx = diag_sync_alloc_slot(current_task);
     if (ctx == NULL) {
+        diag_sequence_result_init(result_out, DALI_ERR_BUSY);
         return DALI_ERR_BUSY;
     }
 
@@ -359,6 +378,7 @@ static DaliError diag_sched_sequence_sync(DaliSequence *seq,
     DaliError err = dali_sched_enqueue_sequence(seq);
     if (err != DALI_OK) {
         diag_sync_release_slot(ctx);
+        diag_sequence_result_init(result_out, err);
         return err;
     }
 
@@ -373,18 +393,16 @@ static DaliError diag_sched_sequence_sync(DaliSequence *seq,
     }
 
     DaliError result = DALI_ERR_TIMEOUT;
-    DaliFrame reply = {0u, 0u};
-    bool has_reply = false;
+    DaliSequenceResult sequence = { .failed_step = DALI_SEQUENCE_NO_FAILED_STEP };
+    bool has_sequence = false;
     bool completed = false;
-    uint8_t failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
 
     taskENTER_CRITICAL(&s_diag_sync_mux);
     completed = ctx->complete;
     if (completed) {
-        result      = ctx->result;
-        has_reply   = ctx->has_reply;
-        reply       = ctx->reply;
-        failed_step = ctx->failed_step;
+        result       = ctx->result;
+        sequence     = ctx->sequence;
+        has_sequence = ctx->has_sequence;
         ctx->waiting_task = NULL;
         ctx->in_use       = false;
         ctx->complete     = false;
@@ -393,11 +411,13 @@ static DaliError diag_sched_sequence_sync(DaliSequence *seq,
     }
     taskEXIT_CRITICAL(&s_diag_sync_mux);
 
-    if (failed_step_out != NULL) {
-        *failed_step_out = failed_step;
-    }
-    if (completed && reply_out != NULL && has_reply) {
-        *reply_out = reply;
+    if (result_out != NULL) {
+        /* A wait that timed out never reached the completion callback, so carry
+         * the wait result on an otherwise empty outcome. */
+        if (!has_sequence) {
+            sequence.result = result;
+        }
+        *result_out = sequence;
     }
     return result;
 }
@@ -2281,15 +2301,15 @@ static void cmd_config_dtr0(const char *args)
         .cb_ctx = NULL,
     };
 
-    uint8_t failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
-    err = diag_sched_sequence_sync(&seq, NULL, &failed_step);
+    DaliSequenceResult seq_result;
+    err = diag_sched_sequence_sync(&seq, &seq_result);
     if (err == DALI_OK) {
         printf("%s: OK\r\n", spec->name);
-    } else if (failed_step != DALI_SEQUENCE_NO_FAILED_STEP) {
+    } else if (seq_result.failed_step != DALI_SEQUENCE_NO_FAILED_STEP) {
         printf("%s: ERR %d at sequence step %u\r\n",
                spec->name,
                (int)err,
-               (unsigned)failed_step);
+               (unsigned)seq_result.failed_step);
     } else {
         printf("%s: ERR %d\r\n", spec->name, (int)err);
     }

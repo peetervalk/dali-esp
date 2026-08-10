@@ -335,15 +335,17 @@ static void on_cmd_query_reply(DaliError result, const DaliFrame *reply, void *c
     }
 }
 
-static void on_memread_done(DaliError result, uint8_t /*failed_step*/,
-                            const DaliFrame *reply, void *ctx)
+static void on_memread_done(const DaliSequenceResult *result, void *ctx)
 {
-    if (result != DALI_OK || reply == nullptr) {
-        set_cmd_result_for_generation(result == DALI_ERR_TIMEOUT ? "no reply" : "err", ctx);
+    DaliFrame reply;
+    if (result == nullptr || result->result != DALI_OK ||
+        !dali_sequence_result_last_reply(result, &reply)) {
+        DaliError err = result != nullptr ? result->result : DALI_ERR_INVALID;
+        set_cmd_result_for_generation(err == DALI_ERR_TIMEOUT ? "no reply" : "err", ctx);
     } else {
         char buf[16];
-        snprintf(buf, sizeof(buf), "%u (0x%02X)", (unsigned)(reply->data & 0xFFu),
-                 (unsigned)(reply->data & 0xFFu));
+        snprintf(buf, sizeof(buf), "%u (0x%02X)", (unsigned)(reply.data & 0xFFu),
+                 (unsigned)(reply.data & 0xFFu));
         set_cmd_result_for_generation(buf, ctx);
     }
 }

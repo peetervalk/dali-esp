@@ -77,6 +77,7 @@ static DaliError  g_seq_result;
 static uint8_t    g_seq_failed_step;
 static DaliFrame  g_seq_reply;
 static bool       g_seq_has_reply;
+static DaliSequenceResult g_seq_full;
 static int        g_seq_count;
 static void      *g_seq_ctx;
 static uint8_t    g_seq_marker;
@@ -115,17 +116,20 @@ static void on_trace(const DaliSchedTraceEvent *event, void *ctx)
     g_trace_count++;
 }
 
-static void on_sequence_complete(DaliError result,
-                                 uint8_t failed_step,
-                                 const DaliFrame *last_reply,
-                                 void *ctx)
+static void on_sequence_complete(const DaliSequenceResult *result, void *ctx)
 {
-    g_seq_result = result;
-    g_seq_failed_step = failed_step;
-    g_seq_has_reply = last_reply != NULL;
-    if (last_reply != NULL) {
-        g_seq_reply = *last_reply;
+    if (result != NULL) {
+        g_seq_full        = *result;
+        g_seq_result      = result->result;
+        g_seq_failed_step = result->failed_step;
+        g_seq_has_reply   = dali_sequence_result_last_reply(result, &g_seq_reply);
     } else {
+        memset(&g_seq_full, 0, sizeof(g_seq_full));
+        g_seq_result      = DALI_ERR_INVALID;
+        g_seq_failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
+        g_seq_has_reply   = false;
+    }
+    if (!g_seq_has_reply) {
         memset(&g_seq_reply, 0, sizeof(g_seq_reply));
     }
     g_seq_ctx = ctx;
@@ -201,6 +205,7 @@ void setUp(void)
     g_seq_count = 0;
     g_seq_ctx = NULL;
     memset(&g_seq_reply, 0, sizeof(g_seq_reply));
+    memset(&g_seq_full, 0, sizeof(g_seq_full));
 
     memset(&g_dali_stats, 0, sizeof(g_dali_stats));
 
@@ -1379,6 +1384,149 @@ void test_sequence_keeps_last_reply_for_completion_callback(void)
     TEST_ASSERT_EQUAL_UINT8(8u, g_seq_reply.bit_length);
 }
 
+void test_sequence_captures_a_reply_per_step(void)
+{
+    DaliSequence seq = {
+        .steps = {
+            {
+                .frame = { .data = 0x0B90u, .bit_length = 16u },
+                .needs_reply = true,
+            },
+            {
+                .frame = { .data = 0xA312u, .bit_length = 16u },
+                .needs_reply = false,
+            },
+            {
+                .frame = { .data = 0x0BA0u, .bit_length = 16u },
+                .needs_reply = true,
+            },
+        },
+        .step_count = 3u,
+        .on_complete = on_sequence_complete,
+    };
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue_sequence(&seq));
+
+    dali_sched_run();                 /* step 0 transmitted */
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+    inject_reply(0xAAu, 8u);
+    dali_sched_run();
+
+    advance_to_next_forward();
+    dali_sched_run();                 /* step 1 transmitted, wants no reply */
+    TEST_ASSERT_EQUAL_HEX32(0xA312u, g_mock_last_tx.data);
+    advance_past_settle();
+    dali_sched_run();
+
+    advance_to_next_forward();
+    dali_sched_run();                 /* step 2 transmitted */
+    TEST_ASSERT_EQUAL_HEX32(0x0BA0u, g_mock_last_tx.data);
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+    inject_reply(0xBBu, 8u);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_seq_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_seq_result);
+    TEST_ASSERT_EQUAL_UINT8(DALI_SEQUENCE_NO_FAILED_STEP, g_seq_full.failed_step);
+    TEST_ASSERT_EQUAL_UINT8(3u, g_seq_full.steps_run);
+    TEST_ASSERT_EQUAL_HEX8(0x05u, g_seq_full.reply_mask);
+
+    DaliFrame frame = {0u, 0u};
+    TEST_ASSERT_TRUE(dali_sequence_result_reply(&g_seq_full, 0u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xAAu, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(8u, frame.bit_length);
+    TEST_ASSERT_FALSE(dali_sequence_result_reply(&g_seq_full, 1u, &frame));
+    TEST_ASSERT_TRUE(dali_sequence_result_reply(&g_seq_full, 2u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xBBu, frame.data);
+
+    TEST_ASSERT_TRUE(dali_sequence_result_last_reply(&g_seq_full, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xBBu, frame.data);
+}
+
+void test_sequence_keeps_earlier_replies_when_a_later_step_fails(void)
+{
+    DaliSequence seq = {
+        .steps = {
+            {
+                .frame = { .data = 0x0B90u, .bit_length = 16u },
+                .needs_reply = true,
+            },
+            {
+                .frame = { .data = 0xA312u, .bit_length = 16u },
+                .needs_reply = false,
+            },
+            {
+                .frame = { .data = 0x0BA0u, .bit_length = 16u },
+                .needs_reply = true,
+            },
+        },
+        .step_count = 3u,
+        .on_complete = on_sequence_complete,
+    };
+
+    g_mock_tx_fail_on_count = 2;
+    g_mock_tx_result = DALI_ERR_BUS_STUCK;
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue_sequence(&seq));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+    inject_reply(0x77u, 8u);
+    dali_sched_run();
+
+    advance_to_next_forward();
+    dali_sched_run();                 /* step 1 transmit fails */
+
+    TEST_ASSERT_EQUAL(1, g_seq_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK, g_seq_result);
+    TEST_ASSERT_EQUAL_UINT8(1u, g_seq_full.failed_step);
+    TEST_ASSERT_EQUAL_UINT8(2u, g_seq_full.steps_run);
+    TEST_ASSERT_EQUAL_HEX8(0x01u, g_seq_full.reply_mask);
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+
+    /* The reply gathered before the failure must survive the abort. */
+    DaliFrame frame = {0u, 0u};
+    TEST_ASSERT_TRUE(dali_sequence_result_reply(&g_seq_full, 0u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x77u, frame.data);
+    TEST_ASSERT_FALSE(dali_sequence_result_reply(&g_seq_full, 2u, &frame));
+    TEST_ASSERT_TRUE(g_seq_has_reply);
+    TEST_ASSERT_EQUAL_HEX32(0x77u, g_seq_reply.data);
+}
+
+void test_sequence_result_accessors_reject_missing_replies(void)
+{
+    DaliSequenceResult result = {
+        .result      = DALI_OK,
+        .failed_step = DALI_SEQUENCE_NO_FAILED_STEP,
+        .steps_run   = 2u,
+        .reply_mask  = 0x02u,
+    };
+    result.replies[1] = (DaliFrame){ .data = 0x42u, .bit_length = 8u };
+
+    DaliFrame frame = {0u, 0u};
+    TEST_ASSERT_FALSE(dali_sequence_result_reply(NULL, 1u, &frame));
+    TEST_ASSERT_FALSE(dali_sequence_result_reply(&result, 1u, NULL));
+    TEST_ASSERT_FALSE(dali_sequence_result_reply(&result, 0u, &frame));
+    TEST_ASSERT_FALSE(
+        dali_sequence_result_reply(&result, DALI_SEQUENCE_MAX_STEPS, &frame));
+    TEST_ASSERT_TRUE(dali_sequence_result_reply(&result, 1u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x42u, frame.data);
+
+    TEST_ASSERT_TRUE(dali_sequence_result_last_reply(&result, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x42u, frame.data);
+    TEST_ASSERT_FALSE(dali_sequence_result_last_reply(NULL, &frame));
+    TEST_ASSERT_FALSE(dali_sequence_result_last_reply(&result, NULL));
+
+    DaliSequenceResult empty = { .failed_step = DALI_SEQUENCE_NO_FAILED_STEP };
+    TEST_ASSERT_FALSE(dali_sequence_result_last_reply(&empty, &frame));
+}
+
 void test_sequence_rejects_invalid_args(void)
 {
     DaliSequence seq = {0};
@@ -1509,6 +1657,9 @@ int main(void)
     RUN_TEST(test_seven_step_sequence_uses_one_queue_entry);
     RUN_TEST(test_sequence_aborts_later_steps_on_tx_error);
     RUN_TEST(test_sequence_keeps_last_reply_for_completion_callback);
+    RUN_TEST(test_sequence_captures_a_reply_per_step);
+    RUN_TEST(test_sequence_keeps_earlier_replies_when_a_later_step_fails);
+    RUN_TEST(test_sequence_result_accessors_reject_missing_replies);
     RUN_TEST(test_sequence_rejects_invalid_args);
     RUN_TEST(test_queue_full);
     RUN_TEST(test_reset_clears_state);
