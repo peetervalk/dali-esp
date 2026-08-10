@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
-project(dali_host_tests C)
+project(dali_host_tests C CXX)
 
 set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 
 # Treat warnings as errors; keep things clean
 add_compile_options(-Wall -Wextra -Werror -DDALI_HOST_BUILD=1)
@@ -74,3 +75,7 @@ add_dali_test(test_control    test_control.c)
 add_dali_test(test_scheduler  test_scheduler.c)
 add_dali_test(test_dispatch   test_dispatch.c)
 add_dali_test(test_group_map  test_group_map.c)
+
+add_executable(test_light_state_mailbox test_light_state_mailbox.cpp)
+target_link_libraries(test_light_state_mailbox PRIVATE unity)
+add_test(NAME test_light_state_mailbox COMMAND test_light_state_mailbox)

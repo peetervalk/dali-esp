@@ -52,7 +52,7 @@ adding broad new device support.
 
 - The audit began from commit `0302d70` (tag `v1.0.1`); all three working-tree
   deployment YAMLs now reference that tag.
-- All 19 host test executables pass.
+- All 20 host test executables pass.
 - The native ESP-IDF firmware builds successfully with ESP-IDF 6.0.1.
 - All three pinned YAMLs pass `esphome config` with ESPHome 2026.6.2 and
   resolve the published `v1.0.1` external component.
@@ -79,6 +79,10 @@ adding broad new device support.
   send-twice commands. Host tests cover nine-frame ordering, queue-boundary
   admission, and execution before a following local command; the ESPHome build
   is verified, but the write path has not been re-verified on hardware.
+- Cross-core light-state updates now use one packed atomic latest-value mailbox,
+  so on/off and level cannot be mixed across updates and a newer publish cannot
+  be erased by the consumer. A portable C++ host suite covers empty, coherent,
+  coalesced, and successive publish/take behavior; hardware is not re-verified.
 - Tracked source and documentation files are valid UTF-8; no active mojibake
   cleanup is required.
 
@@ -159,6 +163,8 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
 - Control-device `memwrite` is one scheduler-contiguous sequence and cannot be
   partially enqueued. Its `OK` result means queued, not device-acknowledged or
   read-back verified, and it does not exclude another physical bus master.
+- Light state transferred from the DALI task to ESPHome is one coherent packed
+  update; multiple pending observations intentionally coalesce to the latest.
 - Matching Device/Instance events request an immediate authoritative sensor
   poll; event information is never published as a generic sensor value.
 - Bus monitoring and Find Couplers retain and format the canonical Part 103
@@ -238,8 +244,6 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 - Make scans exclusive or explicitly pause/reject normal polling and HA traffic.
 - Handle every enqueue result. Never report `OK` for a dropped command; pace full
   refresh, retry missed entries, and expose queue depth/high-water/drop diagnostics.
-- Fix the cross-task light-state mailbox so on/off and level are published as one
-  coherent update without losing a newer notification.
 - Update light-command deduplication only after confirmed transmission, or
   invalidate its cached state after TX/bus errors, so a failed command can be retried.
 - Correct observed-state semantics for RECALL MAX, STEP DOWN AND OFF, TOGGLE, and
@@ -281,7 +285,7 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 
 - Add CI that compiles a clean external-component checkout from the release tag and
   validates the Python schema, ESPHome C++ layer, YAML, and wrapper packaging.
-- Add the native ESP-IDF build to CI alongside the existing 19-suite host workflow.
+- Add the native ESP-IDF build to CI alongside the existing 20-suite host workflow.
 - Keep one intentional ESPHome source-inclusion path. Remove the unused component
   `CMakeLists.txt` path and stale fallback references if the Python-copy/wrapper
   route remains authoritative.

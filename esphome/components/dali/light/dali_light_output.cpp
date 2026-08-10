@@ -106,17 +106,15 @@ void DaliLightOutput::write_state(light::LightState *state) {
 }
 
 void DaliLightOutput::mark_state_from_bus(bool is_on, uint8_t level) {
-  bus_is_on_.store(is_on, std::memory_order_relaxed);
-  bus_level_.store(level, std::memory_order_relaxed);
-  bus_dirty_.store(true, std::memory_order_release);  // release: ensures is_on/level visible before dirty
+  bus_state_mailbox_.publish(is_on, level);
 }
 
 void DaliLightOutput::apply_bus_state() {
-  if (!bus_dirty_.load(std::memory_order_acquire) || !state_) return;
+  if (!state_) return;
 
-  bool    is_on = bus_is_on_.load(std::memory_order_relaxed);
-  uint8_t level = bus_level_.load(std::memory_order_relaxed);
-  bus_dirty_.store(false, std::memory_order_relaxed);
+  bool is_on;
+  uint8_t level;
+  if (!bus_state_mailbox_.take(is_on, level)) return;
 
   known_state_valid_ = true;
   known_is_on_ = is_on;

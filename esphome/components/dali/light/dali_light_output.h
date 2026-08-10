@@ -5,8 +5,8 @@
 #include "esphome/components/light/light_traits.h"
 #include "esphome/components/light/color_mode.h"
 #include "../dali_component.h"  // provides DaliBusLight + DaliComponent
+#include "dali_light_state_mailbox.h"
 
-#include <atomic>
 #include <cstdint>
 
 extern "C" {
@@ -56,10 +56,8 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   uint8_t         query_address_{0xFFu};
   uint16_t        member_groups_{0};
 
-  // Bus state — written on Core 1, read on Core 0.
-  std::atomic<bool>    bus_dirty_{false};
-  std::atomic<bool>    bus_is_on_{false};
-  std::atomic<uint8_t> bus_level_{0};
+  // Coherent latest bus state — published on Core 1, drained on Core 0.
+  DaliLightStateMailbox bus_state_mailbox_;
 
   // Core 0 only — prevents re-issuing a DALI command when state is pushed
   // from the bus into ESPHome via LightCall::perform().

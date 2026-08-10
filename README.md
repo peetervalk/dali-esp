@@ -11,7 +11,8 @@ A reusable C protocol stack (`components/dali`) drives the bus — PHY, schedule
 - DALI-2 input devices: occupancy, lux, temperature, humidity — authoritative polling, with matching Device/Instance events requesting an immediate poll
 - Passive observation of existing pushbutton couplers (`headless_dispatch`): couplers keep commanding the lamps, ESP32 keeps HA state in sync
 - Free-text DALI command console in HA: queries, config, memory bank read/write, raw 16/24-bit frames
-- Protocol core is plain C with no ESPHome dependency, covered by 19 host test suites (run in CI)
+- Protocol core is plain C with no ESPHome dependency; protocol and cross-task
+  helpers are covered by 20 host test suites (run in CI)
 
 ## Hardware
 
