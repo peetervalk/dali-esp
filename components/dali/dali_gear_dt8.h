@@ -182,6 +182,38 @@ DaliError dali_dt8_read_colour_value_16(const DaliDt8Transport    *transport,
 DaliFrame dali_dt8_enable(void);
 
 /* ---------------------------------------------------------------------------
+ * Atomic command grouping
+ * --------------------------------------------------------------------------*/
+
+#define DALI_DT8_MAX_DTR_BYTES 3u
+/* Up to three DTR loads, ENABLE DEVICE TYPE 8, and the command itself. */
+#define DALI_DT8_MAX_SEQUENCE_STEPS (DALI_DT8_MAX_DTR_BYTES + 2u)
+
+/*
+ * Build [DTR0..DTRn] + ENABLE DEVICE TYPE 8 + command as one sequence.
+ *
+ * The DT8 equivalent of dali_dt6_build_command_sequence(), and it exists for
+ * the same reason: the command is answered under the enable that precedes it,
+ * and it reads whatever the DTRs hold when it arrives. Splitting the group lets
+ * another locally scheduled frame change either, and the gear then answers a
+ * different question than the caller asked.
+ *
+ * dtr supplies DTR0, DTR1, DTR2 in that order. No step carries a retry budget.
+ * command must be a 16-bit forward frame carrying its own address. Use
+ * dali_dt8_build_colour_value_sequence() for the 16-bit colour value read,
+ * which needs a different four-step shape.
+ */
+DaliError dali_dt8_build_command_sequence(DaliFrame      command,
+                                          bool           send_twice,
+                                          bool           expects_reply,
+                                          const uint8_t *dtr,
+                                          uint8_t        dtr_count,
+                                          DaliSequence  *out);
+
+/* Index of the command step in a sequence built with dtr_count DTR loads. */
+#define DALI_DT8_COMMAND_STEP(dtr_count) ((uint8_t)((dtr_count) + 1u))
+
+/* ---------------------------------------------------------------------------
  * Temporary register command frames
  * These do NOT take effect until Activate is sent.
  * DTR loading is the caller's responsibility (see file header).

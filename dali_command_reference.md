@@ -4,7 +4,10 @@ This is the project command/protocol reference for the native CLI, ESPHome
 command console, and reusable protocol builders. It is not a replacement for
 IEC 62386.
 
-**Last reviewed:** 2026-08-10
+**Last reviewed:** 2026-08-11
+
+Per-capability status — shared API, native verb, host vector, real-bus result,
+and ESPHome exposure — is tracked in `dali_capability_matrix.md`.
 
 ## Current Implementation Status
 
@@ -21,6 +24,11 @@ IEC 62386.
   then read it back before broader use.
 - ESPHome command console supports the practical subset needed from HA:
   `off`, `max`, `min`, `level`, `query`, `config`, `iquery`, and `iconfig`.
+- The native CLI now exposes typed verbs for memory, DT6, DT8, Part 103
+  instance query and configuration, vendor helpers, and control-device memory,
+  plus CONTINUOUS UP/DOWN, arc power MASK, and a send-twice `raw2`. Every
+  multi-frame form runs as one scheduler sequence. None of the new paths has
+  been exercised on a real bus.
 - Active code gaps and cleanup work live in `current_status.md`.
 
 ## Sources
@@ -101,6 +109,16 @@ commands, and `0xFF` addresses all instances where supported.
 
 ## Native CLI Reference
 
+`help` prints the whole verb table, and `list <table>` prints any named
+command table (`query`, `special`, `config`, `dt6`, `dt8`, `selectors`,
+`iquery`, `iconfig`, `vendor`). Both are generated from the same table the
+parser dispatches on, so they cannot drift from what the CLI actually accepts.
+Which of these verbs have been run on real hardware is recorded in
+`dali_capability_matrix.md`.
+
+Numbers may be written in decimal or with a `0x` prefix. A leading zero is
+decimal, not octal. Trailing tokens are rejected rather than ignored.
+
 Important diagnostic commands:
 
 ```text
@@ -127,26 +145,93 @@ Control commands:
 off <target>
 max <target>
 min <target>
-level <target> <0-254>
+level <target> <0-254|mask>
+mask <target>
 up <target>
 down <target>
 step-up <target>
 step-down <target>
 step-off <target>
 on-step <target>
+cont-up <target>
+cont-down <target>
 last <target>
 scene <target> <0-15>
 dapc-seq <target>
 ```
 
+`mask` is arc power 255: the gear leaves its level unchanged. It is a separate
+verb, and a separate frame builder, so no level arithmetic can reach 255 and
+silently stop meaning "set this level".
+
+`cont-up` and `cont-down` are the IEC 62386-102:2022 CONTINUOUS UP (opcode 11)
+and CONTINUOUS DOWN (opcode 12) commands: they fade toward max or min until a
+stop condition, unlike `up`/`down`, which perform one fade step.
+
 Query/config helpers:
 
 ```text
-query-list
-query <target> <query-name> [param]
-config-list
+list <table>
+query-list | special-list | config-list
+query <target> [query-name] [param]
+special <name> [param]
 config <target> <config-name> [param]
+config-dtr0 <target> <config-name> <dtr0> [param]
 ```
+
+Raw frames:
+
+```text
+raw <hex> len=<bits> [wait]
+raw2 <hex> len=<bits>
+dtr <0|1|2> <0-255>
+```
+
+`raw2` transmits the frame twice through the scheduler's send-twice path, which
+is the only way to meet the 100 ms window. Two manually typed `raw` commands
+cannot, so a send-twice command entered that way is not the command the standard
+describes. The value must fit the stated width; an over-wide value is rejected
+rather than transmitted as a differently framed command.
+
+Memory:
+
+```text
+memread <addr> <bank> <offset> [count]     # Part 102 control gear
+meminfo <addr>                             # Part 102 bank 0 identity
+devmem read <addr> <bank> <offset> [count] # Part 103 control device
+devmem write <addr> <bank> <offset> <value>
+```
+
+The control-gear and control-device forms use different DTR and memory opcodes,
+so they are separate verbs. Note that the ESPHome console's `memread`/`memwrite`
+are the *control-device* forms, matching `devmem` rather than `memread` here.
+No write path reads its value back; confirm a write with a following read.
+
+Device types 6 and 8:
+
+```text
+dt6 <addr> <name> [dtr0]
+dt8 <addr> <name> [v0] [v1] [v2]
+dt8 <addr> colour <selector>
+```
+
+Each of these goes out as one scheduler sequence carrying the DTR loads, ENABLE
+DEVICE TYPE, and the command itself. The command is answered under that enable
+and reads whatever the DTRs hold when it arrives, so the group must not be
+split. `dt8 <addr> colour <selector>` performs the four-step 16-bit colour value
+read and prints Kelvin as well as mirek for the `tc` selector.
+
+Part 103 control devices:
+
+```text
+iquery <addr> <instance> <name> [dtr0]
+iconfig <addr> <instance> <name> [v0] [v1] [v2]
+vendor lunatone <addr> <instance> <name>
+vendor steinel <instance> <raw>
+```
+
+`iconfig` reports transmitted, not applied. Read the value back with `iquery`
+before relying on any input-device configuration write.
 
 ## ESPHome Command Console
 

@@ -50,6 +50,10 @@
 #define DALI_ALL_INSTANCES              0xFFu /* 24-bit instance byte */
 #define DALI_YES_RESPONSE               0xFFu /* 8-bit backward frame */
 #define DALI_DAPC_MAX_LEVEL             254u
+/* Arc power level 255 is MASK: "leave the level unchanged", not a level.
+ * The ordinary DAPC builders reject it so a level cannot become MASK by
+ * arithmetic; dali_build_dapc_mask() is the only way to emit it. */
+#define DALI_DAPC_MASK_LEVEL            255u
 
 /* ---------------------------------------------------------------------------
  * Buffer sizes — power-of-2 required for ring buffer masking

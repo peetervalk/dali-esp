@@ -114,6 +114,11 @@ static const DaliCommandInfo s_command_table[] = {
     CMD(DALI_CMD_QUERY_EVENT_FILTER_16_23, "QUERY EVENT FILTER 16-23", 0x92u, 0x92u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
     CMD(DALI_CMD_QUERY_INSTANCE_CONFIGURATION, "QUERY INSTANCE CONFIGURATION", 0x93u, 0x93u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
     CMD(DALI_CMD_QUERY_AVAILABLE_INSTANCE_TYPES, "QUERY AVAILABLE INSTANCE TYPES", 0x94u, 0x94u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
+
+    /* IEC 62386-102:2022 level commands 11 and 12. Like the other arc power
+     * control commands they are sent once; only configuration commands repeat. */
+    CMD(DALI_CMD_CONTINUOUS_UP, "CONTINUOUS UP", 0x0Bu, 0x0Bu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, true),
+    CMD(DALI_CMD_CONTINUOUS_DOWN, "CONTINUOUS DOWN", 0x0Cu, 0x0Cu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, true),
 };
 
 #define DALI_COMMAND_TABLE_COUNT ((uint8_t)(sizeof(s_command_table) / sizeof(s_command_table[0])))
@@ -313,6 +318,24 @@ DaliError dali_build_command(DaliAddressType type,
         return err;
     }
     *out = make_frame16(addr_byte, opcode);
+    return DALI_OK;
+}
+
+DaliError dali_build_dapc_mask(DaliAddressType type,
+                               uint8_t address,
+                               DaliFrame *out)
+{
+    if (out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    uint8_t addr_byte;
+    DaliError err = target_addr_byte(type, address, 0u, &addr_byte);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    *out = make_frame16(addr_byte, DALI_DAPC_MASK_LEVEL);
     return DALI_OK;
 }
 

@@ -777,12 +777,103 @@ void test_colour_value_from_sequence_reports_failures(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * Atomic command sequences
+ *
+ * Same contract as the DT6 form: the DTR loads, ENABLE DEVICE TYPE 8, and the
+ * command travel as one group, because the command is answered under that
+ * enable and reads whatever the DTRs hold when it arrives.
+ * --------------------------------------------------------------------------*/
+
+static void test_dt8_command_sequence_without_dtr(void)
+{
+    DaliSequence seq;
+    DaliFrame command = dali_dt8_activate(3u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_dt8_build_command_sequence(command, false, false,
+                                                          NULL, 0u, &seq));
+    TEST_ASSERT_EQUAL_UINT8(2u, seq.step_count);
+    TEST_ASSERT_EQUAL_HEX32(0xC108u, seq.steps[0].frame.data);
+    TEST_ASSERT_EQUAL_HEX32(command.data, seq.steps[1].frame.data);
+    TEST_ASSERT_FALSE(seq.steps[1].needs_reply);
+    TEST_ASSERT_EQUAL_UINT8(1u, DALI_DT8_COMMAND_STEP(0u));
+}
+
+static void test_dt8_command_sequence_loads_three_dtrs_in_order(void)
+{
+    DaliSequence seq;
+    const uint8_t dtr[3] = { 0xAAu, 0xBBu, 0xCCu };
+    DaliFrame command = dali_dt8_set_temporary_rgb_dim_level(1u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_dt8_build_command_sequence(command, false, false,
+                                                          dtr, 3u, &seq));
+    TEST_ASSERT_EQUAL_UINT8(5u, seq.step_count);
+    TEST_ASSERT_EQUAL_HEX32(0xA3AAu, seq.steps[0].frame.data);  /* DTR0 = R */
+    TEST_ASSERT_EQUAL_HEX32(0xC3BBu, seq.steps[1].frame.data);  /* DTR1 = G */
+    TEST_ASSERT_EQUAL_HEX32(0xC5CCu, seq.steps[2].frame.data);  /* DTR2 = B */
+    TEST_ASSERT_EQUAL_HEX32(0xC108u, seq.steps[3].frame.data);
+    TEST_ASSERT_EQUAL_HEX32(command.data, seq.steps[4].frame.data);
+    TEST_ASSERT_EQUAL_UINT8(4u, DALI_DT8_COMMAND_STEP(3u));
+}
+
+static void test_dt8_command_sequence_marks_send_twice_and_reply(void)
+{
+    DaliSequence seq;
+    const uint8_t dtr[1] = { 0x0Fu };
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_dt8_build_command_sequence(
+                              dali_dt8_store_gear_features_status(2u),
+                              true, false, dtr, 1u, &seq));
+    TEST_ASSERT_TRUE(seq.steps[2].send_twice);
+    TEST_ASSERT_FALSE(seq.steps[2].needs_reply);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_dt8_build_command_sequence(
+                              dali_dt8_query_colour_status(2u),
+                              false, true, NULL, 0u, &seq));
+    TEST_ASSERT_FALSE(seq.steps[1].send_twice);
+    TEST_ASSERT_TRUE(seq.steps[1].needs_reply);
+
+    for (uint8_t i = 0u; i < seq.step_count; i++) {
+        TEST_ASSERT_EQUAL_UINT8(0u, seq.steps[i].retries_left);
+    }
+}
+
+static void test_dt8_command_sequence_rejects_invalid_arguments(void)
+{
+    DaliSequence seq;
+    const uint8_t dtr[3] = { 0u, 0u, 0u };
+    DaliFrame command = dali_dt8_activate(1u);
+    DaliFrame empty = { 0u, 0u };
+
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
+                          dali_dt8_build_command_sequence(command, false, false,
+                                                          dtr, 3u, NULL));
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
+                          dali_dt8_build_command_sequence(empty, false, false,
+                                                          NULL, 0u, &seq));
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
+                          dali_dt8_build_command_sequence(command, false, false,
+                                                          dtr, 4u, &seq));
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
+                          dali_dt8_build_command_sequence(command, false, false,
+                                                          NULL, 2u, &seq));
+}
+
+/* ---------------------------------------------------------------------------
  * Runner
  * --------------------------------------------------------------------------*/
 
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_dt8_command_sequence_without_dtr);
+    RUN_TEST(test_dt8_command_sequence_loads_three_dtrs_in_order);
+    RUN_TEST(test_dt8_command_sequence_marks_send_twice_and_reply);
+    RUN_TEST(test_dt8_command_sequence_rejects_invalid_arguments);
+
     RUN_TEST(test_build_colour_value_sequence_layout);
     RUN_TEST(test_build_colour_value_sequence_carries_selector_and_address);
     RUN_TEST(test_build_colour_value_sequence_rejects_bad_arguments);

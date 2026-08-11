@@ -15,6 +15,42 @@
  */
 
 #include "dali_protocol.h"
+#include "dali_scheduler.h"
+
+/* ---------------------------------------------------------------------------
+ * Atomic command grouping
+ * --------------------------------------------------------------------------*/
+
+#define DALI_INPUT_CONFIG_MAX_DTR_BYTES 3u
+/* Up to three control-device DTR loads plus the command itself. */
+#define DALI_INPUT_CONFIG_MAX_SEQUENCE_STEPS (DALI_INPUT_CONFIG_MAX_DTR_BYTES + 1u)
+
+/*
+ * Build [DTR0..DTRn] + command as one sequence for any builder in this file.
+ *
+ * These are Part 103 control-device commands, so the DTR loads use the 24-bit
+ * control-device DTR frames, not the 16-bit control-gear ones, and there is no
+ * ENABLE DEVICE TYPE step. Keeping the loads and the command in one sequence is
+ * what stops another locally scheduled frame from replacing a DTR between the
+ * write and the command that consumes it.
+ *
+ * dtr supplies DTR0, DTR1, DTR2 in that order; pass dtr_count 0 for commands
+ * that take none. Send-twice expansion is the scheduler's job, so a send-twice
+ * command still occupies one step. No step carries a retry budget: a repeated
+ * DTR write is indistinguishable from the caller's next value, and a repeated
+ * configuration command would be a second, unpaired transmission.
+ *
+ * command must be a 24-bit forward frame carrying its own address and instance.
+ */
+DaliError dali_input_build_config_sequence(DaliFrame      command,
+                                           bool           send_twice,
+                                           bool           expects_reply,
+                                           const uint8_t *dtr,
+                                           uint8_t        dtr_count,
+                                           DaliSequence  *out);
+
+/* Index of the command step in a sequence built with dtr_count DTR loads. */
+#define DALI_INPUT_CONFIG_COMMAND_STEP(dtr_count) ((uint8_t)(dtr_count))
 
 /* Common instance configuration (IEC 62386-103:2022). */
 

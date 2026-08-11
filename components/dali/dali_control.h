@@ -27,11 +27,18 @@ uint8_t dali_control_percent_to_dapc(uint8_t percent);
 
 /* Build frames without touching the scheduler.  Useful for tests/diagnostics. */
 DaliError dali_control_build_dapc(DaliTarget target, uint8_t level, DaliFrame *out);
+/* Arc power MASK (255): leave the level unchanged. Not reachable from
+ * dali_control_build_dapc(), which rejects anything above DALI_DAPC_MAX_LEVEL. */
+DaliError dali_control_build_dapc_mask(DaliTarget target, DaliFrame *out);
 DaliError dali_control_build_off(DaliTarget target, DaliFrame *out);
 DaliError dali_control_build_up(DaliTarget target, DaliFrame *out);
 DaliError dali_control_build_down(DaliTarget target, DaliFrame *out);
 DaliError dali_control_build_step_up(DaliTarget target, DaliFrame *out);
 DaliError dali_control_build_step_down(DaliTarget target, DaliFrame *out);
+/* IEC 62386-102:2022 CONTINUOUS UP/DOWN: fade toward max/min until a stop
+ * condition, rather than the single fade step UP/DOWN perform. */
+DaliError dali_control_build_continuous_up(DaliTarget target, DaliFrame *out);
+DaliError dali_control_build_continuous_down(DaliTarget target, DaliFrame *out);
 DaliError dali_control_build_recall_max(DaliTarget target, DaliFrame *out);
 DaliError dali_control_build_recall_min(DaliTarget target, DaliFrame *out);
 DaliError dali_control_build_step_down_and_off(DaliTarget target, DaliFrame *out);

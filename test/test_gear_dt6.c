@@ -235,12 +235,123 @@ void test_parse_failure_status_mixed(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * Atomic command sequences
+ *
+ * The enable and the command it enables must not be split: a frame landing
+ * between them leaves the command to be answered under the device's default
+ * type. The DTR loads join the same group because a DT6 command reads whatever
+ * DTR0 holds when it arrives, not what this caller wrote.
+ * --------------------------------------------------------------------------*/
+
+void test_command_sequence_without_dtr(void)
+{
+    DaliSequence seq;
+    DaliFrame command = dali_dt6_query_dimming_curve(3u);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_dt6_build_command_sequence(command, false, true,
+                                                      NULL, 0u, &seq));
+    TEST_ASSERT_EQUAL_UINT8(2u, seq.step_count);
+
+    /* ENABLE DEVICE TYPE 6 = special frame 0xC1 0x06. */
+    TEST_ASSERT_EQUAL_HEX32(0xC106u, seq.steps[0].frame.data);
+    TEST_ASSERT_FALSE(seq.steps[0].needs_reply);
+
+    TEST_ASSERT_EQUAL_HEX32(command.data, seq.steps[1].frame.data);
+    TEST_ASSERT_TRUE(seq.steps[1].needs_reply);
+    TEST_ASSERT_FALSE(seq.steps[1].send_twice);
+    TEST_ASSERT_EQUAL_UINT8(DALI_DT6_COMMAND_STEP(0u), 1u);
+}
+
+void test_command_sequence_with_dtr_loads(void)
+{
+    DaliSequence seq;
+    const uint8_t dtr[1] = { DALI_DT6_CURVE_LINEAR };
+    DaliFrame command = dali_dt6_select_dimming_curve(3u);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_dt6_build_command_sequence(command, true, false,
+                                                      dtr, 1u, &seq));
+    TEST_ASSERT_EQUAL_UINT8(3u, seq.step_count);
+
+    /* DTR0 DATA = special frame 0xA3 <value>. */
+    TEST_ASSERT_EQUAL_HEX32(0xA301u, seq.steps[0].frame.data);
+    TEST_ASSERT_EQUAL_HEX32(0xC106u, seq.steps[1].frame.data);
+    TEST_ASSERT_EQUAL_HEX32(command.data, seq.steps[2].frame.data);
+    TEST_ASSERT_TRUE(seq.steps[2].send_twice);
+    TEST_ASSERT_FALSE(seq.steps[2].needs_reply);
+    TEST_ASSERT_EQUAL_UINT8(DALI_DT6_COMMAND_STEP(1u), 2u);
+}
+
+void test_command_sequence_loads_dtrs_in_order(void)
+{
+    DaliSequence seq;
+    const uint8_t dtr[3] = { 0x11u, 0x22u, 0x33u };
+    DaliFrame command = dali_dt6_store_dtr_as_fast_fade_time(0u);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_dt6_build_command_sequence(command, true, false,
+                                                      dtr, 3u, &seq));
+    TEST_ASSERT_EQUAL_UINT8(5u, seq.step_count);
+    TEST_ASSERT_EQUAL_HEX32(0xA311u, seq.steps[0].frame.data);  /* DTR0 */
+    TEST_ASSERT_EQUAL_HEX32(0xC322u, seq.steps[1].frame.data);  /* DTR1 */
+    TEST_ASSERT_EQUAL_HEX32(0xC533u, seq.steps[2].frame.data);  /* DTR2 */
+    TEST_ASSERT_EQUAL_HEX32(0xC106u, seq.steps[3].frame.data);
+    TEST_ASSERT_EQUAL_HEX32(command.data, seq.steps[4].frame.data);
+}
+
+/*
+ * No step may retry on its own. A lone retransmission of the command would run
+ * without its enable, and a repeated DTR write cannot be told apart from the
+ * caller's own next value. Retry the whole sequence instead.
+ */
+void test_command_sequence_carries_no_retry_budget(void)
+{
+    DaliSequence seq;
+    const uint8_t dtr[2] = { 0x01u, 0x02u };
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_dt6_build_command_sequence(dali_dt6_query_features(1u),
+                                                      false, true, dtr, 2u, &seq));
+    for (uint8_t i = 0u; i < seq.step_count; i++) {
+        TEST_ASSERT_EQUAL_UINT8(0u, seq.steps[i].retries_left);
+    }
+}
+
+void test_command_sequence_rejects_invalid_arguments(void)
+{
+    DaliSequence seq;
+    const uint8_t dtr[3] = { 0u, 0u, 0u };
+    DaliFrame command = dali_dt6_query_features(1u);
+    DaliFrame empty = { 0u, 0u };
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_dt6_build_command_sequence(command, false, true,
+                                                      dtr, 3u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_dt6_build_command_sequence(empty, false, true,
+                                                      dtr, 0u, &seq));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_dt6_build_command_sequence(command, false, true,
+                                                      dtr, 4u, &seq));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_dt6_build_command_sequence(command, false, true,
+                                                      NULL, 1u, &seq));
+}
+
+/* ---------------------------------------------------------------------------
  * Runner
  * --------------------------------------------------------------------------*/
 
 int main(void)
 {
     UNITY_BEGIN();
+
+    RUN_TEST(test_command_sequence_without_dtr);
+    RUN_TEST(test_command_sequence_with_dtr_loads);
+    RUN_TEST(test_command_sequence_loads_dtrs_in_order);
+    RUN_TEST(test_command_sequence_carries_no_retry_budget);
+    RUN_TEST(test_command_sequence_rejects_invalid_arguments);
 
     RUN_TEST(test_enable_matches_protocol_enable_device_type_6);
     RUN_TEST(test_enable_is_16bit);

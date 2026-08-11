@@ -38,7 +38,7 @@ DALI bus
 
 | Aim | Current state |
 |---|---|
-| CLI completeness | **Partial.** Common Part 102 gear control, diagnostics, discovery, commissioning, capture, and polling are useful, but shared DT6/DT8, memory, input-configuration, vendor, control-device, and atomic/send-twice workflows are not fully exposed as typed native CLI verbs. |
+| CLI completeness | **Surface complete, verification incomplete.** Every shared capability now has a typed native verb, including memory, DT6, DT8, input-device query/configuration, vendor helpers, control-device memory, CONTINUOUS UP/DOWN, arc power MASK, and send-twice `raw2`. `dali_capability_matrix.md` tracks the gap that remains: DT6, DT8, memory writes, and input-device configuration have host vectors but no real-bus result. |
 | ESP32 / ESPHome controller | **Working installation-grade baseline.** The two known sites have operational brightness control, observation, sensor polling, diagnostics, and discovery. It is not yet a general, fully state-correct DALI controller. |
 | Protocol separation | **Directionally strong.** The reusable C stack is independent of ESPHome, but several protocol sequences and raw opcode paths still need to move out of `dali_component.cpp`. |
 | Standards confidence | **Selected workflows verified, not complete conformance.** Host tests and recorded hardware results provide useful evidence, but some tests repeat implementation constants rather than independent standard-derived vectors. The project is not DALI Alliance certified. |
@@ -49,6 +49,86 @@ adding broad new device support.
 ## Verification Baseline
 
 ### Verified locally on 2026-08-11
+
+- The native CLI is now table-driven, and the half of it that decides what a
+  typed line means is portable and host-tested. `main/dali_cli.c` owns
+  tokenising, the verb table, argument validation, the named command tables, and
+  response formatting; `main/dali_diag.c` keeps the FreeRTOS task, the blocking
+  scheduler slots, and the long-running workflows. A verb is reachable only
+  through the one table, and `dali_diag.c` switches over `DaliCliCommandId` with
+  no default case, so a table entry without a handler is a `-Wswitch`
+  diagnostic. 57 host vectors cover this layer.
+- Trailing tokens are now rejected for every verb instead of ignored. The table
+  carries each verb's argument-count bounds and `dali_cli_resolve()` enforces
+  them before a handler runs, so `level a1 100 junk` is refused rather than
+  acted on. The same class of bug remains open in the separate ESPHome console
+  parser, which does not share this code.
+- Help and `list <table>` are generated from the same tables the parser
+  dispatches on, so they cannot describe a command the CLI does not accept. The
+  host suite additionally asserts that every `DaliCliCommandId` has a table
+  entry, that verb and table names are unique, and that every verb appears in
+  help.
+- The table entries are checked against the shared stack rather than trusted:
+  every `query` name must map to an addressed 16-bit command that expects a
+  reply, every `config` name to a send-twice configuration command whose
+  `uses_dtr0` column agrees with `dali_control_config_uses_dtr0()`, every
+  `special` name to a special frame, and any ranged opcode must declare a
+  parameter. A name pointing at the wrong `DaliCommandId` would otherwise
+  transmit a different command than the operator asked for, silently.
+- New typed verbs: `memread`/`meminfo` for Part 102 control-gear memory,
+  `devmem read`/`devmem write` for Part 103 control-device memory, `dt6` and
+  `dt8` for the device-type command tables including the 16-bit colour value
+  read, `iquery`/`iconfig` for Part 103 instance query and configuration,
+  `vendor lunatone`/`vendor steinel`, and `list` for any named table. `iconfig`
+  reports transmitted, not applied, and says so on every success line.
+- The native CLI names the control-device memory verbs `devmem read`/`devmem
+  write` while the ESPHome console calls the same operations `memread`/
+  `memwrite`. Native `memread` is the Part 102 control-gear form. The two use
+  different DTR and memory opcodes, so the divergence is deliberate and
+  documented rather than silent; converging the two consoles is not scheduled.
+- Every new multi-frame verb runs as one scheduler sequence.
+  `dali_dt6_build_command_sequence()` and `dali_dt8_build_command_sequence()`
+  carry [DTR0..DTRn] + ENABLE DEVICE TYPE + command, and
+  `dali_input_build_config_sequence()` carries the Part 103 control-device DTR
+  loads plus the command, with no ENABLE step because Part 103 does not use one.
+  No step in any of them carries a retry budget: a lone retransmission of the
+  command would run without its enable, and a repeated DTR write cannot be told
+  apart from the caller's next value. These live in the reusable stack, so the
+  ESPHome DT8-to-Home-Assistant mapping can use them later.
+- `raw2` sends one arbitrary frame twice through the scheduler's send-twice
+  path. Two manually typed `raw` commands cannot meet the 100 ms window, so a
+  send-twice command entered that way was never the command the standard
+  describes. Frame parsing bounds the value by the stated width, so a mistyped
+  length is refused rather than transmitted as a differently framed command.
+- CONTINUOUS UP and CONTINUOUS DOWN (IEC 62386-102:2022 opcodes 11 and 12) are
+  in the shared command table with `dali_control_build_continuous_up/down()` and
+  the `cont-up`/`cont-down` verbs. Standard-derived vectors cover the opcodes,
+  the short/group/broadcast address bytes, the send-once metadata, and rejection
+  of a non-zero parameter, which would otherwise walk into the GO TO SCENE range.
+- Arc power MASK (255) has its own builder, `dali_build_dapc_mask()` and
+  `dali_control_build_dapc_mask()`, reachable as `mask <target>` or
+  `level <target> mask`. The ordinary DAPC builders still reject 255, so no
+  level arithmetic can land on MASK and silently stop meaning "set this level".
+- `dali_capability_matrix.md` is the new per-capability record: shared API,
+  native verb, host vector, real-bus result, and ESPHome exposure. It is what
+  makes the remaining gap legible — DT6, DT8, memory writes, and input-device
+  configuration are implemented and host-covered but have never been run against
+  physical gear.
+- A verb whose first argument is a fixed keyword declares those keywords in the
+  same table row, and the handler tests membership with
+  `dali_cli_has_subcommand()` rather than comparing its own literal. This was
+  added after the first version of the table advertised `bus on|off` while the
+  handler accepted only `bus check`: help told the operator to type a command
+  that could not work, and nothing caught it. A host vector now asserts that
+  every declared keyword is recognised and appears in the usage line.
+- All 24 host executables pass. The new CLI suite is 59 cases; protocol is now
+  66, control 31, DT6 21, DT8 46, and input config 9.
+- The native firmware builds with ESP-IDF 6.0.1 (`0x3C0A0`-byte application
+  image). `_local/dali-diag-local.yaml` builds the working-tree component with
+  ESPHome 2026.7.4 (919611-byte OTA image); the shared-stack header changes did
+  not disturb the ESPHome wrapper set.
+- These changes are host- and compile-verified only. No new verb has been
+  flashed or exercised on COM6, and neither site deployment has been re-tested.
 
 - Light command deduplication is now committed only by a scheduler completion.
   Previously the cached on/level was written as soon as `dali_control_*`
@@ -418,8 +498,10 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
   it: multi-byte input polling, memory reads and the control-device memory
   write, discovery's ENABLE DEVICE TYPE pairs, group query, and multi-type
   enumeration, commissioning's opening, search-plus-COMPARE probe, and
-  PROGRAM/VERIFY pair, and the DT8 16-bit colour value read. Only genuine
-  single-frame queries still go through `transact` directly.
+  PROGRAM/VERIFY pair, the DT8 16-bit colour value read, the generic DT6/DT8
+  [DTR loads + ENABLE DEVICE TYPE + command] grouping, and the Part 103
+  [control-device DTR loads + command] grouping. Only genuine single-frame
+  queries still go through `transact` directly.
 - Part 103 events are decoded into canonical source fields, reject command and
   reserved frames, preserve all ten event-information bits, and use the sparse
   Part 301/type 1 event values. Independent vectors cover all five normal source
@@ -433,26 +515,38 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
   firmware and hardware versions. Discovery performs this 16-bit read only for
   confirmed control gear; pure Part 103 devices require a future typed 24-bit
   memory path. Generic byte access to optional Bank 1 remains available.
-- DT6 and DT8 builder APIs exist and are host-tested, but are not yet fully
-  surfaced through the native CLI or comprehensively hardware-verified.
+- DT6 and DT8 builder APIs are host-tested and fully surfaced through the native
+  CLI, each command running as one sequence carrying its DTR loads, ENABLE
+  DEVICE TYPE, and the command itself. They are not hardware-verified.
 - DT1 and other specialized/legacy device types remain intentionally unimplemented.
 
 ### Native diagnostic CLI
 
-- `main/main.c` and `main/dali_diag.c` provide the ESP-IDF serial diagnostic
-  application.
+- `main/main.c`, `main/dali_cli.c`, and `main/dali_diag.c` provide the ESP-IDF
+  serial diagnostic application. The split is deliberate: `dali_cli.c` is plain
+  C with no ESP-IDF, FreeRTOS, or bus dependency and is built by the host tests;
+  `dali_diag.c` owns the task, the blocking scheduler slots, the caches, and the
+  long-running workflows.
+- Dispatch is one table. `dali_cli_resolve()` tokenises, looks the verb up, and
+  checks the argument-count bounds before any handler runs, so trailing tokens
+  are rejected rather than ignored. Help and `list <table>` are generated from
+  the same tables, so neither can describe a command the parser will not accept.
 - Common gear commands and queries, DTR/config operations, scan/discovery,
   control-gear commissioning, inventory/export, input polling, capture, and
-  coupler-finding workflows are present.
+  coupler-finding workflows are present, plus typed verbs for control-gear and
+  control-device memory, DT6, DT8, Part 103 instance query and configuration,
+  and vendor helpers.
 - `stats` and `queue [reset]` report PHY/RX counters and scheduler queue
   admission state respectively.
-- Native `raw` sends one arbitrary 16- or 24-bit frame. It is a diagnostic escape hatch, not a
-  substitute for typed atomic workflows; unlike the ESPHome console it has no
-  `raw2` send-twice verb.
+- Native `raw` sends one arbitrary 16- or 24-bit frame and `raw2` sends one
+  twice through the scheduler's send-twice path. Both remain diagnostic escape
+  hatches rather than substitutes for the typed atomic verbs.
 - Native event capture/export reports canonical Part 103 source fields and full
   event information. Device/Instance push-button events are typed from the
   discovery cache rather than guessed from their event value.
-- The CLI parser/help/dispatch layer currently has no host-test coverage.
+- `identify`, `smoke`, `capture`, and the inventory JSON export still have no
+  host vectors of their own; they are composed from covered primitives, but
+  their output formats are unasserted.
 
 ### ESPHome component
 
@@ -543,6 +637,21 @@ migrate to generic bank access.
 write fits in one queue entry. This changes the public `DaliSequence` layout and
 requires all callers to rebuild. In the ESP32 build, the active-sequence and
 16-entry scheduler queue storage increase by 612 bytes in total.
+
+`DaliCommandId` gains `DALI_CMD_CONTINUOUS_UP` and `DALI_CMD_CONTINUOUS_DOWN`,
+appended before `DALI_CMD_COUNT` so every existing numeric value is unchanged.
+`dali_command_lookup_opcode(DALI_CMD_FRAME_16BIT, ...)` now resolves opcodes
+`0x0B` and `0x0C`, which previously returned NULL. `dali_frame.h` adds
+`DALI_DAPC_MASK_LEVEL`; `dali_protocol.h` adds `dali_build_dapc_mask()` and
+`dali_control.h` adds `dali_control_build_dapc_mask()` plus
+`dali_control_build_continuous_up/down()`. The ordinary DAPC builders still
+reject 255, so this is additive rather than a behaviour change.
+
+`dali_gear_dt6.h` now includes `dali_scheduler.h` and `dali_input_config.h` now
+includes `dali_scheduler.h`, for the new
+`dali_dt6_build_command_sequence()`, `dali_dt8_build_command_sequence()`, and
+`dali_input_build_config_sequence()`. A translation unit that included either
+header only for its pure frame builders now also sees the scheduler types.
 
 `dali_scheduler.h` adds `DaliSchedQueueStats`, `dali_sched_queue_stats()`, and
 `dali_sched_reset_queue_stats()`. These are additive; existing callers are
@@ -670,17 +779,26 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   alternates correctly, but commands whose exact result is unknown still need an
   actual-level query.
 
-### P1 — CLI completeness
+### P1 — CLI verification on real hardware
 
-- Maintain a capability matrix with: shared API, native CLI verb, independent host
-  vector, real-bus verification, and ESPHome exposure.
-- Add typed native verbs for memory, DT6, DT8, input-device query/configuration,
-  vendor helpers, and Part 103 control-device workflows.
-- Add native `raw2` with enforced send-twice timing; do not rely on two manually
-  entered `raw` commands.
-- Fill remaining common Part 102 gaps, including Continuous Up/Down and DAPC MASK.
-- Add host tests for CLI parsing, dispatch, help/command-table parity, validation,
-  response formatting, and multi-frame workflow behavior.
+The typed verb surface is in place; what is missing is evidence. Keep
+`dali_capability_matrix.md` current as each row is exercised.
+
+- Run the DT6 and DT8 verbs against real DT6/DT8 gear. Every DT8 row in the
+  matrix is host-covered and hardware-unverified, and the P2 mapping of DT8 to
+  Home Assistant colour traits is deliberately held behind this.
+- Complete the memory read/write/read-back cycle on hardware for both
+  `memread`/`meminfo` (Part 102) and `devmem` (Part 103). No write path reads
+  its value back today, so `devmem write` reports transmitted, not applied.
+- Validate input-device configuration writes with read/write/read-back per
+  parameter. `iconfig` is explicit that its success means transmitted; until
+  this is done the whole surface stays experimental.
+- Add host vectors for `identify`, `smoke`, `capture`, and the inventory JSON
+  export, whose output formats are currently unasserted.
+- Decide whether the ESPHome console should adopt `dali_cli`'s tokeniser and
+  tables. Doing so would fix its trailing-token gap and remove the
+  `memread`/`devmem` naming divergence in one change; leaving it alone keeps two
+  parsers to maintain.
 
 ### P1 — ESPHome correctness and architecture
 
@@ -770,7 +888,8 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 |---|---|
 | `components/dali` | Reusable C protocol, scheduler, PHY, discovery, dispatch, memory, and device-type stack |
 | `main/main.c` | Native ESP-IDF diagnostic application entry point |
-| `main/dali_diag.c/.h` | App-specific serial CLI |
+| `main/dali_cli.c/.h` | Portable CLI core: tokenising, verb table, validation, formatting |
+| `main/dali_diag.c/.h` | Device half of the serial CLI: task, transports, workflows |
 | `esphome/components/dali` | Active ESPHome external component |
 | `dali_diag.yaml` | Tracked diagnostic/discovery firmware |
 | `_local/dali-diag-local.yaml` | Ignored compile-test copy of the diagnostic firmware |
@@ -778,6 +897,7 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 | `_local/dali-1k.yaml` | Ignored first-floor site firmware |
 | `_local/dali-2k.yaml` | Ignored second-floor site firmware |
 | `dali_command_reference.md` | Protocol and command catalog |
+| `dali_capability_matrix.md` | Per-capability API/verb/vector/hardware/ESPHome status |
 | `esphome_verb_readme.md` | ESPHome console examples and notes |
 | `steinel_bank2_reference.md` | Installation-specific Steinel memory observations |
 
@@ -818,7 +938,8 @@ C:\msys64\ucrt64\bin\mingw32-make.exe --directory build test CTEST_OUTPUT_ON_FAI
 - Keep this file limited to current verified state, constraints, and open work.
 - Record completed changes in Git history or a changelog; remove them from the
   active backlog.
-- Keep protocol/command detail in `dali_command_reference.md`.
+- Keep protocol/command detail in `dali_command_reference.md`, and per-capability
+  API/verb/vector/hardware status in `dali_capability_matrix.md`.
 - Label claims as host-tested, hardware-verified, or still unverified.
 - Do not add session-log TODO files; merge active work into the prioritized list
   above.

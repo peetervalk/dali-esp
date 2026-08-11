@@ -153,6 +153,11 @@ typedef enum {
     DALI_CMD_QUERY_INSTANCE_CONFIGURATION,
     DALI_CMD_QUERY_AVAILABLE_INSTANCE_TYPES,
 
+    /* Part 102 level commands added after the original table. Appended for the
+     * same reason as the queries above: existing public IDs keep their values. */
+    DALI_CMD_CONTINUOUS_UP,
+    DALI_CMD_CONTINUOUS_DOWN,
+
     DALI_CMD_COUNT,
 } DaliCommandId;
 
@@ -210,6 +215,18 @@ DaliError dali_build_instance_command(uint8_t addr,
 DaliError dali_build_device_command(uint8_t addr,
                                     DaliCommandId id,
                                     DaliFrame *out);
+
+/*
+ * Build an arc power frame carrying MASK (255).
+ *
+ * MASK is not a level: the gear leaves its arc power unchanged, which is how a
+ * DAPC sequence is terminated without disturbing the current output. It is a
+ * separate entry point precisely so no level arithmetic can reach 255 and
+ * silently stop meaning "set this level".
+ */
+DaliError dali_build_dapc_mask(DaliAddressType type,
+                               uint8_t address,
+                               DaliFrame *out);
 
 /* Build a special command frame. */
 DaliError dali_build_special(DaliCommandId id,

@@ -60,3 +60,40 @@ DaliError dali_dt6_parse_failure_status(uint8_t raw, DaliDt6FailureStatus *out)
     out->reference_measurement_failed = (raw & (1u << 7u)) != 0u;
     return DALI_OK;
 }
+
+DaliError dali_dt6_build_command_sequence(DaliFrame      command,
+                                          bool           send_twice,
+                                          bool           expects_reply,
+                                          const uint8_t *dtr,
+                                          uint8_t        dtr_count,
+                                          DaliSequence  *out)
+{
+    if (out == NULL ||
+        command.bit_length != DALI_FORWARD_FRAME_BITS ||
+        dtr_count > DALI_DT6_MAX_DTR_BYTES ||
+        (dtr_count > 0u && dtr == NULL)) {
+        return DALI_ERR_INVALID;
+    }
+
+    *out = (DaliSequence){0};
+
+    uint8_t step = 0u;
+    for (uint8_t i = 0u; i < dtr_count; i++) {
+        DaliFrame frame;
+        DaliError err = dali_build_dtr_data((DaliDtrRegister)i, dtr[i], &frame);
+        if (err != DALI_OK) {
+            return err;
+        }
+        out->steps[step++] = (DaliSequenceStep){ .frame = frame };
+    }
+
+    out->steps[step++] = (DaliSequenceStep){ .frame = dali_dt6_enable() };
+    out->steps[step++] = (DaliSequenceStep){
+        .frame       = command,
+        .needs_reply = expects_reply,
+        .send_twice  = send_twice,
+    };
+
+    out->step_count = step;
+    return DALI_OK;
+}

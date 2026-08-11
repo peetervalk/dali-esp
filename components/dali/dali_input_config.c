@@ -50,6 +50,44 @@
 #define LIGHT_QUERY_REPORT_TIMER     0x3Eu
 #define LIGHT_QUERY_HYSTERESIS       0x3Fu
 
+DaliError dali_input_build_config_sequence(DaliFrame      command,
+                                           bool           send_twice,
+                                           bool           expects_reply,
+                                           const uint8_t *dtr,
+                                           uint8_t        dtr_count,
+                                           DaliSequence  *out)
+{
+    if (out == NULL ||
+        command.bit_length != DALI_EXTENDED_FRAME_BITS ||
+        dtr_count > DALI_INPUT_CONFIG_MAX_DTR_BYTES ||
+        (dtr_count > 0u && dtr == NULL)) {
+        return DALI_ERR_INVALID;
+    }
+
+    *out = (DaliSequence){0};
+
+    uint8_t step = 0u;
+    for (uint8_t i = 0u; i < dtr_count; i++) {
+        DaliFrame frame;
+        DaliError err = dali_build_control_device_dtr_data((DaliDtrRegister)i,
+                                                           dtr[i],
+                                                           &frame);
+        if (err != DALI_OK) {
+            return err;
+        }
+        out->steps[step++] = (DaliSequenceStep){ .frame = frame };
+    }
+
+    out->steps[step++] = (DaliSequenceStep){
+        .frame       = command,
+        .needs_reply = expects_reply,
+        .send_twice  = send_twice,
+    };
+
+    out->step_count = step;
+    return DALI_OK;
+}
+
 /* Common IEC 62386-103 instance configuration. */
 
 DaliFrame dali_input_build_set_event_priority(uint8_t addr, uint8_t instance)

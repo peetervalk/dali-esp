@@ -703,6 +703,60 @@ void test_query_status_allows_group_broadcast_and_rejects_null_callback(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * CONTINUOUS UP/DOWN and arc power MASK through the control layer
+ * --------------------------------------------------------------------------*/
+
+static void test_build_continuous_up_down(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_build_continuous_up(target(DALI_ADDR_SHORT, 7u),
+                                                       &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x0F0Bu, frame.data);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_build_continuous_down(target(DALI_ADDR_GROUP, 2u),
+                                                         &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x850Cu, frame.data);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_build_continuous_up(target(DALI_ADDR_BROADCAST, 0u),
+                                                       &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xFF0Bu, frame.data);
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_control_build_continuous_up(target(DALI_ADDR_SHORT, 64u),
+                                                       &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_control_build_continuous_down(target(DALI_ADDR_GROUP, 16u),
+                                                         &frame));
+}
+
+static void test_build_dapc_mask_through_control(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_build_dapc_mask(target(DALI_ADDR_SHORT, 7u), &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x0EFFu, frame.data);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_build_dapc_mask(target(DALI_ADDR_BROADCAST, 0u),
+                                                   &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xFEFFu, frame.data);
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_control_build_dapc_mask(target(DALI_ADDR_SHORT, 64u), &frame));
+
+    /* The level path keeps rejecting MASK, so a caller cannot reach it by
+     * passing 255 to the ordinary level builder. */
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_control_build_dapc(target(DALI_ADDR_SHORT, 7u),
+                                              DALI_DAPC_MASK_LEVEL, &frame));
+}
+
+/* ---------------------------------------------------------------------------
  * Main
  * --------------------------------------------------------------------------*/
 int main(void)
@@ -713,6 +767,8 @@ int main(void)
     RUN_TEST(test_build_short_and_broadcast_dapc);
     RUN_TEST(test_build_off_for_group_and_broadcast);
     RUN_TEST(test_build_recall_min_for_short_group_and_broadcast);
+    RUN_TEST(test_build_continuous_up_down);
+    RUN_TEST(test_build_dapc_mask_through_control);
     RUN_TEST(test_build_output_level_commands);
     RUN_TEST(test_build_go_to_scene_for_group);
     RUN_TEST(test_invalid_targets_and_levels_are_rejected);

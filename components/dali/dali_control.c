@@ -179,6 +179,15 @@ DaliError dali_control_build_dapc(DaliTarget target, uint8_t level, DaliFrame *o
     return build_target_command(target, DALI_CMD_DAPC, level, out);
 }
 
+DaliError dali_control_build_dapc_mask(DaliTarget target, DaliFrame *out)
+{
+    DaliError err = dali_control_validate_target(target);
+    if (err != DALI_OK) {
+        return err;
+    }
+    return dali_build_dapc_mask(target.type, target.address, out);
+}
+
 DaliError dali_control_build_off(DaliTarget target, DaliFrame *out)
 {
     return build_target_command(target, DALI_CMD_OFF, 0u, out);
@@ -202,6 +211,16 @@ DaliError dali_control_build_step_up(DaliTarget target, DaliFrame *out)
 DaliError dali_control_build_step_down(DaliTarget target, DaliFrame *out)
 {
     return build_target_command(target, DALI_CMD_STEP_DOWN, 0u, out);
+}
+
+DaliError dali_control_build_continuous_up(DaliTarget target, DaliFrame *out)
+{
+    return build_target_command(target, DALI_CMD_CONTINUOUS_UP, 0u, out);
+}
+
+DaliError dali_control_build_continuous_down(DaliTarget target, DaliFrame *out)
+{
+    return build_target_command(target, DALI_CMD_CONTINUOUS_DOWN, 0u, out);
 }
 
 DaliError dali_control_build_recall_max(DaliTarget target, DaliFrame *out)

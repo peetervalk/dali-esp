@@ -45,12 +45,29 @@ set(DALI_INC
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali
 )
 
+# The portable half of the native CLI. dali_diag.c stays out: it owns the
+# FreeRTOS task and the blocking scheduler slots, which have no host form.
+set(DALI_CLI_SRC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../main/dali_cli.c
+)
+
+set(DALI_CLI_INC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../main
+)
+
 # ---------------------------------------------------------------------------
 # Helper macro to define a test executable
 # ---------------------------------------------------------------------------
 macro(add_dali_test name src)
     add_executable(${name} ${src} ${DALI_SRC})
     target_include_directories(${name} PRIVATE ${DALI_INC})
+    target_link_libraries(${name} PRIVATE unity)
+    add_test(NAME ${name} COMMAND ${name})
+endmacro()
+
+macro(add_dali_cli_test name src)
+    add_executable(${name} ${src} ${DALI_SRC} ${DALI_CLI_SRC})
+    target_include_directories(${name} PRIVATE ${DALI_INC} ${DALI_CLI_INC})
     target_link_libraries(${name} PRIVATE unity)
     add_test(NAME ${name} COMMAND ${name})
 endmacro()
@@ -77,6 +94,7 @@ add_dali_test(test_control    test_control.c)
 add_dali_test(test_scheduler  test_scheduler.c)
 add_dali_test(test_dispatch   test_dispatch.c)
 add_dali_test(test_group_map  test_group_map.c)
+add_dali_cli_test(test_cli    test_cli.c)
 
 add_executable(test_light_state_mailbox test_light_state_mailbox.cpp)
 target_link_libraries(test_light_state_mailbox PRIVATE unity)
