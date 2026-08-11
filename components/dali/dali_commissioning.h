@@ -79,6 +79,12 @@ DaliError dali_commissioning_decode_short_address(uint8_t encoded,
  * a collided reply readable.
  * --------------------------------------------------------------------------*/
 
+/* TERMINATE, INITIALISE(unaddressed), RANDOMIZE. */
+#define DALI_COMMISSIONING_START_SEQUENCE_STEPS  3u
+#define DALI_COMMISSIONING_START_STEP_TERMINATE  0u
+#define DALI_COMMISSIONING_START_STEP_INITIALISE 1u
+#define DALI_COMMISSIONING_START_STEP_RANDOMIZE  2u
+
 /* SEARCH ADDRH, SEARCH ADDRM, SEARCH ADDRL. */
 #define DALI_COMMISSIONING_SEARCH_SEQUENCE_STEPS 3u
 #define DALI_COMMISSIONING_SEARCH_STEP_ADDRH     0u
@@ -93,6 +99,17 @@ DaliError dali_commissioning_decode_short_address(uint8_t encoded,
 #define DALI_COMMISSIONING_PROGRAM_VERIFY_SEQUENCE_STEPS 2u
 #define DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_PROGRAM   0u
 #define DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_VERIFY    1u
+
+/*
+ * Build the opening of an unaddressed commissioning run. Grouping these matters
+ * for what it prevents on failure as much as for ordering: if INITIALISE is
+ * admitted and RANDOMIZE is not, the gear sits in initialisation state for
+ * fifteen minutes with nothing on the bus aware of it.
+ *
+ * INITIALISE and RANDOMIZE are send-twice commands; the scheduler expands each
+ * into an adjacent pair, so three logical steps become five forward frames.
+ */
+DaliError dali_commissioning_build_start_sequence(DaliSequence *out);
 
 /* Build the three search-address writes for one 24-bit random address. */
 DaliError dali_commissioning_build_search_sequence(uint32_t random_address,

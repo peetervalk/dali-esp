@@ -30,6 +30,8 @@ typedef struct {
     uint8_t    initialise_count;
     uint8_t    randomize_count;
     uint8_t    withdraw_count;
+    uint8_t    fail_opcode;   /* 0 = no injected fault */
+    DaliError  fail_err;
 } MockCommissioningBus;
 
 static MockCommissioningBus s_bus;
@@ -90,6 +92,10 @@ static MockDevice *mock_first_selected(void)
 
 static DaliError mock_special_no_reply(uint8_t opcode, uint8_t param)
 {
+    if (s_bus.fail_opcode != 0u && opcode == s_bus.fail_opcode) {
+        return s_bus.fail_err;
+    }
+
     switch (opcode) {
         case 0xA1u:
             for (uint8_t i = 0u; i < MOCK_DEVICE_COUNT; i++) {
@@ -522,6 +528,110 @@ void test_invalid_arguments_are_rejected(void)
  * its parameter in the low byte.
  * --------------------------------------------------------------------------*/
 
+void test_build_start_sequence_layout(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_commissioning_build_start_sequence(&seq));
+    TEST_ASSERT_EQUAL_UINT8(DALI_COMMISSIONING_START_SEQUENCE_STEPS,
+                            seq.step_count);
+
+    /* TERMINATE 0xA1, INITIALISE 0xA5 with the unaddressed parameter,
+     * RANDOMIZE 0xA7. */
+    const DaliSequenceStep *terminate =
+        &seq.steps[DALI_COMMISSIONING_START_STEP_TERMINATE];
+    TEST_ASSERT_EQUAL_HEX32(0xA100u, terminate->frame.data);
+    TEST_ASSERT_FALSE(terminate->send_twice);
+
+    const DaliSequenceStep *initialise =
+        &seq.steps[DALI_COMMISSIONING_START_STEP_INITIALISE];
+    TEST_ASSERT_EQUAL_HEX32(
+        (uint32_t)(0xA500u | DALI_INITIALISE_UNADDRESSED_PARAM),
+        initialise->frame.data);
+    TEST_ASSERT_TRUE(initialise->send_twice);
+
+    const DaliSequenceStep *randomize =
+        &seq.steps[DALI_COMMISSIONING_START_STEP_RANDOMIZE];
+    TEST_ASSERT_EQUAL_HEX32(0xA700u, randomize->frame.data);
+    TEST_ASSERT_TRUE(randomize->send_twice);
+
+    for (uint8_t i = 0u; i < DALI_COMMISSIONING_START_SEQUENCE_STEPS; i++) {
+        TEST_ASSERT_EQUAL_UINT8(DALI_FORWARD_FRAME_BITS,
+                                seq.steps[i].frame.bit_length);
+        TEST_ASSERT_FALSE(seq.steps[i].needs_reply);
+        /* A repeated RANDOMIZE would hand out fresh random addresses. */
+        TEST_ASSERT_EQUAL_UINT8(0u, seq.steps[i].retries_left);
+    }
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_commissioning_build_start_sequence(NULL));
+}
+
+static uint16_t count_frames_with_opcode(uint8_t opcode)
+{
+    uint16_t count = 0u;
+    for (uint16_t i = 0u; i < s_bus.log_count; i++) {
+        if ((uint8_t)((s_bus.log[i].data >> 8u) & 0xFFu) == opcode) {
+            count++;
+        }
+    }
+    return count;
+}
+
+void test_failed_start_closes_initialisation_state(void)
+{
+    DaliDiscoveryTransport t = transport();
+    mock_add_device(0u, 0x000010u);
+
+    /* RANDOMIZE fails after INITIALISE has already been accepted. */
+    s_bus.fail_opcode = 0xA7u;
+    s_bus.fail_err    = DALI_ERR_BUS_STUCK;
+
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 0u,
+        .used_address_mask = 0u,
+        .query_short_address = false,
+    };
+    DaliCommissioningResult result;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK,
+                      dali_commissioning_commission_unaddressed(&t, &options,
+                                                                &result, NULL, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK, result.last_error);
+    TEST_ASSERT_EQUAL_UINT8(0u, result.assigned_count);
+
+    /* Gear left in initialisation state stays there for fifteen minutes, so the
+     * opening TERMINATE must be followed by a second one on the way out. */
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.initialise_count);
+    TEST_ASSERT_EQUAL_UINT16(2u, count_frames_with_opcode(0xA1u));
+}
+
+void test_failed_terminate_does_not_add_a_second_terminate(void)
+{
+    DaliDiscoveryTransport t = transport();
+    mock_add_device(0u, 0x000010u);
+
+    /* The opening TERMINATE itself fails, so INITIALISE never went out and
+     * there is no initialisation state to close. */
+    s_bus.fail_opcode = 0xA1u;
+    s_bus.fail_err    = DALI_ERR_BUS_STUCK;
+
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 0u,
+        .used_address_mask = 0u,
+        .query_short_address = false,
+    };
+    DaliCommissioningResult result;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK,
+                      dali_commissioning_commission_unaddressed(&t, &options,
+                                                                &result, NULL, NULL));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_bus.initialise_count);
+    TEST_ASSERT_EQUAL_UINT16(1u, count_frames_with_opcode(0xA1u));
+}
+
 static void assert_search_steps(const DaliSequence *seq)
 {
     /* random address 0x123456 splits into H=0x12, M=0x34, L=0x56 */
@@ -759,6 +869,9 @@ void test_verify_from_sequence_reads_confirmation_and_failures(void)
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_build_start_sequence_layout);
+    RUN_TEST(test_failed_start_closes_initialisation_state);
+    RUN_TEST(test_failed_terminate_does_not_add_a_second_terminate);
     RUN_TEST(test_build_search_sequence_layout);
     RUN_TEST(test_build_search_compare_sequence_layout);
     RUN_TEST(test_build_program_verify_sequence_layout);

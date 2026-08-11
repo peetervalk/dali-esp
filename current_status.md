@@ -50,6 +50,18 @@ adding broad new device support.
 
 ### Verified locally on 2026-08-11
 
+- Commissioning's opening is one three-step sequence built by
+  `dali_commissioning_build_start_sequence()`: TERMINATE, INITIALISE
+  (unaddressed), RANDOMIZE. INITIALISE and RANDOMIZE are send-twice, so three
+  logical steps become five forward frames. No step retries, because a repeated
+  RANDOMIZE would hand out a fresh set of random addresses.
+- That grouping also closed a leftover-state bug. If INITIALISE went out and
+  RANDOMIZE then failed, the old code returned the error without a TERMINATE,
+  leaving the gear in initialisation state for the full fifteen minutes with
+  nothing on the bus aware of it. A failed start now issues TERMINATE whenever
+  the INITIALISE step was attempted, and does not when only the opening
+  TERMINATE itself failed. Both paths have vectors, driven by a new
+  fault-injection hook in the commissioning mock.
 - The DT8 16-bit colour value read is now one four-step sequence built by
   `dali_dt8_build_colour_value_sequence()`: DTR0 = selector, ENABLE DEVICE
   TYPE 8, QUERY COLOUR VALUE for the MSB, then QUERY CONTENT DTR0 for the LSB
@@ -121,7 +133,8 @@ adding broad new device support.
   the distinction between a negative answer and a failed earlier step. All 16
   commissioning cases pass, including the nine pre-existing ones unchanged: the
   migration emits the same frames in the same order with the same retry budgets,
-  so the existing bus-level expectations still hold.
+  so the existing bus-level expectations still hold. With the start sequence and
+  its two failure-path vectors the suite is 19 cases.
 - DT8 vectors cover the four-step layout against standard-derived frames, the
   per-step retry contract, selector and address placement, argument boundaries,
   MSB/LSB assembly, and the partial and failed cases. All 41 DT8 cases pass,
@@ -191,7 +204,7 @@ adding broad new device support.
   was restored to `type: local` with `path: ../esphome/components`, without
   which the compile test verifies the release rather than the working tree.
 - The native ESP-IDF firmware builds warning-free with ESP-IDF 6.0.1; the
-  application binary uses 22% of its partition (0x38100 bytes).
+  application binary uses 22% of its partition (0x38150 bytes).
 - A C++ translation unit mirroring the ESPHome memory-read callback compiles
   against the new API, confirming the signature and accessors work from C++.
 - This change is host- and compile-verified only; it has not been run on hardware.
@@ -292,10 +305,12 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
 - Scheduler sequences run contiguously and report a `DaliSequenceResult` holding
   the overall error, the failing step, the steps attempted, and one backward
   frame per reply-bearing step. This is the primitive the atomic transaction
-  facility needs. Multi-byte input polling, memory reads, and discovery's
-  ENABLE DEVICE TYPE pairs, group query, and multi-type enumeration are built on
-  it. Commissioning still issues independent transactions, as do discovery's
-  remaining single, order-independent queries.
+  facility needs. Every multi-frame workflow in the reusable stack is built on
+  it: multi-byte input polling, memory reads and the control-device memory
+  write, discovery's ENABLE DEVICE TYPE pairs, group query, and multi-type
+  enumeration, commissioning's opening, search-plus-COMPARE probe, and
+  PROGRAM/VERIFY pair, and the DT8 16-bit colour value read. Only genuine
+  single-frame queries still go through `transact` directly.
 - Part 103 events are decoded into canonical source fields, reject command and
   reserved frames, preserve all ten event-information bits, and use the sparse
   Part 301/type 1 event values. Independent vectors cover all five normal source
@@ -472,22 +487,12 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 
 ### P0 — Transaction and runtime reliability
 
-- Add a scheduler-level atomic transaction/session facility for DTR operations,
-  ENABLE DEVICE TYPE sequences, memory access, DT8 multi-byte queries,
-  send-twice commands, discovery, and commissioning. Sequences already execute
-  contiguously and report a reply per step; multi-byte input polling and memory
-  reads are built on them, and `DaliTransport` now carries an atomic-sequence
-  entry point that both real transports implement. Discovery and commissioning
-  have both been moved across: discovery's ENABLE DEVICE TYPE pairs, group
-  query, and multi-type enumeration, and commissioning's SEARCH ADDRH/M/L
-  triple, its search-plus-COMPARE probe, and its PROGRAM/VERIFY pair are all
-  sequences, as is the DT8 16-bit colour value read. Every workflow where an
-  interleaved frame could produce a wrong answer rather than an error has now
-  been moved across. What remains is benign by comparison: commissioning's
-  TERMINATE / INITIALISE / RANDOMIZE opening is still three independent
-  transactions, and the ESPHome console's `dtrcheck` and `iconfig` paths still
-  assemble their own DTR setup steps. An interleaved frame in either case costs
-  a retry, not a corrupted reading.
+- Keep new multi-frame workflows on `DaliSequence`. The atomic-transaction
+  migration is done for everything that exists today, so the open risk is
+  regression: a future workflow that issues dependent frames as separate
+  transactions reintroduces the class of bug this removed. The tell is a query
+  whose answer depends on a register or enumeration pointer that the same query
+  or an immediately preceding frame modifies.
 - Give `dali_sched_reset()` a defined contract: complete every queued and active
   transaction with an error before clearing state instead of dropping their
   callbacks. The native CLI `reset` verb currently orphans its diagnostic sync

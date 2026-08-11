@@ -118,6 +118,45 @@ static DaliError fill_search_steps(DaliSequenceStep *steps, uint32_t random_addr
                             (uint8_t)(random_address & 0xFFu));
 }
 
+DaliError dali_commissioning_build_start_sequence(DaliSequence *out)
+{
+    if (out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    memset(out, 0, sizeof(*out));
+
+    DaliError err = set_special_step(&out->steps[DALI_COMMISSIONING_START_STEP_TERMINATE],
+                                     DALI_CMD_TERMINATE,
+                                     0u);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    DaliSequenceStep *initialise =
+        &out->steps[DALI_COMMISSIONING_START_STEP_INITIALISE];
+    err = set_special_step(initialise,
+                           DALI_CMD_INITIALISE,
+                           DALI_INITIALISE_UNADDRESSED_PARAM);
+    if (err != DALI_OK) {
+        return err;
+    }
+    initialise->send_twice = true;
+
+    DaliSequenceStep *randomize =
+        &out->steps[DALI_COMMISSIONING_START_STEP_RANDOMIZE];
+    err = set_special_step(randomize, DALI_CMD_RANDOMIZE, 0u);
+    if (err != DALI_OK) {
+        return err;
+    }
+    randomize->send_twice = true;
+
+    /* No retries: the scheduler already brackets each send-twice pair, and a
+     * repeated RANDOMIZE would hand out a fresh set of random addresses. */
+    out->step_count = DALI_COMMISSIONING_START_SEQUENCE_STEPS;
+    return DALI_OK;
+}
+
 DaliError dali_commissioning_build_search_sequence(uint32_t random_address,
                                                    DaliSequence *out)
 {
@@ -487,29 +526,29 @@ static uint8_t count_free_addresses(uint64_t used_mask, uint8_t first_address)
     return count;
 }
 
+static DaliError commissioning_finish(const DaliDiscoveryTransport *transport);
+
 static DaliError commissioning_start_unaddressed(
     const DaliDiscoveryTransport *transport)
 {
-    DaliError err = send_special_no_reply(transport,
-                                          DALI_CMD_TERMINATE,
-                                          0u,
-                                          false);
+    DaliSequence seq;
+    DaliError err = dali_commissioning_build_start_sequence(&seq);
     if (err != DALI_OK) {
         return err;
     }
 
-    err = send_special_no_reply(transport,
-                                DALI_CMD_INITIALISE,
-                                DALI_INITIALISE_UNADDRESSED_PARAM,
-                                true);
+    DaliSequenceResult result;
+    err = dali_transport_run_sequence(transport, &seq, &result);
     if (err != DALI_OK) {
+        /* Once INITIALISE has been attempted the gear may be in initialisation
+         * state, where it stays for fifteen minutes. Failing out without a
+         * TERMINATE would leave it there with nothing on the bus aware of it. */
+        if (result.steps_run > DALI_COMMISSIONING_START_STEP_INITIALISE) {
+            (void)commissioning_finish(transport);
+        }
         return err;
     }
 
-    err = send_special_no_reply(transport, DALI_CMD_RANDOMIZE, 0u, true);
-    if (err != DALI_OK) {
-        return err;
-    }
 #ifndef DALI_HOST_BUILD
     vTaskDelay(pdMS_TO_TICKS(15u));
 #endif
