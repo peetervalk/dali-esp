@@ -1,9 +1,14 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-08-11
+**Last updated:** 2026-08-12
 
 **Known-working deployment/component baseline:** `v1.0.1` (`0302d70`), for
 the two recorded site configurations; this is not a conformance claim.
+
+**Deployed now:** the 1k site runs the working tree, not the release. See
+Installation State for what each configuration currently resolves to — the tag
+above is the last release known good, which is no longer the same statement as
+"what is on the hardware".
 
 **Status:** The ESPHome controller is operational on the two known installations.
 The repository has a strong reusable C foundation, but CLI completeness, several
@@ -47,6 +52,59 @@ The next development phase should prioritize protocol and state correctness befo
 adding broad new device support.
 
 ## Verification Baseline
+
+### Verified on hardware 2026-08-12
+
+- Arc power level and light output are no longer treated as the same quantity.
+  `components/dali/dali_dim_curve.c` implements the IEC 62386-102 logarithmic
+  curve, `output(X) = 10 ^ ((X - 1) / (253 / 3) - 3)`, and the ESPHome light
+  entity converts through it in both directions. Level 85 is 1 % of maximum
+  light, not the 33 % a linear reading of 85/254 reported, and a requested 1 %
+  now sends level 85 rather than level 3 — which was 0.1 %, dark enough to look
+  like a failed command.
+- Confirmed on the 1k site: a lamp already sitting at 1 % light output read 1 %
+  in Home Assistant after the flash, where it had read 33 % before. This is the
+  first hardware verification of any work past `v1.0.1`.
+- The conversion has to round-trip exactly or the light entity mistakes the echo
+  of its own bus reading for an operator command and transmits it.
+  `test_dim_curve` asserts level → output → level for all 254 levels, plus the
+  standard's anchor points computed independently in double precision.
+- The on/off threshold moved from `brightness >= 1/254` to `brightness > 0`.
+  The dimmest legal level emits 0.1 %, below the old linear floor, so a level-1
+  observation would otherwise have echoed back to the bus as OFF.
+- Input sensors take a per-instance `poll_on_event` option, default `true`.
+  An event is not evidence of a change: the Steinel reports instance 0 every
+  3.0 s and instance 1 every 1.0 s with an unchanged value, so following every
+  event replaced the configured 30 s lux interval with the device's report rate.
+  Measured cost on the live bus: every lux poll delayed the next occupancy event
+  by about 95 ms, and roughly one poll in ten returned no reading at all.
+  Occupancy keeps `true` for latency; lux, temperature and humidity are `false`.
+- 25 host test executables pass. The ESPHome protocol wrapper set matches the 22
+  reusable C source files.
+- The 2k site configuration compiles against the working tree as a local ESPHome
+  2026.7.4 external component; the image is 938591 bytes.
+
+Not verified, and worth stating plainly:
+
+- The 2k site has not been reflashed, so `poll_on_event` has no hardware result.
+  Everything above about the poll rates is measurement of the old behavior plus
+  a compile of the new.
+- MIN LEVEL and MAX LEVEL are still invisible to the ESPHome layer. Gear clamps
+  a DAPC into that window and answers QUERY ACTUAL LEVEL with the clamped value,
+  so an entity on gear with a reduced ceiling can never report 100 %. The curve
+  is correct either way; the range is not. Mapping 0-100 % onto
+  `[MIN_LEVEL, MAX_LEVEL]` is the fix and is not implemented.
+- `dali_dim_curve` implements the standard curve only. DT6 gear can be switched
+  to a linear curve (`dt6 <addr> select-curve`, DTR0 `1`), and an entity pointed
+  at such gear would be wrong in both directions. The 1k address 0 driver
+  answered QUERY DIMMING CURVE with `0`, but the preceding ENABLE DEVICE TYPE
+  had expired by then, so that reading is weak; the standard default is
+  logarithmic and the hardware result above is consistent with it.
+- Existing Home Assistant scenes and automations that store a brightness
+  percentage now produce very different light output — 20 % was level 51
+  (0.4 % light) and is now level 195 (20 % light). They need re-tuning. Home
+  Assistant's 8-bit brightness also can no longer reach levels 1-50; brightness
+  1 maps to level 51. The console `level` verb still reaches the full range.
 
 ### Verified locally on 2026-08-11
 
@@ -522,11 +580,12 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
 
 ### Native diagnostic CLI
 
-- `main/main.c`, `main/dali_cli.c`, and `main/dali_diag.c` provide the ESP-IDF
-  serial diagnostic application. The split is deliberate: `dali_cli.c` is plain
-  C with no ESP-IDF, FreeRTOS, or bus dependency and is built by the host tests;
-  `dali_diag.c` owns the task, the blocking scheduler slots, the caches, and the
-  long-running workflows.
+- `main/main.c`, `components/dali/dali_cli.c`, and `main/dali_diag.c` provide the
+  ESP-IDF serial diagnostic application. The split is deliberate: `dali_cli.c` is
+  plain C with no ESP-IDF, FreeRTOS, or bus dependency and is built by the host
+  tests; `dali_diag.c` owns the task, the blocking scheduler slots, the caches,
+  and the long-running workflows. `dali_cli.c` sits in `components/dali` rather
+  than `main/` because the ESPHome console dispatches through the same table.
 - Dispatch is one table. `dali_cli_resolve()` tokenises, looks the verb up, and
   checks the argument-count bounds before any handler runs, so trailing tokens
   are rejected rather than ignored. Help and `list <table>` are generated from
@@ -706,20 +765,47 @@ its pure frame builders now also sees the scheduler and transport types.
 
 ## Installation State
 
-The three active firmware configurations pin their external component to
-`v1.0.1`, the current known-working release:
+Each site now exists twice: a tracked reference copy at the repo root and the
+deploy copy under ignored `_local/`. Check the source column before reasoning
+about what is running on a device — the pin, not the working tree, decides what
+gets built.
 
-| Configuration | Role |
-|---|---|
-| `dali_diag.yaml` | Tracked diagnostic/discovery firmware |
-| `_local/dali-1k.yaml` | First-floor site firmware; 16 control gear and group entities for groups 0/2/3/4/5/6/7 |
-| `_local/dali-2k.yaml` | Second-floor site firmware; group 0 lighting, HA console, and Steinel HF 360 II polling |
+| Configuration | Component source | Role |
+|---|---|---|
+| `dali_diag.yaml` | `ref: v1.0.1` | Tracked diagnostic/discovery firmware |
+| `dali_1k.yaml` | `type: local` | Tracked reference copy of the first-floor site |
+| `dali_2k.yaml` | `type: local` | Tracked reference copy of the second-floor site |
+| `_local/dali-1k.yaml` | `ref: dev` | Deploy copy; 16 control gear and group entities for groups 0/2/3/4/5/6/7 |
+| `_local/dali-2k.yaml` | `ref: dev` | Deploy copy; group 0 lighting, HA console, and Steinel HF 360 II polling |
+
+The tracked copies use `type: local` with `path: esphome/components` so that a
+configuration and the component it configures always agree within a commit. The
+`_local` copies keep the git pin because they are what gets flashed and the
+operator chooses when to move.
+
+Two consequences of that split are live right now:
+
+- The 1k site was flashed on 2026-08-12 from a temporary `type: local` edit that
+  has since been reverted, so `_local/dali-1k.yaml` names `dev` while the
+  hardware runs the working tree. The file does not describe what is deployed.
+- `_local/dali-2k.yaml` sets `poll_on_event`, which `dev` does not yet contain,
+  so it fails validation until that branch is pushed or it is pointed at
+  `type: local`. It was deliberately not reflashed: the second floor is occupied
+  at night and the brightness change is visible.
+
+Both resolve when `dev` is pushed.
 
 The entire `_local` directory is deliberately ignored by Git. This checkout also
-contains `_local/dali-diag-local.yaml`, a compile-test copy of the tracked diagnostic
-configuration, and `_local/secrets.yaml`, whose values are explicitly marked
-dummy/compile-only and must not be deployed. Inspect and back up any real site
-files separately; normal `git status` does not show changes under `_local`.
+contains `_local/dali-diag-local.yaml`, a compile-test copy of the tracked
+diagnostic configuration. Inspect and back up any real site files separately;
+normal `git status` does not show changes under `_local`.
+
+`_local/secrets.yaml` was previously described here as dummy compile-only values
+that must not be deployed. That is wrong and the description has been removed:
+its six shared keys are byte-identical to the root `secrets.yaml`, and the 2k
+device joins WiFi and accepts OTA using them, so both files hold live
+credentials. Both are gitignored (`.gitignore:36` and `.gitignore:40`) and
+neither is tracked. Treat both as real secrets.
 
 ### Observed Steinel instance layout
 
@@ -804,9 +890,10 @@ The typed verb surface is in place; what is missing is evidence. Keep
 
 ### P1 — ESPHome correctness and architecture
 
-Everything listed here has been implemented and builds clean; none of it has
-been exercised on a real bus. See "ESPHome console verb renames" below for what
-changed for an operator.
+Everything listed here has been implemented and builds clean. The 1k site flash
+on 2026-08-12 is the first real-bus exercise of any of it; the 2k paths —
+sensor polling, `poll_on_event`, the Steinel workflows — remain unexercised.
+See "ESPHome console verb renames" below for what changed for an operator.
 
 - **Done.** The blanket ten-second startup write suppression is gone. A restore
   write is identified as the first `write_state()` after setup (which is exactly
@@ -862,6 +949,16 @@ Still open in this area:
   native CLI handles these.
 - Define recovery after bus-only power cycles, beyond the current/cumulative
   fault split above.
+- Map brightness onto `[MIN_LEVEL, MAX_LEVEL]` instead of `[1, 254]`. The layer
+  reads neither register, so gear that clamps a DAPC answers QUERY ACTUAL LEVEL
+  with the clamped value and the entity settles somewhere the operator did not
+  ask for — a reduced ceiling can never report 100 %. Needs both registers
+  queried per entity at boot and refreshed after a scan, since they are gear
+  configuration and can change under the controller.
+- Handle DT6 gear switched to the linear dimming curve. `dali_dim_curve` is the
+  standard curve only, and it is applied unconditionally to every light entity,
+  so linear-curve gear is misreported and miscommanded in both directions.
+  Either query the curve during discovery or expose a per-entity override.
 
 ### P1 — Release and verification quality
 
@@ -891,9 +988,13 @@ Still open in this area:
   table is in `dali_command_reference.md` under "Verbs renamed when the console
   adopted the shared tables". Anything in Home Assistant that writes a command
   string to the `text:` entity (scripts, automations, dashboard buttons) needs
-  updating: `memread`/`memwrite` became `devmem read`/`devmem write`,
-  `iquery a0:1 x` became `iquery a0 1 x`, `query a0 actual-level` became
-  `query a0 actual`, and `config <t> <name> <dtr0>` became `config-dtr0`.
+  updating. The target spelling is the one that breaks every stored command at
+  once and is easiest to miss: `a<N>` is rejected as `bad target`, and a short
+  address is now `s<N>` or a bare number. Beyond that, `memread`/`memwrite`
+  became `devmem read`/`devmem write`, `iquery a0:1 x` became `iquery 0 1 x`,
+  `query a0 actual-level` became `query s0 actual`, `config <t> <name> <dtr0>`
+  became `config-dtr0`, and the Part 303/304 instance names took type prefixes
+  (`hold-timer` → `occ-hold-timer`).
 - Clarify the bus topology: direct-control couplers also transmit. Their current
   coexistence is field-tested, but it is not equivalent to collision-safe
   single-master arbitration.
@@ -927,14 +1028,16 @@ Still open in this area:
 
 | Path | Role |
 |---|---|
-| `components/dali` | Reusable C protocol, scheduler, PHY, discovery, dispatch, memory, and device-type stack |
+| `components/dali` | Reusable C protocol, scheduler, PHY, discovery, dispatch, memory, dimming curve, and device-type stack |
+| `components/dali/dali_cli.c/.h` | Portable CLI core: tokenising, verb table, validation, formatting. Shared by the native app and the ESPHome console |
+| `components/dali/dali_dim_curve.c/.h` | IEC 62386-102 arc power level ↔ light output conversion |
 | `main/main.c` | Native ESP-IDF diagnostic application entry point |
-| `main/dali_cli.c/.h` | Portable CLI core: tokenising, verb table, validation, formatting |
 | `main/dali_diag.c/.h` | Device half of the serial CLI: task, transports, workflows |
 | `esphome/components/dali` | Active ESPHome external component |
 | `dali_diag.yaml` | Tracked diagnostic/discovery firmware |
+| `dali_1k.yaml` / `dali_2k.yaml` | Tracked reference copies of the two site configurations |
 | `_local/dali-diag-local.yaml` | Ignored compile-test copy of the diagnostic firmware |
-| `_local/secrets.yaml` | Ignored dummy compile-only secrets; never deploy |
+| `_local/secrets.yaml` | Ignored, untracked, and holds live credentials — see Installation State |
 | `_local/dali-1k.yaml` | Ignored first-floor site firmware |
 | `_local/dali-2k.yaml` | Ignored second-floor site firmware |
 | `dali_command_reference.md` | Protocol and command catalog |
@@ -947,16 +1050,23 @@ Still open in this area:
 ESPHome configuration/build:
 
 ```powershell
+esphome config  dali_1k.yaml                 # tracked copies build the in-repo component
+esphome config  dali_2k.yaml
 esphome compile dali_diag.yaml
-esphome compile _local/dali-diag-local.yaml  # ignored compile-test copy; dummy secrets
-esphome compile _local/dali-1k.yaml
+esphome compile _local/dali-1k.yaml          # deploy copies; whatever they pin
 esphome compile _local/dali-2k.yaml
 ```
 
-For an uncommitted/dev component compile, use the ignored
-`_local/dali-diag-local.yaml` source with `type: local` and
-`path: ../esphome/components`. Keep the
-tracked deployment configuration pinned to the release tag.
+`esphome config` is the cheap check and is what to reach for first: it validates
+the schema without touching a build directory, so it cannot collide with a
+compile already running in another terminal.
+
+To prove uncommitted component changes actually build, compile a tracked copy —
+`dali_1k.yaml` and `dali_2k.yaml` resolve `type: local` against
+`esphome/components`, so they compile the working tree by construction. Give a
+throwaway copy a different `esphome: name:` if the real site's build directory
+must not be disturbed. `_local/dali-diag-local.yaml` remains the diagnostic
+equivalent, with `path: ../esphome/components` for its location.
 
 Native ESP-IDF:
 

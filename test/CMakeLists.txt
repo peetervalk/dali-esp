@@ -36,6 +36,7 @@ set(DALI_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_gear_dt8.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_input_config.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_control.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_dim_curve.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_scheduler.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_dispatch.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_group_map.c
@@ -61,17 +62,25 @@ set(DALI_CLI_INC
 # ---------------------------------------------------------------------------
 # Helper macro to define a test executable
 # ---------------------------------------------------------------------------
+# powf()/log10f() in the dimming curve need libm on Unix toolchains. The Windows
+# CRTs fold those into the default libraries and ship no libm to find, so an
+# empty result there is correct rather than a failure.
+find_library(DALI_LIBM m)
+if(NOT DALI_LIBM)
+    set(DALI_LIBM "")
+endif()
+
 macro(add_dali_test name src)
     add_executable(${name} ${src} ${DALI_SRC})
     target_include_directories(${name} PRIVATE ${DALI_INC})
-    target_link_libraries(${name} PRIVATE unity)
+    target_link_libraries(${name} PRIVATE unity ${DALI_LIBM})
     add_test(NAME ${name} COMMAND ${name})
 endmacro()
 
 macro(add_dali_cli_test name src)
     add_executable(${name} ${src} ${DALI_SRC} ${DALI_CLI_SRC})
     target_include_directories(${name} PRIVATE ${DALI_INC} ${DALI_CLI_INC})
-    target_link_libraries(${name} PRIVATE unity)
+    target_link_libraries(${name} PRIVATE unity ${DALI_LIBM})
     add_test(NAME ${name} COMMAND ${name})
 endmacro()
 
@@ -97,6 +106,7 @@ add_dali_test(test_control    test_control.c)
 add_dali_test(test_scheduler  test_scheduler.c)
 add_dali_test(test_dispatch   test_dispatch.c)
 add_dali_test(test_group_map  test_group_map.c)
+add_dali_test(test_dim_curve  test_dim_curve.c)
 add_dali_cli_test(test_cli    test_cli.c)
 
 add_executable(test_light_state_mailbox test_light_state_mailbox.cpp)

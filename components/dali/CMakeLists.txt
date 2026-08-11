@@ -18,6 +18,7 @@ idf_component_register(
         "dali_gear_dt8.c"
         "dali_input_config.c"
         "dali_control.c"
+        "dali_dim_curve.c"
         "dali_dispatch.c"
         "dali_group_map.c"
         "dali_cli.c"

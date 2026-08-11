@@ -2,8 +2,6 @@
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
-#include <cmath>
-
 namespace esphome {
 namespace dali {
 
@@ -35,8 +33,11 @@ void DaliLightOutput::clear_unused_color_fields_(light::LightColorValues &values
 }
 
 uint8_t DaliLightOutput::brightness_to_level_(float brightness) {
-  uint8_t level = static_cast<uint8_t>(roundf(brightness * 254.0f));
-  return level == 0 ? 1 : level;
+  return dali_dim_curve_output_to_level(brightness);
+}
+
+float DaliLightOutput::level_to_brightness_(uint8_t level) {
+  return dali_dim_curve_level_to_output(level);
 }
 
 void DaliLightOutput::on_command_complete_(DaliError result,
@@ -139,7 +140,10 @@ void DaliLightOutput::write_state(light::LightState *state) {
 
   const auto &target = state->remote_values;
   float brightness = target.get_state() * target.get_brightness();
-  bool desired_is_on = target.is_on() && brightness >= (1.0f / 254.0f);
+  /* Any non-zero brightness is on. The dimmest arc power level still emits
+   * 0.1 %, well under the 1/254 a linear reading treated as the floor, and OFF
+   * is a separate command rather than the bottom of the curve. */
+  bool desired_is_on = target.is_on() && brightness > 0.0f;
   uint8_t desired_level = desired_is_on ? brightness_to_level_(brightness) : 0u;
 
   if (suppress_initial_write_) {
@@ -202,17 +206,19 @@ void DaliLightOutput::apply_bus_state() {
    * write_state() can recognise it as this reading coming back rather than as
    * something a person asked for.
    *
-   * The level survives the round trip unchanged: this pushes level/254 as the
-   * brightness and write_state() turns it back with round(brightness * 254).
-   * remote_values carries the un-gamma-corrected value, so nothing else is
-   * applied in between. */
+   * The level survives the round trip unchanged: this pushes the level's light
+   * output as the brightness and write_state() converts it back through the
+   * inverse curve, which test_dim_curve asserts for all 254 levels. A level
+   * that did not come back intact would be mistaken for an operator command
+   * and sent to the bus. remote_values carries the un-gamma-corrected value,
+   * so nothing else is applied in between. */
   echo_valid_ = true;
   echo_is_on_ = is_on;
   echo_level_ = is_on ? level : 0u;
 
   auto call = state_->make_call();
   call.set_state(is_on);
-  if (is_on) call.set_brightness(static_cast<float>(level) / 254.0f);
+  if (is_on) call.set_brightness(level_to_brightness_(level));
   call.set_transition_length(0);
   clear_unused_color_fields_(state_->remote_values);
   clear_unused_color_fields_(state_->current_values);

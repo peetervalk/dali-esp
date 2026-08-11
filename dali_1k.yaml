@@ -1,0 +1,162 @@
+# ESPHome config for DALI Bus 1 — 16 control gear, groups 0/2/3/4/5/6/7
+# Hardware: ESP32-WROVER-E + MikroE DALI-2 Click (TX=GPIO18, RX=GPIO19)
+# Scan results: addresses 0-15 occupied, group assignments from "export inventory"
+#
+# Tracked reference copy of the first-floor site configuration. Credentials are
+# all !secret lookups resolved from the untracked root secrets.yaml; nothing in
+# this file is site-private beyond the address and group layout.
+#
+# The component source is the in-repo one rather than a release tag, so this
+# file and the component it configures always agree within a commit. A tracked
+# config pinned to an older tag silently drifts out of schema with the tree
+# beside it, which is exactly how `poll_on_event` broke validation on 2026-08-12.
+
+esphome:
+  name: dali-1k
+  friendly_name: "DALI 1k"
+
+esp32:
+  variant: esp32   # classic ESP32 (WROVER-E); board is auto-selected
+  framework:
+    type: esp-idf
+    advanced:
+      sram1_as_iram: true
+      minimum_chip_revision: "3.1"
+
+external_components:
+  - source:
+      type: local
+      path: esphome/components
+    components: [dali]
+
+wifi:
+  ssid: !secret wifi_ssid2
+  password: !secret wifi_password
+  ap:
+    ssid: "dali-1k-ap"
+    password: !secret ap_password
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+logger:
+  level: INFO
+
+# ── DALI bus ──────────────────────────────────────────────────────────────────
+dali:
+  id: dali_bus
+  tx_pin: 18
+  rx_pin: 19
+  headless_dispatch:
+    # BF6 couplers command groups directly; ESP observes and keeps HA state in sync.
+    - { frame_kind: legacy_16bit, address_kind: group, address: 0, action: observe, output_type: group, output_address: 0 }
+    - { frame_kind: legacy_16bit, address_kind: group, address: 2, action: observe, output_type: group, output_address: 2 }
+    - { frame_kind: legacy_16bit, address_kind: group, address: 3, action: observe, output_type: group, output_address: 3 }
+    - { frame_kind: legacy_16bit, address_kind: group, address: 4, action: observe, output_type: group, output_address: 4 }
+    - { frame_kind: legacy_16bit, address_kind: group, address: 5, action: observe, output_type: group, output_address: 5 }
+    - { frame_kind: legacy_16bit, address_kind: group, address: 6, action: observe, output_type: group, output_address: 6 }
+    - { frame_kind: legacy_16bit, address_kind: group, address: 7, action: observe, output_type: group, output_address: 7 }
+  command_result:
+    name: "DALI Command Result"
+  bus_fault:
+    name: "Bus Fault"
+
+# ── Lights (one entity per DALI group) ───────────────────────────────────────
+# Group numbers match the bus configuration discovered via "export inventory".
+# Replace placeholder names with real room/zone names.
+#
+# Groups 1 and 8-15 have no gear assigned — omitted.
+#
+# query_address is only a COLD-START SEED for group state polling — the address
+# used until the component learns real group membership. A bus scan replaces it
+# with scan-verified members, and add-group/remove-group console commands update
+# it live; both are persisted to flash and survive reboots. Pick any member of
+# the group (a plain lamp with no shared input device is ideal).
+
+light:
+  - platform: dali
+    dali_id: dali_bus
+    name: "DALI Group 0"      # addresses 5, 6, 7, 14
+    target_type: group
+    target_address: 0
+    query_address: 5
+
+  - platform: dali
+    dali_id: dali_bus
+    name: "DALI Group 2"      # addresses 4, 8, 9, 12
+    target_type: group
+    target_address: 2
+    query_address: 4
+
+  - platform: dali
+    dali_id: dali_bus
+    name: "DALI Group 3"      # address 13
+    target_type: group
+    target_address: 3
+    query_address: 13
+
+  - platform: dali
+    dali_id: dali_bus
+    name: "DALI Group 4"      # address 1
+    target_type: group
+    target_address: 4
+    query_address: 1
+
+  - platform: dali
+    dali_id: dali_bus
+    name: "DALI Group 5"      # address 0 (DT6 LED driver)
+    target_type: group
+    target_address: 5
+    query_address: 0
+
+  - platform: dali
+    dali_id: dali_bus
+    name: "DALI Group 6"      # addresses 2, 3, 10, 11
+    target_type: group
+    target_address: 6
+    query_address: 2
+
+  - platform: dali
+    dali_id: dali_bus
+    name: "DALI Group 7"      # address 15
+    target_type: group
+    target_address: 7
+    query_address: 15
+
+# ── DALI command console ──────────────────────────────────────────────────────
+# Type commands in HA; result appears in "DALI Command Result" text sensor.
+# Verbs: queue/off/max/min/level/query/config/config-dtr0/iquery/iconfig/devmem/
+#        dtrcheck/group
+#        memread, memwrite and devquery are NOT console verbs; use raw sequences.
+# raw <hex> len=<16|24> [wait]  — send an arbitrary frame, optional wait for reply
+# raw2 <hex> len=<16|24> [wait] — send twice inside the DALI send-twice window
+# Targets: s<N>=short (bare <N> works too), g<N>=group, b=broadcast.
+#   The old a<N> spelling is rejected with "bad target".
+# Examples:
+#   off g0                   (turn off group 0)
+#   max g2                   (recall max group 2)
+#   query s5 actual          (read level of short address 5; name is "actual")
+#   query s5 min-level       (dimming floor — the gear clamps DAPC to this)
+#   query s5 max-level       (dimming ceiling)
+#   query s5 physical-min    (hardware floor; min-level cannot go below it)
+#   query b status           (broadcast status query — may cause reply collision)
+#   queue                    (scheduler admission counters; queue reset to clear)
+#   raw 8305 len=16          (group 1 RECALL MAX)
+#   raw 0101 len=16 wait     (short addr 0, QUERY STATUS)
+# DT6 dimming curve on the address 0 LED driver (0=logarithmic, 1=linear).
+# ENABLE DEVICE TYPE must be the frame immediately before the DT6 command, and
+# two console lines are not atomic — prefer the native CLI's dt6 verb over
+# serial. Quiet bus only:
+#   raw C106 len=16          (ENABLE DEVICE TYPE 6)
+#   raw 01EE len=16 wait     (QUERY DIMMING CURVE, short addr 0)
+text:
+  - platform: dali
+    dali_id: dali_bus
+    name: "DALI Command"
+    mode: text

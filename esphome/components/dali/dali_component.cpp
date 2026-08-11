@@ -541,21 +541,34 @@ static void on_dali_unsolicited(const DaliFrame *frame, void * /*ctx*/)
      * Treat the event as a change notification only: QUERY INPUT VALUE remains
      * authoritative for both one- and two-byte sensor entities. Other Part-103
      * source schemes need type/group metadata that the current YAML does not
-     * carry, so do not guess a target for them. */
+     * carry, so do not guess a target for them.
+     *
+     * Whether an event is worth a poll is per-instance, because "event" does
+     * not imply "change": some instances report on a timer and repeat the same
+     * value indefinitely. For those, following every event replaces the
+     * configured interval with the device's report rate and puts traffic on the
+     * bus that delays other instances' events. poll_on_event: false keeps such
+     * an instance on its interval. */
     if (event.frame_kind == DALI_EVENT_FRAME_INPUT_24BIT &&
         event.source.scheme == DALI_EVENT_SOURCE_DEVICE_INSTANCE &&
         event.source.has_device_address && event.source.has_instance) {
         for (uint8_t i = 0u; i < s_sensor_count; i++) {
             SensorEntry &e = s_sensor_registry[i];
-            if (e.sensor->get_address()  == event.source.device_address &&
-                e.sensor->get_instance() == event.source.instance) {
-                e.poll_requested.store(true, std::memory_order_release);
-                ESP_LOGD(TAG, "event poll requested: addr=%u inst=%u info=%u raw=%06X",
-                         (unsigned)event.source.device_address,
-                         (unsigned)event.source.instance,
-                         (unsigned)event.event_information,
-                         (unsigned)event.raw.data);
+            if (e.sensor->get_address()  != event.source.device_address ||
+                e.sensor->get_instance() != event.source.instance) {
+                continue;
             }
+            /* Gated at the source rather than at admission: a request stored
+             * for a sensor that never consumes it would stay set and then fire
+             * on whatever admitted the next poll. */
+            if (!e.sensor->get_poll_on_event()) continue;
+
+            e.poll_requested.store(true, std::memory_order_release);
+            ESP_LOGD(TAG, "event poll requested: addr=%u inst=%u info=%u raw=%06X",
+                     (unsigned)event.source.device_address,
+                     (unsigned)event.source.instance,
+                     (unsigned)event.event_information,
+                     (unsigned)event.raw.data);
         }
     }
 }

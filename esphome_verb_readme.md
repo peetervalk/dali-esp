@@ -48,8 +48,8 @@ turn a typo into a different, valid command.
 
 Every verb declares how many arguments it takes, and both bounds are checked
 before the command runs. A trailing token is therefore rejected rather than
-ignored: `level a1 100 junk` fails with a usage string, where an earlier version
-of the console accepted it as `level a1 100`.
+ignored: `level s1 100 junk` fails with a usage string, where an earlier version
+of the console accepted it as `level s1 100`.
 
 Results are short strings:
 
@@ -81,10 +81,15 @@ Normal gear commands use `<target>`:
 
 | Form | Range | Meaning |
 |---|---:|---|
-| `a<N>` | `0-63` | Short address. |
-| `s<N>` | `0-63` | Alias for short address. |
+| `s<N>` | `0-63` | Short address. |
+| `<N>` | `0-63` | Short address, bare number. |
 | `g<N>` | `0-15` | Group address. |
 | `b` | n/a | Broadcast. |
+
+`a<N>` is not one of them. It was the spelling before the console adopted the
+shared tables, and it now fails with `bad target` — including inside an
+otherwise valid line, so a stored HA script written against the old syntax stops
+working silently rather than loudly.
 
 Input-device commands take the address and the instance as two separate
 arguments, matching the native CLI:
@@ -93,8 +98,8 @@ arguments, matching the native CLI:
 |---|---:|---|
 | `<addr> <instance>` | address `0-63`, instance `0-31` | Short-addressed DALI-2 input instance. |
 
-The address accepts a bare number or the `a<N>` / `s<N>` forms. The earlier
-`a<N>:<I>` colon form is gone.
+The address accepts a bare number or the `s<N>` form. The earlier `a<N>:<I>`
+colon form is gone.
 
 `iquery`, `iconfig`, `devmem`, and `dtrcheck` require a short address. They do
 not accept group or broadcast targets.
@@ -102,16 +107,16 @@ not accept group or broadcast targets.
 ## Quick Examples
 
 ```text
-query a0 actual
+query s0 actual
 level g0 180
 off b
-iquery a0 1 occ-hold-timer
-iconfig a0 1 occ-set-hold-timer 20
-devmem read a0 2 4
-dtrcheck a0 0 66
+iquery 0 1 occ-hold-timer
+iconfig 0 1 occ-set-hold-timer 20
+devmem read 0 2 4
+dtrcheck 0 0 66
 raw 01FE36 len=24 wait
 raw2 01FE15 len=24
-group forget a7
+group forget 7
 ```
 
 ## Direct Gear Verbs
@@ -123,7 +128,7 @@ Sends DALI `OFF`.
 Examples:
 
 ```text
-off a0
+off s0
 off g0
 off b
 ```
@@ -145,7 +150,7 @@ Sends `RECALL MIN LEVEL`.
 Example:
 
 ```text
-min a3
+min s3
 ```
 
 ### `level <target> <level>`
@@ -164,7 +169,7 @@ Examples:
 
 ```text
 level g0 128
-level a3 mask
+level s3 mask
 ```
 
 ## Raw Frame Verbs
@@ -238,10 +243,10 @@ Adopting the shared table also brought in the rest of the Part 102 query set —
 Examples:
 
 ```text
-query a0 actual
-query a0 fade
-query a0 groups-0-7
-query a0 scene-level 3
+query s0 actual
+query s0 fade
+query s0 groups-0-7
+query s0 scene-level 3
 ```
 
 ## Gear Config Verb
@@ -290,12 +295,12 @@ Commonly used config names:
 Examples:
 
 ```text
-config-dtr0 a0 set-max-dtr0 200
-config-dtr0 a0 set-fade-time-dtr0 4
-config-dtr0 a0 set-scene 200 3
-config a0 add-group 3
+config-dtr0 s0 set-max-dtr0 200
+config-dtr0 s0 set-fade-time-dtr0 4
+config-dtr0 s0 set-scene 200 3
+config s0 add-group 3
 config g0 remove-group 3
-config a0 save-persistent
+config s0 save-persistent
 ```
 
 ## Input Instance Query Verb
@@ -350,10 +355,10 @@ STATUS. Use the `light-*` names for Part 304 values.
 Examples:
 
 ```text
-iquery a0 1 instance-type
-iquery a0 1 input-value
-iquery a0 1 hold-timer
-iquery a0 1 occupancy-capabilities
+iquery 0 1 type
+iquery 0 1 input-value
+iquery 0 1 occ-hold-timer
+iquery 0 1 occ-capabilities
 ```
 
 ## Input Instance Config Verb
@@ -422,17 +427,17 @@ Part 301/304 setters are intentionally removed.
 Recommended test pattern:
 
 ```text
-iquery a0 1 hold-timer
-iconfig a0 1 set-hold-timer 20
-iquery a0 1 hold-timer
+iquery 0 1 occ-hold-timer
+iconfig 0 1 occ-set-hold-timer 20
+iquery 0 1 occ-hold-timer
 ```
 
 Example Part 301 query/write/read-back sequence:
 
 ```text
-iquery a0 0 pb-short-timer
-iconfig a0 0 pb-set-short-timer 25
-iquery a0 0 pb-short-timer
+iquery 0 0 pb-short-timer
+iconfig 0 0 pb-set-short-timer 25
+iquery 0 0 pb-short-timer
 ```
 
 ## Control-Device Memory Verbs
@@ -463,8 +468,8 @@ hex, so a multi-byte read is not reduced to its last value.
 Examples:
 
 ```text
-devmem read a0 2 4
-devmem read a0 0 3 8
+devmem read 0 2 4
+devmem read 0 0 3 8
 ```
 
 ### `devmem write <addr> <bank> <offset> <value>`
@@ -490,9 +495,9 @@ it back afterward.
 Example:
 
 ```text
-devmem read a0 2 4
-devmem write a0 2 4 255
-devmem read a0 2 4
+devmem read 0 2 4
+devmem write 0 2 4 255
+devmem read 0 2 4
 ```
 
 ## Device-Level Diagnostic Verbs
@@ -523,7 +528,7 @@ the value" from "the command that consumes it was ignored".
 Example:
 
 ```text
-dtrcheck a0 0 66
+dtrcheck 0 0 66
 ```
 
 The expected result is `read 66 (0x42)`.
@@ -586,8 +591,8 @@ cache, which is then persisted to flash. For gear that is still present, use
 Examples:
 
 ```text
-group forget a7          # remove address 7 from every group
-group forget a7 3        # remove address 7 from group 3 only
+group forget 7          # remove address 7 from every group
+group forget 7 3        # remove address 7 from group 3 only
 ```
 
 Reports `not a member` when the address held no membership to remove.
@@ -597,41 +602,41 @@ Reports `not a member` when the address held no membership to remove.
 Read a lamp level:
 
 ```text
-query a0 actual
+query s0 actual
 ```
 
 Check group membership:
 
 ```text
-query a0 groups-0-7
-query a0 groups-8-15
+query s0 groups-0-7
+query s0 groups-8-15
 ```
 
 Set and verify a DALI-2 occupancy hold timer:
 
 ```text
-iquery a0 1 hold-timer
-iconfig a0 1 set-hold-timer 20
-iquery a0 1 hold-timer
+iquery 0 1 occ-hold-timer
+iconfig 0 1 occ-set-hold-timer 20
+iquery 0 1 occ-hold-timer
 ```
 
 Check Steinel Bank 2 global sensitivity byte:
 
 ```text
-devmem read a0 2 4
+devmem read 0 2 4
 ```
 
 Verify control-device DTR writes:
 
 ```text
-dtrcheck a0 0 66
-dtrcheck a0 1 2
+dtrcheck 0 0 66
+dtrcheck 0 1 2
 ```
 
 Retire gear that has been physically removed from the bus:
 
 ```text
-group forget a7
+group forget 7
 ```
 
 Use raw frames when helper verbs are suspect:

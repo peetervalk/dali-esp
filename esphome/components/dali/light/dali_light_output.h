@@ -12,6 +12,7 @@
 
 extern "C" {
 #include "../../../../components/dali/dali_control.h"
+#include "../../../../components/dali/dali_dim_curve.h"
 #include "../../../../components/dali/dali_frame.h"
 #include "../../../../components/dali/dali_light_write.h"
 }
@@ -88,7 +89,10 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   light::LightState *state_{nullptr};
 
   static void clear_unused_color_fields_(light::LightColorValues &values);
+  // ESPHome brightness is a fraction of light output; the bus carries arc power
+  // levels. dali_dim_curve owns the conversion — see the note on write_state().
   static uint8_t brightness_to_level_(float brightness);
+  static float   level_to_brightness_(uint8_t level);
   // Core 1 — scheduler completion for a level/off command.
   static void on_command_complete_(DaliError result, const DaliFrame *reply, void *ctx);
   // Core 0 — collect completions, then admit at most one command.

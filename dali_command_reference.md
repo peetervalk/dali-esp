@@ -67,10 +67,17 @@ supported:
 
 | Syntax | Meaning |
 |---|---|
-| `a<N>` or `s<N>` | Short address `0..63` |
+| `s<N>` or `<N>` | Short address `0..63` |
 | `g<N>` | Group address `0..15` |
-| `b` | Broadcast |
-| `a<N>:<I>` | Input-device short address plus instance `0..31` |
+| `b` or `broadcast` | Broadcast |
+
+`a<N>` is **not** accepted and is reported as `bad target`. It was the older
+console spelling; `dali_cli_parse_target()` recognises only a leading `s`, a
+leading `g`, a bare number, and `b`.
+
+Input-device verbs do not take a target at all. They take the short address and
+the instance as two separate arguments — `iquery 0 1 input-value`, not
+`iquery a0:1 input-value`.
 
 Queries should normally target one short address. Group or broadcast queries can
 create reply collisions if multiple devices answer.
@@ -88,10 +95,10 @@ Address byte:
 
 | Target | Selector | Address byte |
 |---|---:|---|
-| Short DAPC | 0 | `(short_addr << 1) | 0` |
-| Short command | 1 | `(short_addr << 1) | 1` |
-| Group DAPC | 0 | `0x80 | (group << 1) | 0` |
-| Group command | 1 | `0x80 | (group << 1) | 1` |
+| Short DAPC | 0 | `(short_addr << 1) \| 0` |
+| Short command | 1 | `(short_addr << 1) \| 1` |
+| Group DAPC | 0 | `0x80 \| (group << 1) \| 0` |
+| Group command | 1 | `0x80 \| (group << 1) \| 1` |
 | Broadcast DAPC | 0 | `0xFE` |
 | Broadcast command | 1 | `0xFF` |
 
@@ -208,6 +215,12 @@ The control-gear and control-device forms use different DTR and memory opcodes,
 so they are separate verbs. No write path reads its value back; confirm a write
 with a following read.
 
+Note the name collision when migrating a command off the old ESPHome console:
+that console's `memread` addressed a control *device* (it was how the Steinel's
+Bank 2 was read), so its replacement is `devmem read`, not the `memread` above.
+This `memread` is Part 102 control-gear memory and exists only on the native
+CLI — the console has no control-gear memory verb at all.
+
 DTR readback:
 
 ```text
@@ -231,7 +244,17 @@ dt8 <addr> colour <selector>
 Each of these goes out as one scheduler sequence carrying the DTR loads, ENABLE
 DEVICE TYPE, and the command itself. The command is answered under that enable
 and reads whatever the DTRs hold when it arrives, so the group must not be
-split. `dt8 <addr> colour <selector>` performs the four-step 16-bit colour value
+split. This is why `dt6` exists as a verb rather than being spelled out as raw
+frames: ENABLE DEVICE TYPE applies only to the frame immediately after it, and
+two console lines are not adjacent on the bus. A `raw C106` followed by a
+separately typed DT6 opcode does not reliably read what it appears to read.
+
+`dt6 <addr> select-curve` (DTR0 `0` standard, `1` linear) and
+`dt6 <addr> dimming-curve` reach the DT6 dimming curve. The ESPHome light
+entity converts between arc power level and light output through
+`dali_dim_curve`, which implements the standard logarithmic curve only, so an
+entity pointed at gear switched to the linear curve reports and commands
+brightness incorrectly in both directions. `dt8 <addr> colour <selector>` performs the four-step 16-bit colour value
 read and prints Kelvin as well as mirek for the `tc` selector.
 
 Part 103 control devices:
@@ -275,8 +298,8 @@ group forget <addr> [group]
 ```
 
 Argument counts are checked against the verb table before any handler runs, so
-a trailing token is an error rather than something quietly ignored: `level a1
-100 junk` is rejected, where it used to be accepted as `level a1 100`.
+a trailing token is an error rather than something quietly ignored: `level s1
+100 junk` is rejected, where it used to be accepted as `level s1 100`.
 
 `queue` and `group` generate no bus traffic, so they are the only verbs accepted
 while a scan is running — which is when queue pressure and a stale group cache
@@ -304,19 +327,19 @@ one sequence. Using the wrong one reports which to use.
 Common examples:
 
 ```text
-query a0 actual
+query s0 actual
 raw C13102 len=24
 raw C13004 len=24
 raw 01FE3C len=24 wait
 raw2 01FE15 len=24
-query a0 power-on
-query a0 failure-level
-config-dtr0 a0 set-max-dtr0 200
-iquery a0 1 occ-hold-timer
-iconfig a0 1 occ-set-hold-timer 20
-devmem read a0 0 3
-dtrcheck a0 0 66
-group forget a7
+query s0 power-on
+query s0 failure-level
+config-dtr0 s0 set-max-dtr0 200
+iquery 0 1 occ-hold-timer
+iconfig 0 1 occ-set-hold-timer 20
+devmem read 0 0 3
+dtrcheck 0 0 66
+group forget 7
 ```
 
 ### Verbs renamed when the console adopted the shared tables
@@ -327,6 +350,7 @@ drift apart in the first place.
 
 | Was | Now |
 |---|---|
+| `a<N>` as a target | `s<N>`, or the bare number |
 | `memread <addr> <bank> <off>` | `devmem read <addr> <bank> <off> [count]` |
 | `memwrite <addr> <bank> <off> <val>` | `devmem write <addr> <bank> <off> <val>` |
 | `devquery <addr> <opcode>` | `raw <hex> len=24 wait` (it built the same frame) |

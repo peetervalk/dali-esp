@@ -48,6 +48,7 @@ class DaliBusSensor {
   virtual uint8_t  get_address()         const = 0;
   virtual uint8_t  get_instance()        const = 0;
   virtual uint32_t get_poll_interval_s() const = 0;
+  virtual bool     get_poll_on_event()   const = 0;
   virtual uint8_t  get_value_bytes()     const = 0;
   virtual uint32_t get_last_poll_ms()    const = 0;
   virtual void     set_last_poll_ms(uint32_t ms) = 0;
