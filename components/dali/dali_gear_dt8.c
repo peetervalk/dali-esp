@@ -1,29 +1,97 @@
 #include "dali_gear_dt8.h"
 #include "dali_protocol.h"
 #include <stddef.h>
+#include <string.h>
 
 /* ---------------------------------------------------------------------------
  * Transport-dependent colour value read
  * --------------------------------------------------------------------------*/
 
-static DaliError dt8_transact_no_reply(const DaliDt8Transport *t, const DaliFrame *f)
-{
-    return t->transact(f, false, 0u, false, NULL, t->ctx);
-}
+_Static_assert(DALI_SEQUENCE_MAX_STEPS >= DALI_DT8_COLOUR_VALUE_SEQUENCE_STEPS,
+               "colour value read must fit in one sequence");
 
-static DaliError dt8_transact_query(const DaliDt8Transport *t,
-                                    const DaliFrame *f,
-                                    uint8_t *out)
+/* Copy one 8-bit answer out of a completed sequence step. */
+static DaliError dt8_u8_from_sequence(const DaliSequenceResult *result,
+                                      uint8_t                   step,
+                                      uint8_t                  *out)
 {
-    DaliFrame reply = {0u, 0u};
-    DaliError err = t->transact(f, true, 1u, false, &reply, t->ctx);
-    if (err != DALI_OK) {
-        return err;
-    }
-    if (reply.bit_length != DALI_BACKWARD_FRAME_BITS) {
+    DaliFrame reply;
+    if (!dali_sequence_result_reply(result, step, &reply) ||
+        reply.bit_length != DALI_BACKWARD_FRAME_BITS) {
         return DALI_ERR_MALFORMED;
     }
     *out = (uint8_t)(reply.data & 0xFFu);
+    return DALI_OK;
+}
+
+DaliError dali_dt8_build_colour_value_sequence(uint8_t                    addr,
+                                               DaliDt8ColourValueSelector selector,
+                                               DaliSequence              *out)
+{
+    if (out == NULL || addr >= DALI_SHORT_ADDRESS_COUNT) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliFrame qdtr0;
+    if (dali_build_command(DALI_ADDR_SHORT, addr,
+                           DALI_CMD_QUERY_CONTENT_DTR0, 0u, &qdtr0) != DALI_OK) {
+        return DALI_ERR_INVALID;
+    }
+
+    memset(out, 0, sizeof(*out));
+
+    /* Step 1: DTR0 = selector (broadcast special, no reply) */
+    out->steps[DALI_DT8_COLOUR_VALUE_STEP_DTR0].frame =
+        dali_dt8_build_dtr0_selector(selector);
+
+    /* Step 2: ENABLE DEVICE TYPE 8 (no reply) */
+    out->steps[DALI_DT8_COLOUR_VALUE_STEP_ENABLE].frame = dali_dt8_enable();
+
+    /* Step 3: QueryColourValue — reply is the MSB, and the gear leaves the LSB
+     * in DTR0. No retries: the step is answered under the ENABLE above, and it
+     * destroys the selector this sequence just wrote. */
+    DaliSequenceStep *query = &out->steps[DALI_DT8_COLOUR_VALUE_STEP_QUERY];
+    query->frame       = dali_dt8_query_colour_value(addr);
+    query->needs_reply = true;
+
+    /* Step 4: QUERY CONTENT DTR0 — reads the LSB without changing it, so this
+     * step alone may safely retry. */
+    DaliSequenceStep *read = &out->steps[DALI_DT8_COLOUR_VALUE_STEP_DTR0_READ];
+    read->frame        = qdtr0;
+    read->needs_reply  = true;
+    read->retries_left = DALI_DT8_QUERY_RETRIES_LEFT;
+
+    out->step_count = DALI_DT8_COLOUR_VALUE_SEQUENCE_STEPS;
+    return DALI_OK;
+}
+
+DaliError dali_dt8_colour_value_from_sequence(const DaliSequenceResult *result,
+                                              uint16_t                 *out)
+{
+    if (result == NULL || out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    if (result->result != DALI_OK) {
+        return result->result;
+    }
+
+    uint8_t msb = 0u;
+    DaliError err = dt8_u8_from_sequence(result,
+                                         DALI_DT8_COLOUR_VALUE_STEP_QUERY,
+                                         &msb);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    uint8_t lsb = 0u;
+    err = dt8_u8_from_sequence(result,
+                               DALI_DT8_COLOUR_VALUE_STEP_DTR0_READ,
+                               &lsb);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    *out = (uint16_t)(((uint16_t)msb << 8u) | (uint16_t)lsb);
     return DALI_OK;
 }
 
@@ -32,47 +100,24 @@ DaliError dali_dt8_read_colour_value_16(const DaliDt8Transport    *transport,
                                         DaliDt8ColourValueSelector selector,
                                         uint16_t                  *out)
 {
-    if (transport == NULL || transport->transact == NULL || out == NULL ||
+    if (!dali_transport_valid(transport) || out == NULL ||
         addr >= DALI_SHORT_ADDRESS_COUNT) {
         return DALI_ERR_INVALID;
     }
 
-    /* Step 1: DTR0 = selector (broadcast special, no reply) */
-    DaliFrame dtr0 = dali_dt8_build_dtr0_selector(selector);
-    DaliError err = dt8_transact_no_reply(transport, &dtr0);
+    DaliSequence seq;
+    DaliError err = dali_dt8_build_colour_value_sequence(addr, selector, &seq);
     if (err != DALI_OK) {
         return err;
     }
 
-    /* Step 2: ENABLE DEVICE TYPE 8 (no reply) */
-    DaliFrame enable = dali_dt8_enable();
-    err = dt8_transact_no_reply(transport, &enable);
+    DaliSequenceResult result;
+    err = dali_transport_run_sequence(transport, &seq, &result);
     if (err != DALI_OK) {
         return err;
     }
 
-    /* Step 3: QueryColourValue — reply is MSB of the 16-bit result */
-    DaliFrame qcv = dali_dt8_query_colour_value(addr);
-    uint8_t msb = 0u;
-    err = dt8_transact_query(transport, &qcv, &msb);
-    if (err != DALI_OK) {
-        return err;
-    }
-
-    /* Step 4: QUERY CONTENT DTR0 — LSB was stored in DTR0 by the gear */
-    DaliFrame qdtr0;
-    if (dali_build_command(DALI_ADDR_SHORT, addr,
-                           DALI_CMD_QUERY_CONTENT_DTR0, 0u, &qdtr0) != DALI_OK) {
-        return DALI_ERR_INVALID;
-    }
-    uint8_t lsb = 0u;
-    err = dt8_transact_query(transport, &qdtr0, &lsb);
-    if (err != DALI_OK) {
-        return err;
-    }
-
-    *out = (uint16_t)(((uint16_t)msb << 8u) | (uint16_t)lsb);
-    return DALI_OK;
+    return dali_dt8_colour_value_from_sequence(&result, out);
 }
 
 /* ---------------------------------------------------------------------------

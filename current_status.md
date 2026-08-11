@@ -50,6 +50,24 @@ adding broad new device support.
 
 ### Verified locally on 2026-08-11
 
+- The DT8 16-bit colour value read is now one four-step sequence built by
+  `dali_dt8_build_colour_value_sequence()`: DTR0 = selector, ENABLE DEVICE
+  TYPE 8, QUERY COLOUR VALUE for the MSB, then QUERY CONTENT DTR0 for the LSB
+  the gear left behind. This was the last workflow where an interleaved frame
+  produced a wrong answer rather than an error: any DTR0 write landing between
+  the two reads replaced the low byte, and the caller received a plausible but
+  incorrect 16-bit value.
+- The same change removes a third retry hazard of the READ MEMORY LOCATION
+  kind, and the most damaging one found so far. QUERY COLOUR VALUE previously
+  retried once, but it is answered under the preceding ENABLE DEVICE TYPE and
+  it overwrites the selector in DTR0 with the result's low byte. A retransmitted
+  step would therefore have been read as a request for whatever selector that
+  byte happened to name, returning a different colour attribute under the
+  caller's original label. It now carries no retry budget. QUERY CONTENT DTR0
+  changes nothing and keeps its budget.
+- `DaliDt8Transport` and `DaliDt8TransactionFn` are now aliases of the shared
+  `DaliTransport` and `DaliTransactionFn`, so every module in the stack takes
+  the same transport value.
 - Commissioning's order-dependent groups now run as sequences too.
   `dali_commissioning_build_search_sequence()` carries the SEARCH ADDRH/M/L
   triple, `dali_commissioning_build_search_compare_sequence()` extends it with
@@ -104,6 +122,10 @@ adding broad new device support.
   commissioning cases pass, including the nine pre-existing ones unchanged: the
   migration emits the same frames in the same order with the same retry budgets,
   so the existing bus-level expectations still hold.
+- DT8 vectors cover the four-step layout against standard-derived frames, the
+  per-step retry contract, selector and address placement, argument boundaries,
+  MSB/LSB assembly, and the partial and failed cases. All 41 DT8 cases pass,
+  including the four pre-existing colour-read cases unchanged.
 - All 22 host suites pass.
 - These changes are host- and compile-verified only. The atomic paths themselves
   have not been exercised on a real bus, no site has been re-scanned to confirm
@@ -381,14 +403,19 @@ that the next sequence overwrites, so a callback must copy anything it keeps.
 Transaction callbacks (`DaliSchedCompletionCb`) are unchanged; only sequence
 callers need migrating.
 
-`DaliDiscoveryTransport` and `DaliMemoryTransport` are now aliases of the shared
-`DaliTransport` in the new `dali_transport.h`, and `DaliDiscoveryTransactionFn`
-and `DaliMemoryTransactionFn` alias `DaliTransactionFn`. Existing code keeps
-compiling, and a transport built for one module can now be passed to another
-without conversion. The struct gains an optional `transact_sequence` member
-between `transact` and `ctx`: designated initialisers are unaffected, but any
-positional initialiser must be updated. `DALI_MEMORY_QUERY_RETRIES` is removed,
-because memory reads no longer retry individual READ MEMORY LOCATION frames.
+`DaliDiscoveryTransport`, `DaliMemoryTransport`, and `DaliDt8Transport` are now
+aliases of the shared `DaliTransport` in the new `dali_transport.h`, and
+`DaliDiscoveryTransactionFn`, `DaliMemoryTransactionFn`, and
+`DaliDt8TransactionFn` alias `DaliTransactionFn`. Existing code keeps compiling,
+and a transport built for one module can now be passed to another without
+conversion. The struct gains an optional `transact_sequence` member between
+`transact` and `ctx`: designated initialisers are unaffected, but any positional
+initialiser must be updated. `DALI_MEMORY_QUERY_RETRIES` is removed, because
+memory reads no longer retry individual READ MEMORY LOCATION frames.
+
+`dali_gear_dt8.h` now includes `dali_transport.h`, which transitively pulls in
+`dali_scheduler.h`. A translation unit that included only `dali_gear_dt8.h` for
+its pure frame builders now also sees the scheduler and transport types.
 
 ## Installation State
 
@@ -454,15 +481,13 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   have both been moved across: discovery's ENABLE DEVICE TYPE pairs, group
   query, and multi-type enumeration, and commissioning's SEARCH ADDRH/M/L
   triple, its search-plus-COMPARE probe, and its PROGRAM/VERIFY pair are all
-  sequences. What remains is narrower, and one item is now the sharpest
-  instance of the problem: `dali_dt8_read_colour_value_16()` issues four
-  independent transactions — DTR0 = selector, ENABLE DEVICE TYPE 8,
-  QUERY COLOUR VALUE for the MSB, then QUERY CONTENT DTR0 for the LSB that the
-  gear left there. Any interleaved frame that writes DTR0 replaces the low byte
-  between the two reads, so the assembled 16-bit value is silently wrong rather
-  than failed. It fits a four-step sequence. Commissioning's
-  TERMINATE / INITIALISE / RANDOMIZE opening is also still three independent
-  transactions, though an interleaved frame there is not corrupting.
+  sequences, as is the DT8 16-bit colour value read. Every workflow where an
+  interleaved frame could produce a wrong answer rather than an error has now
+  been moved across. What remains is benign by comparison: commissioning's
+  TERMINATE / INITIALISE / RANDOMIZE opening is still three independent
+  transactions, and the ESPHome console's `dtrcheck` and `iconfig` paths still
+  assemble their own DTR setup steps. An interleaved frame in either case costs
+  a retry, not a corrupted reading.
 - Give `dali_sched_reset()` a defined contract: complete every queued and active
   transaction with an error before clearing state instead of dropping their
   callbacks. The native CLI `reset` verb currently orphans its diagnostic sync
@@ -482,11 +507,13 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   negative or absent-device answer costs four reply windows (about 140 ms).
   Refresh passes and scans pay that for every silent address.
 - Audit the remaining retry budgets for commands that mutate device state the
-  way READ MEMORY LOCATION advances DTR0. The known cases are fixed: memory
-  reads, the ENABLE DEVICE TYPE pairs, and QUERY NEXT DEVICE TYPE all now run as
-  sequences whose state-advancing steps have no retries. `dali_discovery_query_u8()`
-  still retries every query it issues, which is safe only while the queries left
-  on that path stay idempotent — they are today, but nothing enforces it.
+  way READ MEMORY LOCATION advances DTR0. Four cases are fixed: memory reads,
+  the ENABLE DEVICE TYPE pairs, QUERY NEXT DEVICE TYPE, and QUERY COLOUR VALUE
+  all now run as sequences whose state-advancing steps have no retries.
+  `dali_discovery_query_u8()` still retries every query it issues, which is safe
+  only while the queries left on that path stay idempotent — they are today, but
+  nothing enforces it. The pattern to check for is a query whose reply depends
+  on a register the same query modifies.
 - Handle remaining non-console enqueue failures in identify, diagnostic, and
   headless-dispatch paths, and expose queue depth/high-water/drop diagnostics.
 - Update light-command deduplication only after confirmed transmission, or
