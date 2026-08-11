@@ -50,6 +50,37 @@ adding broad new device support.
 
 ### Verified locally on 2026-08-11
 
+- Discovery's order-dependent query groups now run as sequences instead of
+  independent transactions. `dali_discovery_build_device_type_query_sequence()`
+  pairs ENABLE DEVICE TYPE with the query it enables,
+  `dali_discovery_build_groups_sequence()` carries both group queries, and
+  `dali_discovery_build_device_types_sequence()` holds the whole multi-type
+  enumeration. With an atomic transport nothing can be interleaved, so the DT6
+  and DT8 enrichment bytes recorded during a busy scan can no longer be read
+  under a device type that an intervening frame already cleared.
+- The same change removes two retry hazards of the READ MEMORY LOCATION kind.
+  The DT query step carries no retry budget, because ENABLE DEVICE TYPE is
+  consumed by the command that follows it and a lone retransmission would be
+  answered under the device's default type. No step of the enumeration retries
+  either, because QUERY NEXT DEVICE TYPE advances the device's own list and a
+  repeated step would skip a type. Both previously retried once.
+- The enumeration is a fixed six-step block: QUERY DEVICE TYPE followed by five
+  QUERY NEXT DEVICE TYPE steps, one more than `DALI_DISCOVERY_MAX_DEVICE_TYPES`
+  so an over-long list is still reported as truncated. It re-issues QUERY DEVICE
+  TYPE as its first step so the answer sequence restarts inside the atomic
+  block. The cost is paid only by gear that reports multiple types: seven frames
+  instead of four for a two-type device, since every fixed step transmits
+  regardless of where the list ended. Single-type gear is unaffected and keeps
+  its retry budget on the standalone query.
+- Replies gathered before a failing enumeration step are still stored, so a
+  sequence that aborts part-way contributes the types it had.
+- Host vectors cover the three sequence layouts against standard-derived frames
+  and argument boundaries, the reply readers, low/high group assembly, partial
+  and failed results, the ascending-list and sentinel termination rules, and
+  truncation at capacity. All 45 discovery cases and all 22 suites pass.
+- This change is host- and compile-verified only. The atomic paths themselves
+  have not been exercised on a real bus, and no site has been re-scanned to
+  confirm the multi-type enumeration against actual DT6/DT8 gear.
 - Scheduler sequences now record one backward frame per reply-bearing step, so a
   workflow needing replies from several steps fits in one atomic queue entry.
   Replies live in a single 64-byte `DaliSequenceResult` held for the active
@@ -103,11 +134,14 @@ adding broad new device support.
   truncation, reply retention, argument handling, and the wait budget.
 - The ESPHome protocol wrapper set matches the 20 reusable C source files.
 - The ignored compile-test configuration builds the working-tree component with
-  ESPHome 2026.7.4, warning-free, at 34.9% RAM (63112 bytes) and 49.7% flash.
-  This is a newer ESPHome than the 2026.6.2 recorded below; the three pinned
-  YAMLs were not re-checked against it.
+  ESPHome 2026.7.4 (ESP-IDF 5.5.5), warning-free, at 34.9% RAM (63144 bytes) and
+  49.9% flash (916335 bytes). This is a newer ESPHome than the 2026.6.2 recorded
+  below; the three pinned YAMLs were not re-checked against it.
+  `_local/dali-diag-local.yaml` had been switched to the `v1.0.1` git source and
+  was restored to `type: local` with `path: ../esphome/components`, without
+  which the compile test verifies the release rather than the working tree.
 - The native ESP-IDF firmware builds warning-free with ESP-IDF 6.0.1; the
-  application binary uses 22% of its partition.
+  application binary uses 22% of its partition (0x38060 bytes).
 - A C++ translation unit mirroring the ESPHome memory-read callback compiles
   against the new API, confirming the signature and accessors work from C++.
 - This change is host- and compile-verified only; it has not been run on hardware.
@@ -208,9 +242,10 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
 - Scheduler sequences run contiguously and report a `DaliSequenceResult` holding
   the overall error, the failing step, the steps attempted, and one backward
   frame per reply-bearing step. This is the primitive the atomic transaction
-  facility needs. Multi-byte input polling is built on it through
-  `dali_input_poll_build_value_sequence()`; discovery, commissioning, and memory
-  reads still issue independent transactions.
+  facility needs. Multi-byte input polling, memory reads, and discovery's
+  ENABLE DEVICE TYPE pairs, group query, and multi-type enumeration are built on
+  it. Commissioning still issues independent transactions, as do discovery's
+  remaining single, order-independent queries.
 - Part 103 events are decoded into canonical source fields, reject command and
   reserved frames, preserve all ten event-information bits, and use the sparse
   Part 301/type 1 event values. Independent vectors cover all five normal source
@@ -387,32 +422,35 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   send-twice commands, discovery, and commissioning. Sequences already execute
   contiguously and report a reply per step; multi-byte input polling and memory
   reads are built on them, and `DaliTransport` now carries an atomic-sequence
-  entry point that both real transports implement. The remaining work is to move
-  the workflows themselves across: discovery's ENABLE DEVICE TYPE pairs, its
-  two-frame group query, and commissioning's SEARCH ADDRH/M/L triple plus its
-  PROGRAM/VERIFY pair all still issue independent transactions even though the
-  transport can now group them.
+  entry point that both real transports implement. Discovery has been moved
+  across: its ENABLE DEVICE TYPE pairs, its two-frame group query, and its
+  multi-type enumeration are sequences. The remaining work is commissioning's
+  SEARCH ADDRH/M/L triple and its PROGRAM/VERIFY pair, which still issue
+  independent transactions even though the transport can now group them.
 - Give `dali_sched_reset()` a defined contract: complete every queued and active
   transaction with an error before clearing state instead of dropping their
   callbacks. The native CLI `reset` verb currently orphans its diagnostic sync
   slots, which stay `in_use` permanently and make every synchronous CLI verb
   return BUSY until reboot. The planned ESPHome bus-fault recovery would hit the
   same trap through the console `pending` results and the refresh in-flight flag.
-- Make scans exclusive. Only the light-refresh pump observes `scan_running_`
-  today; sensor polls, identify blinking, headless dispatch actions, and Home
-  Assistant light writes all keep enqueuing during a scan. Because discovery
-  sends ENABLE DEVICE TYPE and its follow-up query as two separate transactions,
-  an interleaved frame clears the enabled device type, so DT6 and DT8 enrichment
-  bytes recorded during a busy scan can be wrong.
+- Decide whether scans still need to be exclusive. Only the light-refresh pump
+  observes `scan_running_` today; sensor polls, identify blinking, headless
+  dispatch actions, and Home Assistant light writes all keep enqueuing during a
+  scan. The concrete corruption this used to cause is gone — discovery's
+  order-dependent queries are now atomic sequences, so an interleaved frame can
+  no longer clear an enabled device type mid-workflow. What remains is scan
+  duration under contention rather than wrong data, so exclusivity is now a
+  performance question, not a correctness one.
 - Make the reply retry budget a per-call-site decision. `dali_control_query()`
   gives every reply-bearing transaction `DALI_MAX_RETRIES`, so a semantically
   negative or absent-device answer costs four reply windows (about 140 ms).
   Refresh passes and scans pay that for every silent address.
 - Audit the remaining retry budgets for commands that mutate device state the
-  way READ MEMORY LOCATION advances DTR0. That specific case is fixed — memory
-  reads now run as sequences whose read steps have no retries — but
-  `dali_discovery_query_u8()` still retries every query it issues, which is only
-  safe while those queries stay idempotent.
+  way READ MEMORY LOCATION advances DTR0. The known cases are fixed: memory
+  reads, the ENABLE DEVICE TYPE pairs, and QUERY NEXT DEVICE TYPE all now run as
+  sequences whose state-advancing steps have no retries. `dali_discovery_query_u8()`
+  still retries every query it issues, which is safe only while the queries left
+  on that path stay idempotent — they are today, but nothing enforces it.
 - Handle remaining non-console enqueue failures in identify, diagnostic, and
   headless-dispatch paths, and expose queue depth/high-water/drop diagnostics.
 - Update light-command deduplication only after confirmed transmission, or

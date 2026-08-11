@@ -10,40 +10,59 @@
 #define DALI_DISCOVERY_DEVICE_TYPE_NONE_OR_END 0xFEu
 #define DALI_DISCOVERY_DEVICE_TYPE_MULTIPLE    0xFFu
 
+_Static_assert(DALI_SEQUENCE_MAX_STEPS >= DALI_DISCOVERY_DEVICE_TYPES_SEQUENCE_STEPS,
+               "device-type enumeration must fit in one sequence");
+
 typedef DaliError (*DaliDiscoveryInputQueryBuilder)(uint8_t addr,
                                                     uint8_t instance,
                                                     DaliFrame *out);
 
-/* Send ENABLE DEVICE TYPE N (no reply) then a query, return the byte. */
+static void discovery_store_device_type(DaliDiscoveryDeviceInfo *device,
+                                        uint8_t type);
+
+static bool transport_valid(const DaliDiscoveryTransport *transport)
+{
+    return transport != NULL && transport->transact != NULL;
+}
+
+/* Send ENABLE DEVICE TYPE N and its query as one group, return the byte. */
 static DaliError discovery_query_dt_typed(const DaliDiscoveryTransport *transport,
-                                          DaliFrame enable,
+                                          uint8_t device_type,
                                           const DaliFrame *query,
                                           uint8_t *out)
 {
-    DaliError err = transport->transact(&enable, false, 0u, false, NULL, transport->ctx);
+    if (!transport_valid(transport) || out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliSequence seq;
+    DaliError err = dali_discovery_build_device_type_query_sequence(device_type,
+                                                                    query,
+                                                                    &seq);
     if (err != DALI_OK) {
         return err;
     }
-    return dali_discovery_query_u8(transport, query, out);
+
+    DaliSequenceResult result;
+    err = dali_transport_run_sequence(transport, &seq, &result);
+    if (err != DALI_OK) {
+        return err;
+    }
+    return dali_discovery_u8_from_sequence(&result, DALI_DISCOVERY_DT_STEP_QUERY, out);
 }
 
 static DaliError discovery_query_dt6(const DaliDiscoveryTransport *transport,
                                      const DaliFrame *query,
                                      uint8_t *out)
 {
-    return discovery_query_dt_typed(transport, dali_dt6_enable(), query, out);
+    return discovery_query_dt_typed(transport, 6u, query, out);
 }
 
 static DaliError discovery_query_dt8(const DaliDiscoveryTransport *transport,
                                      const DaliFrame *query,
                                      uint8_t *out)
 {
-    return discovery_query_dt_typed(transport, dali_dt8_enable(), query, out);
-}
-
-static bool transport_valid(const DaliDiscoveryTransport *transport)
-{
-    return transport != NULL && transport->transact != NULL;
+    return discovery_query_dt_typed(transport, 8u, query, out);
 }
 
 bool dali_discovery_has_device_type(const DaliDiscoveryDeviceInfo *device, uint8_t type)
@@ -139,6 +158,225 @@ DaliError dali_discovery_inventory_update_input_device(
     return DALI_OK;
 }
 
+/* ---------------------------------------------------------------------------
+ * Sequence builders and result readers
+ * --------------------------------------------------------------------------*/
+
+DaliError dali_discovery_build_device_type_query_sequence(uint8_t device_type,
+                                                          const DaliFrame *query,
+                                                          DaliSequence *out)
+{
+    if (query == NULL || out == NULL ||
+        query->bit_length != DALI_FORWARD_FRAME_BITS) {
+        return DALI_ERR_INVALID;
+    }
+
+    /* The protocol layer owns the valid device-type range; a rejected type
+     * comes back as a zeroed frame. */
+    DaliFrame enable = dali_cmd_enable_device_type(device_type);
+    if (enable.bit_length != DALI_FORWARD_FRAME_BITS) {
+        return DALI_ERR_INVALID;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->steps[DALI_DISCOVERY_DT_STEP_ENABLE].frame = enable;
+
+    /* No retries: ENABLE DEVICE TYPE is consumed by the command that follows
+     * it, so a lone retransmission of the query would be answered under the
+     * device's default type. Retry the pair instead. */
+    out->steps[DALI_DISCOVERY_DT_STEP_QUERY].frame       = *query;
+    out->steps[DALI_DISCOVERY_DT_STEP_QUERY].needs_reply = true;
+
+    out->step_count = DALI_DISCOVERY_DT_SEQUENCE_STEPS;
+    return DALI_OK;
+}
+
+DaliError dali_discovery_build_groups_sequence(uint8_t addr, DaliSequence *out)
+{
+    if (out == NULL || addr >= DALI_SHORT_ADDRESS_COUNT) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = addr };
+    DaliFrame low_query;
+    DaliError err = dali_control_build_query(target, DALI_CMD_QUERY_GROUPS_0_7,
+                                             0u, &low_query);
+    if (err != DALI_OK) {
+        return err;
+    }
+    DaliFrame high_query;
+    err = dali_control_build_query(target, DALI_CMD_QUERY_GROUPS_8_15,
+                                   0u, &high_query);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    memset(out, 0, sizeof(*out));
+
+    /* Both queries are read-only and independent, so a lone step may retry. */
+    DaliSequenceStep *low = &out->steps[DALI_DISCOVERY_GROUPS_STEP_0_7];
+    low->frame        = low_query;
+    low->needs_reply  = true;
+    low->retries_left = DALI_DISCOVERY_QUERY_RETRIES_LEFT;
+
+    DaliSequenceStep *high = &out->steps[DALI_DISCOVERY_GROUPS_STEP_8_15];
+    high->frame        = high_query;
+    high->needs_reply  = true;
+    high->retries_left = DALI_DISCOVERY_QUERY_RETRIES_LEFT;
+
+    out->step_count = DALI_DISCOVERY_GROUPS_SEQUENCE_STEPS;
+    return DALI_OK;
+}
+
+DaliError dali_discovery_build_device_types_sequence(uint8_t addr,
+                                                     DaliSequence *out)
+{
+    if (out == NULL || addr >= DALI_SHORT_ADDRESS_COUNT) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = addr };
+    DaliFrame first_query;
+    DaliError err = dali_control_build_query(target, DALI_CMD_QUERY_DEVICE_TYPE,
+                                             0u, &first_query);
+    if (err != DALI_OK) {
+        return err;
+    }
+    DaliFrame next_query;
+    err = dali_control_build_query(target, DALI_CMD_QUERY_NEXT_DEVICE_TYPE,
+                                   0u, &next_query);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    memset(out, 0, sizeof(*out));
+
+    /* No retries anywhere: QUERY NEXT DEVICE TYPE advances the device's
+     * enumeration, so a repeated step would skip a type. The leading
+     * QUERY DEVICE TYPE restarts the answer sequence, which is only meaningful
+     * as the first step of this block, so it does not retry alone either. */
+    out->steps[DALI_DISCOVERY_DEVICE_TYPES_STEP_FIRST].frame       = first_query;
+    out->steps[DALI_DISCOVERY_DEVICE_TYPES_STEP_FIRST].needs_reply = true;
+
+    for (uint8_t i = 0u; i < DALI_DISCOVERY_DEVICE_TYPES_NEXT_STEPS; i++) {
+        DaliSequenceStep *step = &out->steps[1u + i];
+        step->frame       = next_query;
+        step->needs_reply = true;
+    }
+
+    out->step_count = DALI_DISCOVERY_DEVICE_TYPES_SEQUENCE_STEPS;
+    return DALI_OK;
+}
+
+DaliError dali_discovery_u8_from_sequence(const DaliSequenceResult *result,
+                                          uint8_t step,
+                                          uint8_t *out)
+{
+    if (result == NULL || out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    if (result->result != DALI_OK) {
+        return result->result;
+    }
+
+    DaliFrame reply;
+    if (!dali_sequence_result_reply(result, step, &reply) ||
+        reply.bit_length != DALI_BACKWARD_FRAME_BITS) {
+        return DALI_ERR_MALFORMED;
+    }
+
+    *out = (uint8_t)(reply.data & 0xFFu);
+    return DALI_OK;
+}
+
+DaliError dali_discovery_groups_from_sequence(const DaliSequenceResult *result,
+                                              uint16_t *groups_out)
+{
+    if (groups_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    uint8_t low = 0u;
+    DaliError err = dali_discovery_u8_from_sequence(result,
+                                                    DALI_DISCOVERY_GROUPS_STEP_0_7,
+                                                    &low);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    uint8_t high = 0u;
+    err = dali_discovery_u8_from_sequence(result,
+                                          DALI_DISCOVERY_GROUPS_STEP_8_15,
+                                          &high);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    *groups_out = (uint16_t)low | ((uint16_t)high << 8u);
+    return DALI_OK;
+}
+
+/* Read one enumeration step, treating anything unusable as end-of-list. */
+static bool device_types_step_value(const DaliSequenceResult *result,
+                                    uint8_t step,
+                                    uint8_t *out)
+{
+    DaliFrame reply;
+    if (!dali_sequence_result_reply(result, step, &reply) ||
+        reply.bit_length != DALI_BACKWARD_FRAME_BITS) {
+        return false;
+    }
+    *out = (uint8_t)(reply.data & 0xFFu);
+    return true;
+}
+
+DaliError dali_discovery_device_types_from_sequence(const DaliSequenceResult *result,
+                                                    DaliDiscoveryDeviceInfo *device)
+{
+    if (result == NULL || device == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    /* Deliberately not gated on result->result: a sequence that failed part-way
+     * still carries the replies collected before the failing step, and those
+     * types are as good as any. */
+    uint8_t first = 0u;
+    if (!device_types_step_value(result,
+                                 DALI_DISCOVERY_DEVICE_TYPES_STEP_FIRST,
+                                 &first) ||
+        first == DALI_DISCOVERY_DEVICE_TYPE_NONE_OR_END) {
+        return DALI_ERR_MALFORMED;
+    }
+
+    if (first != DALI_DISCOVERY_DEVICE_TYPE_MULTIPLE) {
+        /* The device answered a single type after all. */
+        discovery_store_device_type(device, first);
+        return DALI_OK;
+    }
+
+    for (uint8_t i = 0u; i < DALI_DISCOVERY_DEVICE_TYPES_NEXT_STEPS; i++) {
+        uint8_t type = 0u;
+        if (!device_types_step_value(result, (uint8_t)(1u + i), &type) ||
+            type == DALI_DISCOVERY_DEVICE_TYPE_NONE_OR_END ||
+            type == DALI_DISCOVERY_DEVICE_TYPE_MULTIPLE) {
+            break;
+        }
+        /* The list must ascend; a repeat or a step backwards means the answer
+         * sequence lost its place. */
+        if (device->device_type_count > 0u &&
+            type <= device->device_types[device->device_type_count - 1u]) {
+            break;
+        }
+
+        discovery_store_device_type(device, type);
+        if (device->device_types_truncated) {
+            break;
+        }
+    }
+
+    return device->device_type_count > 0u ? DALI_OK : DALI_ERR_MALFORMED;
+}
+
 DaliError dali_discovery_query_u8(const DaliDiscoveryTransport *transport,
                                   const DaliFrame *frame,
                                   uint8_t *out)
@@ -207,31 +445,19 @@ DaliError dali_discovery_query_groups(const DaliDiscoveryTransport *transport,
         return DALI_ERR_INVALID;
     }
 
-    DaliFrame frame;
-    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = addr };
-
-    DaliError err = dali_control_build_query(target, DALI_CMD_QUERY_GROUPS_0_7, 0u, &frame);
-    if (err != DALI_OK) {
-        return err;
-    }
-    uint8_t low = 0u;
-    err = dali_discovery_query_u8(transport, &frame, &low);
+    DaliSequence seq;
+    DaliError err = dali_discovery_build_groups_sequence(addr, &seq);
     if (err != DALI_OK) {
         return err;
     }
 
-    err = dali_control_build_query(target, DALI_CMD_QUERY_GROUPS_8_15, 0u, &frame);
-    if (err != DALI_OK) {
-        return err;
-    }
-    uint8_t high = 0u;
-    err = dali_discovery_query_u8(transport, &frame, &high);
+    DaliSequenceResult result;
+    err = dali_transport_run_sequence(transport, &seq, &result);
     if (err != DALI_OK) {
         return err;
     }
 
-    *groups_out = (uint16_t)low | ((uint16_t)high << 8u);
-    return DALI_OK;
+    return dali_discovery_groups_from_sequence(&result, groups_out);
 }
 
 DaliError dali_discovery_query_device_type(const DaliDiscoveryTransport *transport,
@@ -310,30 +536,20 @@ static void discovery_enrich_device_types(const DaliDiscoveryTransport *transpor
         return;
     }
 
-    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = addr };
-    DaliFrame next_query;
-    if (dali_control_build_query(target, DALI_CMD_QUERY_NEXT_DEVICE_TYPE,
-                                 0u, &next_query) != DALI_OK) {
+    /* Multiple types: the reply to each QUERY NEXT DEVICE TYPE depends on how
+     * many came before it, so the whole enumeration has to run as one block.
+     * The plain query above stays outside it — that is the common single-type
+     * path, and it keeps its retry budget. */
+    DaliSequence seq;
+    if (dali_discovery_build_device_types_sequence(addr, &seq) != DALI_OK) {
         return;
     }
 
-    for (;;) {
-        uint8_t next_type = 0u;
-        if (dali_discovery_query_u8(transport, &next_query, &next_type) != DALI_OK ||
-            next_type == DALI_DISCOVERY_DEVICE_TYPE_NONE_OR_END ||
-            next_type == DALI_DISCOVERY_DEVICE_TYPE_MULTIPLE) {
-            return;
-        }
-        if (device->device_type_count > 0u &&
-            next_type <= device->device_types[device->device_type_count - 1u]) {
-            return;
-        }
-
-        discovery_store_device_type(device, next_type);
-        if (device->device_types_truncated) {
-            return;
-        }
-    }
+    DaliSequenceResult result;
+    (void)dali_transport_run_sequence(transport, &seq, &result);
+    /* Types gathered before a failing step are still worth keeping, so the
+     * result is read on both the success and the failure path. */
+    (void)dali_discovery_device_types_from_sequence(&result, device);
 }
 
 static void discovery_enrich_device(const DaliDiscoveryTransport *transport,
