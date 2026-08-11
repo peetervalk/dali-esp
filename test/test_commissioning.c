@@ -513,9 +513,259 @@ void test_invalid_arguments_are_rejected(void)
     TEST_ASSERT_FALSE(yes);
 }
 
+/* ---------------------------------------------------------------------------
+ * Sequence builders and result readers
+ *
+ * Frames are derived from the IEC 62386-102 special-command opcodes rather than
+ * from the builders: SEARCH ADDRH/M/L are 0xB1/0xB3/0xB5, COMPARE is 0xA9,
+ * PROGRAM SHORT ADDRESS is 0xB7 and VERIFY SHORT ADDRESS is 0xB9, each carrying
+ * its parameter in the low byte.
+ * --------------------------------------------------------------------------*/
+
+static void assert_search_steps(const DaliSequence *seq)
+{
+    /* random address 0x123456 splits into H=0x12, M=0x34, L=0x56 */
+    TEST_ASSERT_EQUAL_HEX32(0xB112u,
+        seq->steps[DALI_COMMISSIONING_SEARCH_STEP_ADDRH].frame.data);
+    TEST_ASSERT_EQUAL_HEX32(0xB334u,
+        seq->steps[DALI_COMMISSIONING_SEARCH_STEP_ADDRM].frame.data);
+    TEST_ASSERT_EQUAL_HEX32(0xB556u,
+        seq->steps[DALI_COMMISSIONING_SEARCH_STEP_ADDRL].frame.data);
+
+    for (uint8_t i = 0u; i < DALI_COMMISSIONING_SEARCH_SEQUENCE_STEPS; i++) {
+        TEST_ASSERT_EQUAL_UINT8(DALI_FORWARD_FRAME_BITS,
+                                seq->steps[i].frame.bit_length);
+        TEST_ASSERT_FALSE(seq->steps[i].needs_reply);
+        TEST_ASSERT_FALSE(seq->steps[i].send_twice);
+        TEST_ASSERT_EQUAL_UINT8(0u, seq->steps[i].retries_left);
+    }
+}
+
+void test_build_search_sequence_layout(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_build_search_sequence(0x123456u, &seq));
+    TEST_ASSERT_EQUAL_UINT8(DALI_COMMISSIONING_SEARCH_SEQUENCE_STEPS,
+                            seq.step_count);
+    assert_search_steps(&seq);
+}
+
+void test_build_search_compare_sequence_layout(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_build_search_compare_sequence(0x123456u,
+                                                                        &seq));
+    TEST_ASSERT_EQUAL_UINT8(DALI_COMMISSIONING_SEARCH_COMPARE_SEQUENCE_STEPS,
+                            seq.step_count);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT8(DALI_SEQUENCE_MAX_STEPS, seq.step_count);
+    assert_search_steps(&seq);
+
+    const DaliSequenceStep *compare =
+        &seq.steps[DALI_COMMISSIONING_SEARCH_COMPARE_STEP_COMPARE];
+    TEST_ASSERT_EQUAL_HEX32(0xA900u, compare->frame.data);
+    TEST_ASSERT_TRUE(compare->needs_reply);
+    TEST_ASSERT_FALSE(compare->send_twice);
+    /* COMPARE is idempotent, and a YES lost to noise would mislead the search. */
+    TEST_ASSERT_EQUAL_UINT8(DALI_COMMISSIONING_QUERY_RETRIES_LEFT,
+                            compare->retries_left);
+}
+
+void test_build_program_verify_sequence_layout(void)
+{
+    DaliSequence seq;
+
+    /* short address 18 encodes as (18 << 1) | 1 = 0x25 */
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_build_program_verify_sequence(18u, &seq));
+    TEST_ASSERT_EQUAL_UINT8(DALI_COMMISSIONING_PROGRAM_VERIFY_SEQUENCE_STEPS,
+                            seq.step_count);
+
+    const DaliSequenceStep *program =
+        &seq.steps[DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_PROGRAM];
+    TEST_ASSERT_EQUAL_HEX32(0xB725u, program->frame.data);
+    TEST_ASSERT_FALSE(program->needs_reply);
+    TEST_ASSERT_FALSE(program->send_twice);
+    TEST_ASSERT_EQUAL_UINT8(0u, program->retries_left);
+
+    const DaliSequenceStep *verify =
+        &seq.steps[DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_VERIFY];
+    TEST_ASSERT_EQUAL_HEX32(0xB925u, verify->frame.data);
+    TEST_ASSERT_TRUE(verify->needs_reply);
+    TEST_ASSERT_EQUAL_UINT8(DALI_COMMISSIONING_QUERY_RETRIES_LEFT,
+                            verify->retries_left);
+
+    /* Both steps must address the same device. */
+    TEST_ASSERT_EQUAL_HEX8((uint8_t)(program->frame.data & 0xFFu),
+                           (uint8_t)(verify->frame.data & 0xFFu));
+}
+
+void test_sequence_builders_reject_bad_arguments(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_commissioning_build_search_sequence(0u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_commissioning_build_search_sequence(
+                          DALI_RANDOM_ADDRESS_MAX + 1u, &seq));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_build_search_sequence(
+                          DALI_RANDOM_ADDRESS_MAX, &seq));
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_commissioning_build_search_compare_sequence(0u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_commissioning_build_search_compare_sequence(
+                          DALI_RANDOM_ADDRESS_MAX + 1u, &seq));
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_commissioning_build_program_verify_sequence(0u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_commissioning_build_program_verify_sequence(
+                          DALI_SHORT_ADDRESS_COUNT, &seq));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_build_program_verify_sequence(
+                          DALI_SHORT_ADDRESS_COUNT - 1u, &seq));
+}
+
+/* Build a completed result by hand so the readers are tested without a bus. */
+static void result_reset(DaliSequenceResult *result, uint8_t steps_run)
+{
+    memset(result, 0, sizeof(*result));
+    result->result      = DALI_OK;
+    result->failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
+    result->steps_run   = steps_run;
+}
+
+static void seed_reply(DaliSequenceResult *result,
+                       uint8_t step,
+                       uint8_t value,
+                       uint8_t bit_length)
+{
+    result->replies[step] = (DaliFrame){ .data = value, .bit_length = bit_length };
+    result->reply_mask |= (uint8_t)(1u << step);
+}
+
+static void result_fail(DaliSequenceResult *result, DaliError err, uint8_t step)
+{
+    result->result      = err;
+    result->failed_step = step;
+    result->steps_run   = (uint8_t)(step + 1u);
+}
+
+void test_compare_from_sequence_reads_yes_and_no(void)
+{
+    DaliSequenceResult result;
+    bool yes = false;
+
+    result_reset(&result, DALI_COMMISSIONING_SEARCH_COMPARE_SEQUENCE_STEPS);
+    seed_reply(&result, DALI_COMMISSIONING_SEARCH_COMPARE_STEP_COMPARE,
+               DALI_YES_RESPONSE, DALI_BACKWARD_FRAME_BITS);
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_compare_from_sequence(&result, &yes));
+    TEST_ASSERT_TRUE(yes);
+
+    /* Any other value is not YES. */
+    result_reset(&result, DALI_COMMISSIONING_SEARCH_COMPARE_SEQUENCE_STEPS);
+    seed_reply(&result, DALI_COMMISSIONING_SEARCH_COMPARE_STEP_COMPARE,
+               0x00u, DALI_BACKWARD_FRAME_BITS);
+    yes = true;
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_compare_from_sequence(&result, &yes));
+    TEST_ASSERT_FALSE(yes);
+
+    /* A silent reply window on the COMPARE step is the standard NO. */
+    result_reset(&result, 0u);
+    result_fail(&result, DALI_ERR_TIMEOUT,
+                DALI_COMMISSIONING_SEARCH_COMPARE_STEP_COMPARE);
+    yes = true;
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_compare_from_sequence(&result, &yes));
+    TEST_ASSERT_FALSE(yes);
+}
+
+void test_compare_from_sequence_does_not_mistake_a_failed_write_for_no(void)
+{
+    DaliSequenceResult result;
+    bool yes = true;
+
+    /* A search-address write that never made it out must surface as an error;
+     * reporting NO would send the binary search past a real device. */
+    result_reset(&result, 0u);
+    result_fail(&result, DALI_ERR_TIMEOUT, DALI_COMMISSIONING_SEARCH_STEP_ADDRM);
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT,
+                      dali_commissioning_compare_from_sequence(&result, &yes));
+    TEST_ASSERT_TRUE(yes);
+
+    /* A non-timeout failure on the COMPARE step is also a real error. */
+    result_reset(&result, 0u);
+    result_fail(&result, DALI_ERR_BUS_STUCK,
+                DALI_COMMISSIONING_SEARCH_COMPARE_STEP_COMPARE);
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK,
+                      dali_commissioning_compare_from_sequence(&result, &yes));
+
+    /* So is a nominally successful sequence with no COMPARE reply. */
+    result_reset(&result, DALI_COMMISSIONING_SEARCH_COMPARE_SEQUENCE_STEPS);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_commissioning_compare_from_sequence(&result, &yes));
+
+    /* And a reply that came back the wrong width. */
+    result_reset(&result, DALI_COMMISSIONING_SEARCH_COMPARE_SEQUENCE_STEPS);
+    seed_reply(&result, DALI_COMMISSIONING_SEARCH_COMPARE_STEP_COMPARE,
+               DALI_YES_RESPONSE, DALI_FORWARD_FRAME_BITS);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_commissioning_compare_from_sequence(&result, &yes));
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_commissioning_compare_from_sequence(&result, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_commissioning_compare_from_sequence(NULL, &yes));
+}
+
+void test_verify_from_sequence_reads_confirmation_and_failures(void)
+{
+    DaliSequenceResult result;
+    bool verified = false;
+
+    result_reset(&result, DALI_COMMISSIONING_PROGRAM_VERIFY_SEQUENCE_STEPS);
+    seed_reply(&result, DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_VERIFY,
+               DALI_YES_RESPONSE, DALI_BACKWARD_FRAME_BITS);
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_verify_from_sequence(&result, &verified));
+    TEST_ASSERT_TRUE(verified);
+
+    /* A silent VERIFY means the device did not confirm — not a bus failure. */
+    result_reset(&result, 0u);
+    result_fail(&result, DALI_ERR_TIMEOUT,
+                DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_VERIFY);
+    verified = true;
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_verify_from_sequence(&result, &verified));
+    TEST_ASSERT_FALSE(verified);
+
+    /* A PROGRAM that never went out must not be reported as "not confirmed",
+     * which would look like a device problem rather than a transport one. */
+    result_reset(&result, 0u);
+    result_fail(&result, DALI_ERR_TIMEOUT,
+                DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_PROGRAM);
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT,
+                      dali_commissioning_verify_from_sequence(&result, &verified));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_build_search_sequence_layout);
+    RUN_TEST(test_build_search_compare_sequence_layout);
+    RUN_TEST(test_build_program_verify_sequence_layout);
+    RUN_TEST(test_sequence_builders_reject_bad_arguments);
+    RUN_TEST(test_compare_from_sequence_reads_yes_and_no);
+    RUN_TEST(test_compare_from_sequence_does_not_mistake_a_failed_write_for_no);
+    RUN_TEST(test_verify_from_sequence_reads_confirmation_and_failures);
     RUN_TEST(test_short_address_encoding_round_trip);
     RUN_TEST(test_set_search_address_sends_h_m_l_special_commands);
     RUN_TEST(test_compare_timeout_is_no);

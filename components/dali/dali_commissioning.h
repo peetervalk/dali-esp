@@ -63,6 +63,73 @@ uint8_t dali_commissioning_encode_short_address(uint8_t short_address);
 DaliError dali_commissioning_decode_short_address(uint8_t encoded,
                                                   uint8_t *short_address_out);
 
+/* ---------------------------------------------------------------------------
+ * Sequenced commissioning steps
+ *
+ * Commissioning is a chain of commands whose meaning depends on what preceded
+ * them: COMPARE answers about whatever the last SEARCH ADDRH/M/L triple loaded,
+ * and VERIFY SHORT ADDRESS answers about whatever PROGRAM SHORT ADDRESS just
+ * wrote. Those groups are built as sequences and run through
+ * dali_transport_run_sequence(), so an atomic transport cannot let anything
+ * separate them. On the fallback path the same frames are issued individually.
+ *
+ * These sequences do not address the known COMPARE collision problem: when
+ * several devices answer at once the reply is undecodable and the PHY drops it,
+ * which still reads as NO. Atomicity keeps other traffic out; it does not make
+ * a collided reply readable.
+ * --------------------------------------------------------------------------*/
+
+/* SEARCH ADDRH, SEARCH ADDRM, SEARCH ADDRL. */
+#define DALI_COMMISSIONING_SEARCH_SEQUENCE_STEPS 3u
+#define DALI_COMMISSIONING_SEARCH_STEP_ADDRH     0u
+#define DALI_COMMISSIONING_SEARCH_STEP_ADDRM     1u
+#define DALI_COMMISSIONING_SEARCH_STEP_ADDRL     2u
+
+/* The search triple plus the COMPARE it exists to answer. */
+#define DALI_COMMISSIONING_SEARCH_COMPARE_SEQUENCE_STEPS 4u
+#define DALI_COMMISSIONING_SEARCH_COMPARE_STEP_COMPARE   3u
+
+/* PROGRAM SHORT ADDRESS then VERIFY SHORT ADDRESS. */
+#define DALI_COMMISSIONING_PROGRAM_VERIFY_SEQUENCE_STEPS 2u
+#define DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_PROGRAM   0u
+#define DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_VERIFY    1u
+
+/* Build the three search-address writes for one 24-bit random address. */
+DaliError dali_commissioning_build_search_sequence(uint32_t random_address,
+                                                   DaliSequence *out);
+
+/*
+ * Build one complete binary-search probe: load the search address, then ask
+ * COMPARE about it. This is the form the automated search uses, because a frame
+ * landing between the triple and the COMPARE would have it answer about a
+ * different search address.
+ */
+DaliError dali_commissioning_build_search_compare_sequence(uint32_t random_address,
+                                                           DaliSequence *out);
+
+/* Build the assignment pair for one short address. */
+DaliError dali_commissioning_build_program_verify_sequence(uint8_t short_address,
+                                                           DaliSequence *out);
+
+/*
+ * Read the COMPARE answer out of a completed search-compare sequence.
+ *
+ * A reply-window timeout on the COMPARE step is the standard way of saying NO,
+ * so it is reported as yes = false with DALI_OK. A failure on any earlier step
+ * is a real transport error and is returned as such — without that distinction
+ * a failed search-address write would silently read as "no device here".
+ */
+DaliError dali_commissioning_compare_from_sequence(const DaliSequenceResult *result,
+                                                   bool *yes_out);
+
+/*
+ * Read the VERIFY answer out of a completed program-verify sequence. A timeout
+ * on the VERIFY step means the device did not confirm, reported as
+ * verified = false with DALI_OK; an earlier failure is returned as an error.
+ */
+DaliError dali_commissioning_verify_from_sequence(const DaliSequenceResult *result,
+                                                  bool *verified_out);
+
 DaliError dali_commissioning_set_search_address(
     const DaliDiscoveryTransport *transport,
     uint32_t random_address);

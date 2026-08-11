@@ -50,6 +50,26 @@ adding broad new device support.
 
 ### Verified locally on 2026-08-11
 
+- Commissioning's order-dependent groups now run as sequences too.
+  `dali_commissioning_build_search_sequence()` carries the SEARCH ADDRH/M/L
+  triple, `dali_commissioning_build_search_compare_sequence()` extends it with
+  the COMPARE the triple exists to answer, and
+  `dali_commissioning_build_program_verify_sequence()` pairs PROGRAM SHORT
+  ADDRESS with its VERIFY read-back. The binary search and the assignment loop
+  use the combined forms, so no frame can land between a search-address write
+  and the COMPARE that interprets it, or between an address write and its
+  confirmation.
+- The sequence readers keep the standard "silence means no" rule but scope it to
+  the query step. A reply-window timeout on COMPARE or VERIFY is still reported
+  as a negative answer with `DALI_OK`; a failure on any earlier step is returned
+  as the error it was. Previously a failed SEARCH ADDR write could not be told
+  apart from a genuine NO, which would walk the binary search past a real
+  device. Independent vectors cover both readings.
+- This does not address the COMPARE collision inversion recorded below. Several
+  devices answering at once still produce an undecodable reply that the PHY
+  drops, which reads as NO. Atomicity keeps other traffic out of the group; it
+  does not make a collided reply readable, and commissioning remains dependable
+  only with a single unaddressed device on the bus.
 - Discovery's order-dependent query groups now run as sequences instead of
   independent transactions. `dali_discovery_build_device_type_query_sequence()`
   pairs ENABLE DEVICE TYPE with the query it enables,
@@ -77,10 +97,18 @@ adding broad new device support.
 - Host vectors cover the three sequence layouts against standard-derived frames
   and argument boundaries, the reply readers, low/high group assembly, partial
   and failed results, the ascending-list and sentinel termination rules, and
-  truncation at capacity. All 45 discovery cases and all 22 suites pass.
-- This change is host- and compile-verified only. The atomic paths themselves
-  have not been exercised on a real bus, and no site has been re-scanned to
-  confirm the multi-type enumeration against actual DT6/DT8 gear.
+  truncation at capacity. All 45 discovery cases pass.
+- Commissioning vectors cover the three sequence layouts against standard-derived
+  frames, the retry budgets, argument boundaries, YES/NO/timeout readings, and
+  the distinction between a negative answer and a failed earlier step. All 16
+  commissioning cases pass, including the nine pre-existing ones unchanged: the
+  migration emits the same frames in the same order with the same retry budgets,
+  so the existing bus-level expectations still hold.
+- All 22 host suites pass.
+- These changes are host- and compile-verified only. The atomic paths themselves
+  have not been exercised on a real bus, no site has been re-scanned to confirm
+  the multi-type enumeration against actual DT6/DT8 gear, and commissioning has
+  not been re-run against hardware.
 - Scheduler sequences now record one backward frame per reply-bearing step, so a
   workflow needing replies from several steps fits in one atomic queue entry.
   Replies live in a single 64-byte `DaliSequenceResult` held for the active
@@ -141,7 +169,7 @@ adding broad new device support.
   was restored to `type: local` with `path: ../esphome/components`, without
   which the compile test verifies the release rather than the working tree.
 - The native ESP-IDF firmware builds warning-free with ESP-IDF 6.0.1; the
-  application binary uses 22% of its partition (0x38060 bytes).
+  application binary uses 22% of its partition (0x38100 bytes).
 - A C++ translation unit mirroring the ESPHome memory-read callback compiles
   against the new API, confirming the signature and accessors work from C++.
 - This change is host- and compile-verified only; it has not been run on hardware.
@@ -422,11 +450,19 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   send-twice commands, discovery, and commissioning. Sequences already execute
   contiguously and report a reply per step; multi-byte input polling and memory
   reads are built on them, and `DaliTransport` now carries an atomic-sequence
-  entry point that both real transports implement. Discovery has been moved
-  across: its ENABLE DEVICE TYPE pairs, its two-frame group query, and its
-  multi-type enumeration are sequences. The remaining work is commissioning's
-  SEARCH ADDRH/M/L triple and its PROGRAM/VERIFY pair, which still issue
-  independent transactions even though the transport can now group them.
+  entry point that both real transports implement. Discovery and commissioning
+  have both been moved across: discovery's ENABLE DEVICE TYPE pairs, group
+  query, and multi-type enumeration, and commissioning's SEARCH ADDRH/M/L
+  triple, its search-plus-COMPARE probe, and its PROGRAM/VERIFY pair are all
+  sequences. What remains is narrower, and one item is now the sharpest
+  instance of the problem: `dali_dt8_read_colour_value_16()` issues four
+  independent transactions — DTR0 = selector, ENABLE DEVICE TYPE 8,
+  QUERY COLOUR VALUE for the MSB, then QUERY CONTENT DTR0 for the LSB that the
+  gear left there. Any interleaved frame that writes DTR0 replaces the low byte
+  between the two reads, so the assembled 16-bit value is silently wrong rather
+  than failed. It fits a four-step sequence. Commissioning's
+  TERMINATE / INITIALISE / RANDOMIZE opening is also still three independent
+  transactions, though an interleaved frame there is not corrupting.
 - Give `dali_sched_reset()` a defined contract: complete every queued and active
   transaction with an error before clearing state instead of dropping their
   callbacks. The native CLI `reset` verb currently orphans its diagnostic sync

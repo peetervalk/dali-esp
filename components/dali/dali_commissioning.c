@@ -79,6 +79,170 @@ static DaliError query_special_u8(const DaliDiscoveryTransport *transport,
     return DALI_OK;
 }
 
+/* ---------------------------------------------------------------------------
+ * Sequence builders and result readers
+ * --------------------------------------------------------------------------*/
+
+/* Fill one no-reply special-command step. */
+static DaliError set_special_step(DaliSequenceStep *step,
+                                  DaliCommandId id,
+                                  uint8_t param)
+{
+    DaliFrame frame;
+    DaliError err = dali_build_special(id, param, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    step->frame = frame;
+    return DALI_OK;
+}
+
+/* The three search-address writes, shared by both search sequences. */
+static DaliError fill_search_steps(DaliSequenceStep *steps, uint32_t random_address)
+{
+    DaliError err = set_special_step(&steps[DALI_COMMISSIONING_SEARCH_STEP_ADDRH],
+                                     DALI_CMD_SEARCH_ADDRH,
+                                     (uint8_t)((random_address >> 16u) & 0xFFu));
+    if (err != DALI_OK) {
+        return err;
+    }
+    err = set_special_step(&steps[DALI_COMMISSIONING_SEARCH_STEP_ADDRM],
+                           DALI_CMD_SEARCH_ADDRM,
+                           (uint8_t)((random_address >> 8u) & 0xFFu));
+    if (err != DALI_OK) {
+        return err;
+    }
+    return set_special_step(&steps[DALI_COMMISSIONING_SEARCH_STEP_ADDRL],
+                            DALI_CMD_SEARCH_ADDRL,
+                            (uint8_t)(random_address & 0xFFu));
+}
+
+DaliError dali_commissioning_build_search_sequence(uint32_t random_address,
+                                                   DaliSequence *out)
+{
+    if (out == NULL || random_address > DALI_RANDOM_ADDRESS_MAX) {
+        return DALI_ERR_INVALID;
+    }
+
+    memset(out, 0, sizeof(*out));
+    DaliError err = fill_search_steps(out->steps, random_address);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    out->step_count = DALI_COMMISSIONING_SEARCH_SEQUENCE_STEPS;
+    return DALI_OK;
+}
+
+DaliError dali_commissioning_build_search_compare_sequence(uint32_t random_address,
+                                                           DaliSequence *out)
+{
+    if (out == NULL || random_address > DALI_RANDOM_ADDRESS_MAX) {
+        return DALI_ERR_INVALID;
+    }
+
+    memset(out, 0, sizeof(*out));
+    DaliError err = fill_search_steps(out->steps, random_address);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    DaliSequenceStep *compare =
+        &out->steps[DALI_COMMISSIONING_SEARCH_COMPARE_STEP_COMPARE];
+    err = set_special_step(compare, DALI_CMD_COMPARE, 0u);
+    if (err != DALI_OK) {
+        return err;
+    }
+    compare->needs_reply = true;
+    /* COMPARE reads no device state and the search address survives it, so
+     * retrying this step alone is safe. It is worth doing: a YES lost to noise
+     * would otherwise read as NO and send the binary search the wrong way. */
+    compare->retries_left = DALI_COMMISSIONING_QUERY_RETRIES_LEFT;
+
+    out->step_count = DALI_COMMISSIONING_SEARCH_COMPARE_SEQUENCE_STEPS;
+    return DALI_OK;
+}
+
+DaliError dali_commissioning_build_program_verify_sequence(uint8_t short_address,
+                                                           DaliSequence *out)
+{
+    if (out == NULL || short_address >= DALI_SHORT_ADDRESS_COUNT) {
+        return DALI_ERR_INVALID;
+    }
+
+    uint8_t encoded = dali_commissioning_encode_short_address(short_address);
+
+    memset(out, 0, sizeof(*out));
+    DaliError err =
+        set_special_step(&out->steps[DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_PROGRAM],
+                         DALI_CMD_PROGRAM_SHORT_ADDRESS,
+                         encoded);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    DaliSequenceStep *verify =
+        &out->steps[DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_VERIFY];
+    err = set_special_step(verify, DALI_CMD_VERIFY_SHORT_ADDRESS, encoded);
+    if (err != DALI_OK) {
+        return err;
+    }
+    verify->needs_reply = true;
+    /* VERIFY only reads back what PROGRAM wrote, so a lone retry is safe. */
+    verify->retries_left = DALI_COMMISSIONING_QUERY_RETRIES_LEFT;
+
+    out->step_count = DALI_COMMISSIONING_PROGRAM_VERIFY_SEQUENCE_STEPS;
+    return DALI_OK;
+}
+
+/*
+ * Shared reader for the two "no answer means no" queries. Only a timeout on the
+ * expected step counts as a negative answer; anything else is a real error.
+ */
+static DaliError answer_from_sequence(const DaliSequenceResult *result,
+                                      uint8_t query_step,
+                                      bool *yes_out)
+{
+    if (result == NULL || yes_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    if (result->result != DALI_OK) {
+        if (result->result == DALI_ERR_TIMEOUT &&
+            result->failed_step == query_step) {
+            *yes_out = false;
+            return DALI_OK;
+        }
+        return result->result;
+    }
+
+    DaliFrame reply;
+    if (!dali_sequence_result_reply(result, query_step, &reply) ||
+        reply.bit_length != DALI_BACKWARD_FRAME_BITS) {
+        return DALI_ERR_MALFORMED;
+    }
+
+    *yes_out = dali_is_yes((uint8_t)(reply.data & 0xFFu));
+    return DALI_OK;
+}
+
+DaliError dali_commissioning_compare_from_sequence(const DaliSequenceResult *result,
+                                                   bool *yes_out)
+{
+    return answer_from_sequence(result,
+                                DALI_COMMISSIONING_SEARCH_COMPARE_STEP_COMPARE,
+                                yes_out);
+}
+
+DaliError dali_commissioning_verify_from_sequence(const DaliSequenceResult *result,
+                                                  bool *verified_out)
+{
+    return answer_from_sequence(result,
+                                DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_VERIFY,
+                                verified_out);
+}
+
 static void emit_progress(DaliCommissioningProgressCb cb,
                           void *ctx,
                           DaliCommissioningEventKind kind,
@@ -126,26 +290,13 @@ DaliError dali_commissioning_set_search_address(
         return DALI_ERR_INVALID;
     }
 
-    DaliError err = send_special_no_reply(transport,
-                                          DALI_CMD_SEARCH_ADDRH,
-                                          (uint8_t)((random_address >> 16u) & 0xFFu),
-                                          false);
+    DaliSequence seq;
+    DaliError err = dali_commissioning_build_search_sequence(random_address, &seq);
     if (err != DALI_OK) {
         return err;
     }
 
-    err = send_special_no_reply(transport,
-                                DALI_CMD_SEARCH_ADDRM,
-                                (uint8_t)((random_address >> 8u) & 0xFFu),
-                                false);
-    if (err != DALI_OK) {
-        return err;
-    }
-
-    return send_special_no_reply(transport,
-                                 DALI_CMD_SEARCH_ADDRL,
-                                 (uint8_t)(random_address & 0xFFu),
-                                 false);
+    return dali_transport_run_sequence(transport, &seq, NULL);
 }
 
 DaliError dali_commissioning_compare(const DaliDiscoveryTransport *transport,
@@ -169,6 +320,24 @@ DaliError dali_commissioning_compare(const DaliDiscoveryTransport *transport,
     return DALI_OK;
 }
 
+/* One binary-search probe: load the search address and read COMPARE, with
+ * nothing able to change the search address in between. */
+static DaliError search_compare_probe(const DaliDiscoveryTransport *transport,
+                                      uint32_t random_address,
+                                      bool *yes_out)
+{
+    DaliSequence seq;
+    DaliError err = dali_commissioning_build_search_compare_sequence(random_address,
+                                                                     &seq);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    DaliSequenceResult result;
+    (void)dali_transport_run_sequence(transport, &seq, &result);
+    return dali_commissioning_compare_from_sequence(&result, yes_out);
+}
+
 DaliError dali_commissioning_find_next_random_address(
     const DaliDiscoveryTransport *transport,
     uint32_t *random_address_out,
@@ -185,13 +354,8 @@ DaliError dali_commissioning_find_next_random_address(
 
     while (low < high) {
         uint32_t mid = low + ((high - low) / 2u);
-        DaliError err = dali_commissioning_set_search_address(transport, mid);
-        if (err != DALI_OK) {
-            return err;
-        }
-
         bool yes = false;
-        err = dali_commissioning_compare(transport, &yes);
+        DaliError err = search_compare_probe(transport, mid, &yes);
         if (err != DALI_OK) {
             return err;
         }
@@ -203,13 +367,8 @@ DaliError dali_commissioning_find_next_random_address(
         }
     }
 
-    DaliError err = dali_commissioning_set_search_address(transport, low);
-    if (err != DALI_OK) {
-        return err;
-    }
-
     bool yes = false;
-    err = dali_commissioning_compare(transport, &yes);
+    DaliError err = search_compare_probe(transport, low, &yes);
     if (err != DALI_OK) {
         return err;
     }
@@ -362,6 +521,24 @@ static DaliError commissioning_finish(const DaliDiscoveryTransport *transport)
     return send_special_no_reply(transport, DALI_CMD_TERMINATE, 0u, false);
 }
 
+/* Assign one short address and read back the confirmation, with nothing able to
+ * run between the write and the read-back. */
+static DaliError program_and_verify(const DaliDiscoveryTransport *transport,
+                                    uint8_t short_address,
+                                    bool *verified_out)
+{
+    DaliSequence seq;
+    DaliError err = dali_commissioning_build_program_verify_sequence(short_address,
+                                                                     &seq);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    DaliSequenceResult result;
+    (void)dali_transport_run_sequence(transport, &seq, &result);
+    return dali_commissioning_verify_from_sequence(&result, verified_out);
+}
+
 DaliError dali_commissioning_commission_unaddressed(
     const DaliDiscoveryTransport *transport,
     const DaliCommissioningOptions *options,
@@ -456,17 +633,8 @@ DaliError dali_commissioning_commission_unaddressed(
                       short_address,
                       out->assigned_count);
 
-        err = dali_commissioning_program_short_address(transport, short_address);
-        if (err != DALI_OK) {
-            out->last_error = err;
-            (void)commissioning_finish(transport);
-            return err;
-        }
-
         bool verified = false;
-        err = dali_commissioning_verify_short_address(transport,
-                                                      short_address,
-                                                      &verified);
+        err = program_and_verify(transport, short_address, &verified);
         if (err != DALI_OK) {
             out->last_error = err;
             (void)commissioning_finish(transport);
