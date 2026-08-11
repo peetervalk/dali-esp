@@ -3,6 +3,7 @@ import shutil
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
+import esphome.pins as pins
 from esphome.components import text_sensor
 from esphome.const import CONF_ID
 from esphome.core import CORE
@@ -213,11 +214,53 @@ def _copy_protocol_stack():
         # .inc so ESPHome's src/*.* glob cannot compile these behind the shims.
         shutil.copyfile(source, dst_dir / f"{source.name}.inc")
 
-CONFIG_SCHEMA = cv.Schema(
+# ── Pin validation ────────────────────────────────────────────────────────────
+#
+# The DALI-2 Click needs a pin it can actually drive for TX and one that can
+# raise an edge interrupt for RX. A plain int_range(0, 39) accepts neither
+# constraint: GPIO34-39 on the classic ESP32 are input-only, so a config naming
+# one as TX passes validation and then silently never transmits. The
+# internal_gpio_*_pin_number validators know each variant's real capabilities
+# and reject those at compile time.
+
+# WROVER modules wire GPIO16/17 to the PSRAM die. Driving them corrupts PSRAM
+# or the DALI line depending on which wins, and ESPHome only knows to reserve
+# them when PSRAM is configured in the YAML — which the DALI configs do not do.
+_WROVER_PSRAM_PINS = (16, 17)
+
+
+def _dali_gpio(validator):
+    """Board-aware pin number, plus the WROVER PSRAM restriction."""
+
+    def validate(value):
+        number = validator(value)
+        if number in _WROVER_PSRAM_PINS:
+            raise cv.Invalid(
+                f"GPIO{number} is wired to PSRAM on WROVER modules and must not "
+                f"be used for DALI. Pick another pin."
+            )
+        return number
+
+    return validate
+
+
+def _validate_distinct_pins(config):
+    """A single pin cannot be both the transmit and the receive line."""
+    if config[CONF_TX_PIN] == config[CONF_RX_PIN]:
+        raise cv.Invalid(
+            f"{CONF_TX_PIN} and {CONF_RX_PIN} must be different pins "
+            f"(both are GPIO{config[CONF_TX_PIN]}). The DALI-2 Click drives TX "
+            f"and reads RX independently."
+        )
+    return config
+
+
+CONFIG_SCHEMA = cv.All(
+    cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(DaliComponent),
-        cv.Required(CONF_TX_PIN): cv.int_range(min=0, max=39),
-        cv.Required(CONF_RX_PIN): cv.int_range(min=0, max=39),
+        cv.Required(CONF_TX_PIN): _dali_gpio(pins.internal_gpio_output_pin_number),
+        cv.Required(CONF_RX_PIN): _dali_gpio(pins.internal_gpio_input_pin_number),
         # Scan-status: "Idle" / "Scanning..." / "Found N devices"
         cv.Optional(CONF_SCAN_STATUS): text_sensor.text_sensor_schema(),
         # Scan-result: compact last-scan summary persisted in HA
@@ -240,7 +283,9 @@ CONFIG_SCHEMA = cv.Schema(
             _DISPATCH_ENTRY_SCHEMA
         ),
     }
-).extend(cv.COMPONENT_SCHEMA)
+    ).extend(cv.COMPONENT_SCHEMA),
+    _validate_distinct_pins,
+)
 
 
 async def to_code(config):

@@ -158,6 +158,14 @@ typedef enum {
     DALI_CMD_CONTINUOUS_UP,
     DALI_CMD_CONTINUOUS_DOWN,
 
+    /* IEC 62386-103 control-device DTR readback. Distinct from the Part 102
+     * gear commands DALI_CMD_QUERY_CONTENT_DTR0/1/2: these are 24-bit device
+     * frames (address, 0xFE, opcode), so a control device and a control gear at
+     * the same short address answer different frames. */
+    DALI_CMD_QUERY_DEVICE_CONTENT_DTR0,
+    DALI_CMD_QUERY_DEVICE_CONTENT_DTR1,
+    DALI_CMD_QUERY_DEVICE_CONTENT_DTR2,
+
     DALI_CMD_COUNT,
 } DaliCommandId;
 

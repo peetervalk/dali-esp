@@ -105,10 +105,10 @@ Firmware with the corrected helper verbs sends the same 24-bit Part 103 frames
 as the raw examples above:
 
 ```
-memread a0 2 4          # C13102, C13004, 01FE3C wait
-dtrcheck a0 0 66        # C13042, 01FE36 wait
-dtrcheck a0 1 2         # C13102, 01FE37 wait
-memwrite a0 2 4 128     # unlock lock byte, then write Bank 2 offset 4 = 0x80
+devmem read a0 2 4        # C13102, C13004, 01FE3C wait
+dtrcheck a0 0 66          # C13042, 01FE36 wait
+dtrcheck a0 1 2           # C13102, 01FE37 wait
+devmem write a0 2 4 128   # unlock lock byte, then write Bank 2 offset 4 = 0x80
 ```
 
 If an older firmware is still flashed, use the raw commands instead; the stale
@@ -137,7 +137,7 @@ raw 01FE3C len=24 wait   # confirm 128 (0x80) was stored
 ### Verify occupancy state on demand
 
 ```
-iquery a0:1 input-value   # 0=Unoccupied  85=Movement  170=Present  255=Present+Moving
+iquery a0 1 input-value   # 0=Unoccupied  85=Movement  170=Present  255=Present+Moving
 ```
 
 ### Verify Section 3 factory settings
@@ -212,14 +212,12 @@ raw C13102 len=24        # set DTR1 = 0x02 (Bank 2)
 raw 01FE37 len=24 wait   # query DTR1; reply 2 = SET works
 ```
 
-Use `devquery` or `raw` for raw 24-bit queries:
+Use `raw` for raw 24-bit device queries:
 ```
 raw 01FE30 len=24 wait   # 0x30 = QUERY DEVICE STATUS
 raw 01FE35 len=24 wait   # 0x35 = QUERY NUMBER OF INSTANCES (should return 4)
 raw 01FE36 len=24 wait   # 0x36 = QUERY CONTENT DTR0
 raw 01FE37 len=24 wait   # 0x37 = QUERY CONTENT DTR1
-devquery a0 54           # 0x36 = QUERY CONTENT DTR0
-devquery a0 55           # 0x37 = QUERY CONTENT DTR1
 ```
 
 ## Caveats

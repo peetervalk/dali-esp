@@ -74,11 +74,17 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   // from a scheduler completion, never from a successful enqueue.
   DaliLightWrite    write_{};
 
-  // Core 0 only — prevents re-issuing a DALI command when state is pushed
-  // from the bus into ESPHome via LightCall::perform().
-  uint32_t          setup_ms_{0};
+  // Core 0 only — tells apart the two write_state() calls that are not an
+  // operator's intent. See the comment on write_state().
+  //
+  // suppress_initial_write_ covers ESPHome's one restore/default write at
+  // setup. The echo_* trio is the exact state apply_bus_state() last pushed
+  // into ESPHome, so the write it schedules is recognised by its value rather
+  // than by a one-shot flag that the wrong call could consume.
   bool              suppress_initial_write_{true};
-  bool              skip_next_write_{false};
+  bool              echo_valid_{false};
+  bool              echo_is_on_{false};
+  uint8_t           echo_level_{0};
   light::LightState *state_{nullptr};
 
   static void clear_unused_color_fields_(light::LightColorValues &values);

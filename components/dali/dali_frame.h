@@ -118,6 +118,11 @@ typedef struct {
     volatile uint32_t rx_self_echo_suppressed; /* RX ignored during TX echo    */
     volatile uint32_t rx_settle_suppressed; /* RX ignored after TX             */
     volatile uint32_t rx_glitch_drops;  /* RX task dropped duplicate/short edge*/
+    /* Frames the PHY clocked out in full. This is the recovery signal that
+     * pairs with bus_idle_failures: the fault counters only ever grow, so
+     * without a positive counter an integration cannot tell a bus that is
+     * currently stuck from one that failed once an hour ago and works now. */
+    volatile uint32_t tx_frames_ok;
 } dali_stats_t;
 
 /* Global stats instance — defined in dali_phy.c, read everywhere */

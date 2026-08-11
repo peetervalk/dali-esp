@@ -795,53 +795,79 @@ The typed verb surface is in place; what is missing is evidence. Keep
   this is done the whole surface stays experimental.
 - Add host vectors for `identify`, `smoke`, `capture`, and the inventory JSON
   export, whose output formats are currently unasserted.
-- Decide whether the ESPHome console should adopt `dali_cli`'s tokeniser and
-  tables. Doing so would fix its trailing-token gap and remove the
-  `memread`/`devmem` naming divergence in one change; leaving it alone keeps two
-  parsers to maintain.
+- The ESPHome console now shares `dali_cli`'s tokeniser, argument parsers, and
+  named command tables. `dali_cli.{c,h}` moved to `components/dali/` so both
+  front ends can reach it, and `dali_cli_resolve_in()` resolves against a
+  caller-supplied verb table — the console brings the subset that suits a Home
+  Assistant text entity, and the native CLI keeps its own. Verified on hardware:
+  nothing in this migration has been exercised on a real bus.
 
 ### P1 — ESPHome correctness and architecture
 
-- Replace the blanket ten-second startup write suppression with logic that
-  distinguishes restore/default writes from intentional user commands.
-- Decide how an operator should intentionally retire a previously known group
-  member. A complete scan may remove its memberships when that gear answers, but
-  a scan that misses the address retains the prior map by design. This favors
-  avoiding destructive transient loss over automatic removal of absent gear.
-- Give input-sensor values the same packed single-word mailbox the lights use.
-  `DaliInputSensor` still keeps separate `pending_raw_` and `dirty_` atomics and
-  clears `dirty_` before reading the value, so a Core 1 publish landing between
-  the two is discarded with its flag already consumed. The next poll recovers the
-  value, but this is the lost-update pattern the light handoff removed.
-- Reject trailing tokens in the ESPHome console parser. Verb handlers test
-  `ntok >= N` and ignore the remainder, so `level a1 100 junk` is accepted.
+Everything listed here has been implemented and builds clean; none of it has
+been exercised on a real bus. See "ESPHome console verb renames" below for what
+changed for an operator.
+
+- **Done.** The blanket ten-second startup write suppression is gone. A restore
+  write is identified as the first `write_state()` after setup (which is exactly
+  what `LightState::setup()` issues), and a bus reading coming back through
+  ESPHome is matched on the exact `(is_on, level)` pair `apply_bus_state()`
+  pushed, replacing the one-shot `skip_next_write_` flag that the wrong call
+  could consume. A user command in the first ten seconds now reaches the bus.
+- **Done.** `group forget <addr> [group]` retires a departed member from the
+  group cache without touching the bus, backed by `dali_group_map_forget()` and
+  host vectors. The scan's conservative retention is unchanged: it is right for
+  gear that is merely offline, and this is the explicit statement that the gear
+  is gone.
+- **Done.** `DaliInputSensor` uses a packed single-word mailbox
+  (`DaliInputValueMailbox`), removing the lost-update window between clearing
+  `dirty_` and reading the value.
+- **Done.** Trailing tokens are rejected. Each console verb declares argument
+  bounds in the shared `DaliCliCommandSpec` table and `dali_cli_resolve_in()`
+  checks both before a handler runs, so `level a1 100 junk` now fails.
+- **Done.** The Find Couplers summary no longer truncates silently: it fits the
+  255-character Home Assistant limit and appends `+N more` when entries are left
+  out. Every captured frame is still logged in full.
+- **Done.** The remaining raw opcodes are out of `dali_component.cpp`.
+  `dtrcheck` uses `dali_input_build_dtr_check_sequence()` and the typed
+  `DALI_CMD_QUERY_DEVICE_CONTENT_DTR0/1/2` control-device commands instead of
+  hand-built `0x36`/`0x37`; `iconfig` uses
+  `dali_input_build_config_sequence()` instead of assembling its own DTR0 step.
+- **Done.** The GPIO schema is board-aware
+  (`pins.internal_gpio_output_pin_number` / `..._input_pin_number`), rejects
+  TX equal to RX, and rejects GPIO16/17 for the WROVER PSRAM restriction.
+  `dali_phy_init()` now checks both `gpio_config()` calls, `gpio_set_level()`,
+  `gpio_isr_handler_add()`, and the GPTIMER alarm/callback/enable calls, and
+  releases what earlier steps acquired before returning an error.
+- **Done.** DALI-task creation is checked and fails the component. Core 1 is no
+  longer hardcoded: `dali_worker_core()` in `dali_core_affinity.h` asks for no
+  affinity on a single-core target, where pinning to core 1 would fail outright.
+- **Done.** Bus faults distinguish current availability from cumulative history.
+  A new `tx_frames_ok` PHY counter is the recovery signal, since the fault
+  counters only grow; `bus_fault` publishes `Bus stuck (N total)` and returns to
+  `OK (N past faults)` once a frame is clocked out in full. Recovery after a
+  bus-only power cycle is still undefined beyond this.
+
+Still open in this area:
+
 - Extend the compact Part 103 dispatch key if a site needs to distinguish
   Device-Group from Instance-Group sources or match instance type; the canonical
   event/capture path retains these fields, but the five-field rule key does not.
-- Replace the 128-byte Find Couplers summary with a paged/exportable result; all
-  canonical captures are logged, but the Home Assistant aggregate can truncate.
-- Move the remaining raw opcodes out of `dali_component.cpp` into reusable typed
-  C APIs. The console `memread` path is now the typed control-device read
-  sequence, but `dtrcheck` still hand-builds the QUERY CONTENT DTR0/DTR1 device
-  opcodes `0x36`/`0x37`, and `iconfig` still assembles its own DTR0 setup step.
-- Use board-aware ESPHome GPIO schemas, reject TX=RX and invalid output pins, and
-  honor the documented WROVER-E restrictions. The schema currently accepts
-  input-only GPIO34-39 as TX and accepts TX equal to RX. Propagate hardware
-  failures out of `dali_phy_init()` as well: both `gpio_config()` calls,
-  `gpio_isr_handler_add()`, and the GPTIMER alarm, callback, and enable calls are
-  issued without checking their return, so a PHY that cannot drive its transmit
-  pin still reports success and the component starts up looking healthy.
-- Check the remaining DALI-task creation result and remove or validate hard-coded
-  Core 1 assumptions, particularly for single-core ESP32 targets. Scan-task
-  allocation/creation failure is now reported and releases scan/refresh state.
-- Define recovery after DALI bus faults and bus-only power cycles. Distinguish
-  current fault/availability from cumulative fault history.
+  No site needs this today, and it changes a C struct layout that needs a
+  documented migration.
+- A paged or exportable Find Couplers result, rather than one truncated-with-a-
+  count summary. The log already holds every frame.
+- `iquery` names whose value is selected by DTR0 (`instance-config`) are refused
+  by the console: it has no verb that loads DTR0 and reads in one sequence. The
+  native CLI handles these.
+- Define recovery after bus-only power cycles, beyond the current/cumulative
+  fault split above.
 
 ### P1 — Release and verification quality
 
 - Add CI that compiles a clean external-component checkout from the release tag and
   validates the Python schema, ESPHome C++ layer, YAML, and wrapper packaging.
-- Add the native ESP-IDF build to CI alongside the existing 23-suite host workflow.
+- Add the native ESP-IDF build to CI alongside the existing 24-suite host workflow.
 - Keep one intentional ESPHome source-inclusion path. Remove the unused component
   `CMakeLists.txt` path and stale fallback references if the Python-copy/wrapper
   route remains authoritative.
@@ -851,8 +877,23 @@ The typed verb surface is in place; what is missing is evidence. Keep
   verbs, and keep local filenames hyphenated in all documentation.
 - Complete release provenance: project SPDX identifiers and the full vendored
   Unity MIT license/third-party notice.
-- Document the next-release C migration for the intentionally changed
-  `DaliInputEvent` and `DaliDispatchKey` field names/layout before tagging it.
+- Document the next-release C migration before tagging it. Accumulated so far:
+  the intentionally changed `DaliInputEvent` and `DaliDispatchKey` field
+  names/layout; `dali_cli.{c,h}` moved from `main/` to `components/dali/`;
+  `DaliCommandId` gained three enumerators before `DALI_CMD_COUNT`
+  (`DALI_CMD_QUERY_DEVICE_CONTENT_DTR0/1/2`), so any persisted or wire-shared
+  numeric command id is unaffected but `DALI_CMD_COUNT` itself moved;
+  `dali_stats_t` gained `tx_frames_ok` at the end; `DaliCliCommandSpec` and
+  `DaliCliInstanceConfig` gained fields, so brace-initialised tables outside
+  this repo need updating.
+- Announce the ESPHome console verb renames in the release notes. They are the
+  operator-visible half of the `dali_cli` adoption and have no aliases — the
+  table is in `dali_command_reference.md` under "Verbs renamed when the console
+  adopted the shared tables". Anything in Home Assistant that writes a command
+  string to the `text:` entity (scripts, automations, dashboard buttons) needs
+  updating: `memread`/`memwrite` became `devmem read`/`devmem write`,
+  `iquery a0:1 x` became `iquery a0 1 x`, `query a0 actual-level` became
+  `query a0 actual`, and `config <t> <name> <dtr0>` became `config-dtr0`.
 - Clarify the bus topology: direct-control couplers also transmit. Their current
   coexistence is field-tested, but it is not equivalent to collision-safe
   single-master arbitration.

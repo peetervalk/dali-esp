@@ -573,6 +573,18 @@ DaliError dali_phy_init(uint8_t tx_gpio, uint8_t rx_gpio)
     rx_debug_clear();
 
 #ifndef DALI_HOST_BUILD
+    /*
+     * Every driver call below is checked. A PHY that cannot drive its transmit
+     * pin or arm its bit-clock is not a working PHY, and reporting success would
+     * bring the whole component up looking healthy while no frame can ever
+     * reach the bus. Each failure path releases what earlier steps acquired so a
+     * caller may retry init after fixing the configuration.
+     */
+    esp_err_t ret;
+
+    /* Latch the idle level into the output register before the pin is enabled
+     * as an output, so enabling it cannot briefly drive the bus to the wrong
+     * level. The pin is not an output yet, so this only stages the value. */
     gpio_set_level(tx_gpio, tx_pin_level_for_bus_level(1u));
 
     /* Configure TX GPIO: output, default to logical DALI bus idle/high. */
@@ -583,8 +595,17 @@ DaliError dali_phy_init(uint8_t tx_gpio, uint8_t rx_gpio)
         .pull_down_en = GPIO_PULLDOWN_ENABLE,
         .intr_type    = GPIO_INTR_DISABLE,
     };
-    gpio_config(&tx_cfg);
-    gpio_set_level(tx_gpio, tx_pin_level_for_bus_level(1u));
+    ret = gpio_config(&tx_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "gpio_config(TX GPIO%d) failed: %d", tx_gpio, ret);
+        return DALI_ERR_INVALID;
+    }
+    /* Only meaningful once the pin is actually an output. */
+    ret = gpio_set_level(tx_gpio, tx_pin_level_for_bus_level(1u));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "gpio_set_level(TX GPIO%d) failed: %d", tx_gpio, ret);
+        return DALI_ERR_INVALID;
+    }
 
     /* Configure RX GPIO: input, interrupt on both edges */
     gpio_config_t rx_cfg = {
@@ -594,13 +615,23 @@ DaliError dali_phy_init(uint8_t tx_gpio, uint8_t rx_gpio)
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type    = GPIO_INTR_ANYEDGE,
     };
-    gpio_config(&rx_cfg);
-    esp_err_t isr_ret = gpio_install_isr_service(0);
-    if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "gpio_install_isr_service failed: %d", isr_ret);
+    ret = gpio_config(&rx_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "gpio_config(RX GPIO%d) failed: %d", rx_gpio, ret);
         return DALI_ERR_INVALID;
     }
-    gpio_isr_handler_add(rx_gpio, dali_phy_rx_isr, NULL);
+
+    /* ESP_ERR_INVALID_STATE means another component already installed it. */
+    ret = gpio_install_isr_service(0);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "gpio_install_isr_service failed: %d", ret);
+        return DALI_ERR_INVALID;
+    }
+    ret = gpio_isr_handler_add(rx_gpio, dali_phy_rx_isr, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "gpio_isr_handler_add(RX GPIO%d) failed: %d", rx_gpio, ret);
+        return DALI_ERR_INVALID;
+    }
 
     /* Configure GPTIMER: 1 MHz resolution, alarm every 104 µs */
     gptimer_config_t timer_cfg = {
@@ -608,9 +639,10 @@ DaliError dali_phy_init(uint8_t tx_gpio, uint8_t rx_gpio)
         .direction     = GPTIMER_COUNT_UP,
         .resolution_hz = 1000000u,  /* 1 µs per tick */
     };
-    esp_err_t ret = gptimer_new_timer(&timer_cfg, &s_gptimer);
+    ret = gptimer_new_timer(&timer_cfg, &s_gptimer);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "gptimer_new_timer failed: %d", ret);
+        gpio_isr_handler_remove(rx_gpio);
         return DALI_ERR_INVALID;
     }
 
@@ -619,13 +651,23 @@ DaliError dali_phy_init(uint8_t tx_gpio, uint8_t rx_gpio)
         .reload_count               = 0u,
         .flags.auto_reload_on_alarm = true,
     };
-    gptimer_set_alarm_action(s_gptimer, &alarm_cfg);
-
-    gptimer_event_callbacks_t cbs = {
-        .on_alarm = dali_phy_tx_isr,
-    };
-    gptimer_register_event_callbacks(s_gptimer, &cbs, NULL);
-    gptimer_enable(s_gptimer);
+    ret = gptimer_set_alarm_action(s_gptimer, &alarm_cfg);
+    if (ret == ESP_OK) {
+        gptimer_event_callbacks_t cbs = {
+            .on_alarm = dali_phy_tx_isr,
+        };
+        ret = gptimer_register_event_callbacks(s_gptimer, &cbs, NULL);
+    }
+    if (ret == ESP_OK) {
+        ret = gptimer_enable(s_gptimer);
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "GPTIMER setup failed: %d", ret);
+        gptimer_del_timer(s_gptimer);
+        s_gptimer = NULL;
+        gpio_isr_handler_remove(rx_gpio);
+        return DALI_ERR_INVALID;
+    }
 
     ESP_LOGI(TAG, "PHY init OK: TX GPIO%d, RX GPIO%d", tx_gpio, rx_gpio);
 #endif /* !DALI_HOST_BUILD */
@@ -695,6 +737,9 @@ DaliError dali_phy_tx(const DaliFrame *frame)
     s_tx_state = DALI_PHY_TX_IDLE;
 #endif
 
+    /* Counted only here, past every early return, so it means "clocked out in
+     * full" rather than "accepted for transmission". */
+    g_dali_stats.tx_frames_ok++;
     return DALI_OK;
 }
 

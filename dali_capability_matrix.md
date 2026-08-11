@@ -143,18 +143,22 @@ the value back with `iquery` before relying on it.
 
 | Capability | Shared API | Native CLI verb | Host vector | Real bus | ESPHome |
 |---|---|---|---|---|---|
-| Tokenising and trailing-token rejection | `dali_cli_tokenize`, `dali_cli_resolve` | every verb | yes | no | no |
+| Tokenising and trailing-token rejection | `dali_cli_tokenize`, `dali_cli_resolve[_in]` | every verb | yes | no | yes |
 | Verb table / help parity | `dali_cli_command_*`, `dali_cli_print_help` | `help` | yes | n/a | n/a |
-| Argument validation | `dali_cli_parse_*` | every verb | yes | no | n/a |
+| Argument validation | `dali_cli_parse_*` | every verb | yes | no | yes |
 | Named table listing | `dali_cli_print_table` | `list`, `*-list` | yes | n/a | n/a |
-| Response formatting | `dali_cli_print_response` | every query verb | yes | yes | separate path |
+| Response formatting | `dali_cli_print_response` | every query verb | yes | yes | separate path (one HA text state) |
 | Scheduler queue diagnostics | `dali_sched_queue_stats` | `stats`, `queue` | yes | no | yes (`queue`) |
 | PHY/RX counters | `g_dali_stats` | `stats`, `bus check`, `rxdebug` | partial | yes | partial |
 | Frame capture | n/a | `capture` | no | yes | yes (bus monitor) |
 
-The ESPHome console has its own parser and does **not** use `dali_cli`. It still
-accepts trailing tokens; that gap is tracked in `current_status.md` under P1 —
-ESPHome correctness.
+The ESPHome console now uses `dali_cli` for tokenising, argument parsing, arity
+checking, and the named command tables, so a verb and a command name mean the
+same thing on both surfaces and trailing tokens are rejected. It supplies its
+own verb table to `dali_cli_resolve_in()`: the subset that suits a Home
+Assistant text entity, with no scan, capture, or inventory verbs. The renames
+this brought are listed in `dali_command_reference.md`. None of the migrated
+console paths has been exercised on a real bus.
 
 ## Known gaps this matrix is tracking
 

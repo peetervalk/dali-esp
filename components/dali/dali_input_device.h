@@ -9,6 +9,7 @@
  */
 
 #include "dali_protocol.h"
+#include "dali_scheduler.h"   /* DaliSequence, for the DTR check sequence */
 
 #define DALI_INPUT_MAX_INSTANCES    DALI_INSTANCE_COUNT
 #define DALI_INPUT_INSTANCE_DEVICE  DALI_DEVICE_INSTANCE
@@ -72,6 +73,26 @@ typedef struct {
 } DaliInputDeviceInfo;
 
 DaliError dali_input_build_query_number_of_instances(uint8_t addr, DaliFrame *out);
+
+/* Read back a control device's DTR registers (Part 103 device frames 0x36-0x38).
+ * Pair one of these with a control-device DTR load in a single sequence to
+ * verify that the device accepted the value: nothing else confirms a DTR write,
+ * because the load itself produces no reply. */
+DaliError dali_input_build_query_content_dtr0(uint8_t addr, DaliFrame *out);
+DaliError dali_input_build_query_content_dtr1(uint8_t addr, DaliFrame *out);
+DaliError dali_input_build_query_content_dtr2(uint8_t addr, DaliFrame *out);
+
+/*
+ * Build "load DTR<reg> = value, then read DTR<reg> back" as one sequence.
+ *
+ * The two frames must not be separately scheduled: any other locally scheduled
+ * DTR write landing between them would be what the read returns, so the check
+ * would report on the wrong value. reg selects DTR0, DTR1, or DTR2.
+ */
+DaliError dali_input_build_dtr_check_sequence(uint8_t addr,
+                                              DaliDtrRegister reg,
+                                              uint8_t value,
+                                              DaliSequence *out);
 DaliError dali_input_build_query_instance_type(uint8_t addr, uint8_t instance, DaliFrame *out);
 DaliError dali_input_build_query_resolution(uint8_t addr, uint8_t instance, DaliFrame *out);
 DaliError dali_input_build_query_instance_error(uint8_t addr, uint8_t instance, DaliFrame *out);

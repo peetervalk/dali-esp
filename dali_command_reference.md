@@ -22,8 +22,10 @@ and ESPHome exposure — is tracked in `dali_capability_matrix.md`.
   the current Part 103, 301, 303, and 304 command tables. Real-bus configuration
   writes remain unverified: read the current value first, write one parameter,
   then read it back before broader use.
-- ESPHome command console supports the practical subset needed from HA:
-  `off`, `max`, `min`, `level`, `query`, `config`, `iquery`, and `iconfig`.
+- The ESPHome command console shares the native CLI's tokeniser, argument
+  parsers, and named command tables, so verbs and command names mean the same
+  thing on both. It implements the subset that suits a Home Assistant text
+  entity; see "ESPHome Command Console" for the verb list and the renames.
 - The native CLI now exposes typed verbs for memory, DT6, DT8, Part 103
   instance query and configuration, vendor helpers, and control-device memory,
   plus CONTINUOUS UP/DOWN, arc power MASK, and a send-twice `raw2`. Every
@@ -203,9 +205,20 @@ devmem write <addr> <bank> <offset> <value>
 ```
 
 The control-gear and control-device forms use different DTR and memory opcodes,
-so they are separate verbs. Note that the ESPHome console's `memread`/`memwrite`
-are the *control-device* forms, matching `devmem` rather than `memread` here.
-No write path reads its value back; confirm a write with a following read.
+so they are separate verbs. No write path reads its value back; confirm a write
+with a following read.
+
+DTR readback:
+
+```text
+dtrcheck <addr> <0|1|2> <0-255>
+```
+
+A control-device DTR load produces no backward frame, so nothing otherwise
+confirms that the device took the value. `dtrcheck` loads the register and reads
+it straight back in one sequence — no other locally scheduled write can land in
+between — and reports whether the two match. Use it to separate "the DTR never
+took the value" from "the command that consumes it was ignored".
 
 Device types 6 and 8:
 
@@ -238,43 +251,101 @@ before relying on any input-device configuration write.
 Available through `text:` platform entity `DALI Command` when configured:
 see `esphome_verb_readme.md` for the practical parameter guide.
 
+The console shares the native CLI's tokeniser, argument parsers, and named
+command tables (`components/dali/dali_cli.c`), so a verb, an argument form, and
+a command name mean the same thing on both surfaces. What differs is the verb
+list: there is no terminal here to print a scan, a capture, or an inventory
+into, and a result is one Home Assistant text state.
+
 ```text
-off <target>
-max <target>
-min <target>
-level <target> <0-254>
-raw <hex> len=<16|24> [wait]
-raw2 <hex> len=<16|24> [wait]
-query <target> <query-name>
-config <target> <config-name> [dtr0]
-iquery a<N>:<instance> <query-name>
-iconfig a<N>:<instance> <config-name> [dtr0]
 queue [reset]
+raw <hex> len=<16|24> [wait]
+raw2 <hex> len=<16|24>
+off|max|min <target>
+level <target> <0-254|mask>
+query <target> <query-name> [param]
+config <target> <config-name> [param]
+config-dtr0 <target> <config-name> <dtr0> [param]
+iquery <addr> <instance> <query-name>
+iconfig <addr> <instance> <config-name> [v0] [v1] [v2]
+devmem read <addr> <bank> <offset> [count]
+devmem write <addr> <bank> <offset> <value>
+dtrcheck <addr> <0|1|2> <0-255>
+group forget <addr> [group]
 ```
 
-`queue` is the only console verb that generates no bus traffic, so it is the
-only one accepted while a scan is running. It reports queue depth, capacity,
-high-water mark, and the cumulative accepted/refused submission counts, which
-`stats` also includes on the native CLI. A refused submission is dropped work,
-not deferred work; the same counters are logged whenever they advance.
+Argument counts are checked against the verb table before any handler runs, so
+a trailing token is an error rather than something quietly ignored: `level a1
+100 junk` is rejected, where it used to be accepted as `level a1 100`.
 
-For ESPHome `add-group` and `remove-group`, the final group value `0-15` is
-required. Short and group targets are accepted; broadcast targets are rejected.
+`queue` and `group` generate no bus traffic, so they are the only verbs accepted
+while a scan is running — which is when queue pressure and a stale group cache
+are most worth inspecting. `queue` reports queue depth, capacity, high-water
+mark, and the cumulative accepted/refused submission counts, which `stats` also
+includes on the native CLI. A refused submission is dropped work, not deferred
+work; the same counters are logged whenever they advance.
+
+`group forget` retires a departed member from the group-membership cache. A
+bus scan deliberately keeps the memberships of gear it did not see, so that a
+device which is merely offline is not dropped — but that also means physically
+removed gear stays in the cache forever, still eligible as a group's query
+target. This is the explicit way to remove it. It sends nothing on the bus (the
+gear is gone and cannot answer) and only edits the cache, which is then
+persisted. Use `config <target> remove-group <g>` for gear that is still
+present, since that reconfigures the device itself.
+
+For `add-group` and `remove-group`, the final group value `0-15` is required.
+Short and group targets are accepted; broadcast targets are rejected.
+
+`config` takes commands that carry their parameter in the opcode;
+`config-dtr0` takes the ones that read DTR0, and loads DTR0 and the command as
+one sequence. Using the wrong one reports which to use.
 
 Common examples:
 
 ```text
-query a0 actual-level
+query a0 actual
 raw C13102 len=24
 raw C13004 len=24
 raw 01FE3C len=24 wait
 raw2 01FE15 len=24
-query a0 power-on-level
+query a0 power-on
 query a0 failure-level
-config a0 set-max-dtr0 200
-iquery a0:1 hold-timer
-iconfig a0:1 set-hold-timer 20
+config-dtr0 a0 set-max-dtr0 200
+iquery a0 1 occ-hold-timer
+iconfig a0 1 occ-set-hold-timer 20
+devmem read a0 0 3
+dtrcheck a0 0 66
+group forget a7
 ```
+
+### Verbs renamed when the console adopted the shared tables
+
+Every name below now matches the native CLI. The old spellings are gone rather
+than aliased: keeping two names for one command is what let the two surfaces
+drift apart in the first place.
+
+| Was | Now |
+|---|---|
+| `memread <addr> <bank> <off>` | `devmem read <addr> <bank> <off> [count]` |
+| `memwrite <addr> <bank> <off> <val>` | `devmem write <addr> <bank> <off> <val>` |
+| `devquery <addr> <opcode>` | `raw <hex> len=24 wait` (it built the same frame) |
+| `iquery a<N>:<inst> <name>` | `iquery <addr> <instance> <name>` |
+| `iconfig a<N>:<inst> <name> [v]` | `iconfig <addr> <instance> <name> [v]` |
+| `config <t> <name> <dtr0>` | `config-dtr0 <t> <name> <dtr0>` |
+| `query <t> actual-level` | `query <t> actual` |
+| `query <t> power-on-level` | `query <t> power-on` |
+| `query <t> power-on-flag` | `query <t> lamp-on` |
+| `query <t> power-fail-flag` | `query <t> power-failure` |
+| `query <t> content-dtr0/1/2` | `query <t> dtr0/dtr1/dtr2` |
+| `iconfig … enable-instance` | `iconfig … enable` |
+| `iconfig … set-instance-group-1/2` | `iconfig … set-group1/set-group2` |
+| `iconfig … set-hold-timer` etc. | `iconfig … occ-set-hold-timer` etc. |
+| `iquery … hold-timer` etc. | `iquery … occ-hold-timer` etc. |
+
+The console gained `config-dtr0`, `dtrcheck`, `group forget`, `level … mask`,
+and the whole of the shared query/config/iquery/iconfig tables, which are larger
+than the subsets it carried before.
 
 `raw2` uses the scheduler send-twice path for commands that must be transmitted
 twice inside the DALI timing window. It avoids relying on Home Assistant to send
@@ -385,7 +456,10 @@ because its contents are optional OEM/part-specific data. Memory transactions ar
 not yet protected by a scheduler-level session, and this layout correction has
 not been hardware-verified.
 
-### ESPHome command-console query names
+### Named control-gear query table
+
+Shared by the native CLI and the ESPHome console; `list query` prints it at
+runtime.
 
 | Query name | Underlying command |
 |---|---|
@@ -394,16 +468,16 @@ not been hardware-verified.
 | `device-type` | QUERY DEVICE TYPE |
 | `physical-min` | QUERY PHYSICAL MINIMUM |
 | `operating-mode` | QUERY OPERATING MODE |
-| `actual-level` | QUERY ACTUAL LEVEL |
+| `actual` | QUERY ACTUAL LEVEL |
 | `max-level` | QUERY MAX LEVEL |
 | `min-level` | QUERY MIN LEVEL |
-| `power-on-level` | QUERY POWER ON LEVEL |
+| `power-on` | QUERY POWER ON LEVEL |
 | `failure-level` | QUERY SYSTEM FAILURE LEVEL |
-| `power-on-flag` | QUERY LAMP POWER ON |
-| `power-fail-flag` | QUERY POWER FAILURE |
+| `lamp-on` | QUERY LAMP POWER ON |
+| `power-failure` | QUERY POWER FAILURE |
 | `fade` | QUERY FADE TIME / FADE RATE |
 | `groups-0-7`, `groups-8-15` | QUERY GROUPS |
-| `content-dtr0`, `content-dtr1`, `content-dtr2` | QUERY CONTENT DTR0/DTR1/DTR2 |
+| `dtr0`, `dtr1`, `dtr2` | QUERY CONTENT DTR0/DTR1/DTR2 |
 
 ## Special Commands
 
@@ -444,14 +518,14 @@ itself duplicated.
 
 ### Generic Part 103 instance configuration
 
-| Opcode | Command | DTR requirement | Sends | ESPHome `iconfig` name |
+| Opcode | Command | DTR requirement | Sends | `iconfig` name |
 |---:|---|---|---:|---|
 | `0x61` | SET EVENT PRIORITY | DTR0 | twice | `set-event-priority` |
-| `0x62` | ENABLE INSTANCE | none | twice | `enable-instance` |
-| `0x63` | DISABLE INSTANCE | none | twice | `disable-instance` |
+| `0x62` | ENABLE INSTANCE | none | twice | `enable` |
+| `0x63` | DISABLE INSTANCE | none | twice | `disable` |
 | `0x64` | SET PRIMARY INSTANCE GROUP | DTR0 | twice | `set-primary-group` |
-| `0x65` | SET INSTANCE GROUP 1 | DTR0 | twice | `set-instance-group-1` |
-| `0x66` | SET INSTANCE GROUP 2 | DTR0 | twice | `set-instance-group-2` |
+| `0x65` | SET INSTANCE GROUP 1 | DTR0 | twice | `set-group1` |
+| `0x66` | SET INSTANCE GROUP 2 | DTR0 | twice | `set-group2` |
 | `0x67` | SET EVENT SCHEME | DTR0 | twice | `set-event-scheme` |
 | `0x68` | SET EVENT FILTER | DTR2:DTR1:DTR0 | twice | Not exposed; shared builder only |
 | `0x69` | SET INSTANCE TYPE | DTR0 | twice | Not exposed; Part 103:2022 shared builder |
@@ -464,26 +538,26 @@ generic report-timer, hysteresis, or deadtime setters.
 
 These are single-send commands and expect an 8-bit backward-frame reply.
 
-| Instance byte | Opcode | Query | ESPHome `iquery` name |
+| Instance byte | Opcode | Query | `iquery` name |
 |---:|---:|---|---|
 | `0xFE` | `0x35` | QUERY NUMBER OF INSTANCES | Discovery/device path |
-| instance | `0x80` | QUERY INSTANCE TYPE | `instance-type` |
+| instance | `0x80` | QUERY INSTANCE TYPE | `type` |
 | instance | `0x81` | QUERY RESOLUTION | `resolution` |
-| instance | `0x82` | QUERY INSTANCE ERROR | `instance-error` |
-| instance | `0x83` | QUERY INSTANCE STATUS | `instance-status` |
+| instance | `0x82` | QUERY INSTANCE ERROR | `error` |
+| instance | `0x83` | QUERY INSTANCE STATUS | `status` |
 | instance | `0x84` | QUERY EVENT PRIORITY | `event-priority` |
-| instance | `0x86` | QUERY INSTANCE ENABLED | `instance-enabled` |
+| instance | `0x86` | QUERY INSTANCE ENABLED | `enabled` |
 | instance | `0x88` | QUERY PRIMARY INSTANCE GROUP | `primary-group` |
-| instance | `0x89` | QUERY INSTANCE GROUP 1 | `instance-group-1` |
-| instance | `0x8A` | QUERY INSTANCE GROUP 2 | `instance-group-2` |
+| instance | `0x89` | QUERY INSTANCE GROUP 1 | `group1` |
+| instance | `0x8A` | QUERY INSTANCE GROUP 2 | `group2` |
 | instance | `0x8B` | QUERY EVENT SCHEME | `event-scheme` |
 | instance | `0x8C` | QUERY INPUT VALUE | `input-value` |
 | instance | `0x8D` | QUERY INPUT VALUE LATCH | `input-value-latch` |
 | feature selector | `0x8E` | QUERY FEATURE TYPE | Not implemented; feature-address selector required |
 | feature selector | `0x8F` | QUERY NEXT FEATURE TYPE | Not implemented; feature-address selector required |
-| instance | `0x90` | QUERY EVENT FILTER 0-7 | `event-filter-0` |
-| instance | `0x91` | QUERY EVENT FILTER 8-15 | `event-filter-1` |
-| instance | `0x92` | QUERY EVENT FILTER 16-23 | `event-filter-2` |
+| instance | `0x90` | QUERY EVENT FILTER 0-7 | `event-filter0` |
+| instance | `0x91` | QUERY EVENT FILTER 8-15 | `event-filter1` |
+| instance | `0x92` | QUERY EVENT FILTER 16-23 | `event-filter2` |
 | instance | `0x93` | QUERY INSTANCE CONFIGURATION | Shared frame builder; DTR0 selects the value and DTR2:DTR1 hold the 16-bit result |
 | instance | `0x94` | QUERY AVAILABLE INSTANCE TYPES | Shared frame builder; DTR2:DTR1:DTR0 complete the 32-bit result |
 
@@ -519,20 +593,20 @@ been removed.
 
 | Opcode | Command | DTR | Sends/reply | ESPHome name |
 |---:|---|---|---|---|
-| `0x20` | CATCH MOVEMENT | none | once | `catch-movement` |
-| `0x21` | SET HOLD TIMER | DTR0 | twice | `set-hold-timer` |
-| `0x22` | SET REPORT TIMER | DTR0 | twice | `set-report-timer` |
-| `0x23` | SET DEADTIME TIMER | DTR0 | twice | `set-deadtime` |
-| `0x24` | CANCEL HOLD TIMER | none | once | `cancel-hold-timer` |
-| `0x25` | SET DETECTION RANGE | DTR0 | twice | `set-detection-range` |
-| `0x26` | SET SENSITIVITY | DTR0 | twice | `set-sensitivity` |
-| `0x29` | QUERY INSTANCE CAPABILITIES | none | reply | `occupancy-capabilities` |
-| `0x2A` | QUERY DETECTION RANGE | none | reply | `detection-range` |
-| `0x2B` | QUERY SENSITIVITY | none | reply | `sensitivity` |
-| `0x2C` | QUERY DEADTIME TIMER | none | reply | `deadtime` |
-| `0x2D` | QUERY HOLD TIMER | none | reply | `hold-timer` |
-| `0x2E` | QUERY REPORT TIMER | none | reply | `report-timer` |
-| `0x2F` | QUERY CATCHING | none | reply | `catching` |
+| `0x20` | CATCH MOVEMENT | none | once | `occ-catch-movement` |
+| `0x21` | SET HOLD TIMER | DTR0 | twice | `occ-set-hold-timer` |
+| `0x22` | SET REPORT TIMER | DTR0 | twice | `occ-set-report-timer` |
+| `0x23` | SET DEADTIME TIMER | DTR0 | twice | `occ-set-deadtime` |
+| `0x24` | CANCEL HOLD TIMER | none | once | `occ-cancel-hold` |
+| `0x25` | SET DETECTION RANGE | DTR0 | twice | `occ-set-detection-range` |
+| `0x26` | SET SENSITIVITY | DTR0 | twice | `occ-set-sensitivity` |
+| `0x29` | QUERY INSTANCE CAPABILITIES | none | reply | `occ-capabilities` |
+| `0x2A` | QUERY DETECTION RANGE | none | reply | `occ-detection-range` |
+| `0x2B` | QUERY SENSITIVITY | none | reply | `occ-sensitivity` |
+| `0x2C` | QUERY DEADTIME TIMER | none | reply | `occ-deadtime` |
+| `0x2D` | QUERY HOLD TIMER | none | reply | `occ-hold-timer` |
+| `0x2E` | QUERY REPORT TIMER | none | reply | `occ-report-timer` |
+| `0x2F` | QUERY CATCHING | none | reply | `occ-catching` |
 
 Hold, report, and deadtime timer values use 10 s, 1 s, and 50 ms units
 respectively. Opcodes `0x25`, `0x26`, and `0x29..0x2B` are the
@@ -555,31 +629,31 @@ Report and deadtime values use 1 s and 50 ms units. Hysteresis is a percentage
 in the range `0..25`; `hysteresisMin` is the absolute minimum band height in
 input-value units. It is not a generic “deadband”.
 
-ESPHome `iquery` names:
+`iquery` names (shared; `list iquery` prints them at runtime):
 
 | Name | Meaning |
 |---|---|
-| `instance-type` | Input instance type |
+| `type` | Input instance type |
 | `resolution` | Bit resolution |
-| `instance-error` | Part/type-specific instance error byte |
-| `instance-enabled` | Whether the instance is active |
-| `instance-status` | Status byte |
+| `error` | Part/type-specific instance error byte |
+| `enabled` | Whether the instance is active |
+| `status` | Status byte |
 | `event-priority` | Configured event priority |
 | `primary-group` | Primary instance-group assignment |
-| `instance-group-1`, `instance-group-2` | Additional instance-group assignments |
+| `group1`, `group2` | Additional instance-group assignments |
 | `event-scheme` | Configured Part 103 event source scheme |
-| `event-filter-0`, `event-filter-1`, `event-filter-2` | Event-filter bytes 0-7, 8-15, and 16-23 |
+| `event-filter0`, `event-filter1`, `event-filter2` | Event-filter bytes 0-7, 8-15, and 16-23 |
 | `input-value`, `input-value-latch` | Current and latched input values |
 | `pb-short-timer`, `pb-short-timer-min` | Part 301 short timer and physical minimum |
 | `pb-double-timer`, `pb-double-timer-min` | Part 301 double timer and physical minimum |
 | `pb-repeat-timer`, `pb-stuck-timer` | Part 301 repeat and stuck timers |
-| `hold-timer`, `report-timer`, `deadtime` | Part 303 occupancy timers (`0x2D`, `0x2E`, `0x2C`) |
-| `occupancy-capabilities` | Part 303 occupancy capability byte |
-| `detection-range`, `sensitivity`, `catching` | Part 303 range, sensitivity, and catch state |
+| `occ-hold-timer`, `occ-report-timer`, `occ-deadtime` | Part 303 occupancy timers (`0x2D`, `0x2E`, `0x2C`) |
+| `occ-capabilities` | Part 303 occupancy capability byte |
+| `occ-detection-range`, `occ-sensitivity`, `occ-catching` | Part 303 range, sensitivity, and catch state |
 | `light-report-timer`, `light-deadtime` | Part 304 light-sensor timers |
 | `light-hysteresis`, `light-hysteresis-min` | Part 304 light-sensor hysteresis values |
 
-ESPHome `iconfig` names:
+`iconfig` names (shared; `list iconfig` prints them at runtime):
 
 > **Warning — hardware validation incomplete.**
 > The opcode mapping has been independently audited, but these configuration
@@ -589,24 +663,24 @@ ESPHome `iconfig` names:
 
 | Name | Value | Meaning |
 |---|---|---|
-| `enable-instance` | none | Enable the selected instance |
-| `disable-instance` | none | Disable the selected instance |
+| `enable` | none | Enable the selected instance |
+| `disable` | none | Disable the selected instance |
 | `set-event-priority` | DTR0 | Set generic Part 103 event priority |
 | `set-primary-group` | DTR0 | Set the primary instance group |
-| `set-instance-group-1` | DTR0 | Set additional instance group 1 |
-| `set-instance-group-2` | DTR0 | Set additional instance group 2 |
+| `set-group1` | DTR0 | Set additional instance group 1 |
+| `set-group2` | DTR0 | Set additional instance group 2 |
 | `set-event-scheme` | DTR0 | Set the Part 103 event source scheme |
 | `pb-set-short-timer` | DTR0 | Set the Part 301 short timer |
 | `pb-set-double-timer` | DTR0 | Set the Part 301 double timer |
 | `pb-set-repeat-timer` | DTR0 | Set the Part 301 repeat timer |
 | `pb-set-stuck-timer` | DTR0 | Set the Part 301 stuck timer |
-| `catch-movement` | none | Start Part 303 movement catching; single send |
-| `cancel-hold-timer` | none | Cancel the Part 303 hold timer; single send |
-| `set-hold-timer` | DTR0 | Set the Part 303 hold timer (`0x21`) |
-| `set-report-timer` | DTR0 | Set the Part 303 report timer (`0x22`) |
-| `set-deadtime` | DTR0 | Set the Part 303 deadtime (`0x23`) |
-| `set-detection-range` | DTR0 | Set Part 303 detection range if supported |
-| `set-sensitivity` | DTR0 | Set Part 303 sensitivity if supported |
+| `occ-catch-movement` | none | Start Part 303 movement catching; single send |
+| `occ-cancel-hold` | none | Cancel the Part 303 hold timer; single send |
+| `occ-set-hold-timer` | DTR0 | Set the Part 303 hold timer (`0x21`) |
+| `occ-set-report-timer` | DTR0 | Set the Part 303 report timer (`0x22`) |
+| `occ-set-deadtime` | DTR0 | Set the Part 303 deadtime (`0x23`) |
+| `occ-set-detection-range` | DTR0 | Set Part 303 detection range if supported |
+| `occ-set-sensitivity` | DTR0 | Set Part 303 sensitivity if supported |
 | `light-set-report-timer` | DTR0 | Set the Part 304 report timer |
 | `light-set-hysteresis` | DTR0 | Set Part 304 hysteresis |
 | `light-set-deadtime` | DTR0 | Set the Part 304 deadtime timer |

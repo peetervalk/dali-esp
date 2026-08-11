@@ -177,6 +177,7 @@ static const DaliCliCommandSpec s_commands[] = {
     { DALI_CLI_CMD_MEMINFO, "meminfo", "<addr>", "control-gear Bank 0 identity", 1u, 1u, NULL },
     { DALI_CLI_CMD_DEVMEM, "devmem", "read|write <addr> <bank> <offset> [count|value]", "control-device memory (Part 103)", 4u, 5u,
       "read write" },
+    { DALI_CLI_CMD_DTRCHECK, "dtrcheck", "<addr> <0|1|2> <0-255>", "load a control-device DTR and read it back", 3u, 3u, NULL },
 
     { DALI_CLI_CMD_DT6, "dt6", "<addr> <name> [dtr0]", "device type 6 (LED) command", 2u, 3u, NULL },
     { DALI_CLI_CMD_DT8, "dt8", "<addr> <name> [v0] [v1] [v2]", "device type 8 (colour) command", 2u, 5u, NULL },
@@ -285,9 +286,26 @@ void dali_cli_print_help(const DaliCliOut *out)
     }
 }
 
-DaliCliResolveResult dali_cli_resolve(const char                *line,
-                                      DaliCliTokens             *tokens,
-                                      const DaliCliCommandSpec **spec_out)
+const DaliCliCommandSpec *dali_cli_command_find_in(const DaliCliCommandSpec *table,
+                                                   uint8_t                   count,
+                                                   const char               *name)
+{
+    if (table == NULL || name == NULL) {
+        return NULL;
+    }
+    for (uint8_t i = 0u; i < count; i++) {
+        if (strcmp(name, table[i].name) == 0) {
+            return &table[i];
+        }
+    }
+    return NULL;
+}
+
+DaliCliResolveResult dali_cli_resolve_in(const DaliCliCommandSpec  *table,
+                                         uint8_t                    count,
+                                         const char                *line,
+                                         DaliCliTokens             *tokens,
+                                         const DaliCliCommandSpec **spec_out)
 {
     if (tokens == NULL || spec_out == NULL) {
         return DALI_CLI_RESOLVE_MALFORMED;
@@ -304,17 +322,25 @@ DaliCliResolveResult dali_cli_resolve(const char                *line,
             break;
     }
 
-    const DaliCliCommandSpec *spec = dali_cli_command_find(tokens->tok[0]);
+    const DaliCliCommandSpec *spec = dali_cli_command_find_in(table, count, tokens->tok[0]);
     if (spec == NULL) {
         return DALI_CLI_RESOLVE_UNKNOWN;
     }
     *spec_out = spec;
 
+    /* Both bounds, so a trailing token is rejected rather than ignored. */
     uint8_t argc = (uint8_t)(tokens->count - 1u);
     if (argc < spec->min_args || argc > spec->max_args) {
         return DALI_CLI_RESOLVE_ARITY;
     }
     return DALI_CLI_RESOLVE_OK;
+}
+
+DaliCliResolveResult dali_cli_resolve(const char                *line,
+                                      DaliCliTokens             *tokens,
+                                      const DaliCliCommandSpec **spec_out)
+{
+    return dali_cli_resolve_in(s_commands, CLI_COMMAND_COUNT, line, tokens, spec_out);
 }
 
 void dali_cli_report_resolve(const DaliCliOut         *out,
@@ -853,6 +879,23 @@ CLI_WRAP_INSTANCE_QUERY(cli_iq_available_types, dali_input_build_query_available
 
 #undef CLI_WRAP_INSTANCE_QUERY
 
+/* QUERY INPUT VALUE / LATCH have no dali_input_build_* wrapper because they are
+ * plain instance commands with no type-specific framing. */
+static DaliFrame cli_iq_input_value(uint8_t addr, uint8_t instance)
+{
+    DaliFrame frame = {0u, 0u};
+    (void)dali_build_instance_command(addr, instance, DALI_CMD_QUERY_INPUT_VALUE, &frame);
+    return frame;
+}
+
+static DaliFrame cli_iq_input_value_latch(uint8_t addr, uint8_t instance)
+{
+    DaliFrame frame = {0u, 0u};
+    (void)dali_build_instance_command(addr, instance, DALI_CMD_QUERY_INPUT_VALUE_LATCH,
+                                      &frame);
+    return frame;
+}
+
 static const DaliCliInstanceQuery s_iquery_commands[] = {
     { "type",            cli_iq_type,            false, NULL, DALI_RESP_UINT8 },
     { "resolution",      cli_iq_resolution,      false, NULL, DALI_RESP_UINT8 },
@@ -869,6 +912,11 @@ static const DaliCliInstanceQuery s_iquery_commands[] = {
     { "event-filter2",   cli_iq_event_filter2,   false, NULL, DALI_RESP_BITSET8 },
     { "instance-config", cli_iq_instance_config, true,  "DTR0=configuration index", DALI_RESP_UINT8 },
     { "available-types", cli_iq_available_types, false, NULL, DALI_RESP_BITSET8 },
+    /* On-demand read of the instance's current value. The latch variant freezes
+     * a multi-byte value so its bytes belong to one reading; the remaining
+     * bytes come from the DTRs and need an atomic follow-up read. */
+    { "input-value",       cli_iq_input_value,       false, NULL, DALI_RESP_INPUT_VALUE_MSB },
+    { "input-value-latch", cli_iq_input_value_latch, false, NULL, DALI_RESP_INPUT_VALUE_LATCH },
 
     { "pb-short-timer",      dali_input_pb_build_query_short_timer,      false, NULL, DALI_RESP_UINT8 },
     { "pb-short-timer-min",  dali_input_pb_build_query_short_timer_min,  false, NULL, DALI_RESP_UINT8 },
@@ -913,36 +961,67 @@ const DaliCliInstanceQuery *dali_cli_iquery_find(const char *name)
  * Part 103 instance configuration
  * --------------------------------------------------------------------------*/
 
+/* Accepted range for one DTR byte. ANY is the 0-255 pass-through used for
+ * opaque values such as event-filter bitmaps and instance-configuration data. */
+#define DTR_ANY        { 0u, 255u, 0u }
+#define DTR_R(lo, hi)  { (lo), (hi), 0u }
+/* 0 disables the timer, otherwise the value must be in range. */
+#define DTR_R_ZERO(lo, hi) { (lo), (hi), DALI_CLI_DTR_ALLOW_ZERO }
+/* 255 is MASK — "no group" — rather than an ordinary out-of-range value. */
+#define DTR_R_MASK(lo, hi) { (lo), (hi), DALI_CLI_DTR_ALLOW_MASK }
+
 static const DaliCliInstanceConfig s_iconfig_commands[] = {
-    { "set-event-priority",  dali_input_build_set_event_priority,       true, 1u, "DTR0=priority 2-5", 0u },
-    { "enable",              dali_input_build_enable_instance,          true, 0u, NULL, 0u },
-    { "disable",             dali_input_build_disable_instance,         true, 0u, NULL, 0u },
-    { "set-primary-group",   dali_input_build_set_primary_group,        true, 1u, "DTR0=group 0-31 or 255 for MASK", 0u },
-    { "set-group1",          dali_input_build_set_instance_group1,      true, 1u, "DTR0=group 0-31 or 255 for MASK", 0u },
-    { "set-group2",          dali_input_build_set_instance_group2,      true, 1u, "DTR0=group 0-31 or 255 for MASK", 0u },
-    { "set-event-scheme",    dali_input_build_set_event_scheme,         true, 1u, "DTR0=scheme 0-4", 0u },
-    { "set-event-filter",    dali_input_build_set_event_filter,         true, 3u, "DTR0,DTR1,DTR2=eventFilter[7:0],[15:8],[23:16]", 0u },
-    { "set-instance-type",   dali_input_build_set_instance_type,        true, 1u, "DTR0=instance type", 0u },
-    { "set-instance-config", dali_input_build_set_instance_configuration, true, 3u, "DTR0=index, DTR1=value low, DTR2=value high", 0u },
+    { "set-event-priority",  dali_input_build_set_event_priority,       true, 1u, "DTR0=priority 2-5", 0u, { DTR_R(2u, 5u) } },
+    { "enable",              dali_input_build_enable_instance,          true, 0u, NULL, 0u, { DTR_ANY } },
+    { "disable",             dali_input_build_disable_instance,         true, 0u, NULL, 0u, { DTR_ANY } },
+    { "set-primary-group",   dali_input_build_set_primary_group,        true, 1u, "DTR0=group 0-31 or 255 for MASK", 0u, { DTR_R_MASK(0u, 31u) } },
+    { "set-group1",          dali_input_build_set_instance_group1,      true, 1u, "DTR0=group 0-31 or 255 for MASK", 0u, { DTR_R_MASK(0u, 31u) } },
+    { "set-group2",          dali_input_build_set_instance_group2,      true, 1u, "DTR0=group 0-31 or 255 for MASK", 0u, { DTR_R_MASK(0u, 31u) } },
+    { "set-event-scheme",    dali_input_build_set_event_scheme,         true, 1u, "DTR0=scheme 0-4", 0u, { DTR_R(0u, 4u) } },
+    { "set-event-filter",    dali_input_build_set_event_filter,         true, 3u, "DTR0,DTR1,DTR2=eventFilter[7:0],[15:8],[23:16]", 0u, { DTR_ANY, DTR_ANY, DTR_ANY } },
+    { "set-instance-type",   dali_input_build_set_instance_type,        true, 1u, "DTR0=instance type 0-31", 0u, { DTR_R(0u, 31u) } },
+    { "set-instance-config", dali_input_build_set_instance_configuration, true, 3u, "DTR0=index, DTR1=value low, DTR2=value high", 0u, { DTR_ANY, DTR_ANY, DTR_ANY } },
 
-    { "pb-set-short-timer",  dali_input_pb_build_set_short_timer,       true, 1u, "DTR0=tShort in 20 ms units", 1u },
-    { "pb-set-double-timer", dali_input_pb_build_set_double_timer,      true, 1u, "DTR0=tDouble in 20 ms units, 0 disables", 1u },
-    { "pb-set-repeat-timer", dali_input_pb_build_set_repeat_timer,      true, 1u, "DTR0=tRepeat 5-100 in 20 ms units", 1u },
-    { "pb-set-stuck-timer",  dali_input_pb_build_set_stuck_timer,       true, 1u, "DTR0=tStuck 5-255 seconds", 1u },
+    { "pb-set-short-timer",  dali_input_pb_build_set_short_timer,       true, 1u, "DTR0=tShort 10-255 in 20 ms units", 1u, { DTR_R(10u, 255u) } },
+    { "pb-set-double-timer", dali_input_pb_build_set_double_timer,      true, 1u, "DTR0=tDouble 10-100 in 20 ms units, 0 disables", 1u, { DTR_R_ZERO(10u, 100u) } },
+    { "pb-set-repeat-timer", dali_input_pb_build_set_repeat_timer,      true, 1u, "DTR0=tRepeat 5-100 in 20 ms units", 1u, { DTR_R(5u, 100u) } },
+    { "pb-set-stuck-timer",  dali_input_pb_build_set_stuck_timer,       true, 1u, "DTR0=tStuck 5-255 seconds", 1u, { DTR_R(5u, 255u) } },
 
-    { "occ-catch-movement",  dali_input_occ_build_catch_movement,       false, 0u, NULL, 3u },
-    { "occ-cancel-hold",     dali_input_occ_build_cancel_hold_timer,    false, 0u, NULL, 3u },
-    { "occ-set-hold-timer",  dali_input_occ_build_set_hold_timer,       true, 1u, "DTR0=hold 0-254 in 10 s units, 0 selects 1 s", 3u },
-    { "occ-set-report-timer", dali_input_occ_build_set_report_timer,    true, 1u, "DTR0=report seconds, 0 disables", 3u },
-    { "occ-set-deadtime",    dali_input_occ_build_set_deadtime,         true, 1u, "DTR0=deadtime in 50 ms units, 0 disables", 3u },
-    { "occ-set-detection-range", dali_input_occ_build_set_detection_range, true, 1u, "DTR0=range 0-100", 3u },
-    { "occ-set-sensitivity", dali_input_occ_build_set_sensitivity,      true, 1u, "DTR0=sensitivity 0-100", 3u },
+    { "occ-catch-movement",  dali_input_occ_build_catch_movement,       false, 0u, NULL, 3u, { DTR_ANY } },
+    { "occ-cancel-hold",     dali_input_occ_build_cancel_hold_timer,    false, 0u, NULL, 3u, { DTR_ANY } },
+    { "occ-set-hold-timer",  dali_input_occ_build_set_hold_timer,       true, 1u, "DTR0=hold 0-254 in 10 s units, 0 selects 1 s", 3u, { DTR_R(0u, 254u) } },
+    { "occ-set-report-timer", dali_input_occ_build_set_report_timer,    true, 1u, "DTR0=report seconds, 0 disables", 3u, { DTR_R(0u, 255u) } },
+    { "occ-set-deadtime",    dali_input_occ_build_set_deadtime,         true, 1u, "DTR0=deadtime in 50 ms units, 0 disables", 3u, { DTR_R(0u, 255u) } },
+    { "occ-set-detection-range", dali_input_occ_build_set_detection_range, true, 1u, "DTR0=range 0-100", 3u, { DTR_R(0u, 100u) } },
+    { "occ-set-sensitivity", dali_input_occ_build_set_sensitivity,      true, 1u, "DTR0=sensitivity 0-100", 3u, { DTR_R(0u, 100u) } },
 
-    { "light-set-report-timer",   dali_input_light_build_set_report_timer,   true, 1u, "DTR0=report seconds, 0 disables", 4u },
-    { "light-set-hysteresis",     dali_input_light_build_set_hysteresis,     true, 1u, "DTR0=percentage 0-25", 4u },
-    { "light-set-deadtime",       dali_input_light_build_set_deadtime,       true, 1u, "DTR0=deadtime in 50 ms units, 0 disables", 4u },
-    { "light-set-hysteresis-min", dali_input_light_build_set_hysteresis_min, true, 1u, "DTR0=absolute minimum 0-255", 4u },
+    { "light-set-report-timer",   dali_input_light_build_set_report_timer,   true, 1u, "DTR0=report seconds, 0 disables", 4u, { DTR_R(0u, 255u) } },
+    { "light-set-hysteresis",     dali_input_light_build_set_hysteresis,     true, 1u, "DTR0=percentage 0-25", 4u, { DTR_R(0u, 25u) } },
+    { "light-set-deadtime",       dali_input_light_build_set_deadtime,       true, 1u, "DTR0=deadtime in 50 ms units, 0 disables", 4u, { DTR_R(0u, 255u) } },
+    { "light-set-hysteresis-min", dali_input_light_build_set_hysteresis_min, true, 1u, "DTR0=absolute minimum 0-255", 4u, { DTR_R(0u, 255u) } },
 };
+
+#undef DTR_ANY
+#undef DTR_R
+#undef DTR_R_ZERO
+#undef DTR_R_MASK
+
+bool dali_cli_dtr_value_valid(const DaliCliDtrRange *range, uint8_t value)
+{
+    if (range == NULL) {
+        return false;
+    }
+    if (value >= range->min && value <= range->max) {
+        return true;
+    }
+    if ((range->flags & DALI_CLI_DTR_ALLOW_ZERO) != 0u && value == 0u) {
+        return true;
+    }
+    if ((range->flags & DALI_CLI_DTR_ALLOW_MASK) != 0u && value == 255u) {
+        return true;
+    }
+    return false;
+}
 
 uint8_t dali_cli_iconfig_count(void) { return CLI_TABLE_ENTRIES(s_iconfig_commands); }
 const DaliCliInstanceConfig *dali_cli_iconfig_at(uint8_t index)

@@ -3,8 +3,8 @@
 #include "esphome/core/component.h"
 #include "esphome/components/sensor/sensor.h"
 #include "../dali_component.h"
+#include "dali_input_value_mailbox.h"
 
-#include <atomic>
 #include <cstdint>
 
 namespace esphome {
@@ -32,16 +32,12 @@ class DaliInputSensor : public sensor::Sensor, public Component, public DaliBusS
   void     set_last_poll_ms(uint32_t ms) { last_poll_ms_ = ms; }
 
   /* Called from Core 1 (DALI task completion callback). */
-  void mark_raw_value(uint16_t raw) {
-    pending_raw_.store(raw, std::memory_order_release);
-    dirty_.store(true, std::memory_order_release);
-  }
+  void mark_raw_value(uint16_t raw) { value_mailbox_.publish(raw); }
 
-  /* Called from Core 0 (DaliComponent::loop). Publishes if dirty. */
+  /* Called from Core 0 (DaliComponent::loop). Publishes if a value is waiting. */
   void apply_value() {
-    if (!dirty_.load(std::memory_order_acquire)) return;
-    dirty_.store(false, std::memory_order_relaxed);
-    uint16_t raw = pending_raw_.load(std::memory_order_relaxed);
+    uint16_t raw;
+    if (!value_mailbox_.take(raw)) return;
     publish_state((float)raw * scale_ + offset_);
   }
 
@@ -57,8 +53,8 @@ class DaliInputSensor : public sensor::Sensor, public Component, public DaliBusS
 
   uint32_t last_poll_ms_{0};
 
-  std::atomic<uint16_t> pending_raw_{0};
-  std::atomic<bool>     dirty_{false};
+  /* Coherent latest reading — published on Core 1, drained on Core 0. */
+  DaliInputValueMailbox value_mailbox_;
 };
 
 }  // namespace dali

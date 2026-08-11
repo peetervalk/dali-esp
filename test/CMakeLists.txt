@@ -45,14 +45,17 @@ set(DALI_INC
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali
 )
 
-# The portable half of the native CLI. dali_diag.c stays out: it owns the
-# FreeRTOS task and the blocking scheduler slots, which have no host form.
+# The portable half of the native CLI. It lives in components/dali so that both
+# the native app and the ESPHome console can reach it; only the tests that need
+# it link it, which keeps the other suites' link lines small. dali_diag.c stays
+# out: it owns the FreeRTOS task and the blocking scheduler slots, which have no
+# host form.
 set(DALI_CLI_SRC
-    ${CMAKE_CURRENT_SOURCE_DIR}/../main/dali_cli.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_cli.c
 )
 
 set(DALI_CLI_INC
-    ${CMAKE_CURRENT_SOURCE_DIR}/../main
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali
 )
 
 # ---------------------------------------------------------------------------

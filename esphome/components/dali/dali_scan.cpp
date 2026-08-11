@@ -1,5 +1,6 @@
 #include "dali_scan.h"
 #include "dali_component.h"
+#include "dali_core_affinity.h"
 #include "esphome/core/log.h"
 
 #include "freertos/FreeRTOS.h"
@@ -544,10 +545,10 @@ bool dali_scan_start(DaliComponent *component) {
         ESP_LOGE(TAG, "failed to allocate scan task arguments");
         return false;
     }
-    // Pin to Core 1 alongside the DALI task so the sync wait doesn't starve
-    // the ESPHome main loop on Core 0.
-    BaseType_t created =
-        xTaskCreatePinnedToCore(scan_task, "dali_scan", 8192, args, 9, nullptr, 1);
+    // Runs alongside the DALI task, off the ESPHome main loop's core wherever
+    // there is a second one, so the sync wait cannot starve it.
+    BaseType_t created = xTaskCreatePinnedToCore(scan_task, "dali_scan", 8192, args, 9,
+                                                 nullptr, dali_worker_core());
     if (created != pdPASS) {
         delete args;
         ESP_LOGE(TAG, "failed to create scan task");

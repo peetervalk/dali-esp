@@ -1,6 +1,7 @@
 #include "dali_input_device.h"
 
 #include <stddef.h>
+#include <string.h>
 
 static DaliInputRole role_for_type(uint8_t type)
 {
@@ -39,6 +40,71 @@ static DaliInputUsableState usable_for_role(DaliInputRole role)
 DaliError dali_input_build_query_number_of_instances(uint8_t addr, DaliFrame *out)
 {
     return dali_build_device_command(addr, DALI_CMD_QUERY_NUMBER_OF_INSTANCES, out);
+}
+
+DaliError dali_input_build_query_content_dtr0(uint8_t addr, DaliFrame *out)
+{
+    return dali_build_device_command(addr, DALI_CMD_QUERY_DEVICE_CONTENT_DTR0, out);
+}
+
+DaliError dali_input_build_query_content_dtr1(uint8_t addr, DaliFrame *out)
+{
+    return dali_build_device_command(addr, DALI_CMD_QUERY_DEVICE_CONTENT_DTR1, out);
+}
+
+DaliError dali_input_build_query_content_dtr2(uint8_t addr, DaliFrame *out)
+{
+    return dali_build_device_command(addr, DALI_CMD_QUERY_DEVICE_CONTENT_DTR2, out);
+}
+
+static DaliError dtr_readback_command_id(DaliDtrRegister reg, DaliCommandId *out)
+{
+    switch (reg) {
+        case DALI_DTR0: *out = DALI_CMD_QUERY_DEVICE_CONTENT_DTR0; return DALI_OK;
+        case DALI_DTR1: *out = DALI_CMD_QUERY_DEVICE_CONTENT_DTR1; return DALI_OK;
+        case DALI_DTR2: *out = DALI_CMD_QUERY_DEVICE_CONTENT_DTR2; return DALI_OK;
+        default:        return DALI_ERR_INVALID;
+    }
+}
+
+DaliError dali_input_build_dtr_check_sequence(uint8_t addr,
+                                              DaliDtrRegister reg,
+                                              uint8_t value,
+                                              DaliSequence *out)
+{
+    if (out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliCommandId query_id;
+    DaliError err = dtr_readback_command_id(reg, &query_id);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    DaliFrame load;
+    err = dali_build_control_device_dtr_data(reg, value, &load);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    DaliFrame readback;
+    err = dali_build_device_command(addr, query_id, &readback);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    DaliSequence seq;
+    memset(&seq, 0, sizeof(seq));
+    /* No retry budget on either step: a repeated DTR load is indistinguishable
+     * from the caller's next value, and a repeated read would report on it. */
+    seq.steps[0].frame       = load;
+    seq.steps[1].frame       = readback;
+    seq.steps[1].needs_reply = true;
+    seq.step_count           = 2u;
+
+    *out = seq;
+    return DALI_OK;
 }
 
 DaliError dali_input_build_query_instance_type(uint8_t addr, uint8_t instance, DaliFrame *out)

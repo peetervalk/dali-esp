@@ -179,10 +179,76 @@ void test_classify_rejects_invalid_args(void)
                                                    NULL));
 }
 
+void test_build_query_content_dtr_uses_device_frames(void)
+{
+    DaliFrame frame;
+
+    /* Device frames: address byte, 0xFE, opcode 0x36/0x37/0x38. Distinct from
+     * the 16-bit Part 102 gear commands of the same name. */
+    TEST_ASSERT_EQUAL(DALI_OK, dali_input_build_query_content_dtr0(5u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x0BFE36u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(24u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_input_build_query_content_dtr1(5u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x0BFE37u, frame.data);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_input_build_query_content_dtr2(5u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x0BFE38u, frame.data);
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_input_build_query_content_dtr0(64u, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_input_build_query_content_dtr0(5u, NULL));
+}
+
+void test_build_dtr_check_sequence_pairs_load_and_readback(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_input_build_dtr_check_sequence(0u, DALI_DTR0, 0x42u, &seq));
+    TEST_ASSERT_EQUAL_UINT8(2u, seq.step_count);
+
+    /* Step 0 loads DTR0; it produces no reply and must not be sent twice. */
+    TEST_ASSERT_EQUAL_HEX32(dali_cmd_control_device_dtr0_data(0x42u).data,
+                            seq.steps[0].frame.data);
+    TEST_ASSERT_FALSE(seq.steps[0].needs_reply);
+    TEST_ASSERT_FALSE(seq.steps[0].send_twice);
+    TEST_ASSERT_EQUAL_UINT8(0u, seq.steps[0].retries_left);
+
+    /* Step 1 reads it back from the same device and expects the value. */
+    TEST_ASSERT_EQUAL_HEX32(0x01FE36u, seq.steps[1].frame.data);
+    TEST_ASSERT_TRUE(seq.steps[1].needs_reply);
+    TEST_ASSERT_FALSE(seq.steps[1].send_twice);
+    /* No retry: a repeat would read back a value a later load may have replaced. */
+    TEST_ASSERT_EQUAL_UINT8(0u, seq.steps[1].retries_left);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_input_build_dtr_check_sequence(7u, DALI_DTR1, 0x99u, &seq));
+    TEST_ASSERT_EQUAL_HEX32(dali_cmd_control_device_dtr1_data(0x99u).data,
+                            seq.steps[0].frame.data);
+    TEST_ASSERT_EQUAL_HEX32(0x0FFE37u, seq.steps[1].frame.data);
+}
+
+void test_build_dtr_check_sequence_rejects_invalid_args(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_input_build_dtr_check_sequence(0u, DALI_DTR0, 0u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_input_build_dtr_check_sequence(0u, (DaliDtrRegister)3, 0u, &seq));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_input_build_dtr_check_sequence(64u, DALI_DTR0, 0u, &seq));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_build_query_number_of_instances);
+    RUN_TEST(test_build_query_content_dtr_uses_device_frames);
+    RUN_TEST(test_build_dtr_check_sequence_pairs_load_and_readback);
+    RUN_TEST(test_build_dtr_check_sequence_rejects_invalid_args);
     RUN_TEST(test_build_standard_instance_queries);
     RUN_TEST(test_build_extended_standard_instance_queries);
     RUN_TEST(test_extended_standard_instance_queries_reject_invalid_args);

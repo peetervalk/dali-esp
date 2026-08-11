@@ -150,6 +150,7 @@ typedef enum {
     DALI_CLI_CMD_MEMREAD,
     DALI_CLI_CMD_MEMINFO,
     DALI_CLI_CMD_DEVMEM,
+    DALI_CLI_CMD_DTRCHECK,
 
     DALI_CLI_CMD_DT6,
     DALI_CLI_CMD_DT8,
@@ -170,6 +171,13 @@ typedef enum {
     DALI_CLI_CMD_EXPORT,
     DALI_CLI_CMD_IDENTIFY,
 
+    /*
+     * Also the marker a front end with its own table (see dali_cli_resolve_in)
+     * puts on a verb that has no shared id, because it acts on state only that
+     * front end has. Use it only for that case: a verb that merely happens to
+     * be unimplemented on the other side belongs in the shared table, so both
+     * surfaces keep one spelling for it.
+     */
     DALI_CLI_CMD_COUNT,
 } DaliCliCommandId;
 
@@ -221,6 +229,27 @@ typedef enum {
 DaliCliResolveResult dali_cli_resolve(const char                *line,
                                       DaliCliTokens             *tokens,
                                       const DaliCliCommandSpec **spec_out);
+
+/*
+ * The same resolution against a caller-supplied verb table.
+ *
+ * The ESPHome console reaches the same bus through the same protocol stack but
+ * offers a deliberately smaller surface: it has no terminal to print a scan or
+ * a capture into, and its result is a single Home Assistant text state. It
+ * therefore brings its own table of the verbs it actually implements, and gets
+ * this module's tokenising, arity checking, argument parsing, and named command
+ * tables for free — which is what keeps one spelling of a command name and one
+ * definition of what counts as a well-formed line across both front ends.
+ */
+DaliCliResolveResult dali_cli_resolve_in(const DaliCliCommandSpec  *table,
+                                         uint8_t                    count,
+                                         const char                *line,
+                                         DaliCliTokens             *tokens,
+                                         const DaliCliCommandSpec **spec_out);
+
+const DaliCliCommandSpec *dali_cli_command_find_in(const DaliCliCommandSpec *table,
+                                                   uint8_t                   count,
+                                                   const char               *name);
 
 /* Print the standard message for a resolve outcome. DALI_CLI_RESOLVE_OK and
  * DALI_CLI_RESOLVE_EMPTY print nothing. */
@@ -352,6 +381,27 @@ const DaliCliInstanceQuery *dali_cli_iquery_find(const char *name);
 
 typedef DaliFrame (*DaliCliInstanceConfigFn)(uint8_t addr, uint8_t instance);
 
+/*
+ * Accepted values for one DTR byte, taken from the applicable Part 103/3xx
+ * command definition. These are machine-checked rather than left to the prose
+ * in dtr_help: an out-of-range configuration byte is accepted and stored by
+ * some gear, so the mistake shows up later as a sensor that behaves oddly
+ * rather than as a rejected command.
+ *
+ * Some commands accept a sentinel outside their ordinary range — 0 to disable a
+ * timer, or 255 (MASK) to clear a group — which is what the flags express.
+ */
+#define DALI_CLI_DTR_ALLOW_ZERO 0x01u  /* 0 is valid even when below min */
+#define DALI_CLI_DTR_ALLOW_MASK 0x02u  /* 255 (MASK) is valid even when above max */
+
+typedef struct {
+    uint8_t min;
+    uint8_t max;
+    uint8_t flags;
+} DaliCliDtrRange;
+
+bool dali_cli_dtr_value_valid(const DaliCliDtrRange *range, uint8_t value);
+
 typedef struct {
     const char             *name;
     DaliCliInstanceConfigFn build;
@@ -361,6 +411,9 @@ typedef struct {
     /* Instance type this command belongs to: 0 = generic Part 103, otherwise
      * the Part 301/303/304 instance type it is only valid for. */
     uint8_t                 instance_type;
+    /* Accepted range per DTR byte. Only the first dtr_count entries are
+     * meaningful; the rest are never read. */
+    DaliCliDtrRange         dtr_range[DALI_INPUT_CONFIG_MAX_DTR_BYTES];
 } DaliCliInstanceConfig;
 
 uint8_t                      dali_cli_iconfig_count(void);

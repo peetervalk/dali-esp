@@ -8,7 +8,6 @@ namespace esphome {
 namespace dali {
 
 static const char *TAG = "dali.light";
-static constexpr uint32_t STARTUP_WRITE_SUPPRESS_MS = 10000u;
 
 // Only referenced from ESP_LOGD; unused when the build's log level is above DEBUG.
 [[maybe_unused]] static const char *target_type_name(DaliAddressType type) {
@@ -101,37 +100,62 @@ void DaliLightOutput::setup_state(light::LightState *state) {
   state->set_default_transition_length(0);
   clear_unused_color_fields_(state->remote_values);
   clear_unused_color_fields_(state->current_values);
-  setup_ms_ = millis();
   suppress_initial_write_ = true;
 }
 
+/*
+ * Which writes are ours to send.
+ *
+ * Two kinds of write_state() call are not an operator's intent, and both are
+ * identified by what they are rather than by when they arrive:
+ *
+ *   1. ESPHome's restore/default write. LightState::setup() calls
+ *      setup_state() and then performs exactly one call carrying the restored
+ *      or default state, so the first write_state() after setup is that one.
+ *      Sending it would drive the bus to a remembered level before anything has
+ *      looked at what the gear is actually doing.
+ *
+ *   2. The echo of a bus reading. apply_bus_state() pushes an observed level
+ *      into ESPHome via LightCall::perform(), which schedules a write of the
+ *      value we just took off the bus. Re-sending it would be a command the
+ *      operator never issued.
+ *
+ * The echo is matched on the exact (is_on, level) pair that was pushed, not on
+ * a "skip the next one" flag: a flag is consumed by whichever call happens to
+ * arrive first, so a user command racing an observation was dropped, and an
+ * observation that produced no write left the flag armed to eat a later real
+ * command. Matching on the value cannot do either — and a user command that
+ * genuinely equals the current bus state is a no-op the write arbiter already
+ * suppresses.
+ *
+ * There is deliberately no time window. The previous ten-second startup
+ * suppression discarded every command in the first ten seconds after boot,
+ * including ones a person had just issued.
+ */
 void DaliLightOutput::write_state(light::LightState *state) {
   if (!state_) state_ = state;  // capture on first call
   clear_unused_color_fields_(state->remote_values);
   clear_unused_color_fields_(state->current_values);
 
-  if (suppress_initial_write_) {
-    suppress_initial_write_ = false;
-    skip_next_write_ = false;
-    ESP_LOGD(TAG, "suppressing initial restore/default write");
-    return;
-  }
-
-  if (skip_next_write_) {
-    skip_next_write_ = false;
-    return;  // state was pushed from bus — don't re-issue DALI command
-  }
-
-  if ((uint32_t)(millis() - setup_ms_) < STARTUP_WRITE_SUPPRESS_MS) {
-    ESP_LOGD(TAG, "suppressing startup write to %s %u",
-             target_type_name(target_.type), (unsigned)target_.address);
-    return;
-  }
-
   const auto &target = state->remote_values;
   float brightness = target.get_state() * target.get_brightness();
   bool desired_is_on = target.is_on() && brightness >= (1.0f / 254.0f);
   uint8_t desired_level = desired_is_on ? brightness_to_level_(brightness) : 0u;
+
+  if (suppress_initial_write_) {
+    suppress_initial_write_ = false;
+    echo_valid_ = false;
+    ESP_LOGD(TAG, "suppressing initial restore/default write to %s %u",
+             target_type_name(target_.type), (unsigned)target_.address);
+    return;
+  }
+
+  if (echo_valid_ && echo_is_on_ == desired_is_on &&
+      (!desired_is_on || echo_level_ == desired_level)) {
+    echo_valid_ = false;
+    return;  // state came from the bus — do not send it back
+  }
+  echo_valid_ = false;
 
   /* Record the desired state itself rather than relying on LightState: a
    * bus-state publication can overwrite remote_values before this is sent. */
@@ -168,7 +192,24 @@ void DaliLightOutput::apply_bus_state() {
    * authority for the state it establishes, and this reading may predate it. */
   dali_light_write_observe(&write_, is_on, level);
 
-  skip_next_write_ = true;
+  /* A real reading also settles what the gear is doing, so the restore write is
+   * no longer pending arbitration — disarm it here as well as on first use, so
+   * a boot where ESPHome never issued one cannot leave the flag to swallow a
+   * later operator command. */
+  suppress_initial_write_ = false;
+
+  /* What LightCall::perform() below will schedule as a write. Recorded so that
+   * write_state() can recognise it as this reading coming back rather than as
+   * something a person asked for.
+   *
+   * The level survives the round trip unchanged: this pushes level/254 as the
+   * brightness and write_state() turns it back with round(brightness * 254).
+   * remote_values carries the un-gamma-corrected value, so nothing else is
+   * applied in between. */
+  echo_valid_ = true;
+  echo_is_on_ = is_on;
+  echo_level_ = is_on ? level : 0u;
+
   auto call = state_->make_call();
   call.set_state(is_on);
   if (is_on) call.set_brightness(static_cast<float>(level) / 254.0f);

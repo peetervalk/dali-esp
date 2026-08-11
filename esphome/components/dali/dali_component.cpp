@@ -1,10 +1,8 @@
 #include "dali_component.h"
+#include "dali_core_affinity.h"
 #include "dali_scan.h"
 #include "esphome/core/log.h"
 #include "esphome/components/text_sensor/text_sensor.h"
-
-#include <cctype>
-#include <cstdlib>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -16,6 +14,7 @@
 extern "C" {
 #include "../../../components/dali/dali_phy.h"
 #include "../../../components/dali/dali_scheduler.h"
+#include "../../../components/dali/dali_cli.h"
 #include "../../../components/dali/dali_control.h"
 #include "../../../components/dali/dali_event.h"
 #include "../../../components/dali/dali_dispatch.h"
@@ -31,6 +30,10 @@ namespace esphome {
 namespace dali {
 
 static const char *TAG = "dali";
+
+/* Home Assistant rejects a state string longer than this, so any summary built
+ * for a text sensor has to fit — and has to say so when it cannot. */
+static constexpr size_t HA_STATE_MAX = 255u;
 
 /* ── Headless dispatch state ─────────────────────────────────────────────── */
 
@@ -557,7 +560,7 @@ static void on_dali_unsolicited(const DaliFrame *frame, void * /*ctx*/)
     }
 }
 
-/* ── DALI task (Core 1) ──────────────────────────────────────────────────── */
+/* ── DALI task (worker core; see dali_core_affinity.h) ───────────────────── */
 
 static void dali_task(void *raw_component)
 {
@@ -675,7 +678,15 @@ void DaliComponent::setup()
         portEXIT_CRITICAL(&s_group_map_mux);
     }
 
-    xTaskCreatePinnedToCore(dali_task, "dali", 4096, this, 10, nullptr, 1);
+    /* Nothing below this point works without the task: it is what drives RX
+     * decoding and every scheduler transaction. A failed creation must fail the
+     * component rather than leave a silent, permanently idle bus. */
+    if (xTaskCreatePinnedToCore(dali_task, "dali", 4096, this, 10, nullptr,
+                                dali_worker_core()) != pdPASS) {
+        ESP_LOGE(TAG, "failed to create DALI task");
+        mark_failed();
+        return;
+    }
 
     if (scan_status_) scan_status_->publish_state("Idle");
     if (bus_fault_)   bus_fault_->publish_state("OK");
@@ -789,16 +800,7 @@ void DaliComponent::loop()
     }
 
     /* ── Bus fault detection ── */
-    if (bus_fault_) {
-        uint32_t count = g_dali_stats.bus_idle_failures;
-        if (count != last_bus_fault_count_) {
-            last_bus_fault_count_ = count;
-            char buf[32];
-            snprintf(buf, sizeof(buf), "Bus stuck: %u", (unsigned)count);
-            ESP_LOGE(TAG, "DALI bus stuck — %u total occurrence(s)", (unsigned)count);
-            bus_fault_->publish_state(buf);
-        }
-    }
+    update_bus_fault_();
 
     /* ── Scheduler queue drops ── */
     report_queue_drops_();
@@ -886,7 +888,16 @@ void DaliComponent::loop()
             if (cnt == 0u) {
                 couplers_result_->publish_state("None");
             } else {
-                char buf[128] = {};
+                /* Home Assistant caps a state string at 255 characters, and the
+                 * old 128-byte buffer silently dropped whatever did not fit —
+                 * so a busy bus produced a summary that looked complete and was
+                 * not. Fit as many entries as the budget allows and say plainly
+                 * how many were left out; every captured frame is logged below
+                 * regardless, which is the complete record. */
+                char buf[HA_STATE_MAX] = {};
+                size_t pos = 0u;
+                uint8_t shown = 0u;
+
                 for (uint8_t i = 0u; i < cnt; i++) {
                     const DaliInputEvent &event = s_coupler_frames[i];
                     char entry[48];
@@ -894,9 +905,26 @@ void DaliComponent::loop()
                     ESP_LOGI(TAG, "coupler[%u] %s raw=%0*X", (unsigned)i,
                              entry, event.raw.bit_length == 24u ? 6 : 4,
                              (unsigned)event.raw.data);
-                    if (i > 0u)
-                        strncat(buf, "; ", sizeof(buf) - strlen(buf) - 1u);
-                    strncat(buf, entry, sizeof(buf) - strlen(buf) - 1u);
+
+                    /* Reserve room for the worst-case "; +NN more" suffix so a
+                     * truncation can always be reported. */
+                    const size_t reserve = 12u;
+                    size_t need = strlen(entry) + (shown == 0u ? 0u : 2u);
+                    if (pos + need + reserve >= sizeof(buf)) continue;
+
+                    if (shown > 0u) {
+                        buf[pos++] = ';';
+                        buf[pos++] = ' ';
+                    }
+                    memcpy(buf + pos, entry, strlen(entry));
+                    pos += strlen(entry);
+                    buf[pos] = '\0';
+                    shown++;
+                }
+
+                if (shown < cnt) {
+                    snprintf(buf + pos, sizeof(buf) - pos, "%s+%u more",
+                             shown > 0u ? "; " : "", (unsigned)(cnt - shown));
                 }
                 couplers_result_->publish_state(buf);
             }
@@ -937,283 +965,367 @@ void DaliComponent::loop()
 
 /* ── execute_command ─────────────────────────────────────────────────────── */
 
-/* Parse decimal integer in s into *out; return false if empty, non-numeric,
- * has trailing garbage, or is outside [lo, hi]. */
-static bool parse_uint(const char *s, unsigned long lo, unsigned long hi,
-                        unsigned long *out)
-{
-    if (!s || !*s) return false;
-    char *end;
-    unsigned long v = strtoul(s, &end, 10);
-    if (end == s || *end != '\0' || v < lo || v > hi) return false;
-    *out = v;
-    return true;
-}
+/* ── Console command table ───────────────────────────────────────────────── */
 
-static bool parse_raw_len(const char *s, uint8_t *out)
-{
-    if (s == nullptr || out == nullptr || strncmp(s, "len=", 4) != 0) return false;
-    unsigned long bits;
-    if (!parse_uint(s + 4, 16u, 24u, &bits)) return false;
-    if (bits != 16u && bits != 24u) return false;
-    *out = (uint8_t)bits;
-    return true;
-}
-
-static bool parse_hex_frame(const char *s, uint8_t bit_len, DaliFrame *out)
-{
-    if (s == nullptr || out == nullptr || (bit_len != 16u && bit_len != 24u)) return false;
-    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
-    if (*s == '\0') return false;
-
-    for (const char *p = s; *p != '\0'; p++) {
-        if (!isxdigit((unsigned char)*p)) return false;
-    }
-
-    char *end;
-    unsigned long value = strtoul(s, &end, 16);
-    if (*end != '\0') return false;
-
-    unsigned long max_value = (1UL << bit_len) - 1UL;
-    if (value > max_value) return false;
-
-    out->data       = (uint32_t)value;
-    out->bit_length = bit_len;
-    return true;
-}
-
-/* Parse "a0", "s3", "g5", "b" into a DaliTarget. Returns false on error. */
-static bool parse_target(const char *tok, DaliTarget *out)
-{
-    if (!tok) return false;
-    if (tok[0] == 'b' && tok[1] == '\0') {
-        out->type    = DALI_ADDR_BROADCAST;
-        out->address = 0u;
-        return true;
-    }
-    const char *digits = nullptr;
-    if ((tok[0] == 'a' || tok[0] == 's') && isdigit((unsigned char)tok[1])) {
-        out->type = DALI_ADDR_SHORT;
-        digits    = tok + 1;
-    } else if (tok[0] == 'g' && isdigit((unsigned char)tok[1])) {
-        out->type = DALI_ADDR_GROUP;
-        digits    = tok + 1;
-    } else {
-        return false;
-    }
-    char *end;
-    unsigned long val = strtoul(digits, &end, 10);
-    if (*end != '\0') return false;
-    uint8_t limit = (out->type == DALI_ADDR_GROUP) ? 15u : 63u;
-    if (val > limit) return false;
-    out->address = (uint8_t)val;
-    return true;
-}
-
-/* Lookup table for gear queries (subset of DaliCommandId). */
-struct QueryEntry { const char *name; DaliCommandId id; };
-static const QueryEntry s_query_table[] = {
-    { "actual-level",     DALI_CMD_QUERY_ACTUAL_LEVEL              },
-    { "max-level",        DALI_CMD_QUERY_MAX_LEVEL                 },
-    { "min-level",        DALI_CMD_QUERY_MIN_LEVEL                 },
-    { "power-on-level",   DALI_CMD_QUERY_POWER_ON_LEVEL            },
-    { "failure-level",    DALI_CMD_QUERY_SYSTEM_FAILURE_LEVEL      },
-    { "status",           DALI_CMD_QUERY_STATUS                    },
-    { "version",          DALI_CMD_QUERY_VERSION_NUMBER            },
-    { "device-type",      DALI_CMD_QUERY_DEVICE_TYPE               },
-    { "power-on-flag",    DALI_CMD_QUERY_LAMP_POWER_ON             },
-    { "power-fail-flag",  DALI_CMD_QUERY_POWER_FAILURE             },
-    { "groups-0-7",       DALI_CMD_QUERY_GROUPS_0_7                },
-    { "groups-8-15",      DALI_CMD_QUERY_GROUPS_8_15               },
-    { "physical-min",     DALI_CMD_QUERY_PHYSICAL_MINIMUM          },
-    { "operating-mode",   DALI_CMD_QUERY_OPERATING_MODE            },
-    { "fade",             DALI_CMD_QUERY_FADE_TIME_FADE_RATE       },
-    { "content-dtr0",     DALI_CMD_QUERY_CONTENT_DTR0              },
-    { "content-dtr1",     DALI_CMD_QUERY_CONTENT_DTR1              },
-    { "content-dtr2",     DALI_CMD_QUERY_CONTENT_DTR2              },
-};
-
-/* Lookup table for 16-bit gear config commands (subset). */
-struct ConfigEntry { const char *name; DaliCommandId id; bool uses_dtr0; };
-static const ConfigEntry s_config_table[] = {
-    { "reset",                DALI_CMD_RESET,                         false },
-    { "set-max-dtr0",         DALI_CMD_SET_MAX_LEVEL_DTR0,            true  },
-    { "set-min-dtr0",         DALI_CMD_SET_MIN_LEVEL_DTR0,            true  },
-    { "set-power-on-dtr0",    DALI_CMD_SET_POWER_ON_LEVEL_DTR0,       true  },
-    { "set-failure-dtr0",     DALI_CMD_SET_SYSTEM_FAILURE_LEVEL_DTR0, true  },
-    { "set-fade-time-dtr0",   DALI_CMD_SET_FADE_TIME_DTR0,            true  },
-    { "set-fade-rate-dtr0",   DALI_CMD_SET_FADE_RATE_DTR0,            true  },
-    { "set-operating-mode",   DALI_CMD_SET_OPERATING_MODE_DTR0,       true  },
-    { "add-group",            DALI_CMD_ADD_TO_GROUP,                   false },
-    { "remove-group",         DALI_CMD_REMOVE_FROM_GROUP,              false },
-    { "identify-device",      DALI_CMD_IDENTIFY_DEVICE,                false },
-    { "save-persistent",      DALI_CMD_SAVE_PERSISTENT_VARIABLES,      false },
-};
-
-/* Lookup table for 24-bit instance configuration and control commands.
+/*
+ * The console and the native CLI reach the same bus through the same protocol
+ * stack, so they share one tokeniser, one set of argument parsers, and one set
+ * of named command tables (dali_cli.h). What they do not share is the verb
+ * list: there is no terminal here to print a scan, a capture, or an inventory
+ * into, and the result of a command is a single Home Assistant text state.
  *
- * Type-specific names are deliberately explicit except for the three Part 303
- * timer names retained for backwards compatibility with the installed site.
- * DTR0 ranges come from the applicable Part 103/3xx command definition. */
-typedef DaliFrame (*IConfigBuilder)(uint8_t addr, uint8_t instance);
-enum IConfigParamKind : uint8_t {
-    ICONFIG_NO_PARAM = 0,
-    ICONFIG_DTR0,
-};
-struct IConfigEntry {
-    const char       *name;
-    IConfigBuilder    builder;
-    IConfigParamKind  param_kind;
-    uint8_t           min_value;
-    uint8_t           max_value;
-    bool              allow_zero;
-    bool              allow_mask;
-    bool              send_twice;
-};
-static const IConfigEntry s_iconfig_table[] = {
-    { "set-event-priority",   dali_input_build_set_event_priority,         ICONFIG_DTR0,     2u,   5u, false, false, true  },
-    { "set-primary-group",    dali_input_build_set_primary_group,          ICONFIG_DTR0,     0u,  31u, false, true,  true  },
-    { "set-instance-group-1", dali_input_build_set_instance_group1,        ICONFIG_DTR0,     0u,  31u, false, true,  true  },
-    { "set-instance-group-2", dali_input_build_set_instance_group2,        ICONFIG_DTR0,     0u,  31u, false, true,  true  },
-    { "set-event-scheme",     dali_input_build_set_event_scheme,           ICONFIG_DTR0,     0u,   4u, false, false, true  },
-    { "enable-instance",      dali_input_build_enable_instance,            ICONFIG_NO_PARAM, 0u,   0u, false, false, true  },
-    { "disable-instance",     dali_input_build_disable_instance,           ICONFIG_NO_PARAM, 0u,   0u, false, false, true  },
+ * This table is therefore the subset that is meaningful through that surface,
+ * spelled exactly as the native CLI spells it. Sharing the spec struct is what
+ * gives the console its argument-count checking: dali_cli_resolve_in() enforces
+ * both bounds before a handler runs, so a trailing token is now an error rather
+ * than something quietly ignored.
+ *
+ * `group` carries DALI_CLI_CMD_COUNT because it has no shared id: it edits the
+ * group-membership cache, which exists only in this integration.
+ */
+static const DaliCliCommandSpec s_console_commands[] = {
+    { DALI_CLI_CMD_QUEUE, "queue", "[reset]", "scheduler queue admission diagnostics", 0u, 1u, "reset" },
 
-    { "pb-set-short-timer",   dali_input_pb_build_set_short_timer,         ICONFIG_DTR0,    10u, 255u, false, false, true  },
-    { "pb-set-double-timer",  dali_input_pb_build_set_double_timer,        ICONFIG_DTR0,    10u, 100u, true,  false, true  },
-    { "pb-set-repeat-timer",  dali_input_pb_build_set_repeat_timer,        ICONFIG_DTR0,     5u, 100u, false, false, true  },
-    { "pb-set-stuck-timer",   dali_input_pb_build_set_stuck_timer,         ICONFIG_DTR0,     5u, 255u, false, false, true  },
+    { DALI_CLI_CMD_RAW,  "raw",  "<hex> len=<bits> [wait]", "send one arbitrary frame", 2u, 3u, NULL },
+    { DALI_CLI_CMD_RAW2, "raw2", "<hex> len=<bits>", "send one frame twice within the 100 ms window", 2u, 2u, NULL },
 
-    { "catch-movement",       dali_input_occ_build_catch_movement,         ICONFIG_NO_PARAM, 0u,   0u, false, false, false },
-    { "set-hold-timer",       dali_input_occ_build_set_hold_timer,         ICONFIG_DTR0,     0u, 254u, false, false, true  },
-    { "set-report-timer",     dali_input_occ_build_set_report_timer,       ICONFIG_DTR0,     0u, 255u, false, false, true  },
-    { "set-deadtime",         dali_input_occ_build_set_deadtime,           ICONFIG_DTR0,     0u, 255u, false, false, true  },
-    { "cancel-hold-timer",    dali_input_occ_build_cancel_hold_timer,      ICONFIG_NO_PARAM, 0u,   0u, false, false, false },
-    { "set-detection-range",  dali_input_occ_build_set_detection_range,    ICONFIG_DTR0,     0u, 100u, false, false, true  },
-    { "set-sensitivity",      dali_input_occ_build_set_sensitivity,        ICONFIG_DTR0,     0u, 100u, false, false, true  },
+    { DALI_CLI_CMD_LEVEL, "level", DALI_CLI_TARGET_ARG " <0-254|mask>", "direct arc power control", 2u, 2u, NULL },
+    { DALI_CLI_CMD_OFF,   "off",   DALI_CLI_TARGET_ARG, "OFF", 1u, 1u, NULL },
+    { DALI_CLI_CMD_MAX,   "max",   DALI_CLI_TARGET_ARG, "RECALL MAX LEVEL", 1u, 1u, NULL },
+    { DALI_CLI_CMD_MIN,   "min",   DALI_CLI_TARGET_ARG, "RECALL MIN LEVEL", 1u, 1u, NULL },
 
-    { "light-set-report-timer",   dali_input_light_build_set_report_timer,   ICONFIG_DTR0, 0u, 255u, false, false, true },
-    { "light-set-hysteresis",     dali_input_light_build_set_hysteresis,     ICONFIG_DTR0, 0u,  25u, false, false, true },
-    { "light-set-deadtime",       dali_input_light_build_set_deadtime,       ICONFIG_DTR0, 0u, 255u, false, false, true },
-    { "light-set-hysteresis-min", dali_input_light_build_set_hysteresis_min, ICONFIG_DTR0, 0u, 255u, false, false, true },
+    { DALI_CLI_CMD_QUERY,       "query",       DALI_CLI_TARGET_ARG " <query-name> [param]", "addressed control-gear query", 2u, 3u, NULL },
+    { DALI_CLI_CMD_CONFIG,      "config",      DALI_CLI_TARGET_ARG " <config-name> [param]", "addressed configuration command", 2u, 3u, NULL },
+    { DALI_CLI_CMD_CONFIG_DTR0, "config-dtr0", DALI_CLI_TARGET_ARG " <config-name> <dtr0> [param]", "load DTR0 and configure atomically", 3u, 4u, NULL },
+
+    { DALI_CLI_CMD_IQUERY,  "iquery",  "<addr> <instance> <name>", "Part 103 instance query", 3u, 3u, NULL },
+    { DALI_CLI_CMD_ICONFIG, "iconfig", "<addr> <instance> <name> [v0] [v1] [v2]", "Part 103 instance configuration", 3u, 6u, NULL },
+
+    { DALI_CLI_CMD_DEVMEM,   "devmem",   "read|write <addr> <bank> <offset> [count|value]", "control-device memory (Part 103)", 4u, 5u, "read write" },
+    { DALI_CLI_CMD_DTRCHECK, "dtrcheck", "<addr> <0|1|2> <0-255>", "load a control-device DTR and read it back", 3u, 3u, NULL },
+
+    { DALI_CLI_CMD_COUNT, "group", "forget <addr> [group]", "retire a departed member from the group cache", 2u, 3u, "forget" },
 };
 
-static bool iconfig_value_valid(const IConfigEntry &entry, unsigned long value)
+static constexpr uint8_t CONSOLE_COMMAND_COUNT =
+    (uint8_t)(sizeof(s_console_commands) / sizeof(s_console_commands[0]));
+
+/* Longest console line accepted. dali_cli_tokenize() rejects anything longer
+ * rather than truncating it, so a clipped line can never become a different,
+ * valid command. */
+static constexpr size_t CONSOLE_LINE_MAX = 96u;
+
+static void set_cmd_usage(const DaliCliCommandSpec *spec)
 {
-    if (value >= entry.min_value && value <= entry.max_value) return true;
-    if (entry.allow_zero && value == 0u) return true;
-    if (entry.allow_mask && value == 0xFFu) return true;
-    return false;
+    if (spec == nullptr) {
+        set_cmd_result("bad args");
+        return;
+    }
+    char buf[sizeof(s_cmd_result_str)];
+    snprintf(buf, sizeof(buf), "usage: %s %s", spec->name, spec->args);
+    set_cmd_result(buf);
 }
 
-/* Adapters: dali_input_device.h uses DaliError+out-ptr; iquery table needs DaliFrame return. */
-static DaliFrame s_qry_instance_type(uint8_t a, uint8_t i)    { DaliFrame f={}; dali_input_build_query_instance_type(a,i,&f);    return f; }
-static DaliFrame s_qry_resolution(uint8_t a, uint8_t i)       { DaliFrame f={}; dali_input_build_query_resolution(a,i,&f);        return f; }
-static DaliFrame s_qry_instance_error(uint8_t a, uint8_t i)   { DaliFrame f={}; dali_input_build_query_instance_error(a,i,&f);   return f; }
-static DaliFrame s_qry_instance_status(uint8_t a, uint8_t i)  { DaliFrame f={}; dali_input_build_query_instance_status(a,i,&f);   return f; }
-static DaliFrame s_qry_instance_enabled(uint8_t a, uint8_t i) { DaliFrame f={}; dali_input_build_query_instance_enabled(a,i,&f);  return f; }
-static DaliFrame s_qry_event_priority(uint8_t a, uint8_t i)   { DaliFrame f={}; dali_input_build_query_event_priority(a,i,&f);   return f; }
-static DaliFrame s_qry_primary_group(uint8_t a, uint8_t i)    { DaliFrame f={}; dali_input_build_query_primary_instance_group(a,i,&f); return f; }
-static DaliFrame s_qry_instance_group1(uint8_t a, uint8_t i)  { DaliFrame f={}; dali_input_build_query_instance_group1(a,i,&f); return f; }
-static DaliFrame s_qry_instance_group2(uint8_t a, uint8_t i)  { DaliFrame f={}; dali_input_build_query_instance_group2(a,i,&f); return f; }
-static DaliFrame s_qry_event_scheme(uint8_t a, uint8_t i)     { DaliFrame f={}; dali_input_build_query_event_scheme(a,i,&f);     return f; }
-static DaliFrame s_qry_event_filter0(uint8_t a, uint8_t i)    { DaliFrame f={}; dali_input_build_query_event_filter_zero(a,i,&f); return f; }
-static DaliFrame s_qry_event_filter1(uint8_t a, uint8_t i)    { DaliFrame f={}; dali_input_build_query_event_filter_one(a,i,&f); return f; }
-static DaliFrame s_qry_event_filter2(uint8_t a, uint8_t i)    { DaliFrame f={}; dali_input_build_query_event_filter_two(a,i,&f); return f; }
-static DaliFrame s_qry_input_value(uint8_t a, uint8_t i)      { DaliFrame f={}; dali_build_instance_command(a,i,DALI_CMD_QUERY_INPUT_VALUE,&f);       return f; }
-static DaliFrame s_qry_input_value_latch(uint8_t a, uint8_t i){ DaliFrame f={}; dali_build_instance_command(a,i,DALI_CMD_QUERY_INPUT_VALUE_LATCH,&f); return f; }
+/* ── Multi-byte memory read result (Core 1 -> Core 0) ────────────────────── */
 
-/* Lookup table for 24-bit instance query commands (single send, expects reply). */
-struct IQueryEntry { const char *name; IConfigBuilder builder; };
-static const IQueryEntry s_iquery_table[] = {
-    { "instance-type",       s_qry_instance_type     },
-    { "resolution",          s_qry_resolution        },
-    { "instance-error",      s_qry_instance_error    },
-    { "instance-status",     s_qry_instance_status   },
-    { "instance-enabled",    s_qry_instance_enabled  },
-    { "event-priority",      s_qry_event_priority    },
-    { "primary-group",       s_qry_primary_group     },
-    { "instance-group-1",    s_qry_instance_group1   },
-    { "instance-group-2",    s_qry_instance_group2   },
-    { "event-scheme",        s_qry_event_scheme      },
-    { "event-filter-0",      s_qry_event_filter0     },
-    { "event-filter-1",      s_qry_event_filter1     },
-    { "event-filter-2",      s_qry_event_filter2     },
-    { "input-value",         s_qry_input_value       },
-    { "input-value-latch",   s_qry_input_value_latch },
+static void on_devmem_read_done(const DaliSequenceResult *result, void *ctx)
+{
+    if (result == nullptr || result->result != DALI_OK) {
+        DaliError err = result != nullptr ? result->result : DALI_ERR_INVALID;
+        set_cmd_result_for_generation(err == DALI_ERR_TIMEOUT ? "no reply" : "err", ctx);
+        return;
+    }
 
-    { "pb-short-timer",      dali_input_pb_build_query_short_timer      },
-    { "pb-short-timer-min",  dali_input_pb_build_query_short_timer_min  },
-    { "pb-double-timer",     dali_input_pb_build_query_double_timer     },
-    { "pb-double-timer-min", dali_input_pb_build_query_double_timer_min },
-    { "pb-repeat-timer",     dali_input_pb_build_query_repeat_timer     },
-    { "pb-stuck-timer",      dali_input_pb_build_query_stuck_timer      },
+    /* One reply per read step; report every byte so a multi-byte read is not
+     * silently reduced to its last value. */
+    char buf[sizeof(s_cmd_result_str)];
+    size_t pos = 0u;
+    uint8_t reported = 0u;
+    for (uint8_t step = 0u; step < DALI_SEQUENCE_MAX_STEPS; step++) {
+        DaliFrame reply;
+        if (!dali_sequence_result_reply(result, step, &reply)) continue;
+        int n = snprintf(buf + pos, sizeof(buf) - pos, reported == 0u ? "%02X" : " %02X",
+                         (unsigned)(reply.data & 0xFFu));
+        if (n <= 0 || pos + (size_t)n >= sizeof(buf)) break;
+        pos += (size_t)n;
+        reported++;
+    }
+    if (reported == 0u) {
+        set_cmd_result_for_generation("no reply", ctx);
+        return;
+    }
+    set_cmd_result_for_generation(buf, ctx);
+}
 
-    { "hold-timer",          dali_input_occ_build_query_hold_timer       },
-    { "deadtime",            dali_input_occ_build_query_deadtime         },
-    { "report-timer",        dali_input_occ_build_query_report_timer     },
-    { "occupancy-capabilities", dali_input_occ_build_query_capabilities   },
-    { "detection-range",     dali_input_occ_build_query_detection_range  },
-    { "sensitivity",         dali_input_occ_build_query_sensitivity      },
-    { "catching",            dali_input_occ_build_query_catching         },
+static void on_dtrcheck_done(const DaliSequenceResult *result, void *ctx)
+{
+    DaliFrame reply;
+    if (result == nullptr || result->result != DALI_OK ||
+        !dali_sequence_result_last_reply(result, &reply)) {
+        DaliError err = result != nullptr ? result->result : DALI_ERR_INVALID;
+        set_cmd_result_for_generation(err == DALI_ERR_TIMEOUT ? "no reply" : "err", ctx);
+        return;
+    }
+    char buf[24];
+    snprintf(buf, sizeof(buf), "read %u (0x%02X)", (unsigned)(reply.data & 0xFFu),
+             (unsigned)(reply.data & 0xFFu));
+    set_cmd_result_for_generation(buf, ctx);
+}
 
-    { "light-hysteresis-min", dali_input_light_build_query_hysteresis_min },
-    { "light-deadtime",       dali_input_light_build_query_deadtime       },
-    { "light-report-timer",   dali_input_light_build_query_report_timer   },
-    { "light-hysteresis",     dali_input_light_build_query_hysteresis     },
-};
+/* ── Console handlers ────────────────────────────────────────────────────── */
+
+void DaliComponent::console_queue_(const DaliCliTokens &t)
+{
+    if (t.count == 2u) {
+        dali_sched_reset_queue_stats();
+        last_queue_rejected_full_ = 0u;
+        last_queue_rejected_busy_ = 0u;
+    }
+    DaliSchedQueueStats stats;
+    if (dali_sched_queue_stats(&stats) != DALI_OK) {
+        set_cmd_result("err");
+        return;
+    }
+    char buf[64];
+    snprintf(buf, sizeof(buf), "d=%u/%u hw=%u ok=%u full=%u busy=%u",
+             (unsigned)stats.depth, (unsigned)stats.capacity,
+             (unsigned)stats.high_water, (unsigned)stats.admitted,
+             (unsigned)stats.rejected_full, (unsigned)stats.rejected_busy);
+    set_cmd_result(buf);
+}
+
+/*
+ * Retire a departed group member from the runtime cache.
+ *
+ * This is the operator's counterpart to the scan's deliberate conservatism: a
+ * scan that misses an address keeps its memberships, which is right for gear
+ * that is merely offline but leaves physically removed gear in the cache
+ * forever, still eligible as a group's query target. Unlike `config
+ * remove-group` this sends nothing — the gear is gone and cannot answer — so it
+ * only edits local bookkeeping, which is then persisted by the main loop.
+ */
+void DaliComponent::console_group_(const DaliCliTokens &t)
+{
+    uint8_t addr;
+    if (!dali_cli_parse_short_addr(t.tok[2], &addr)) {
+        set_cmd_result("group: addr 0-63");
+        return;
+    }
+
+    uint8_t group = DALI_GROUP_MAP_ALL_GROUPS;
+    if (t.count == 4u && (!dali_cli_parse_u8(t.tok[3], 15u, &group))) {
+        set_cmd_result("group: 0-15");
+        return;
+    }
+
+    portENTER_CRITICAL(&s_group_map_mux);
+    bool changed = dali_group_map_forget(&s_group_map, addr, group);
+    portEXIT_CRITICAL(&s_group_map_mux);
+
+    if (!changed) {
+        set_cmd_result("not a member");
+        return;
+    }
+    s_group_members_dirty_.store(true, std::memory_order_release);
+
+    char buf[48];
+    if (group == DALI_GROUP_MAP_ALL_GROUPS) {
+        snprintf(buf, sizeof(buf), "forgot a%u (all groups)", (unsigned)addr);
+    } else {
+        snprintf(buf, sizeof(buf), "forgot a%u from g%u", (unsigned)addr, (unsigned)group);
+    }
+    ESP_LOGI(TAG, "%s", buf);
+    set_cmd_result(buf);
+}
+
+void DaliComponent::console_raw_(const DaliCliTokens &t, bool send_twice, void *ctx)
+{
+    DaliFrame frame;
+    if (!dali_cli_parse_raw_frame(t.tok[1], t.tok[2], &frame)) {
+        set_cmd_result("bad raw syntax");
+        return;
+    }
+
+    bool wait_reply = false;
+    if (t.count == 4u) {
+        if (strcmp(t.tok[3], "wait") != 0) {
+            set_cmd_result("bad raw syntax");
+            return;
+        }
+        wait_reply = true;
+    }
+
+    DaliTransaction txn = {};
+    txn.frame       = frame;
+    txn.needs_reply = wait_reply;
+    txn.send_twice  = send_twice;
+    txn.on_complete = send_twice ? on_raw2_done : on_raw_done;
+    txn.cb_ctx      = ctx;
+    set_cmd_result("pending");
+    set_cmd_enqueue_error(dali_sched_enqueue(&txn));
+}
+
+void DaliComponent::console_devmem_(const DaliCliTokens &t, void *ctx)
+{
+    bool is_write = strcmp(t.tok[1], "write") == 0;
+    uint8_t addr, bank, offset;
+    if (!dali_cli_parse_short_addr(t.tok[2], &addr) ||
+        !dali_cli_parse_u8(t.tok[3], 255u, &bank) ||
+        !dali_cli_parse_u8(t.tok[4], 255u, &offset)) {
+        set_cmd_result("devmem: bad args");
+        return;
+    }
+
+    DaliSequence seq;
+    DaliError err;
+
+    if (is_write) {
+        uint8_t value;
+        if (t.count != 6u || !dali_cli_parse_u8(t.tok[5], 255u, &value)) {
+            set_cmd_result("usage: devmem write <addr> <bank> <off> <val>");
+            return;
+        }
+        if (bank == 0u) {
+            set_cmd_result("devmem: bank 0 is read-only");
+            return;
+        }
+        err = dali_memory_build_control_device_write_sequence(addr, bank, offset,
+                                                              value, &seq);
+        if (err == DALI_OK) err = dali_sched_enqueue_sequence(&seq);
+        /* Transmitted, not applied: nothing reads the value back. */
+        set_cmd_enqueue_result(err);
+        return;
+    }
+
+    uint8_t count = 1u;
+    if (t.count == 6u &&
+        (!dali_cli_parse_u8(t.tok[5], DALI_MEMORY_MAX_SEQUENCE_READ_BYTES, &count) ||
+         count == 0u)) {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "devmem read count 1-%u",
+                 (unsigned)DALI_MEMORY_MAX_SEQUENCE_READ_BYTES);
+        set_cmd_result(buf);
+        return;
+    }
+    if ((unsigned)offset + (unsigned)count > 256u) {
+        set_cmd_result("devmem: past end of bank");
+        return;
+    }
+
+    err = dali_memory_build_control_device_read_sequence(addr, bank, offset, count, &seq);
+    if (err == DALI_OK) {
+        seq.on_complete = on_devmem_read_done;
+        seq.cb_ctx      = ctx;
+        set_cmd_result("pending");
+        err = dali_sched_enqueue_sequence(&seq);
+    }
+    set_cmd_enqueue_error(err);
+}
+
+void DaliComponent::console_iconfig_(const DaliCliTokens &t)
+{
+    uint8_t addr, instance;
+    if (!dali_cli_parse_short_addr(t.tok[1], &addr) ||
+        !dali_cli_parse_instance(t.tok[2], &instance)) {
+        set_cmd_result("iconfig: addr 0-63, inst 0-31");
+        return;
+    }
+
+    const DaliCliInstanceConfig *spec = dali_cli_iconfig_find(t.tok[3]);
+    if (spec == nullptr) {
+        set_cmd_result("unknown iconfig cmd");
+        return;
+    }
+
+    if (t.count != (uint8_t)(4u + spec->dtr_count)) {
+        char buf[sizeof(s_cmd_result_str)];
+        snprintf(buf, sizeof(buf), "%s needs %u value(s)", spec->name,
+                 (unsigned)spec->dtr_count);
+        set_cmd_result(buf);
+        return;
+    }
+
+    uint8_t dtr[DALI_INPUT_CONFIG_MAX_DTR_BYTES] = {};
+    for (uint8_t i = 0u; i < spec->dtr_count; i++) {
+        if (!dali_cli_parse_u8(t.tok[4u + i], 255u, &dtr[i]) ||
+            !dali_cli_dtr_value_valid(&spec->dtr_range[i], dtr[i])) {
+            char buf[sizeof(s_cmd_result_str)];
+            snprintf(buf, sizeof(buf), "DTR%u out of range: %s", (unsigned)i,
+                     spec->dtr_help != nullptr ? spec->dtr_help : "");
+            set_cmd_result(buf);
+            return;
+        }
+    }
+
+    DaliFrame command = spec->build(addr, instance);
+    if (command.bit_length == 0u) {
+        set_cmd_result("iconfig: bad args");
+        return;
+    }
+
+    /* The DTR loads and the command they configure go out as one sequence, so
+     * no other locally scheduled frame can replace a DTR in between. */
+    DaliSequence seq;
+    DaliError err = dali_input_build_config_sequence(command, spec->send_twice, false,
+                                                     dtr, spec->dtr_count, &seq);
+    if (err == DALI_OK) err = dali_sched_enqueue_sequence(&seq);
+    set_cmd_enqueue_result(err);
+}
 
 void DaliComponent::execute_command(const std::string &cmd_str)
 {
-    /* Tokenise into 5 command tokens plus one overflow sentinel. */
-    char buf[96];
-    if (cmd_str.size() >= sizeof(buf)) {
+    if (cmd_str.size() >= CONSOLE_LINE_MAX) {
         begin_cmd_generation();
         set_cmd_result("command too long");
         return;
     }
-    strncpy(buf, cmd_str.c_str(), sizeof(buf) - 1u);
-    buf[sizeof(buf) - 1u] = '\0';
 
-    const char *tok[6] = {};
-    uint8_t     ntok   = 0u;
-    char       *p      = buf;
-    while (*p && ntok < 6u) {
-        while (*p == ' ') p++;
-        if (!*p) break;
-        tok[ntok++] = p;
-        while (*p && *p != ' ') p++;
-        if (*p) *p++ = '\0';
-    }
-    if (ntok == 0u) return;
+    DaliCliTokens tokens;
+    const DaliCliCommandSpec *spec = nullptr;
+    DaliCliResolveResult resolved =
+        dali_cli_resolve_in(s_console_commands, CONSOLE_COMMAND_COUNT,
+                            cmd_str.c_str(), &tokens, &spec);
 
-    const char *verb = tok[0];
+    if (resolved == DALI_CLI_RESOLVE_EMPTY) return;
+
     uint32_t cmd_generation = begin_cmd_generation();
     void *cmd_ctx = cmd_generation_ctx(cmd_generation);
-    /* Scheduler queue diagnostics: queue [reset]. Answers locally without any
-     * bus traffic, so unlike every other verb its result is a reading rather
-     * than an admission — and it stays available during a scan, which is when
-     * queue pressure is most worth inspecting. */
-    if (strcmp(verb, "queue") == 0) {
-        if (ntok == 2u && strcmp(tok[1], "reset") == 0) {
-            dali_sched_reset_queue_stats();
-            last_queue_rejected_full_ = 0u;
-            last_queue_rejected_busy_ = 0u;
-        } else if (ntok != 1u) {
-            set_cmd_result("bad queue syntax");
+
+    switch (resolved) {
+        case DALI_CLI_RESOLVE_OK:
+            break;
+        case DALI_CLI_RESOLVE_UNKNOWN:
+            set_cmd_result("unknown verb");
+            ESP_LOGD(TAG, "execute_command: %s -> unknown verb", cmd_str.c_str());
             return;
-        }
-        DaliSchedQueueStats stats;
-        if (dali_sched_queue_stats(&stats) != DALI_OK) {
-            set_cmd_result("err");
+        case DALI_CLI_RESOLVE_ARITY:
+            /* Both bounds are checked, so this is also what rejects a trailing
+             * token instead of ignoring it. */
+            set_cmd_usage(spec);
             return;
-        }
-        char buf_q[64];
-        snprintf(buf_q, sizeof(buf_q), "d=%u/%u hw=%u ok=%u full=%u busy=%u",
-                 (unsigned)stats.depth, (unsigned)stats.capacity,
-                 (unsigned)stats.high_water, (unsigned)stats.admitted,
-                 (unsigned)stats.rejected_full, (unsigned)stats.rejected_busy);
-        set_cmd_result(buf_q);
+        case DALI_CLI_RESOLVE_MALFORMED:
+        default:
+            set_cmd_result("command too long");
+            return;
+    }
+
+    /* A verb whose first argument is a fixed keyword is checked against the one
+     * list in the table, so the usage line and what is accepted cannot drift. */
+    if (spec->subcommands != nullptr && tokens.count >= 2u &&
+        !dali_cli_has_subcommand(spec, tokens.tok[1])) {
+        set_cmd_usage(spec);
+        return;
+    }
+
+    /* Answered locally with no bus traffic, so unlike every other verb these
+     * stay available during a scan — which is when queue pressure and a stale
+     * group cache are most worth inspecting. */
+    if (spec->id == DALI_CLI_CMD_QUEUE) {
+        console_queue_(tokens);
+        return;
+    }
+    if (spec->id == DALI_CLI_CMD_COUNT) {  /* group */
+        console_group_(tokens);
         return;
     }
 
@@ -1223,289 +1335,202 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         return;
     }
 
-    /* Raw frame: raw/raw2 <hex> len=<16|24> [wait]. */
-    if (strcmp(verb, "raw") == 0 || strcmp(verb, "raw2") == 0) {
-        if (ntok < 3u) { set_cmd_result("bad raw syntax"); return; }
-        bool send_twice = (strcmp(verb, "raw2") == 0);
-        bool wait_reply = false;
-        if (ntok == 4u) {
-            if (strcmp(tok[3], "wait") != 0) { set_cmd_result("bad raw syntax"); return; }
-            wait_reply = true;
-        } else if (ntok > 4u) {
-            set_cmd_result("bad raw syntax");
-            return;
-        }
-
-        uint8_t bit_len;
-        DaliFrame frame;
-        if (!parse_raw_len(tok[2], &bit_len) || !parse_hex_frame(tok[1], bit_len, &frame)) {
-            set_cmd_result("bad raw syntax");
-            return;
-        }
-
-        DaliTransaction txn = {};
-        txn.frame       = frame;
-        txn.needs_reply = wait_reply;
-        txn.send_twice  = send_twice;
-        txn.on_complete = send_twice ? on_raw2_done : on_raw_done;
-        txn.cb_ctx      = cmd_ctx;
-        set_cmd_result("pending");
-        set_cmd_enqueue_error(dali_sched_enqueue(&txn));
-        return;
-    }
-
-    /* ── Direct gear control ── */
     DaliTarget tgt{};
-    if ((strcmp(verb, "off") == 0 || strcmp(verb, "max") == 0 ||
-         strcmp(verb, "min") == 0) && ntok >= 2u) {
-        if (!parse_target(tok[1], &tgt)) { set_cmd_result("bad target"); return; }
-        DaliError err;
-        if (strcmp(verb, "off") == 0) err = dali_control_off(tgt);
-        else if (strcmp(verb, "max") == 0) err = dali_control_recall_max(tgt);
-        else err = dali_control_recall_min(tgt);
-        set_cmd_enqueue_result(err);
-        return;
-    }
+    switch (spec->id) {
+        case DALI_CLI_CMD_RAW:
+            console_raw_(tokens, false, cmd_ctx);
+            return;
+        case DALI_CLI_CMD_RAW2:
+            console_raw_(tokens, true, cmd_ctx);
+            return;
 
-    if (strcmp(verb, "level") == 0 && ntok >= 3u) {
-        if (!parse_target(tok[1], &tgt)) { set_cmd_result("bad target"); return; }
-        unsigned long lv;
-        if (!parse_uint(tok[2], 0u, 254u, &lv)) { set_cmd_result("level 0-254"); return; }
-        set_cmd_enqueue_result(dali_control_set_level(tgt, (uint8_t)lv));
-        return;
-    }
-
-    /* ── Gear query ── */
-    if (strcmp(verb, "query") == 0 && ntok >= 3u) {
-        if (!parse_target(tok[1], &tgt)) { set_cmd_result("bad target"); return; }
-        for (const auto &e : s_query_table) {
-            if (strcmp(tok[2], e.name) == 0) {
-                set_cmd_result("pending");
-                set_cmd_enqueue_error(
-                    dali_control_query(tgt, e.id, 0u, on_cmd_query_reply, cmd_ctx));
+        case DALI_CLI_CMD_OFF:
+        case DALI_CLI_CMD_MAX:
+        case DALI_CLI_CMD_MIN:
+            if (!dali_cli_parse_target(tokens.tok[1], &tgt)) {
+                set_cmd_result("bad target");
                 return;
             }
-        }
-        set_cmd_result("unknown query");
-        return;
-    }
+            set_cmd_enqueue_result(spec->id == DALI_CLI_CMD_OFF ? dali_control_off(tgt)
+                                 : spec->id == DALI_CLI_CMD_MAX ? dali_control_recall_max(tgt)
+                                                                : dali_control_recall_min(tgt));
+            return;
 
-    /* ── Gear config ── */
-    if (strcmp(verb, "config") == 0 && ntok >= 3u) {
-        if (!parse_target(tok[1], &tgt)) { set_cmd_result("bad target"); return; }
-        for (const auto &e : s_config_table) {
-            if (strcmp(tok[2], e.name) == 0) {
-                DaliError err;
-                if (e.uses_dtr0 && ntok >= 4u) {
-                    unsigned long dtr0v;
-                    if (!parse_uint(tok[3], 0u, 255u, &dtr0v)) { set_cmd_result("bad dtr0 value"); return; }
-                    err = dali_control_config_with_dtr0(tgt, e.id, (uint8_t)dtr0v, 0u);
-                } else if (!e.uses_dtr0) {
-                    unsigned long paramv = 0u;
-                    bool group_edit = (e.id == DALI_CMD_ADD_TO_GROUP ||
-                                       e.id == DALI_CMD_REMOVE_FROM_GROUP);
-                    if (group_edit) {
-                        if (ntok < 4u) { set_cmd_result("needs group 0-15"); return; }
-                        if (!parse_uint(tok[3], 0u, 15u, &paramv)) { set_cmd_result("group 0-15"); return; }
-                        if (tgt.type == DALI_ADDR_BROADCAST) { set_cmd_result("no broadcast group config"); return; }
-                    } else if (ntok >= 4u && !parse_uint(tok[3], 0u, 255u, &paramv)) {
-                        set_cmd_result("bad param");
-                        return;
-                    }
-                    err = dali_control_config(tgt, e.id, (uint8_t)paramv);
-                    if (err == DALI_OK && group_edit)
-                        update_group_members_from_config(tgt, e.id, (uint8_t)paramv);
-                } else {
-                    set_cmd_result("needs dtr0 value");
-                    return;
+        case DALI_CLI_CMD_LEVEL: {
+            if (!dali_cli_parse_target(tokens.tok[1], &tgt)) {
+                set_cmd_result("bad target");
+                return;
+            }
+            DaliCliLevel level;
+            if (!dali_cli_parse_level(tokens.tok[2], &level)) {
+                set_cmd_result("level 0-254 or mask");
+                return;
+            }
+            if (level.is_mask) {
+                /* MASK leaves the level unchanged; it is not a DAPC value, so
+                 * it cannot go through dali_control_set_level(). */
+                DaliFrame frame;
+                DaliError err = dali_control_build_dapc_mask(tgt, &frame);
+                if (err == DALI_OK) {
+                    DaliTransaction txn = {};
+                    txn.frame = frame;
+                    err = dali_sched_enqueue(&txn);
                 }
                 set_cmd_enqueue_result(err);
                 return;
             }
+            set_cmd_enqueue_result(dali_control_set_level(tgt, level.level));
+            return;
         }
-        set_cmd_result("unknown config");
-        return;
-    }
 
-    /* ── Instance config: iconfig a<N>:<inst> <cmd> [<dtr0>] ── */
-    if (strcmp(verb, "iconfig") == 0 && ntok >= 3u) {
-        const char *at = tok[1];
-        if (at[0] != 'a' && at[0] != 's') { set_cmd_result("iconfig: use a<N>:<inst>"); return; }
-        char *colon = strchr(const_cast<char *>(at), ':');
-        if (!colon) { set_cmd_result("iconfig: missing :<inst>"); return; }
-        *colon      = '\0';
-        unsigned long addrv, instv;
-        if (!parse_uint(at + 1, 0u, 63u, &addrv)) { set_cmd_result("iconfig: addr 0-63"); return; }
-        if (!parse_uint(colon + 1, 0u, 31u, &instv)) { set_cmd_result("iconfig: inst 0-31"); return; }
-        uint8_t addr = (uint8_t)addrv;
-        uint8_t inst = (uint8_t)instv;
-
-        for (const auto &e : s_iconfig_table) {
-            if (strcmp(tok[2], e.name) == 0) {
-                DaliFrame cfg_frame = e.builder(addr, inst);
-                DaliSequence seq = {};
-                if (e.param_kind == ICONFIG_DTR0) {
-                    if (ntok != 4u) { set_cmd_result("iconfig: needs one value"); return; }
-                    unsigned long dtr0v;
-                    if (!parse_uint(tok[3], 0u, 255u, &dtr0v) ||
-                        !iconfig_value_valid(e, dtr0v)) {
-                        set_cmd_result("iconfig: value out of range");
-                        return;
-                    }
-                    DaliFrame dtr_frame = dali_cmd_control_device_dtr0_data((uint8_t)dtr0v);
-                    seq.steps[0] = { dtr_frame, false, false, 0u };
-                    seq.steps[1] = { cfg_frame, false, e.send_twice, 0u };
-                    seq.step_count = 2u;
-                } else {
-                    if (ntok != 3u) { set_cmd_result("iconfig: unexpected value"); return; }
-                    seq.steps[0] = { cfg_frame, false, e.send_twice, 0u };
-                    seq.step_count = 1u;
+        case DALI_CLI_CMD_QUERY: {
+            if (!dali_cli_parse_target(tokens.tok[1], &tgt)) {
+                set_cmd_result("bad target");
+                return;
+            }
+            const DaliCliGearCommand *q = dali_cli_query_find(tokens.tok[2]);
+            if (q == nullptr) {
+                set_cmd_result("unknown query");
+                return;
+            }
+            uint8_t param = 0u;
+            if (q->needs_param) {
+                if (tokens.count != 4u ||
+                    !dali_cli_parse_u8(tokens.tok[3], q->max_param, &param)) {
+                    set_cmd_usage(spec);
+                    return;
                 }
-                set_cmd_enqueue_result(dali_sched_enqueue_sequence(&seq));
+            } else if (tokens.count != 3u) {
+                set_cmd_usage(spec);
                 return;
             }
-        }
-        set_cmd_result("unknown iconfig cmd");
-        return;
-    }
-
-    /* ── Instance query: iquery a<N>:<inst> <name> ── */
-    if (strcmp(verb, "iquery") == 0 && ntok >= 3u) {
-        const char *at = tok[1];
-        if (at[0] != 'a' && at[0] != 's') { set_cmd_result("iquery: use a<N>:<inst>"); return; }
-        char *colon = strchr(const_cast<char *>(at), ':');
-        if (!colon) { set_cmd_result("iquery: missing :<inst>"); return; }
-        *colon      = '\0';
-        unsigned long addrv, instv;
-        if (!parse_uint(at + 1, 0u, 63u, &addrv)) { set_cmd_result("iquery: addr 0-63"); return; }
-        if (!parse_uint(colon + 1, 0u, 31u, &instv)) { set_cmd_result("iquery: inst 0-31"); return; }
-        uint8_t addr = (uint8_t)addrv;
-        uint8_t inst = (uint8_t)instv;
-
-        for (const auto &e : s_iquery_table) {
-            if (strcmp(tok[2], e.name) == 0) {
-                DaliFrame frame = e.builder(addr, inst);
-                DaliTransaction txn = {};
-                txn.frame       = frame;
-                txn.needs_reply = true;
-                txn.on_complete = on_cmd_query_reply;
-                txn.cb_ctx      = cmd_ctx;
-                set_cmd_result("pending");
-                set_cmd_enqueue_error(dali_sched_enqueue(&txn));
-                return;
-            }
-        }
-        set_cmd_result("unknown iquery");
-        return;
-    }
-
-    /* ── Memory read: memread a<N> <bank> <offset> ── */
-    if (strcmp(verb, "memread") == 0 && ntok >= 4u) {
-        DaliTarget memtgt{};
-        if (!parse_target(tok[1], &memtgt) || memtgt.type != DALI_ADDR_SHORT) {
-            set_cmd_result("memread: use a<N>");
-            return;
-        }
-        unsigned long bankv, offv;
-        if (!parse_uint(tok[2], 0u, 255u, &bankv)) { set_cmd_result("bad bank");   return; }
-        if (!parse_uint(tok[3], 0u, 255u, &offv))  { set_cmd_result("bad offset"); return; }
-        DaliSequence seq;
-        DaliError err = dali_memory_build_control_device_read_sequence(
-            memtgt.address, (uint8_t)bankv, (uint8_t)offv, 1u, &seq);
-        if (err == DALI_OK) {
-            seq.on_complete = on_memread_done;
-            seq.cb_ctx      = cmd_ctx;
             set_cmd_result("pending");
-            err = dali_sched_enqueue_sequence(&seq);
-        }
-        set_cmd_enqueue_error(err);
-        return;
-    }
-
-    /* ── Raw device query: devquery a<N> <opcode>
-     * Sends a single 24-bit device-level command (addr FE opcode) and returns
-     * the 8-bit reply. Opcode in decimal (e.g. 48=0x30=QUERY DEVICE STATUS,
-     * 53=0x35=QUERY NUMBER OF INSTANCES, 60=0x3C=READ MEM LOCATION without DTR setup).
-     *   devquery a0 54   → 01 FE 36, returns Steinel's current DTR0
-     *   devquery a0 55   → 01 FE 37, returns Steinel's current DTR1 ── */
-    if (strcmp(verb, "devquery") == 0 && ntok >= 3u) {
-        DaliTarget tgt{};
-        if (!parse_target(tok[1], &tgt) || tgt.type != DALI_ADDR_SHORT) {
-            set_cmd_result("devquery: use a<N>");
+            set_cmd_enqueue_error(
+                dali_control_query(tgt, q->id, param, on_cmd_query_reply, cmd_ctx));
             return;
         }
-        unsigned long opcv;
-        if (!parse_uint(tok[2], 0u, 255u, &opcv)) { set_cmd_result("bad opcode"); return; }
-        DaliTransaction txn = {};
-        txn.frame       = dali_cmd_device(tgt.address, (uint8_t)opcv);
-        txn.needs_reply = true;
-        txn.on_complete = on_cmd_query_reply;
-        txn.cb_ctx      = cmd_ctx;
-        set_cmd_result("pending");
-        set_cmd_enqueue_error(dali_sched_enqueue(&txn));
-        return;
-    }
 
-    /* ── DTR check: dtrcheck a<N> <reg> <value>
-     * Sends SET DTR0 (reg=0) or SET DTR1 (reg=1), then immediately queries
-     * that register from the addressed 103 device.
-     *   dtrcheck a0 0 66  → set DTR0=0x42, then query it back.
-     *                        If Steinel replies 0x42 the SET works. ── */
-    if (strcmp(verb, "dtrcheck") == 0 && ntok >= 4u) {
-        DaliTarget tgt{};
-        if (!parse_target(tok[1], &tgt) || tgt.type != DALI_ADDR_SHORT) {
-            set_cmd_result("dtrcheck: use a<N>");
+        case DALI_CLI_CMD_CONFIG:
+        case DALI_CLI_CMD_CONFIG_DTR0: {
+            bool with_dtr0 = (spec->id == DALI_CLI_CMD_CONFIG_DTR0);
+            if (!dali_cli_parse_target(tokens.tok[1], &tgt)) {
+                set_cmd_result("bad target");
+                return;
+            }
+            const DaliCliGearCommand *c = dali_cli_config_find(tokens.tok[2]);
+            if (c == nullptr) {
+                set_cmd_result("unknown config");
+                return;
+            }
+            if (c->uses_dtr0 != with_dtr0) {
+                set_cmd_result(with_dtr0 ? "use config for this command"
+                                         : "use config-dtr0 for this command");
+                return;
+            }
+
+            uint8_t first_param_tok = with_dtr0 ? 4u : 3u;
+            uint8_t dtr0 = 0u;
+            if (with_dtr0 && !dali_cli_parse_u8(tokens.tok[3], 255u, &dtr0)) {
+                set_cmd_result("bad dtr0 value");
+                return;
+            }
+
+            uint8_t param = 0u;
+            if (c->needs_param) {
+                if (tokens.count != (uint8_t)(first_param_tok + 1u) ||
+                    !dali_cli_parse_u8(tokens.tok[first_param_tok], c->max_param, &param)) {
+                    set_cmd_usage(spec);
+                    return;
+                }
+            } else if (tokens.count != first_param_tok) {
+                set_cmd_usage(spec);
+                return;
+            }
+
+            bool group_edit = (c->id == DALI_CMD_ADD_TO_GROUP ||
+                               c->id == DALI_CMD_REMOVE_FROM_GROUP);
+            if (group_edit && tgt.type == DALI_ADDR_BROADCAST) {
+                set_cmd_result("no broadcast group config");
+                return;
+            }
+
+            DaliError err = with_dtr0
+                                ? dali_control_config_with_dtr0(tgt, c->id, dtr0, param)
+                                : dali_control_config(tgt, c->id, param);
+            if (err == DALI_OK && group_edit)
+                update_group_members_from_config(tgt, c->id, param);
+            set_cmd_enqueue_result(err);
             return;
         }
-        unsigned long regv, valv;
-        if (!parse_uint(tok[2], 0u, 1u,   &regv)) { set_cmd_result("dtrcheck: reg 0 or 1"); return; }
-        if (!parse_uint(tok[3], 0u, 255u,  &valv)) { set_cmd_result("bad value");            return; }
-        DaliFrame set_frame  = (regv == 0u) ? dali_cmd_control_device_dtr0_data((uint8_t)valv)
-                                            : dali_cmd_control_device_dtr1_data((uint8_t)valv);
-        uint8_t   query_opc  = (regv == 0u) ? 0x36u : 0x37u;
-        DaliSequence seq = {};
-        seq.steps[0] = { set_frame,                                        false, false, 0u };
-        seq.steps[1] = { dali_cmd_device(tgt.address, query_opc),         true,  false, 0u };
-        seq.step_count  = 2u;
-        seq.on_complete = on_memread_done;
-        seq.cb_ctx      = cmd_ctx;
-        set_cmd_result("pending");
-        set_cmd_enqueue_error(dali_sched_enqueue_sequence(&seq));
-        return;
-    }
 
-    /* ── Memory write: memwrite a<N> <bank> <offset> <value> ──
-     * Implements the IEC 62386-103 write sequence as one scheduler sequence
-     * (seven logical steps, nine forward frames after send-twice expansion):
-     *   unlock bank: DTR1=bank, DTR0=0x02(lock), ENABLE_WRITE(×2), WRITE=0x55
-     *   write value: DTR0=offset, ENABLE_WRITE(×2), WRITE=value
-     * ENABLE WRITE MEMORY for a control device is a 24-bit device command (FE 0x15),
-     * distinct from the 16-bit gear command (0x81). ── */
-    if (strcmp(verb, "memwrite") == 0) {
-        if (ntok != 5u) { set_cmd_result("memwrite: needs 4 args"); return; }
-        DaliTarget memtgt{};
-        if (!parse_target(tok[1], &memtgt) || memtgt.type != DALI_ADDR_SHORT) {
-            set_cmd_result("memwrite: use a<N>");
+        case DALI_CLI_CMD_IQUERY: {
+            uint8_t addr, instance;
+            if (!dali_cli_parse_short_addr(tokens.tok[1], &addr) ||
+                !dali_cli_parse_instance(tokens.tok[2], &instance)) {
+                set_cmd_result("iquery: addr 0-63, inst 0-31");
+                return;
+            }
+            const DaliCliInstanceQuery *q = dali_cli_iquery_find(tokens.tok[3]);
+            if (q == nullptr) {
+                set_cmd_result("unknown iquery");
+                return;
+            }
+            if (q->needs_dtr0) {
+                /* DTR0 selects which value comes back, so the load and the read
+                 * must share a sequence; the console has no verb for that yet. */
+                set_cmd_result("iquery: needs DTR0; use the native CLI");
+                return;
+            }
+            DaliFrame frame = q->build(addr, instance);
+            if (frame.bit_length == 0u) {
+                set_cmd_result("iquery: bad args");
+                return;
+            }
+            DaliTransaction txn = {};
+            txn.frame       = frame;
+            txn.needs_reply = true;
+            txn.on_complete = on_cmd_query_reply;
+            txn.cb_ctx      = cmd_ctx;
+            set_cmd_result("pending");
+            set_cmd_enqueue_error(dali_sched_enqueue(&txn));
             return;
         }
-        unsigned long bankv, offv, valv;
-        if (!parse_uint(tok[2], 1u, 255u, &bankv)) { set_cmd_result("bank 1-255"); return; }
-        if (!parse_uint(tok[3], 0u, 255u, &offv))  { set_cmd_result("bad offset"); return; }
-        if (!parse_uint(tok[4], 0u, 255u, &valv))  { set_cmd_result("bad value");  return; }
 
-        DaliSequence seq = {};
-        DaliError err = dali_memory_build_control_device_write_sequence(
-            memtgt.address, (uint8_t)bankv, (uint8_t)offv, (uint8_t)valv, &seq);
-        if (err == DALI_OK) {
-            err = dali_sched_enqueue_sequence(&seq);
+        case DALI_CLI_CMD_ICONFIG:
+            console_iconfig_(tokens);
+            return;
+
+        case DALI_CLI_CMD_DEVMEM:
+            console_devmem_(tokens, cmd_ctx);
+            return;
+
+        case DALI_CLI_CMD_DTRCHECK: {
+            uint8_t addr, reg, value;
+            if (!dali_cli_parse_short_addr(tokens.tok[1], &addr) ||
+                !dali_cli_parse_u8(tokens.tok[2], 2u, &reg) ||
+                !dali_cli_parse_u8(tokens.tok[3], 255u, &value)) {
+                set_cmd_usage(spec);
+                return;
+            }
+            DaliSequence seq;
+            DaliError err = dali_input_build_dtr_check_sequence(
+                addr, (DaliDtrRegister)reg, value, &seq);
+            if (err == DALI_OK) {
+                seq.on_complete = on_dtrcheck_done;
+                seq.cb_ctx      = cmd_ctx;
+                set_cmd_result("pending");
+                err = dali_sched_enqueue_sequence(&seq);
+            }
+            set_cmd_enqueue_error(err);
+            return;
         }
-        set_cmd_enqueue_result(err);
-        return;
-    }
 
-    set_cmd_result("unknown verb");
-    ESP_LOGD(TAG, "execute_command: %s -> unknown verb", cmd_str.c_str());
+        default:
+            set_cmd_result("unsupported verb");
+            return;
+    }
 }
+
 
 void DaliComponent::register_light(uint8_t type, uint8_t address,
                                    uint16_t member_groups, DaliBusLight *light)
@@ -1693,6 +1718,53 @@ void DaliComponent::start_find_couplers()
     find_couplers_end_ms_   = millis() + 30000u;
     s_find_couplers_active_.store(true, std::memory_order_release);
     if (scan_status_) scan_status_->publish_state("Listening...");
+}
+
+/*
+ * Bus availability now, plus the fault history behind it.
+ *
+ * bus_idle_failures only ever grows, so on its own it cannot say whether the
+ * bus is stuck right now or recovered an hour ago — the previous version of
+ * this latched "Bus stuck: N" and never returned. Recovery is therefore judged
+ * against tx_frames_ok: a frame clocked out in full after the last fault is
+ * direct evidence the PHY can drive the bus again.
+ *
+ * Both facts are published, because they answer different questions. The state
+ * string leads with current availability ("OK" / "Bus stuck") for automations,
+ * and carries the cumulative count so a bus that recovers between glances still
+ * shows that it has been failing.
+ */
+void DaliComponent::update_bus_fault_()
+{
+    if (bus_fault_ == nullptr) return;
+
+    uint32_t faults = g_dali_stats.bus_idle_failures;
+    uint32_t tx_ok  = g_dali_stats.tx_frames_ok;
+
+    if (faults != last_bus_fault_count_) {
+        /* New fault(s) since the last look: the bus is stuck as far as we know,
+         * and stays that way until a frame gets out. */
+        last_bus_fault_count_ = faults;
+        bus_fault_recovered_  = false;
+        tx_ok_at_bus_fault_   = tx_ok;
+        char buf[48];
+        snprintf(buf, sizeof(buf), "Bus stuck (%u total)", (unsigned)faults);
+        ESP_LOGE(TAG, "DALI bus stuck — %u total occurrence(s)", (unsigned)faults);
+        bus_fault_->publish_state(buf);
+        return;
+    }
+
+    if (faults == 0u || bus_fault_recovered_) return;
+
+    /* Sitting in a fault state: a completed transmission clears it. */
+    if (tx_ok != tx_ok_at_bus_fault_) {
+        bus_fault_recovered_ = true;
+        char buf[48];
+        snprintf(buf, sizeof(buf), "OK (%u past fault%s)", (unsigned)faults,
+                 faults == 1u ? "" : "s");
+        ESP_LOGI(TAG, "DALI bus recovered after %u fault(s)", (unsigned)faults);
+        bus_fault_->publish_state(buf);
+    }
 }
 
 /*

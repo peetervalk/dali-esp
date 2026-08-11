@@ -3135,6 +3135,57 @@ static void cmd_devmem(const DaliCliTokens *t)
     dali_cli_print_memory_block(&s_out, bank, offset, buf, count);
 }
 
+/*
+ * dtrcheck — load a control-device DTR and read it straight back.
+ *
+ * A DTR load produces no backward frame, so nothing otherwise confirms that a
+ * control device accepted one. That matters when a device's configuration
+ * writes appear to do nothing: this separates "the DTR never took the value"
+ * from "the command that consumes it was ignored". Both frames go out as one
+ * sequence, so no other locally scheduled DTR write can land between them.
+ */
+static void cmd_dtrcheck(const DaliCliTokens *t)
+{
+    const DaliCliCommandSpec *usage = dali_cli_command_for_id(DALI_CLI_CMD_DTRCHECK);
+    uint8_t addr;
+    uint8_t reg;
+    uint8_t value;
+
+    if (!dali_cli_parse_short_addr(t->tok[1], &addr) ||
+        !dali_cli_parse_u8(t->tok[2], 2u, &reg) ||
+        !dali_cli_parse_u8(t->tok[3], 255u, &value)) {
+        dali_cli_print_usage(&s_out, usage);
+        return;
+    }
+
+    DaliSequence seq;
+    DaliError err = dali_input_build_dtr_check_sequence(addr, (DaliDtrRegister)reg,
+                                                        value, &seq);
+    if (err != DALI_OK) {
+        dali_cli_print_error(&s_out, "dtrcheck", err);
+        return;
+    }
+
+    DaliSequenceResult result;
+    err = diag_sched_sequence_sync(&seq, &result);
+    if (err != DALI_OK) {
+        diag_print_sequence_result("dtrcheck", err, &result);
+        return;
+    }
+
+    DaliFrame reply;
+    if (!dali_sequence_result_last_reply(&result, &reply)) {
+        printf("dtrcheck: DTR%u no reply\r\n", (unsigned)reg);
+        return;
+    }
+
+    uint8_t read_back = (uint8_t)(reply.data & 0xFFu);
+    printf("dtrcheck: DTR%u wrote %u (0x%02X), read %u (0x%02X) - %s\r\n",
+           (unsigned)reg, (unsigned)value, (unsigned)value,
+           (unsigned)read_back, (unsigned)read_back,
+           read_back == value ? "match" : "MISMATCH");
+}
+
 /* ---------------------------------------------------------------------------
  * Device types 6 and 8
  *
@@ -3414,6 +3465,20 @@ static void cmd_iconfig(const DaliCliTokens *t)
         return;
     }
 
+    /* Out-of-range configuration bytes are refused here rather than sent: some
+     * gear stores them, and the mistake then shows up as odd behaviour later
+     * instead of as a rejected command. */
+    for (uint8_t i = 0u; i < spec->dtr_count; i++) {
+        if (!dali_cli_dtr_value_valid(&spec->dtr_range[i], dtr[i])) {
+            printf("iconfig: DTR%u value %u out of range\r\n",
+                   (unsigned)i, (unsigned)dtr[i]);
+            if (spec->dtr_help != NULL) {
+                printf("       %s\r\n", spec->dtr_help);
+            }
+            return;
+        }
+    }
+
     DaliFrame command = spec->build(addr, instance);
     if (command.bit_length == 0u) {
         dali_cli_print_error(&s_out, spec->name, DALI_ERR_INVALID);
@@ -3608,6 +3673,7 @@ static void diag_execute(DaliCliCommandId id, const DaliCliTokens *t)
         case DALI_CLI_CMD_MEMREAD:      cmd_memread(t); break;
         case DALI_CLI_CMD_MEMINFO:      cmd_meminfo(t); break;
         case DALI_CLI_CMD_DEVMEM:       cmd_devmem(t); break;
+        case DALI_CLI_CMD_DTRCHECK:     cmd_dtrcheck(t); break;
 
         case DALI_CLI_CMD_DT6:          cmd_dt6(t); break;
         case DALI_CLI_CMD_DT8:          cmd_dt8(t); break;

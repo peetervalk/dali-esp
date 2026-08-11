@@ -370,6 +370,65 @@ static void test_apply_group_unverified_clears_dest_verified_bit(void)
 
 /* ── null-safety ─────────────────────────────────────────────────────────── */
 
+static void test_forget_single_group_clears_only_that_group(void)
+{
+    DaliGroupMap map;
+    dali_group_map_reset(&map);
+    dali_group_map_seed(&map, 3u, 7u);
+    dali_group_map_seed(&map, 5u, 7u);
+    dali_group_map_seed(&map, 3u, 9u);
+
+    TEST_ASSERT_TRUE(dali_group_map_forget(&map, 7u, 3u));
+    /* 9 still holds group 3; 7 still holds group 5. */
+    TEST_ASSERT_EQUAL_UINT8(9u, dali_group_map_pick(&map, 3u));
+    TEST_ASSERT_EQUAL_UINT8(7u, dali_group_map_pick(&map, 5u));
+}
+
+static void test_forget_all_groups_removes_every_membership(void)
+{
+    DaliGroupMap map;
+    dali_group_map_reset(&map);
+    dali_group_map_seed(&map, 0u, 4u);
+    dali_group_map_seed(&map, 7u, 4u);
+    dali_group_map_seed(&map, 7u, 5u);
+
+    TEST_ASSERT_TRUE(dali_group_map_forget(&map, 4u, DALI_GROUP_MAP_ALL_GROUPS));
+    TEST_ASSERT_EQUAL_UINT8(0xFFu, dali_group_map_pick(&map, 0u));
+    TEST_ASSERT_EQUAL_UINT8(5u, dali_group_map_pick(&map, 7u));
+}
+
+static void test_forget_preserves_verified_bits(void)
+{
+    DaliGroupMap map;
+    dali_group_map_reset(&map);
+    dali_group_map_seed(&map, 2u, 1u);
+    dali_group_map_seed(&map, 2u, 6u);
+    map.verified = 0xFFFFu;
+
+    TEST_ASSERT_TRUE(dali_group_map_forget(&map, 1u, 2u));
+    /* Retiring a departed member says nothing about the rest of the group, so
+     * the scan-verified status of every group is left alone. */
+    TEST_ASSERT_EQUAL_HEX16(0xFFFFu, map.verified);
+    TEST_ASSERT_EQUAL_UINT8(6u, dali_group_map_pick(&map, 2u));
+}
+
+static void test_forget_reports_no_change_and_rejects_bad_args(void)
+{
+    DaliGroupMap map;
+    dali_group_map_reset(&map);
+    dali_group_map_seed(&map, 1u, 2u);
+
+    /* Not a member of that group. */
+    TEST_ASSERT_FALSE(dali_group_map_forget(&map, 3u, 1u));
+    /* Member, but of a different group. */
+    TEST_ASSERT_FALSE(dali_group_map_forget(&map, 2u, 4u));
+    /* Out-of-range address and group. */
+    TEST_ASSERT_FALSE(dali_group_map_forget(&map, 64u, 1u));
+    TEST_ASSERT_FALSE(dali_group_map_forget(&map, 2u, 16u));
+    /* Nothing above may have disturbed the real membership. */
+    TEST_ASSERT_EQUAL_UINT8(2u, dali_group_map_pick(&map, 1u));
+}
+
 static void test_null_map_is_safe(void)
 {
     dali_group_map_reset(NULL);
@@ -379,6 +438,7 @@ static void test_null_map_is_safe(void)
     TEST_ASSERT_EQUAL(DALI_GROUP_MAP_NO_CHANGE,
                       dali_group_map_apply_config(NULL, short_target(0u),
                                                   DALI_CMD_ADD_TO_GROUP, 0u));
+    TEST_ASSERT_FALSE(dali_group_map_forget(NULL, 0u, 0u));
 }
 
 int main(void)
@@ -417,6 +477,11 @@ int main(void)
     RUN_TEST(test_apply_group_add_unverified_source_keeps_dest);
     RUN_TEST(test_apply_group_remove_unverified_source_clears_dest);
     RUN_TEST(test_apply_group_unverified_clears_dest_verified_bit);
+
+    RUN_TEST(test_forget_single_group_clears_only_that_group);
+    RUN_TEST(test_forget_all_groups_removes_every_membership);
+    RUN_TEST(test_forget_preserves_verified_bits);
+    RUN_TEST(test_forget_reports_no_change_and_rejects_bad_args);
 
     RUN_TEST(test_null_map_is_safe);
 

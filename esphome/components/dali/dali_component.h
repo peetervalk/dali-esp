@@ -6,6 +6,7 @@
 
 extern "C" {
 #include "../../../components/dali/dali_frame.h"  // DaliError
+#include "../../../components/dali/dali_cli.h"    // DaliCliTokens
 }
 
 #include <atomic>
@@ -104,8 +105,13 @@ class DaliComponent : public Component {
 
   // ── Text command interface ──────────────────────────────────────────────────
 
-  // Parse and execute a CLI-style DALI command string (called from Core 0).
-  // Supports: off/max/min/level/query/config/iconfig <target> [args...]
+  // Parse and execute a DALI command line (called from Core 0).
+  //
+  // Verbs, argument forms, and the named command tables are shared with the
+  // native CLI via dali_cli.h; see s_console_commands in the .cpp for the
+  // subset this surface implements. Argument counts are checked against that
+  // table before a handler runs, so a trailing token is rejected rather than
+  // ignored.
   void execute_command(const std::string &cmd);
 
   // ── Callbacks (called from other tasks / Core 1) ─────────────────────────
@@ -148,8 +154,13 @@ class DaliComponent : public Component {
   text_sensor::TextSensor *command_result_{nullptr};
   text_sensor::TextSensor *bus_fault_{nullptr};
 
-  // Bus fault tracking (Core 0 only; reads volatile g_dali_stats.bus_idle_failures).
+  // Bus fault tracking (Core 0 only; reads volatile g_dali_stats).
+  // last_bus_fault_count_ is the cumulative history already reported;
+  // bus_fault_recovered_ plus the tx_frames_ok watermark taken when the fault
+  // was seen give current availability, which the cumulative counter cannot.
   uint32_t last_bus_fault_count_{0u};
+  uint32_t tx_ok_at_bus_fault_{0u};
+  bool     bus_fault_recovered_{true};
 
   // Scheduler queue drop tracking (Core 0 only). Cumulative rejections already
   // reported, so only newly dropped work produces a log line.
@@ -205,6 +216,16 @@ class DaliComponent : public Component {
   void pump_refresh();
   // Surface a rejected diagnostic-button enqueue; no-op on DALI_OK.
   void report_diag_enqueue_(const char *what, DaliError err);
+  // Publish current bus availability alongside its cumulative fault count.
+  void update_bus_fault_();
+
+  // Console verb handlers. Split out of execute_command() only for length;
+  // each is called with the resolved token list and runs on Core 0.
+  void console_queue_(const DaliCliTokens &tokens);
+  void console_group_(const DaliCliTokens &tokens);
+  void console_raw_(const DaliCliTokens &tokens, bool send_twice, void *ctx);
+  void console_devmem_(const DaliCliTokens &tokens, void *ctx);
+  void console_iconfig_(const DaliCliTokens &tokens);
   // Log a warning when the scheduler's cumulative rejection counters advance.
   void report_queue_drops_();
 };
