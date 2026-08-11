@@ -167,6 +167,23 @@ _DISPATCH_ENTRY_SCHEMA = cv.All(
 )
 
 
+# ── Protocol stack vendoring ──────────────────────────────────────────────────
+#
+# The DALI stack is plain C99 in the repo-root components/dali/ IDF component,
+# shared with the native app in main/ and the host tests in test/. ESPHome
+# copies only THIS directory into its build tree, so those sources would never
+# reach the compiler on their own. _copy_protocol_stack() vendors them into
+# <build>/src/components/dali/ at codegen time, and the proto_dali_*.c shims
+# here pull each one into a translation unit the build does compile.
+#
+# Each .c is vendored as .c.inc deliberately: ESPHome generates a src
+# CMakeLists doing FILE(GLOB_RECURSE app_sources src/*.*), which sweeps the
+# vendored directory too. Under a .c name every module would compile twice —
+# once via the glob, once via its shim — and every non-static symbol would
+# collide at link. CMake skips the unknown .inc extension, leaving the shims
+# as the only entry point; one shim per module keeps one translation unit per
+# module, so static helpers keep file scope.
+
 def _protocol_source_dir():
     component_dir = Path(__file__).resolve().parent
     candidates = [
@@ -193,6 +210,7 @@ def _copy_protocol_stack():
     for header in src_dir.glob("dali_*.h"):
         shutil.copyfile(header, dst_dir / header.name)
     for source in src_dir.glob("dali_*.c"):
+        # .inc so ESPHome's src/*.* glob cannot compile these behind the shims.
         shutil.copyfile(source, dst_dir / f"{source.name}.inc")
 
 CONFIG_SCHEMA = cv.Schema(
