@@ -72,8 +72,10 @@ static portMUX_TYPE    s_group_map_mux = portMUX_INITIALIZER_UNLOCKED;
  * the Core 1 scan task from the Core 0-only preferences API. */
 static std::atomic<bool> s_group_members_dirty_{false};
 
-/* Persisted-to-flash layout (see load/save_group_membership). */
-static constexpr uint32_t GROUP_MEMBERSHIP_MAGIC = 0x44475031u;  /* "DGP1" */
+/* Persisted-to-flash layout (see load/save_group_membership). DGP2 deliberately
+ * invalidates DGP1 snapshots, which older firmware could persist from a
+ * partially failed scan as if they were authoritative. */
+static constexpr uint32_t GROUP_MEMBERSHIP_MAGIC = 0x44475032u;  /* "DGP2" */
 struct GroupMembershipPersist {
     uint32_t     magic;
     DaliGroupMap map;
@@ -557,8 +559,9 @@ static void on_dali_unsolicited(const DaliFrame *frame, void * /*ctx*/)
 
 /* ── DALI task (Core 1) ──────────────────────────────────────────────────── */
 
-static void dali_task(void *)
+static void dali_task(void *raw_component)
 {
+    DaliComponent *component = static_cast<DaliComponent *>(raw_component);
     const TickType_t delay = pdMS_TO_TICKS(1);
     for (;;) {
         dali_phy_rx_process();
@@ -574,7 +577,12 @@ static void dali_task(void *)
          * Only dispatch if a headless table is loaded. */
         DaliInputEventRecord rec;
         while (dali_event_queue_pop(&s_event_queue, &rec)) {
-            if (s_dispatch_count > 0u) {
+            /* Keep draining/observing events during a scan so the fixed queue
+             * cannot overflow, but do not let headless actions enqueue local
+             * traffic into the scan. Such actions are intentionally suppressed,
+             * not replayed later when their physical context may be stale. */
+            bool scan_active = component != nullptr && component->is_scan_running();
+            if (s_dispatch_count > 0u && !scan_active) {
                 char event_str[48];
                 format_event(event_str, sizeof(event_str), &rec.event);
                 DaliDispatchResult result = {};
@@ -656,7 +664,7 @@ void DaliComponent::setup()
         portEXIT_CRITICAL(&s_group_map_mux);
     }
 
-    xTaskCreatePinnedToCore(dali_task, "dali", 4096, nullptr, 10, nullptr, 1);
+    xTaskCreatePinnedToCore(dali_task, "dali", 4096, this, 10, nullptr, 1);
 
     if (scan_status_) scan_status_->publish_state("Idle");
     if (bus_fault_)   bus_fault_->publish_state("OK");
@@ -667,8 +675,11 @@ void DaliComponent::setup()
 void DaliComponent::loop()
 {
     /* ── Bus state from snooping / query replies ── */
-    for (uint8_t i = 0u; i < s_light_count; i++)
+    for (uint8_t i = 0u; i < s_light_count; i++) {
         s_light_registry[i].light->apply_bus_state();
+        if (!scan_running_.load(std::memory_order_acquire))
+            s_light_registry[i].light->flush_pending_write();
+    }
 
     /* ── Boot query (lights) ── */
     if (!boot_query_done_) {
@@ -686,7 +697,9 @@ void DaliComponent::loop()
     }
 
     /* ── Input sensor: boot query then periodic poll ── */
-    {
+    /* Keep recurring and event-requested sensor polls pending until the scan
+     * releases admission. Due timestamps are not advanced while paused. */
+    if (!scan_running_.load(std::memory_order_acquire)) {
         uint32_t now = millis();
         for (uint8_t i = 0u; i < s_sensor_count; i++) {
             SensorEntry &e = s_sensor_registry[i];
@@ -791,17 +804,32 @@ void DaliComponent::loop()
     /* ── Identify blink ── */
     if (identify_active_) {
         uint32_t now = millis();
-        if ((uint32_t)(now - identify_last_ms_) >= 500u) {
-            identify_last_ms_ = now;
-            identify_phase_   = !identify_phase_;
-            DaliTarget t;
-            t.type    = DALI_ADDR_SHORT;
-            t.address = diag_address_;
-            if (identify_phase_) dali_control_recall_max(t);
-            else                 dali_control_recall_min(t);
+        if (scan_running_.load(std::memory_order_acquire)) {
+            if (!identify_scan_paused_) {
+                identify_scan_paused_   = true;
+                identify_scan_pause_ms_ = now;
+            }
+        } else {
+            if (identify_scan_paused_) {
+                uint32_t paused_ms = now - identify_scan_pause_ms_;
+                identify_start_ms_ += paused_ms;
+                identify_last_ms_  += paused_ms;
+                identify_scan_paused_ = false;
+            }
+            if ((uint32_t)(now - identify_last_ms_) >= 500u) {
+                identify_last_ms_ = now;
+                identify_phase_   = !identify_phase_;
+                DaliTarget t;
+                t.type    = DALI_ADDR_SHORT;
+                t.address = diag_address_;
+                if (identify_phase_) dali_control_recall_max(t);
+                else                 dali_control_recall_min(t);
+            }
+            if ((uint32_t)(now - identify_start_ms_) >= 10000u) {
+                identify_active_ = false;
+                identify_scan_paused_ = false;
+            }
         }
-        if ((uint32_t)(millis() - identify_start_ms_) >= 10000u)
-            identify_active_ = false;
     }
 
     /* ── Find-couplers timer ── */
@@ -867,10 +895,13 @@ void DaliComponent::loop()
     }
 
     bool scan_success = scan_success_.load();
+    bool scan_data_complete = scan_data_complete_.load();
     if (scan_status_) {
         if (scan_success) {
-            scan_status_->publish_state(
-                "Found " + std::to_string(scan_count_.load()) + " devices");
+            std::string state =
+                "Found " + std::to_string(scan_count_.load()) + " devices";
+            if (!scan_data_complete) state += "; group data incomplete";
+            scan_status_->publish_state(state);
         } else {
             scan_status_->publish_state("Scan error");
         }
@@ -1135,6 +1166,10 @@ void DaliComponent::execute_command(const std::string &cmd_str)
     const char *verb = tok[0];
     uint32_t cmd_generation = begin_cmd_generation();
     void *cmd_ctx = cmd_generation_ctx(cmd_generation);
+    if (scan_running_.load(std::memory_order_acquire)) {
+        set_cmd_result("scan active");
+        return;
+    }
 
     /* Raw frame: raw/raw2 <hex> len=<16|24> [wait]. */
     if (strcmp(verb, "raw") == 0 || strcmp(verb, "raw2") == 0) {
@@ -1430,15 +1465,24 @@ void DaliComponent::register_light(uint8_t type, uint8_t address,
     }
 }
 
-void DaliComponent::set_group_membership_snapshot(const uint64_t masks[16])
+bool DaliComponent::set_group_membership_snapshot(const uint64_t masks[16],
+                                                  uint16_t verified,
+                                                  uint64_t observed_gear)
 {
+    if (masks == nullptr || verified != 0xFFFFu) return false;
     /* Runs on the scan task (Core 1); flash write is deferred to loop() (Core 0). */
     portENTER_CRITICAL(&s_group_map_mux);
+    if (!dali_group_map_scan_covers_known_members(&s_group_map,
+                                                   observed_gear)) {
+        portEXIT_CRITICAL(&s_group_map_mux);
+        return false;
+    }
     for (uint8_t g = 0u; g < 16u; g++)
         s_group_map.members[g] = masks[g];
     s_group_map.verified = 0xFFFFu;
     portEXIT_CRITICAL(&s_group_map_mux);
     s_group_members_dirty_.store(true, std::memory_order_release);
+    return true;
 }
 
 bool DaliComponent::load_group_membership()
@@ -1581,6 +1625,7 @@ void DaliComponent::start_identify()
     identify_phase_    = true;
     identify_start_ms_ = millis();
     identify_last_ms_  = millis() - 500u;  // fire immediately on first loop tick
+    identify_scan_paused_ = false;
 }
 
 void DaliComponent::start_find_couplers()
@@ -1600,30 +1645,35 @@ void DaliComponent::start_find_couplers()
 
 void DaliComponent::send_diag_on()
 {
+    if (scan_running_.load(std::memory_order_acquire)) return;
     DaliTarget t{ DALI_ADDR_SHORT, diag_address_ };
     dali_control_go_to_last_active_level(t);
 }
 
 void DaliComponent::send_diag_off()
 {
+    if (scan_running_.load(std::memory_order_acquire)) return;
     DaliTarget t{ DALI_ADDR_SHORT, diag_address_ };
     dali_control_off(t);
 }
 
 void DaliComponent::send_diag_max()
 {
+    if (scan_running_.load(std::memory_order_acquire)) return;
     DaliTarget t{ DALI_ADDR_SHORT, diag_address_ };
     dali_control_recall_max(t);
 }
 
 void DaliComponent::send_diag_min()
 {
+    if (scan_running_.load(std::memory_order_acquire)) return;
     DaliTarget t{ DALI_ADDR_SHORT, diag_address_ };
     dali_control_recall_min(t);
 }
 
 void DaliComponent::send_diag_refresh()
 {
+    if (scan_running_.load(std::memory_order_acquire)) return;
     DaliTarget qt{ DALI_ADDR_SHORT, diag_address_ };
     dali_control_query(qt, DALI_CMD_QUERY_ACTUAL_LEVEL, 0u, on_diag_refresh_reply, nullptr);
 }
@@ -1645,10 +1695,13 @@ uint16_t DaliComponent::get_coupler_group_mask() const
     return s_coupler_group_mask_.load(std::memory_order_acquire);
 }
 
-void DaliComponent::on_scan_complete(uint8_t count, bool success)
+void DaliComponent::on_scan_complete(uint8_t count,
+                                     bool success,
+                                     bool data_complete)
 {
-    scan_count_   = count;
-    scan_success_ = success;
+    scan_count_         = count;
+    scan_success_       = success;
+    scan_data_complete_ = data_complete;
     scan_done_.store(true, std::memory_order_release);
 }
 

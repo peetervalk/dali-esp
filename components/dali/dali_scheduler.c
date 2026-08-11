@@ -49,18 +49,27 @@ static uint8_t         s_q_tail;    /* producer index (dali_sched_enqueue)*/
 static uint8_t         s_q_count;   /* number of items currently queued   */
 
 /* Active transaction state */
-static DaliSchedState  s_state;
+static volatile DaliSchedState s_state;
 static DaliTransaction s_active;          /* copy of the current transaction */
 static uint8_t         s_send_count;      /* 1 = first TX done, 2 = both done */
 static uint32_t        s_state_entered_ms;
 static bool            s_active_is_sequence;
 static DaliSequence    s_active_sequence;
 static uint8_t         s_active_sequence_step;
+static bool            s_active_step_started;
 static DaliSequenceResult s_sequence_result;
+static DaliSequenceResult s_cancel_sequence_result;
 
 /* Reply notification — written by notify_rx, read by dali_sched_run */
 static volatile bool   s_reply_received;
+static volatile bool   s_reply_intervened;
 static DaliFrame       s_reply_frame;
+
+/* Cross-task reset request; applied only by the scheduler owner task. */
+static bool            s_reset_requested;
+static bool            s_reset_applying;
+static DaliSchedResetCompletionCb s_reset_completion_cb;
+static void           *s_reset_completion_ctx;
 
 /* Unsolicited raw-event routing */
 static DaliSchedEventCb s_event_cb;
@@ -159,6 +168,7 @@ static void sched_load_sequence_step(uint8_t step)
         .on_complete  = NULL,
         .cb_ctx       = NULL,
     };
+    s_active_step_started = false;
 }
 
 static void sched_complete_sequence(DaliError result, uint8_t failed_step)
@@ -208,6 +218,7 @@ static bool sched_finish_active_step(DaliError result, const DaliFrame *reply)
     s_send_twice_first_started_us = 0u;
     s_send_twice_first_started_ms = 0u;
     s_reply_received = false;
+    s_reply_intervened = false;
     return true;
 }
 
@@ -266,7 +277,9 @@ static DaliError queue_push(const SchedQueueEntry *entry)
 
     DaliError result;
     SCHED_ENTER_CRITICAL();
-    if (s_q_count >= DALI_CMD_QUEUE_SIZE) {
+    if (s_reset_requested || s_reset_applying) {
+        result = DALI_ERR_BUSY;
+    } else if (s_q_count >= DALI_CMD_QUEUE_SIZE) {
         result = DALI_ERR_QUEUE_FULL;
     } else {
         s_queue[s_q_tail] = *entry;
@@ -308,6 +321,137 @@ static bool queue_pop_locked(SchedQueueEntry *entry)
     return true;
 }
 
+static void sched_clear_active_for_reset(void)
+{
+    memset(&s_active, 0, sizeof(s_active));
+    memset(&s_active_sequence, 0, sizeof(s_active_sequence));
+    memset(&s_sequence_result, 0, sizeof(s_sequence_result));
+    s_sequence_result.failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
+    memset(&s_reply_frame, 0, sizeof(s_reply_frame));
+    s_state = SCHED_IDLE;
+    s_send_count = 0u;
+    s_send_twice_first_started_us = 0u;
+    s_send_twice_first_started_ms = 0u;
+    s_state_entered_ms = 0u;
+    s_reply_received = false;
+    s_reply_intervened = false;
+    s_active_is_sequence = false;
+    s_active_sequence_step = 0u;
+    s_active_step_started = false;
+    s_last_tx_us = 0u;
+    s_have_last_tx_us = false;
+    /*
+     * Keep s_tx_guard_* untouched. A reset is a logical cancellation, not
+     * permission to violate the physical forward-frame inter-frame gap.
+     */
+}
+
+static void sched_cancel_queued_entry(const SchedQueueEntry *entry)
+{
+    if (entry->kind == SCHED_QUEUE_SEQUENCE) {
+        memset(&s_cancel_sequence_result, 0,
+               sizeof(s_cancel_sequence_result));
+        s_cancel_sequence_result.result = DALI_SCHED_RESET_ERROR;
+        s_cancel_sequence_result.failed_step =
+            DALI_SEQUENCE_NO_FAILED_STEP;
+        if (entry->item.sequence.on_complete != NULL) {
+            entry->item.sequence.on_complete(&s_cancel_sequence_result,
+                                             entry->item.sequence.cb_ctx);
+        }
+    } else if (entry->item.txn.on_complete != NULL) {
+        entry->item.txn.on_complete(DALI_SCHED_RESET_ERROR, NULL,
+                                    entry->item.txn.cb_ctx);
+    }
+}
+
+/* Apply reset only from the scheduler owner task. */
+static bool sched_apply_reset_if_requested(void)
+{
+    DaliSchedCompletionCb active_cb = NULL;
+    void *active_cb_ctx = NULL;
+    DaliSequenceCompletionCb active_sequence_cb = NULL;
+    void *active_sequence_cb_ctx = NULL;
+    DaliSchedResetCompletionCb reset_cb;
+    void *reset_cb_ctx;
+    bool cancel_active_sequence = false;
+    SchedQueueEntry queued;
+
+    SCHED_ENTER_CRITICAL();
+    if (!s_reset_requested) {
+        SCHED_EXIT_CRITICAL();
+        return false;
+    }
+    if (s_reset_applying) {
+        SCHED_EXIT_CRITICAL();
+        return true;
+    }
+    s_reset_applying = true;
+
+    reset_cb = s_reset_completion_cb;
+    reset_cb_ctx = s_reset_completion_ctx;
+    s_reset_completion_cb = NULL;
+    s_reset_completion_ctx = NULL;
+
+    if (s_state != SCHED_IDLE) {
+        if (s_active_is_sequence) {
+            cancel_active_sequence = true;
+            active_sequence_cb = s_active_sequence.on_complete;
+            active_sequence_cb_ctx = s_active_sequence.cb_ctx;
+            s_cancel_sequence_result = s_sequence_result;
+            s_cancel_sequence_result.result = DALI_SCHED_RESET_ERROR;
+            s_cancel_sequence_result.failed_step =
+                DALI_SEQUENCE_NO_FAILED_STEP;
+            s_cancel_sequence_result.steps_run =
+                (uint8_t)(s_active_sequence_step +
+                          (s_active_step_started ? 1u : 0u));
+        } else {
+            active_cb = s_active.on_complete;
+            active_cb_ctx = s_active.cb_ctx;
+        }
+    }
+
+    /* Drop scheduler ownership before invoking user code: no double callback. */
+    sched_clear_active_for_reset();
+    SCHED_EXIT_CRITICAL();
+
+    if (cancel_active_sequence) {
+        if (active_sequence_cb != NULL) {
+            active_sequence_cb(&s_cancel_sequence_result,
+                               active_sequence_cb_ctx);
+        }
+    } else if (active_cb != NULL) {
+        active_cb(DALI_SCHED_RESET_ERROR, NULL, active_cb_ctx);
+    }
+
+    for (;;) {
+        bool have_queued;
+        SCHED_ENTER_CRITICAL();
+        have_queued = queue_pop_locked(&queued);
+        SCHED_EXIT_CRITICAL();
+        if (!have_queued) {
+            break;
+        }
+        sched_cancel_queued_entry(&queued);
+    }
+
+    /*
+     * The reset callback is deliberately inside the admission barrier. It may
+     * reset the PHY because the scheduler is idle and no work can be admitted.
+     */
+    if (reset_cb != NULL) {
+        reset_cb(reset_cb_ctx);
+    }
+
+    SCHED_ENTER_CRITICAL();
+    s_q_head = 0u;
+    s_q_tail = 0u;
+    s_q_count = 0u;
+    s_reset_requested = false;
+    s_reset_applying = false;
+    SCHED_EXIT_CRITICAL();
+    return true;
+}
+
 /* ---------------------------------------------------------------------------
  * PHY RX callback — registered with PHY during init
  * --------------------------------------------------------------------------*/
@@ -335,8 +479,10 @@ DaliError dali_sched_init(const DaliSchedOps *ops)
     s_state       = SCHED_IDLE;
     s_send_count  = 0u;
     s_reply_received = false;
+    s_reply_intervened = false;
     s_active_is_sequence = false;
     s_active_sequence_step = 0u;
+    s_active_step_started = false;
     memset(&s_active_sequence, 0, sizeof(s_active_sequence));
     memset(&s_sequence_result, 0, sizeof(s_sequence_result));
     s_sequence_result.failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
@@ -351,6 +497,10 @@ DaliError dali_sched_init(const DaliSchedOps *ops)
     s_tx_guard_duration_us = 0u;
     s_send_twice_first_started_us = 0u;
     s_send_twice_first_started_ms = 0u;
+    s_reset_requested = false;
+    s_reset_applying = false;
+    s_reset_completion_cb = NULL;
+    s_reset_completion_ctx = NULL;
     s_initialized = true;
 
     s_ops.set_rx_callback(phy_rx_handler, NULL);
@@ -390,6 +540,10 @@ void dali_sched_run(void)
     }
 
 next:
+    if (sched_apply_reset_if_requested()) {
+        return;
+    }
+
     switch (s_state) {
 
         case SCHED_IDLE: {
@@ -411,11 +565,13 @@ next:
             } else {
                 s_active = entry.item.txn;
                 s_active_is_sequence = false;
+                s_active_step_started = false;
             }
             s_send_count = 0u;
             s_send_twice_first_started_us = 0u;
             s_send_twice_first_started_ms = 0u;
             s_reply_received = false;
+            s_reply_intervened = false;
             s_state = SCHED_TX;
             goto next;
         }
@@ -443,6 +599,7 @@ next:
                 s_send_twice_first_started_ms = s_ops.get_tick_ms();
             }
 
+            s_active_step_started = true;
             DaliError err = s_ops.tx(&s_active.frame);
             if (err != DALI_OK) {
                 ESP_LOGE(TAG, "phy_tx failed: %d", (int)err);
@@ -488,6 +645,7 @@ next:
             }
             if (s_active.needs_reply) {
                 s_reply_received = false;
+                s_reply_intervened = false;
                 s_state_entered_ms = s_ops.get_tick_ms();
                 s_state = SCHED_WAIT_REPLY;
                 return;
@@ -502,6 +660,17 @@ next:
         }
 
         case SCHED_WAIT_REPLY: {
+            if (s_reply_intervened) {
+                s_reply_intervened = false;
+                s_reply_received = false;
+                if (sched_finish_active_step(DALI_SCHED_INTERVENED_ERROR,
+                                             NULL)) {
+                    s_state = SCHED_TX;
+                } else {
+                    s_state = SCHED_IDLE;
+                }
+                goto next;
+            }
             if (s_reply_received) {
                 DaliFrame reply = s_reply_frame;
                 s_reply_received = false;
@@ -548,6 +717,22 @@ void dali_sched_notify_rx(const DaliFrame *frame)
 
     if (s_state == SCHED_WAIT_REPLY &&
         s_active.needs_reply &&
+        (frame->bit_length == DALI_FORWARD_FRAME_BITS ||
+         frame->bit_length == DALI_EXTENDED_FRAME_BITS)) {
+        /*
+         * Another forward frame may have changed DTR or device-type state.
+         * Invalidate both this query and any reply already latched for it; a
+         * later backward frame must not be accepted as the query's reply.
+         */
+        s_reply_received = false;
+        s_reply_intervened = true;
+        sched_route_unsolicited_or_ignore(frame);
+        return;
+    }
+
+    if (s_state == SCHED_WAIT_REPLY &&
+        s_active.needs_reply &&
+        !s_reply_intervened &&
         !s_reply_received &&
         frame->bit_length == DALI_BACKWARD_FRAME_BITS) {
         s_reply_frame    = *frame;
@@ -606,35 +791,60 @@ DaliError dali_sched_set_trace_callback(DaliSchedTraceCb cb, void *cb_ctx)
     return DALI_OK;
 }
 
-DaliError dali_sched_reset(void)
+DaliError dali_sched_request_reset(DaliSchedResetCompletionCb completion_cb,
+                                   void *cb_ctx)
 {
+    if (!s_initialized) {
+        return DALI_ERR_INVALID;
+    }
+
     SCHED_ENTER_CRITICAL();
-    s_q_head  = 0u;
-    s_q_tail  = 0u;
-    s_q_count = 0u;
-    memset(&s_active, 0, sizeof(s_active));
-    memset(&s_active_sequence, 0, sizeof(s_active_sequence));
-    memset(&s_sequence_result, 0, sizeof(s_sequence_result));
-    s_sequence_result.failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
-    memset(&s_reply_frame, 0, sizeof(s_reply_frame));
-    s_state            = SCHED_IDLE;
-    s_send_count       = 0u;
-    s_send_twice_first_started_us = 0u;
-    s_send_twice_first_started_ms = 0u;
-    s_state_entered_ms = 0u;
-    s_reply_received   = false;
-    s_active_is_sequence = false;
-    s_active_sequence_step = 0u;
-    s_last_tx_us       = 0u;
-    s_have_last_tx_us  = false;
-    /* Preserve the physical-bus TX guard across a logical scheduler reset. */
+    if (s_reset_requested || s_reset_applying) {
+        SCHED_EXIT_CRITICAL();
+        return DALI_ERR_BUSY;
+    }
+    s_reset_completion_cb = completion_cb;
+    s_reset_completion_ctx = cb_ctx;
+    s_reset_requested = true;
     SCHED_EXIT_CRITICAL();
     return DALI_OK;
+}
+
+bool dali_sched_reset_pending(void)
+{
+    bool pending;
+    if (!s_initialized) {
+        return false;
+    }
+    SCHED_ENTER_CRITICAL();
+    pending = s_reset_requested || s_reset_applying;
+    SCHED_EXIT_CRITICAL();
+    return pending;
+}
+
+DaliError dali_sched_reset(void)
+{
+    return dali_sched_request_reset(NULL, NULL);
 }
 
 DaliSchedState dali_sched_state(void)
 {
     return s_state;
+}
+
+bool dali_sched_is_quiescent(void)
+{
+    bool quiescent;
+    if (!s_initialized) {
+        return false;
+    }
+    SCHED_ENTER_CRITICAL();
+    quiescent = s_state == SCHED_IDLE &&
+                s_q_count == 0u &&
+                !s_reset_requested &&
+                !s_reset_applying;
+    SCHED_EXIT_CRITICAL();
+    return quiescent;
 }
 
 /* ---------------------------------------------------------------------------

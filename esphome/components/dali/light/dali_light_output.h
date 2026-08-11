@@ -53,6 +53,7 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   // DaliBusLight interface — Core 1 writes, Core 0 drains.
   void mark_state_from_bus(bool is_on, uint8_t level) override;
   void apply_bus_state() override;
+  void flush_pending_write() override;
 
  protected:
   DaliTarget      target_{};
@@ -71,10 +72,14 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   uint8_t           known_level_{0};
   bool              suppress_initial_write_{true};
   bool              skip_next_write_{false};
+  bool              scan_write_pending_{false};
+  bool              scan_pending_is_on_{false};
+  uint8_t           scan_pending_level_{0};
   light::LightState *state_{nullptr};
 
   static void clear_unused_color_fields_(light::LightColorValues &values);
   static uint8_t brightness_to_level_(float brightness);
+  DaliError enqueue_desired_state_(bool is_on, uint8_t level);
 };
 
 }  // namespace dali

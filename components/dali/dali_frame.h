@@ -83,6 +83,8 @@ typedef enum {
     DALI_ERR_BUSY       = 6,    /* PHY TX already in progress                 */
     DALI_ERR_INVALID    = 7,    /* bad argument (e.g. bit_length == 0)        */
     DALI_ERR_TIMING     = 8,    /* required protocol timing window was missed */
+    DALI_ERR_CANCELLED  = 9,    /* queued/active work cancelled by reset      */
+    DALI_ERR_INTERVENED = 10,   /* another forward frame invalidated a reply  */
 } DaliError;
 
 /* ---------------------------------------------------------------------------

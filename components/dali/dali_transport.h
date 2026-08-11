@@ -10,14 +10,16 @@
  * Two levels are available:
  *
  *   transact           one frame; other traffic may run before the next call
- *   transact_sequence  a whole DaliSequence with nothing interleaved
+ *   transact_sequence  a whole DaliSequence with no other local work interleaved
  *
  * Only the scheduler can provide real atomicity, so transact_sequence is
  * optional: a transport that cannot offer it leaves the pointer NULL, and
  * dali_transport_run_sequence() falls back to issuing the steps one at a time.
  * The fallback produces the same frames in the same order but gives up the
- * atomicity guarantee, so a caller that depends on a group staying together
- * must check dali_transport_supports_atomic_sequence() first.
+ * local atomicity guarantee, so a caller that depends on a group staying
+ * together must use dali_transport_run_sequence_atomic(). Another physical
+ * DALI master can still transmit between frames; this abstraction only controls
+ * traffic admitted through the local scheduler.
  *
  * No hardware dependencies.
  */
@@ -37,10 +39,10 @@ typedef DaliError (*DaliTransactionFn)(const DaliFrame *frame,
                                        void            *ctx);
 
 /*
- * Run every step of seq with no other bus traffic in between, and report the
- * per-step outcome. result_out may be NULL when only the overall error matters;
- * an implementation that receives a non-NULL result_out must populate it before
- * returning, on success and on failure alike.
+ * Run every step of seq with no other locally scheduled traffic in between,
+ * and report the per-step outcome. result_out may be NULL when only the overall
+ * error matters; an implementation that receives a non-NULL result_out must
+ * populate it before returning, on success and on failure alike.
  */
 typedef DaliError (*DaliSequenceTransactionFn)(const DaliSequence *seq,
                                                DaliSequenceResult *result_out,
@@ -56,14 +58,16 @@ typedef struct {
 bool dali_transport_valid(const DaliTransport *transport);
 
 /*
- * True when a sequence handed to dali_transport_run_sequence() runs with
- * nothing interleaved. False means the fallback will be used.
+ * True when a sequence handed to dali_transport_run_sequence() runs with no
+ * other locally scheduled transaction interleaved. False means the fallback
+ * will be used.
  */
 bool dali_transport_supports_atomic_sequence(const DaliTransport *transport);
 
 /*
- * Run a sequence, atomically when the transport supports it. On the fallback
- * path the steps are issued individually and other bus traffic may interleave.
+ * Run a sequence with local atomicity when the transport supports it. On the
+ * fallback path the steps are issued individually and other local work may
+ * interleave.
  *
  * Returns the overall result: DALI_OK when every step succeeded, otherwise the
  * error that ended it. result_out, when given, is written on every path.
@@ -71,6 +75,17 @@ bool dali_transport_supports_atomic_sequence(const DaliTransport *transport);
 DaliError dali_transport_run_sequence(const DaliTransport *transport,
                                       const DaliSequence  *seq,
                                       DaliSequenceResult  *result_out);
+
+/*
+ * Run only when the transport provides locally atomic sequence capability. A
+ * frame-only or otherwise incomplete transport is rejected with
+ * DALI_ERR_INVALID before any traffic; result_out is initialized on every path.
+ * Use the ordinary runner only when split-frame fallback is explicitly
+ * acceptable.
+ */
+DaliError dali_transport_run_sequence_atomic(const DaliTransport *transport,
+                                             const DaliSequence  *seq,
+                                             DaliSequenceResult  *result_out);
 
 /* Per-step and fixed parts of the blocking-wait budget below. */
 #define DALI_TRANSPORT_SEQUENCE_QUEUE_BUDGET_MS 200u

@@ -167,10 +167,9 @@ DaliError dali_memory_read_byte(const DaliMemoryTransport *transport,
  * Read count consecutive bytes starting at bank:offset into buf for short_addr
  * 0..63. buf must be at least count bytes.
  *
- * Runs through dali_transport_run_sequence() in chunks of at most
+ * Runs through dali_transport_run_sequence_atomic() in chunks of at most
  * DALI_MEMORY_MAX_SEQUENCE_READ_BYTES, each chunk re-issuing its own DTR1/DTR0
- * setup. On a transport that supports atomic sequences each chunk is
- * uninterruptible; otherwise the frames are the same but may be interleaved.
+ * setup. A frame-only transport is rejected before any frame is sent.
  */
 DaliError dali_memory_read_bytes(const DaliMemoryTransport *transport,
                                  uint8_t                    short_addr,

@@ -49,6 +49,8 @@ static bool key_matches(const DaliDispatchKey *key, const DaliInputEvent *event)
 static bool toggle_get(const DaliDispatchToggleState *state, DaliTarget out)
 {
     if (state == NULL) return false;
+    if (out.type == DALI_ADDR_BROADCAST)
+        return state->broadcast_on;
     if (out.type == DALI_ADDR_GROUP && out.address < DALI_GROUP_COUNT)
         return ((state->group_on >> out.address) & 1u) != 0u;
     if (out.type == DALI_ADDR_SHORT && out.address < DALI_SHORT_ADDRESS_COUNT)
@@ -59,7 +61,9 @@ static bool toggle_get(const DaliDispatchToggleState *state, DaliTarget out)
 static void toggle_set(DaliDispatchToggleState *state, DaliTarget out, bool on)
 {
     if (state == NULL) return;
-    if (out.type == DALI_ADDR_GROUP && out.address < DALI_GROUP_COUNT) {
+    if (out.type == DALI_ADDR_BROADCAST) {
+        state->broadcast_on = on;
+    } else if (out.type == DALI_ADDR_GROUP && out.address < DALI_GROUP_COUNT) {
         if (on) state->group_on |=  (uint16_t)(1u << out.address);
         else    state->group_on &= ~(uint16_t)(1u << out.address);
     } else if (out.type == DALI_ADDR_SHORT && out.address < DALI_SHORT_ADDRESS_COUNT) {

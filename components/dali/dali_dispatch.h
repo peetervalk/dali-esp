@@ -115,6 +115,7 @@ typedef struct {
 typedef struct {
     uint16_t group_on;  /* bit N = group N considered on */
     uint64_t short_on;  /* bit N = short address N considered on */
+    bool     broadcast_on; /* broadcast target considered on */
 } DaliDispatchToggleState;
 
 /* ── Inferred state result ────────────────────────────────────────────────── */

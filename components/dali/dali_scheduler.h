@@ -48,6 +48,19 @@ typedef void (*DaliSchedCompletionCb)(DaliError result,
                                       void *cb_ctx);
 
 /*
+ * Called by the scheduler owner task after a requested reset has cancelled all
+ * active and queued work. The callback is the reset barrier: no transaction
+ * accepted before the request can execute after it is called. Queue admission
+ * remains blocked for the duration of the callback, so it is also the safe
+ * place for the application to reset the PHY.
+ */
+typedef void (*DaliSchedResetCompletionCb)(void *cb_ctx);
+
+/* Results used for reset cancellation and an externally invalidated reply. */
+#define DALI_SCHED_RESET_ERROR      DALI_ERR_CANCELLED
+#define DALI_SCHED_INTERVENED_ERROR DALI_ERR_INTERVENED
+
+/*
  * Unsolicited RX event callback — invoked from task context for raw DALI-2
  * event candidates that are not solicited backward replies.
  */
@@ -94,7 +107,9 @@ typedef struct {
 /*
  * Outcome of one sequence, including a backward frame per reply-bearing step.
  * `replies[i]` is meaningful only when bit i of `reply_mask` is set. Steps after
- * a failure never run, so they are never present in the mask.
+ * a failure never run, so they are never present in the mask. failed_step is
+ * also DALI_SEQUENCE_NO_FAILED_STEP for reset cancellation, which is not
+ * attributable to a sequence step; steps_run still reports attempted steps.
  *
  * The pointer handed to the completion callback refers to scheduler-owned
  * storage that is reused by the next sequence; copy anything needed later.
@@ -182,11 +197,42 @@ DaliError dali_sched_set_event_callback(DaliSchedEventCb cb, void *cb_ctx);
  */
 DaliError dali_sched_set_trace_callback(DaliSchedTraceCb cb, void *cb_ctx);
 
-/* Reset scheduler: clear queue and return to IDLE; preserve the active TX gap. */
+/*
+ * Request an owner-task reset.
+ *
+ * This call is safe from another task and does not synchronously mutate active
+ * scheduler state. The next dali_sched_run() cancels the active transaction
+ * and every queued transaction with DALI_SCHED_RESET_ERROR, then calls
+ * completion_cb from the scheduler owner task. Sequence results are filled
+ * before their callbacks run. While reset is pending, new queue submissions
+ * fail with DALI_ERR_BUSY.
+ *
+ * A successful return means the request was accepted, not that reset is
+ * complete. completion_cb is the completion barrier. A second request while
+ * one is pending returns DALI_ERR_BUSY.
+ */
+DaliError dali_sched_request_reset(DaliSchedResetCompletionCb completion_cb,
+                                   void *cb_ctx);
+
+/* True from reset request acceptance until its completion callback returns. */
+bool dali_sched_reset_pending(void);
+
+/*
+ * Compatibility wrapper for dali_sched_request_reset(NULL, NULL).
+ * Reset is deferred; callers needing a barrier must use
+ * dali_sched_request_reset().
+ */
 DaliError dali_sched_reset(void);
 
 /* Return current state (for diagnostics/tests). */
 DaliSchedState dali_sched_state(void);
+
+/*
+ * True only when no transaction is active or queued and no reset barrier is
+ * pending. Intended for an exclusive workflow to wait until previously
+ * admitted work has drained before it starts enqueueing.
+ */
+bool dali_sched_is_quiescent(void);
 
 #ifndef DALI_HOST_BUILD
 /*

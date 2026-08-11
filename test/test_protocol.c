@@ -411,6 +411,22 @@ void test_command_lookup_invalid_returns_null(void)
     TEST_ASSERT_NULL(dali_command_lookup_opcode(DALI_CMD_FRAME_24BIT_INST, 0xFFu));
 }
 
+void test_response_retry_safety_rejects_state_advancing_commands(void)
+{
+    TEST_ASSERT_TRUE(dali_command_response_retry_safe(DALI_CMD_QUERY_STATUS));
+    TEST_ASSERT_TRUE(dali_command_response_retry_safe(DALI_CMD_QUERY_DEVICE_TYPE));
+    TEST_ASSERT_FALSE(
+        dali_command_response_retry_safe(DALI_CMD_QUERY_NEXT_DEVICE_TYPE));
+    TEST_ASSERT_FALSE(
+        dali_command_response_retry_safe(DALI_CMD_READ_MEMORY_LOCATION));
+    TEST_ASSERT_FALSE(
+        dali_command_response_retry_safe(DALI_CMD_WRITE_MEMORY_LOCATION));
+    TEST_ASSERT_FALSE(
+        dali_command_response_retry_safe(DALI_CMD_QUERY_INPUT_VALUE_LATCH));
+    TEST_ASSERT_FALSE(dali_command_response_retry_safe(DALI_CMD_OFF));
+    TEST_ASSERT_FALSE(dali_command_response_retry_safe(DALI_CMD_COUNT));
+}
+
 void test_build_command_short_group_broadcast_dapc(void)
 {
     DaliFrame frame;
@@ -1036,6 +1052,7 @@ int main(void)
     RUN_TEST(test_command_metadata_table_covers_all_standard_ids);
     RUN_TEST(test_command_lookup_keeps_vendor_specific_opcodes_out_of_standard_table);
     RUN_TEST(test_command_lookup_invalid_returns_null);
+    RUN_TEST(test_response_retry_safety_rejects_state_advancing_commands);
     RUN_TEST(test_build_command_short_group_broadcast_dapc);
     RUN_TEST(test_build_command_fixed_opcode_and_range_opcode);
     RUN_TEST(test_build_command_rejects_invalid_args);

@@ -20,6 +20,15 @@ typedef struct {
 
 uint8_t dali_input_poll_bytes_for_resolution(uint8_t resolution_bits);
 
+/*
+ * Read and assemble one input value through a single atomic transport
+ * sequence. The transport must provide transact_sequence; a frame-only
+ * transport is rejected before any frame is sent because falling back to
+ * separate transactions can redirect the instance's latch cursor.
+ *
+ * byte_errors records DALI_OK for completed reply steps, the sequence error at
+ * its failing step, and DALI_ERR_INVALID for steps that were not attempted.
+ */
 DaliError dali_input_poll_value(const DaliDiscoveryTransport *transport,
                                 uint8_t addr,
                                 uint8_t instance,

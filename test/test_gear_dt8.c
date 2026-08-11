@@ -430,6 +430,48 @@ static DaliError dt8_mock_transact(const DaliFrame *frame,
     return DALI_ERR_TIMEOUT;
 }
 
+static DaliError dt8_mock_transact_sequence(const DaliSequence *seq,
+                                            DaliSequenceResult *result_out,
+                                            void *ctx)
+{
+    if (seq == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliSequenceResult result = {
+        .result = DALI_OK,
+        .failed_step = DALI_SEQUENCE_NO_FAILED_STEP,
+    };
+    for (uint8_t i = 0u; i < seq->step_count; i++) {
+        const DaliSequenceStep *step = &seq->steps[i];
+        DaliFrame reply = {0u, 0u};
+        DaliError err = dt8_mock_transact(&step->frame,
+                                          step->needs_reply,
+                                          step->retries_left,
+                                          step->send_twice,
+                                          step->needs_reply ? &reply : NULL,
+                                          ctx);
+        result.steps_run = (uint8_t)(i + 1u);
+        if (err != DALI_OK) {
+            result.result = err;
+            result.failed_step = i;
+            if (result_out != NULL) {
+                *result_out = result;
+            }
+            return err;
+        }
+        if (step->needs_reply) {
+            result.replies[i] = reply;
+            result.reply_mask |= (uint8_t)(1u << i);
+        }
+    }
+
+    if (result_out != NULL) {
+        *result_out = result;
+    }
+    return DALI_OK;
+}
+
 static void dt8_mock_reset(void)
 {
     memset(s_dt8_script, 0, sizeof(s_dt8_script));
@@ -465,7 +507,11 @@ static void dt8_add_error(uint32_t data, uint8_t bit_length, DaliError err)
 
 static DaliDt8Transport dt8_transport(void)
 {
-    return (DaliDt8Transport){ .transact = dt8_mock_transact, .ctx = NULL };
+    return (DaliDt8Transport){
+        .transact = dt8_mock_transact,
+        .transact_sequence = dt8_mock_transact_sequence,
+        .ctx = NULL,
+    };
 }
 
 /* ---------------------------------------------------------------------------
@@ -483,6 +529,28 @@ void test_read_colour_value_16_rejects_invalid_args(void)
                                                         DALI_DT8_VALUE_X_COORDINATE, &out));
     TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
                           dali_dt8_read_colour_value_16(&t, 5u, DALI_DT8_VALUE_X_COORDINATE, NULL));
+}
+
+void test_read_colour_value_16_rejects_frame_only_transport_without_traffic(void)
+{
+    dt8_mock_reset();
+    DaliFrame selector =
+        dali_dt8_build_dtr0_selector(DALI_DT8_VALUE_X_COORDINATE);
+    dt8_add_no_reply(selector.data, selector.bit_length);
+    DaliDt8Transport frame_only = {
+        .transact = dt8_mock_transact,
+        .ctx = NULL,
+    };
+    uint16_t result = 0xA5A5u;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_dt8_read_colour_value_16(
+                          &frame_only,
+                          5u,
+                          DALI_DT8_VALUE_X_COORDINATE,
+                          &result));
+    TEST_ASSERT_FALSE(s_dt8_script[0].consumed);
+    TEST_ASSERT_EQUAL_HEX16(0xA5A5u, result);
 }
 
 void test_read_colour_value_16_returns_combined_word(void)
@@ -762,6 +830,7 @@ int main(void)
     RUN_TEST(test_parse_colour_status_tc_with_out_of_range);
 
     RUN_TEST(test_read_colour_value_16_rejects_invalid_args);
+    RUN_TEST(test_read_colour_value_16_rejects_frame_only_transport_without_traffic);
     RUN_TEST(test_read_colour_value_16_returns_combined_word);
     RUN_TEST(test_read_colour_value_16_uses_selector_for_dtr0);
     RUN_TEST(test_read_colour_value_16_propagates_query_error);

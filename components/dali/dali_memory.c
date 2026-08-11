@@ -205,7 +205,7 @@ DaliError dali_memory_read_bytes(const DaliMemoryTransport *transport,
         }
 
         DaliSequenceResult result;
-        err = dali_transport_run_sequence(transport, &seq, &result);
+        err = dali_transport_run_sequence_atomic(transport, &seq, &result);
         if (err != DALI_OK) {
             return err;
         }

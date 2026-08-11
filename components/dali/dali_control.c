@@ -7,11 +7,12 @@
 #define HA_BRIGHTNESS_ROUNDING  128u
 #define PERCENT_MAX             100u
 
-static DaliError enqueue_frame(const DaliFrame *frame,
-                               bool needs_reply,
-                               bool send_twice,
-                               DaliSchedCompletionCb cb,
-                               void *cb_ctx)
+static DaliError enqueue_frame_with_retries(const DaliFrame *frame,
+                                            bool needs_reply,
+                                            bool send_twice,
+                                            uint8_t retries_left,
+                                            DaliSchedCompletionCb cb,
+                                            void *cb_ctx)
 {
     if (frame == NULL) {
         return DALI_ERR_INVALID;
@@ -21,11 +22,25 @@ static DaliError enqueue_frame(const DaliFrame *frame,
         .frame        = *frame,
         .needs_reply  = needs_reply,
         .send_twice   = send_twice,
-        .retries_left = needs_reply ? DALI_MAX_RETRIES : 0u,
+        .retries_left = needs_reply ? retries_left : 0u,
         .on_complete  = cb,
         .cb_ctx       = cb_ctx,
     };
     return dali_sched_enqueue(&txn);
+}
+
+static DaliError enqueue_frame(const DaliFrame *frame,
+                               bool needs_reply,
+                               bool send_twice,
+                               DaliSchedCompletionCb cb,
+                               void *cb_ctx)
+{
+    return enqueue_frame_with_retries(frame,
+                                      needs_reply,
+                                      send_twice,
+                                      needs_reply ? DALI_MAX_RETRIES : 0u,
+                                      cb,
+                                      cb_ctx);
 }
 
 static DaliError build_target_command(DaliTarget target,
@@ -412,7 +427,13 @@ DaliError dali_control_query(DaliTarget target,
     if (err != DALI_OK) {
         return err;
     }
-    return enqueue_frame(&frame, true, false, cb, cb_ctx);
+    return enqueue_frame_with_retries(
+        &frame,
+        true,
+        false,
+        dali_command_response_retry_safe(id) ? DALI_MAX_RETRIES : 0u,
+        cb,
+        cb_ctx);
 }
 
 DaliError dali_control_query_status(DaliTarget target,

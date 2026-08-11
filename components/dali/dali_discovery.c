@@ -44,7 +44,7 @@ static DaliError discovery_query_dt_typed(const DaliDiscoveryTransport *transpor
     }
 
     DaliSequenceResult result;
-    err = dali_transport_run_sequence(transport, &seq, &result);
+    err = dali_transport_run_sequence_atomic(transport, &seq, &result);
     if (err != DALI_OK) {
         return err;
     }
@@ -134,6 +134,34 @@ DaliError dali_discovery_inventory_store_groups(DaliDiscoveryInventory *inventor
     device->has_groups = true;
     device->groups = groups;
     return DALI_OK;
+}
+
+bool dali_discovery_inventory_has_complete_group_data(
+    const DaliDiscoveryInventory *inventory)
+{
+    if (inventory == NULL) {
+        return false;
+    }
+
+    bool found_present_device = false;
+    bool found_control_gear = false;
+    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        const DaliDiscoveryDeviceInfo *device = &inventory->devices[addr];
+        if (device->present) {
+            found_present_device = true;
+        }
+        if (device->present && device->has_control_gear) {
+            found_control_gear = true;
+            if (!device->has_groups) {
+                return false;
+            }
+        }
+    }
+    /* An input-only response proves the bus is alive and there was no observed
+     * gear to enrich. A wholly empty scan is ambiguous with a disconnected bus
+     * and must not erase a known-good snapshot. The integration additionally
+     * checks that every previously known member was observed as gear. */
+    return found_control_gear || found_present_device;
 }
 
 DaliError dali_discovery_inventory_update_input_device(
@@ -452,7 +480,7 @@ DaliError dali_discovery_query_groups(const DaliDiscoveryTransport *transport,
     }
 
     DaliSequenceResult result;
-    err = dali_transport_run_sequence(transport, &seq, &result);
+    err = dali_transport_run_sequence_atomic(transport, &seq, &result);
     if (err != DALI_OK) {
         return err;
     }
@@ -546,7 +574,7 @@ static void discovery_enrich_device_types(const DaliDiscoveryTransport *transpor
     }
 
     DaliSequenceResult result;
-    (void)dali_transport_run_sequence(transport, &seq, &result);
+    (void)dali_transport_run_sequence_atomic(transport, &seq, &result);
     /* Types gathered before a failing step are still worth keeping, so the
      * result is read on both the success and the failure path. */
     (void)dali_discovery_device_types_from_sequence(&result, device);
@@ -560,6 +588,10 @@ static void discovery_enrich_device(const DaliDiscoveryTransport *transport,
 
     uint16_t groups = 0u;
     if (dali_discovery_query_groups(transport, addr, &groups) == DALI_OK) {
+        /* A valid gear-only group reply is positive evidence even when the
+         * initial QUERY STATUS reply was lost. This also merges gear and input
+         * roles that legitimately share the same numeric short address. */
+        device->has_control_gear = true;
         device->has_groups = true;
         device->groups = groups;
     }
@@ -654,7 +686,9 @@ DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
                               void *found_ctx,
                               uint8_t *found_out)
 {
-    if (inventory == NULL || !transport_valid(transport)) {
+    if (inventory == NULL ||
+        !transport_valid(transport) ||
+        !dali_transport_supports_atomic_sequence(transport)) {
         return DALI_ERR_INVALID;
     }
 

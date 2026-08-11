@@ -335,7 +335,7 @@ DaliError dali_commissioning_set_search_address(
         return err;
     }
 
-    return dali_transport_run_sequence(transport, &seq, NULL);
+    return dali_transport_run_sequence_atomic(transport, &seq, NULL);
 }
 
 DaliError dali_commissioning_compare(const DaliDiscoveryTransport *transport,
@@ -373,7 +373,7 @@ static DaliError search_compare_probe(const DaliDiscoveryTransport *transport,
     }
 
     DaliSequenceResult result;
-    (void)dali_transport_run_sequence(transport, &seq, &result);
+    (void)dali_transport_run_sequence_atomic(transport, &seq, &result);
     return dali_commissioning_compare_from_sequence(&result, yes_out);
 }
 
@@ -482,7 +482,13 @@ uint64_t dali_commissioning_used_mask_from_inventory(
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         const DaliDiscoveryDeviceInfo *device =
             dali_discovery_inventory_get(inventory, addr);
-        if (device != NULL && device->present) {
+        /*
+         * Control gear and control devices have independent 0..63 short-
+         * address spaces.  This mask feeds control-gear commissioning, so a
+         * pure input device at the same numeric address must not reserve it.
+         * Hybrid inventory entries still count because they contain gear.
+         */
+        if (device != NULL && device->present && device->has_control_gear) {
             mask |= ((uint64_t)1u << addr);
         }
     }
@@ -538,7 +544,7 @@ static DaliError commissioning_start_unaddressed(
     }
 
     DaliSequenceResult result;
-    err = dali_transport_run_sequence(transport, &seq, &result);
+    err = dali_transport_run_sequence_atomic(transport, &seq, &result);
     if (err != DALI_OK) {
         /* Once INITIALISE has been attempted the gear may be in initialisation
          * state, where it stays for fifteen minutes. Failing out without a
@@ -574,7 +580,7 @@ static DaliError program_and_verify(const DaliDiscoveryTransport *transport,
     }
 
     DaliSequenceResult result;
-    (void)dali_transport_run_sequence(transport, &seq, &result);
+    (void)dali_transport_run_sequence_atomic(transport, &seq, &result);
     return dali_commissioning_verify_from_sequence(&result, verified_out);
 }
 

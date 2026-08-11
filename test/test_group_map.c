@@ -88,6 +88,29 @@ static void test_seed_does_not_verify(void)
     TEST_ASSERT_EQUAL_UINT16(0u, map.verified);
 }
 
+static void test_replacement_scan_must_cover_every_known_member(void)
+{
+    DaliGroupMap map;
+    dali_group_map_reset(&map);
+    dali_group_map_seed(&map, 2u, 3u);
+    dali_group_map_seed(&map, 7u, 12u);
+
+    uint64_t both = ((uint64_t)1u << 3u) | ((uint64_t)1u << 12u);
+    TEST_ASSERT_TRUE(dali_group_map_scan_covers_known_members(&map, both));
+    TEST_ASSERT_TRUE(dali_group_map_scan_covers_known_members(
+        &map, both | ((uint64_t)1u << 40u)));
+    TEST_ASSERT_FALSE(dali_group_map_scan_covers_known_members(
+        &map, (uint64_t)1u << 3u));
+    TEST_ASSERT_FALSE(dali_group_map_scan_covers_known_members(NULL, both));
+}
+
+static void test_empty_map_is_covered_by_empty_scan(void)
+{
+    DaliGroupMap map;
+    dali_group_map_reset(&map);
+    TEST_ASSERT_TRUE(dali_group_map_scan_covers_known_members(&map, 0u));
+}
+
 /* ── rebuild from inventory ──────────────────────────────────────────────── */
 
 static void build_gear(DaliDiscoveryInventory *inv, uint8_t addr, uint16_t groups)
@@ -124,6 +147,21 @@ static void test_rebuild_marks_all_groups_verified(void)
     TEST_ASSERT_EQUAL_UINT16(0xFFFFu, map.verified);
 }
 
+static void test_rebuild_marks_partial_group_observation_unverified(void)
+{
+    DaliDiscoveryInventory inv;
+    dali_discovery_inventory_reset(&inv);
+    build_gear(&inv, 1u, (1u << 2));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_inventory_store_status(&inv, 7u, 0u));
+    /* Address 7 is known gear, but its optional group query did not complete. */
+
+    DaliGroupMap map;
+    TEST_ASSERT_FALSE(dali_group_map_rebuild_from_inventory(&map, &inv));
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)1u << 1, map.members[2]);
+    TEST_ASSERT_EQUAL_UINT16(0u, map.verified);
+}
+
 static void test_rebuild_skips_pure_input_device(void)
 {
     DaliDiscoveryInventory inv;
@@ -137,9 +175,20 @@ static void test_rebuild_skips_pure_input_device(void)
     d->has_control_gear = false;
 
     DaliGroupMap map;
-    dali_group_map_rebuild_from_inventory(&map, &inv);
+    TEST_ASSERT_TRUE(dali_group_map_rebuild_from_inventory(&map, &inv));
     TEST_ASSERT_EQUAL_UINT64(0u, map.members[4]);
     TEST_ASSERT_EQUAL_UINT8(0xFFu, dali_group_map_pick(&map, 4u));
+    TEST_ASSERT_EQUAL_UINT16(0xFFFFu, map.verified);
+}
+
+static void test_rebuild_does_not_authorize_empty_inventory(void)
+{
+    DaliDiscoveryInventory inv;
+    dali_discovery_inventory_reset(&inv);
+
+    DaliGroupMap map;
+    TEST_ASSERT_FALSE(dali_group_map_rebuild_from_inventory(&map, &inv));
+    TEST_ASSERT_EQUAL_UINT16(0u, map.verified);
 }
 
 static void test_rebuild_replaces_prior_state(void)
@@ -343,10 +392,14 @@ int main(void)
     RUN_TEST(test_seed_out_of_range_is_noop);
     RUN_TEST(test_pick_invalid_group_returns_ff);
     RUN_TEST(test_seed_does_not_verify);
+    RUN_TEST(test_replacement_scan_must_cover_every_known_member);
+    RUN_TEST(test_empty_map_is_covered_by_empty_scan);
 
     RUN_TEST(test_rebuild_maps_gear_to_groups);
     RUN_TEST(test_rebuild_marks_all_groups_verified);
+    RUN_TEST(test_rebuild_marks_partial_group_observation_unverified);
     RUN_TEST(test_rebuild_skips_pure_input_device);
+    RUN_TEST(test_rebuild_does_not_authorize_empty_inventory);
     RUN_TEST(test_rebuild_replaces_prior_state);
 
     RUN_TEST(test_apply_short_add_sets_bit);

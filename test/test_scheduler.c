@@ -81,6 +81,33 @@ static DaliSequenceResult g_seq_full;
 static int        g_seq_count;
 static void      *g_seq_ctx;
 static uint8_t    g_seq_marker;
+static uint8_t    g_reset_callback_order;
+
+typedef struct {
+    int       calls;
+    DaliError result;
+    bool      had_reply;
+    uint8_t   order;
+} ResetTxnCapture;
+
+typedef struct {
+    int                calls;
+    DaliSequenceResult result;
+    uint8_t            order;
+} ResetSequenceCapture;
+
+typedef struct {
+    int       calls;
+    bool      pending_during_callback;
+    DaliError enqueue_result;
+    uint8_t   order;
+} ResetDoneCapture;
+
+typedef struct {
+    ResetTxnCapture  completion;
+    ResetDoneCapture reset;
+    DaliError        request_result;
+} ResetFromCompletionCapture;
 
 static void on_complete(DaliError result, const DaliFrame *reply, void *ctx)
 {
@@ -134,6 +161,53 @@ static void on_sequence_complete(const DaliSequenceResult *result, void *ctx)
     }
     g_seq_ctx = ctx;
     g_seq_count++;
+}
+
+static void on_reset_transaction(DaliError result,
+                                 const DaliFrame *reply,
+                                 void *ctx)
+{
+    ResetTxnCapture *capture = (ResetTxnCapture *)ctx;
+    capture->calls++;
+    capture->result = result;
+    capture->had_reply = reply != NULL;
+    capture->order = ++g_reset_callback_order;
+}
+
+static void on_reset_sequence(const DaliSequenceResult *result, void *ctx)
+{
+    ResetSequenceCapture *capture = (ResetSequenceCapture *)ctx;
+    capture->calls++;
+    if (result != NULL) {
+        capture->result = *result;
+    } else {
+        memset(&capture->result, 0, sizeof(capture->result));
+        capture->result.result = DALI_ERR_INVALID;
+    }
+    capture->order = ++g_reset_callback_order;
+}
+
+static void on_reset_done(void *ctx)
+{
+    ResetDoneCapture *capture = (ResetDoneCapture *)ctx;
+    DaliTransaction txn = {
+        .frame = { .data = 0x7777u, .bit_length = 16u },
+    };
+    capture->calls++;
+    capture->pending_during_callback = dali_sched_reset_pending();
+    capture->enqueue_result = dali_sched_enqueue(&txn);
+    capture->order = ++g_reset_callback_order;
+}
+
+static void on_complete_request_reset(DaliError result,
+                                      const DaliFrame *reply,
+                                      void *ctx)
+{
+    ResetFromCompletionCapture *capture =
+        (ResetFromCompletionCapture *)ctx;
+    on_reset_transaction(result, reply, &capture->completion);
+    capture->request_result =
+        dali_sched_request_reset(on_reset_done, &capture->reset);
 }
 
 /* ---------------------------------------------------------------------------
@@ -206,6 +280,7 @@ void setUp(void)
     g_seq_ctx = NULL;
     memset(&g_seq_reply, 0, sizeof(g_seq_reply));
     memset(&g_seq_full, 0, sizeof(g_seq_full));
+    g_reset_callback_order = 0u;
 
     memset(&g_dali_stats, 0, sizeof(g_dali_stats));
 
@@ -561,8 +636,8 @@ void test_24bit_rx_during_settle_is_ignored_not_routed(void)
     TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
 }
 
-/* 9. A 24-bit event during WAIT_REPLY must not complete the transaction */
-void test_unsolicited_24bit_during_reply_window_routes_without_completing(void)
+/* 9. Another 24-bit forward frame invalidates the pending local query. */
+void test_unsolicited_24bit_during_reply_window_invalidates_query(void)
 {
     TEST_ASSERT_EQUAL(DALI_OK,
                       dali_sched_set_event_callback(on_event, &g_event_marker));
@@ -571,7 +646,7 @@ void test_unsolicited_24bit_during_reply_window_routes_without_completing(void)
         .frame        = { .data = 0x0B90u, .bit_length = 16u },
         .needs_reply  = true,
         .send_twice   = false,
-        .retries_left = 0u,
+        .retries_left = 2u,
         .on_complete  = on_complete,
     };
     TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
@@ -582,28 +657,33 @@ void test_unsolicited_24bit_during_reply_window_routes_without_completing(void)
     TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
 
     inject_event(0x123456u);
-    dali_sched_run();
-    TEST_ASSERT_EQUAL(0, g_cb_count);
-    TEST_ASSERT_EQUAL(1, g_event_count);
-    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
-    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.unsolicited_events_routed);
-
+    /* This backward frame belongs to unknown bus traffic, not our query. */
     inject_reply(0xAFu, 8u);
     dali_sched_run();
     TEST_ASSERT_EQUAL(1, g_cb_count);
-    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
-    TEST_ASSERT_EQUAL_HEX32(0xAFu, g_cb_reply.data);
-    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_outside_reply);
+    TEST_ASSERT_EQUAL(DALI_SCHED_INTERVENED_ERROR, g_cb_result);
+    TEST_ASSERT_EQUAL_UINT8(0u, g_cb_reply.bit_length);
+    TEST_ASSERT_EQUAL(1, g_event_count);
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.unsolicited_events_routed);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+
+    /* Neither a late frame nor another run may complete or retry it again. */
+    inject_reply(0x55u, 8u);
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
 }
 
-/* 10. Non-8-bit traffic cannot satisfy a solicited backward reply */
-void test_16bit_frame_during_reply_window_is_ignored_not_reply(void)
+/* 10. A legacy 16-bit forward frame has the same invalidation semantics. */
+void test_16bit_frame_during_reply_window_invalidates_query(void)
 {
     DaliTransaction txn = {
         .frame        = { .data = 0x0B90u, .bit_length = 16u },
         .needs_reply  = true,
         .send_twice   = false,
-        .retries_left = 0u,
+        .retries_left = 2u,
         .on_complete  = on_complete,
     };
     TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
@@ -615,15 +695,17 @@ void test_16bit_frame_during_reply_window_is_ignored_not_reply(void)
 
     inject_reply(0x1234u, 16u);
     dali_sched_run();
-    TEST_ASSERT_EQUAL(0, g_cb_count);
-    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_SCHED_INTERVENED_ERROR, g_cb_result);
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
 
     inject_reply(0xAFu, 8u);
     dali_sched_run();
     TEST_ASSERT_EQUAL(1, g_cb_count);
-    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
-    TEST_ASSERT_EQUAL_HEX32(0xAFu, g_cb_reply.data);
+    TEST_ASSERT_EQUAL(DALI_SCHED_INTERVENED_ERROR, g_cb_result);
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
 }
 
 /* 11. Reply timeout followed by successful retry */
@@ -1207,6 +1289,171 @@ void test_sequence_reports_send_twice_timing_failure(void)
     TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
 }
 
+void test_reset_cancels_active_and_queued_callbacks_once(void)
+{
+    ResetTxnCapture active_capture = {0};
+    ResetTxnCapture queued_capture = {0};
+    ResetSequenceCapture sequence_capture = {0};
+    ResetDoneCapture done_capture = {0};
+    DaliTransaction active = {
+        .frame = { .data = 0x1111u, .bit_length = 16u },
+        .needs_reply = true,
+        .on_complete = on_reset_transaction,
+        .cb_ctx = &active_capture,
+    };
+    DaliTransaction queued = {
+        .frame = { .data = 0x2222u, .bit_length = 16u },
+        .on_complete = on_reset_transaction,
+        .cb_ctx = &queued_capture,
+    };
+    DaliSequence sequence = {
+        .steps = {{
+            .frame = { .data = 0x3333u, .bit_length = 16u },
+        }},
+        .step_count = 1u,
+        .on_complete = on_reset_sequence,
+        .cb_ctx = &sequence_capture,
+    };
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&active));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&queued));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue_sequence(&sequence));
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_SETTLE, dali_sched_state());
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_request_reset(on_reset_done, &done_capture));
+    TEST_ASSERT_TRUE(dali_sched_reset_pending());
+    TEST_ASSERT_EQUAL(SCHED_WAIT_SETTLE, dali_sched_state());
+    TEST_ASSERT_EQUAL(DALI_ERR_BUSY,
+                      dali_sched_request_reset(NULL, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_BUSY, dali_sched_enqueue(&queued));
+    TEST_ASSERT_EQUAL(0, active_capture.calls);
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+    TEST_ASSERT_FALSE(dali_sched_reset_pending());
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    TEST_ASSERT_EQUAL(1, active_capture.calls);
+    TEST_ASSERT_EQUAL(DALI_SCHED_RESET_ERROR, active_capture.result);
+    TEST_ASSERT_FALSE(active_capture.had_reply);
+    TEST_ASSERT_EQUAL_UINT8(1u, active_capture.order);
+    TEST_ASSERT_EQUAL(1, queued_capture.calls);
+    TEST_ASSERT_EQUAL(DALI_SCHED_RESET_ERROR, queued_capture.result);
+    TEST_ASSERT_FALSE(queued_capture.had_reply);
+    TEST_ASSERT_EQUAL_UINT8(2u, queued_capture.order);
+
+    TEST_ASSERT_EQUAL(1, sequence_capture.calls);
+    TEST_ASSERT_EQUAL(DALI_SCHED_RESET_ERROR,
+                      sequence_capture.result.result);
+    TEST_ASSERT_EQUAL_UINT8(DALI_SEQUENCE_NO_FAILED_STEP,
+                            sequence_capture.result.failed_step);
+    TEST_ASSERT_EQUAL_UINT8(0u, sequence_capture.result.steps_run);
+    TEST_ASSERT_EQUAL_UINT8(0u, sequence_capture.result.reply_mask);
+    TEST_ASSERT_EQUAL_UINT8(3u, sequence_capture.order);
+
+    TEST_ASSERT_EQUAL(1, done_capture.calls);
+    TEST_ASSERT_TRUE(done_capture.pending_during_callback);
+    TEST_ASSERT_EQUAL(DALI_ERR_BUSY, done_capture.enqueue_result);
+    TEST_ASSERT_EQUAL_UINT8(4u, done_capture.order);
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, active_capture.calls);
+    TEST_ASSERT_EQUAL(1, queued_capture.calls);
+    TEST_ASSERT_EQUAL(1, sequence_capture.calls);
+    TEST_ASSERT_EQUAL(1, done_capture.calls);
+}
+
+void test_reset_active_sequence_preserves_partial_result(void)
+{
+    ResetSequenceCapture sequence_capture = {0};
+    ResetDoneCapture done_capture = {0};
+    DaliSequence sequence = {
+        .steps = {
+            {
+                .frame = { .data = 0x1111u, .bit_length = 16u },
+                .needs_reply = true,
+            },
+            {
+                .frame = { .data = 0x2222u, .bit_length = 16u },
+            },
+        },
+        .step_count = 2u,
+        .on_complete = on_reset_sequence,
+        .cb_ctx = &sequence_capture,
+    };
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue_sequence(&sequence));
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+    inject_reply(0x5Au, 8u);
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_TX, dali_sched_state());
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_request_reset(on_reset_done, &done_capture));
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, sequence_capture.calls);
+    TEST_ASSERT_EQUAL(DALI_SCHED_RESET_ERROR,
+                      sequence_capture.result.result);
+    TEST_ASSERT_EQUAL_UINT8(DALI_SEQUENCE_NO_FAILED_STEP,
+                            sequence_capture.result.failed_step);
+    TEST_ASSERT_EQUAL_UINT8(1u, sequence_capture.result.steps_run);
+    TEST_ASSERT_EQUAL_UINT8(1u, sequence_capture.result.reply_mask);
+    TEST_ASSERT_EQUAL_HEX32(0x5Au,
+                            sequence_capture.result.replies[0].data);
+    TEST_ASSERT_EQUAL_UINT8(1u, sequence_capture.order);
+    TEST_ASSERT_EQUAL(1, done_capture.calls);
+    TEST_ASSERT_EQUAL_UINT8(2u, done_capture.order);
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+}
+
+void test_reset_requested_from_completion_prevents_next_tx(void)
+{
+    ResetFromCompletionCapture first_capture = {0};
+    ResetTxnCapture second_capture = {0};
+    DaliTransaction first = {
+        .frame = { .data = 0x1111u, .bit_length = 16u },
+        .on_complete = on_complete_request_reset,
+        .cb_ctx = &first_capture,
+    };
+    DaliTransaction second = {
+        .frame = { .data = 0x2222u, .bit_length = 16u },
+        .on_complete = on_reset_transaction,
+        .cb_ctx = &second_capture,
+    };
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&first));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&second));
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, first_capture.completion.calls);
+    TEST_ASSERT_EQUAL(DALI_OK, first_capture.completion.result);
+    TEST_ASSERT_EQUAL(DALI_OK, first_capture.request_result);
+    TEST_ASSERT_EQUAL_UINT8(1u, first_capture.completion.order);
+    TEST_ASSERT_EQUAL(1, second_capture.calls);
+    TEST_ASSERT_EQUAL(DALI_SCHED_RESET_ERROR, second_capture.result);
+    TEST_ASSERT_EQUAL_UINT8(2u, second_capture.order);
+    TEST_ASSERT_EQUAL(1, first_capture.reset.calls);
+    TEST_ASSERT_TRUE(first_capture.reset.pending_during_callback);
+    TEST_ASSERT_EQUAL_UINT8(3u, first_capture.reset.order);
+    TEST_ASSERT_FALSE(dali_sched_reset_pending());
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, second_capture.calls);
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+}
+
 void test_reset_preserves_active_forward_gap(void)
 {
     DaliTransaction first = {
@@ -1220,6 +1467,11 @@ void test_reset_preserves_active_forward_gap(void)
     TEST_ASSERT_EQUAL(1, g_mock_tx_count);
 
     TEST_ASSERT_EQUAL(DALI_OK, dali_sched_reset());
+    TEST_ASSERT_TRUE(dali_sched_reset_pending());
+    TEST_ASSERT_EQUAL(DALI_ERR_BUSY, dali_sched_enqueue(&second));
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+    TEST_ASSERT_FALSE(dali_sched_reset_pending());
     TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&second));
     dali_sched_run();
     TEST_ASSERT_EQUAL(1, g_mock_tx_count);
@@ -1279,6 +1531,9 @@ void test_seven_step_sequence_uses_one_queue_entry(void)
     TEST_ASSERT_EQUAL(DALI_ERR_QUEUE_FULL, dali_sched_enqueue(&txn));
 
     TEST_ASSERT_EQUAL(DALI_OK, dali_sched_reset());
+    TEST_ASSERT_EQUAL(DALI_ERR_BUSY, dali_sched_enqueue(&txn));
+    dali_sched_run();
+    TEST_ASSERT_FALSE(dali_sched_reset_pending());
     for (uint8_t i = 0u; i < DALI_CMD_QUEUE_SIZE; i++) {
         TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
     }
@@ -1571,7 +1826,11 @@ void test_reset_clears_state(void)
     dali_sched_run();               /* TX → WAIT_SETTLE */
 
     TEST_ASSERT_EQUAL(DALI_OK, dali_sched_reset());
+    TEST_ASSERT_TRUE(dali_sched_reset_pending());
+    TEST_ASSERT_EQUAL(SCHED_WAIT_SETTLE, dali_sched_state());
+    dali_sched_run();
     TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+    TEST_ASSERT_FALSE(dali_sched_reset_pending());
 
     /* No further TX calls after reset */
     advance_past_settle();
@@ -1614,6 +1873,27 @@ void test_multiple_transactions_in_order(void)
     TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
 }
 
+void test_quiescent_reports_active_queued_and_drained_work(void)
+{
+    DaliTransaction txn = {
+        .frame = { .data = 0x1111u, .bit_length = 16u },
+    };
+
+    TEST_ASSERT_TRUE(dali_sched_is_quiescent());
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+    TEST_ASSERT_FALSE(dali_sched_is_quiescent());
+    dali_sched_run();
+    TEST_ASSERT_FALSE(dali_sched_is_quiescent());
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_TRUE(dali_sched_is_quiescent());
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_reset());
+    TEST_ASSERT_FALSE(dali_sched_is_quiescent());
+    dali_sched_run();
+    TEST_ASSERT_TRUE(dali_sched_is_quiescent());
+}
+
 /* ---------------------------------------------------------------------------
  * Main
  * --------------------------------------------------------------------------*/
@@ -1638,6 +1918,9 @@ int main(void)
     RUN_TEST(test_phy_error_arms_gap_before_following_transaction);
     RUN_TEST(test_send_twice_retry_starts_a_fresh_window);
     RUN_TEST(test_sequence_reports_send_twice_timing_failure);
+    RUN_TEST(test_reset_cancels_active_and_queued_callbacks_once);
+    RUN_TEST(test_reset_active_sequence_preserves_partial_result);
+    RUN_TEST(test_reset_requested_from_completion_prevents_next_tx);
     RUN_TEST(test_reset_preserves_active_forward_gap);
     RUN_TEST(test_coarse_clock_rejects_ambiguous_100ms_repeat);
     RUN_TEST(test_reply_received);
@@ -1648,8 +1931,8 @@ int main(void)
     RUN_TEST(test_unsolicited_24bit_idle_routes_event);
     RUN_TEST(test_unsolicited_16bit_idle_routes_event);
     RUN_TEST(test_24bit_rx_during_settle_is_ignored_not_routed);
-    RUN_TEST(test_unsolicited_24bit_during_reply_window_routes_without_completing);
-    RUN_TEST(test_16bit_frame_during_reply_window_is_ignored_not_reply);
+    RUN_TEST(test_unsolicited_24bit_during_reply_window_invalidates_query);
+    RUN_TEST(test_16bit_frame_during_reply_window_invalidates_query);
     RUN_TEST(test_reply_timeout_then_retry_succeeds);
     RUN_TEST(test_reply_timeout_exhausted);
     RUN_TEST(test_sequence_runs_all_steps_before_next_queue_entry);
@@ -1664,6 +1947,7 @@ int main(void)
     RUN_TEST(test_queue_full);
     RUN_TEST(test_reset_clears_state);
     RUN_TEST(test_multiple_transactions_in_order);
+    RUN_TEST(test_quiescent_reports_active_queued_and_drained_work);
 
     return UNITY_END();
 }

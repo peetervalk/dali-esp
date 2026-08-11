@@ -12,7 +12,7 @@ A reusable C protocol stack (`components/dali`) drives the bus — PHY, schedule
 - Passive observation of existing pushbutton couplers (`headless_dispatch`): couplers keep commanding the lamps, ESP32 keeps HA state in sync
 - Free-text DALI command console in HA: queries, config, memory bank read/write, raw 16/24-bit frames
 - Protocol core is plain C with no ESPHome dependency; protocol and cross-task
-  helpers are covered by 21 host test suites (run in CI)
+  helpers are covered by 22 host test suites (run in CI)
 
 ## Hardware
 
@@ -26,7 +26,7 @@ Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The controller has
 
 ## Getting started
 
-1. Flash [dali_diag.yaml](dali_diag.yaml) (`esphome run dali_diag.yaml`). Use **Scan DALI Bus**, **Find Couplers**, and **Identify** from HA to map out addresses and groups — the scan streams ready-to-paste light YAML to the log.
+1. Flash [dali_diag.yaml](dali_diag.yaml) (`esphome run dali_diag.yaml`). Use **Scan DALI Bus**, **Find Couplers**, and **Identify** from HA to map out addresses and groups. A scan publishes ready-to-paste light YAML only when group discovery is complete; otherwise it retains the previous map and asks you to retry.
 2. Write your own config from the example below and the scan output.
 
 ### Example configuration
@@ -69,8 +69,8 @@ light:
     name: "Living Room"
     target_type: group        # short | group | broadcast
     target_address: 0
-    query_address: 2          # cold-start seed: any group member; a scan
-                              # replaces it with verified membership
+    query_address: 2          # cold-start seed: any group member; only a
+                              # complete scan replaces verified membership
   - platform: dali
     dali_id: dali_bus
     name: "Hallway"

@@ -50,6 +50,52 @@ adding broad new device support.
 
 ### Verified locally on 2026-08-11
 
+- The correctness audit closed the remaining local split-transaction paths.
+  Every existing dependent discovery, commissioning, memory, DT8, and input-
+  polling executor now uses `dali_transport_run_sequence_atomic()` and rejects a
+  frame-only or incomplete transport before sending traffic. The ordinary
+  stepwise runner remains available only for callers that explicitly accept
+  local interleaving. This does not exclude a separate physical DALI master.
+- Native `sensor poll` now uses the same atomic input-value sequence as ESPHome.
+  Response retry policy is command-aware: QUERY NEXT DEVICE TYPE, READ/WRITE
+  MEMORY LOCATION, and QUERY INPUT VALUE LATCH never retry after a lost reply,
+  while idempotent reads retain their retry budget. The native typed `query` and
+  `special` paths use that policy too.
+- Scheduler reset is owner-task deferred and fenced. Active and queued
+  transactions/sequences receive exactly one `DALI_ERR_CANCELLED` completion,
+  partial sequence results are retained, queue admission stays closed through
+  the reset callback, and the native CLI resets the PHY only inside that owner-
+  task barrier. It no longer orphans synchronous diagnostic slots or races a
+  blocking PHY transmit.
+- A 16- or 24-bit forward frame arriving during a local reply window now aborts
+  the pending query with `DALI_ERR_INTERVENED`; a later backward byte cannot be
+  misattributed as its reply and the invalidated query is not retried. Physical
+  collision/activity detection is still open below.
+- ESPHome scans gate all component-owned producers, wait for already admitted
+  work to drain, and retain due sensor/refresh requests. Identify timing pauses;
+  console/diagnostic commands are rejected; headless events are drained but
+  actions are intentionally suppressed rather than replayed. HA light targets
+  are stored as packed desired on/off+level values and retried after scan/queue
+  pressure, so bus readback cannot overwrite them and more pending lights than
+  queue slots drain over successive loops.
+- Incomplete group enrichment no longer replaces or persists an authoritative
+  empty map. `DGP2` invalidates legacy `DGP1` snapshots that older firmware may
+  have created from partial scans; known members must be positively observed
+  before replacement; incomplete scans retain the old map, withhold YAML, and
+  surface the condition in HA. A valid gear group reply also classifies gear
+  when the initial status reply was missed. Pure input devices no longer consume
+  control-gear commissioning addresses.
+- Broadcast toggle state is tracked, so repeated broadcast TOGGLE alternates
+  rather than always issuing RECALL MAX.
+- All 22 host executables pass. Focused totals include transport 12, input poll
+  8, discovery 47, commissioning 20, memory 40, DT8 42, scheduler 47, dispatch
+  30, group map 29, and protocol 61 tests.
+- The native firmware builds with ESP-IDF 6.0.1 (`0x387D0`-byte application
+  image). `_local/dali-diag-local.yaml` builds the working-tree component with
+  ESPHome 2026.7.4 (ESP-IDF 5.5.5; 918608-byte OTA image).
+- These audit fixes are host- and compile-verified only. They have not been
+  flashed or exercised on COM6, and neither site deployment has been re-tested.
+
 - Commissioning's opening is one three-step sequence built by
   `dali_commissioning_build_start_sequence()`: TERMINATE, INITIALISE
   (unaddressed), RANDOMIZE. INITIALISE and RANDOMIZE are send-twice, so three
@@ -105,9 +151,10 @@ adding broad new device support.
   pairs ENABLE DEVICE TYPE with the query it enables,
   `dali_discovery_build_groups_sequence()` carries both group queries, and
   `dali_discovery_build_device_types_sequence()` holds the whole multi-type
-  enumeration. With an atomic transport nothing can be interleaved, so the DT6
-  and DT8 enrichment bytes recorded during a busy scan can no longer be read
-  under a device type that an intervening frame already cleared.
+  enumeration. With an atomic transport no other locally scheduled transaction
+  can be interleaved, so the DT6 and DT8 enrichment bytes recorded during a busy
+  scan can no longer be read under a device type that local traffic already
+  cleared. A separate physical master can still interpose.
 - The same change removes two retry hazards of the READ MEMORY LOCATION kind.
   The DT query step carries no retry budget, because ENABLE DEVICE TYPE is
   consumed by the command that follows it and a lone retransmission would be
@@ -127,17 +174,17 @@ adding broad new device support.
 - Host vectors cover the three sequence layouts against standard-derived frames
   and argument boundaries, the reply readers, low/high group assembly, partial
   and failed results, the ascending-list and sentinel termination rules, and
-  truncation at capacity. All 45 discovery cases pass.
+  truncation at capacity. The current discovery suite has 47 cases.
 - Commissioning vectors cover the three sequence layouts against standard-derived
   frames, the retry budgets, argument boundaries, YES/NO/timeout readings, and
   the distinction between a negative answer and a failed earlier step. All 16
   commissioning cases pass, including the nine pre-existing ones unchanged: the
   migration emits the same frames in the same order with the same retry budgets,
-  so the existing bus-level expectations still hold. With the start sequence and
-  its two failure-path vectors the suite is 19 cases.
+  so the existing bus-level expectations still hold. The current commissioning
+  suite has 20 cases.
 - DT8 vectors cover the four-step layout against standard-derived frames, the
   per-step retry contract, selector and address placement, argument boundaries,
-  MSB/LSB assembly, and the partial and failed cases. All 41 DT8 cases pass,
+  MSB/LSB assembly, and the partial and failed cases. All 42 DT8 cases pass,
   including the four pre-existing colour-read cases unchanged.
 - All 22 host suites pass.
 - These changes are host- and compile-verified only. The atomic paths themselves
@@ -159,7 +206,8 @@ adding broad new device support.
   transactions, so the bytes of one latched reading cannot be separated by other
   bus traffic, and a full queue can no longer strand a half-finished read.
   Independent vectors cover the frame layout, argument boundaries, MSB-first
-  assembly, and the partial and failed cases.
+  assembly, and the partial and failed cases. The native CLI uses this executor
+  too; both production transports provide scheduler-backed atomic grouping.
 - Memory reads have typed sequence builders for both forms:
   `dali_memory_build_read_sequence()` for Part 102 control gear and
   `dali_memory_build_control_device_read_sequence()` for Part 103 control
@@ -174,11 +222,13 @@ adding broad new device support.
 - `components/dali/dali_transport.c` is the new home of the bus abstraction that
   discovery, commissioning, memory, and input polling share. `DaliTransport`
   keeps the existing per-frame `transact` and adds an optional
-  `transact_sequence` that runs a whole `DaliSequence` with nothing interleaved.
+  `transact_sequence` that runs a whole `DaliSequence` without other locally
+  scheduled work interleaved.
   `dali_transport_run_sequence()` uses it when present and otherwise issues the
   steps individually — same frames, no atomicity — and
   `dali_transport_supports_atomic_sequence()` lets a caller tell the two apart.
-  The ESPHome scan task and the native CLI both provide the atomic form.
+  Dependent high-level executors use the strict atomic runner and never silently
+  take that fallback. The ESPHome scan task and native CLI provide the atomic form.
 - `DaliDiscoveryTransport` and `DaliMemoryTransport` are now the same type, so
   the hand-rolled struct conversion in discovery is gone and one transport value
   serves every module.
@@ -191,20 +241,20 @@ adding broad new device support.
   fails the read instead of silently returning the following location. The Bank 0
   identity read that discovery performs costs six extra setup frames (26 instead
   of 20) in exchange for a re-established offset at every chunk boundary.
-- All 22 host test executables pass, with 43 cases in the scheduler suite, 7 in
-  the input-poll suite, 39 in the memory suite, and 9 in the new transport suite
+- All 22 host test executables pass, with 47 cases in the scheduler suite, 8 in
+  the input-poll suite, 40 in the memory suite, and 12 in the transport suite
   covering capability reporting, the atomic and fallback paths, failure
   truncation, reply retention, argument handling, and the wait budget.
 - The ESPHome protocol wrapper set matches the 20 reusable C source files.
 - The ignored compile-test configuration builds the working-tree component with
-  ESPHome 2026.7.4 (ESP-IDF 5.5.5), warning-free, at 34.9% RAM (63144 bytes) and
-  49.9% flash (916335 bytes). This is a newer ESPHome than the 2026.6.2 recorded
+  ESPHome 2026.7.4 (ESP-IDF 5.5.5); the current OTA image is 918608 bytes. This
+  is a newer ESPHome than the 2026.6.2 recorded
   below; the three pinned YAMLs were not re-checked against it.
   `_local/dali-diag-local.yaml` had been switched to the `v1.0.1` git source and
   was restored to `type: local` with `path: ../esphome/components`, without
   which the compile test verifies the release rather than the working tree.
-- The native ESP-IDF firmware builds warning-free with ESP-IDF 6.0.1; the
-  application binary uses 22% of its partition (0x38150 bytes).
+- The native ESP-IDF firmware builds with ESP-IDF 6.0.1; the application binary
+  is `0x387D0` bytes.
 - A C++ translation unit mirroring the ESPHome memory-read callback compiles
   against the new API, confirming the signature and accessors work from C++.
 - This change is host- and compile-verified only; it has not been run on hardware.
@@ -366,9 +416,19 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
 - Boot, periodic, deferred, and post-scan light refreshes share a one-query-at-a-
   time pump. Queue-full leaves the current light pending for retry, and refresh
   requests arriving during a pass coalesce into one additional pass.
-- Light refresh is the only traffic source that pauses for a bus scan. Sensor
-  polls, identify, headless dispatch, and Home Assistant light writes keep
-  enqueuing, so a scan is not an exclusive bus session.
+- Every component-owned producer observes the scan gate. Refresh and due sensor
+  polls remain pending; identify time is paused; console and diagnostic actions
+  are rejected; HA light writes retain their latest packed target and retry after
+  admission reopens. Headless events are drained so their fixed queue cannot
+  overflow, but actions observed during a scan are intentionally dropped rather
+  than replayed after their physical context is stale.
+- A scan waits for the local scheduler to become quiescent before its first
+  transaction. This is an integration-level gate, not a scheduler reservation:
+  a future client that bypasses `DaliComponent` or another physical DALI master
+  can still interpose.
+- Only complete group discovery replaces and persists membership. Optional query
+  failure or a missed previously known member retains the prior `DGP2` map and
+  withholds generated YAML; HA reports group data as incomplete.
 - Matching Device/Instance events request an immediate authoritative sensor
   poll; event information is never published as a generic sensor value.
 - A sensor reading is one scheduler sequence, so a two-byte instance cannot have
@@ -404,8 +464,14 @@ write fits in one queue entry. This changes the public `DaliSequence` layout and
 requires all callers to rebuild. In the ESP32 build, the active-sequence and
 16-entry scheduler queue storage increase by 612 bytes in total.
 
-`DaliError` adds `DALI_ERR_TIMING = 8`. Existing numeric values remain unchanged;
-callers with exhaustive error handling should add the new scheduler result.
+`DaliError` adds `DALI_ERR_TIMING = 8`, `DALI_ERR_CANCELLED = 9`, and
+`DALI_ERR_INTERVENED = 10`. Existing earlier numeric values remain unchanged;
+callers with exhaustive error handling should add the new scheduler results.
+
+`dali_sched_reset()` is now a deferred compatibility wrapper around
+`dali_sched_request_reset()`. A successful request means accepted, not complete;
+the owner-task completion callback (or `dali_sched_reset_pending() == false`) is
+the fence. Work discarded by reset completes with `DALI_ERR_CANCELLED`.
 
 `DaliSequenceCompletionCb` changes from
 `(DaliError, uint8_t failed_step, const DaliFrame *last_reply, void *cb_ctx)` to
@@ -427,6 +493,12 @@ conversion. The struct gains an optional `transact_sequence` member between
 `transact` and `ctx`: designated initialisers are unaffected, but any positional
 initialiser must be updated. `DALI_MEMORY_QUERY_RETRIES` is removed, because
 memory reads no longer retry individual READ MEMORY LOCATION frames.
+
+Dependent public executors require the new strict
+`dali_transport_run_sequence_atomic()` contract. A transport must provide both
+its normal `transact` callback and scheduler-backed `transact_sequence`; otherwise
+the call returns `DALI_ERR_INVALID` before traffic. The ordinary runner retains
+its stepwise fallback only for explicitly non-dependent callers.
 
 `dali_gear_dt8.h` now includes `dali_transport.h`, which transitively pulls in
 `dali_scheduler.h`. A translation unit that included only `dali_gear_dt8.h` for
@@ -492,39 +564,20 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   regression: a future workflow that issues dependent frames as separate
   transactions reintroduces the class of bug this removed. The tell is a query
   whose answer depends on a register or enumeration pointer that the same query
-  or an immediately preceding frame modifies.
-- Give `dali_sched_reset()` a defined contract: complete every queued and active
-  transaction with an error before clearing state instead of dropping their
-  callbacks. The native CLI `reset` verb currently orphans its diagnostic sync
-  slots, which stay `in_use` permanently and make every synchronous CLI verb
-  return BUSY until reboot. The planned ESPHome bus-fault recovery would hit the
-  same trap through the console `pending` results and the refresh in-flight flag.
-- Decide whether scans still need to be exclusive. Only the light-refresh pump
-  observes `scan_running_` today; sensor polls, identify blinking, headless
-  dispatch actions, and Home Assistant light writes all keep enqueuing during a
-  scan. The concrete corruption this used to cause is gone — discovery's
-  order-dependent queries are now atomic sequences, so an interleaved frame can
-  no longer clear an enabled device type mid-workflow. What remains is scan
-  duration under contention rather than wrong data, so exclusivity is now a
-  performance question, not a correctness one.
-- Make the reply retry budget a per-call-site decision. `dali_control_query()`
-  gives every reply-bearing transaction `DALI_MAX_RETRIES`, so a semantically
-  negative or absent-device answer costs four reply windows (about 140 ms).
-  Refresh passes and scans pay that for every silent address.
-- Audit the remaining retry budgets for commands that mutate device state the
-  way READ MEMORY LOCATION advances DTR0. Four cases are fixed: memory reads,
-  the ENABLE DEVICE TYPE pairs, QUERY NEXT DEVICE TYPE, and QUERY COLOUR VALUE
-  all now run as sequences whose state-advancing steps have no retries.
-  `dali_discovery_query_u8()` still retries every query it issues, which is safe
-  only while the queries left on that path stay idempotent — they are today, but
-  nothing enforces it. The pattern to check for is a query whose reply depends
-  on a register the same query modifies.
+  or an immediately preceding frame modifies. The strict transport runner and
+  command retry-safety metadata enforce this for every workflow known today.
+- If new scheduler clients are added outside `DaliComponent`, add a true
+  scheduler admission reservation for scans. The current quiescence check plus
+  component-wide gate covers present local producers but is not an atomic
+  check-and-reserve primitive.
 - Handle remaining non-console enqueue failures in identify, diagnostic, and
   headless-dispatch paths, and expose queue depth/high-water/drop diagnostics.
 - Update light-command deduplication only after confirmed transmission, or
   invalidate its cached state after TX/bus errors, so a failed command can be retried.
-- Correct observed-state semantics for RECALL MAX, STEP DOWN AND OFF, TOGGLE, and
-  broadcast commands. Query actual level whenever the exact state is not known.
+- Correct observed-state semantics for RECALL MAX, STEP DOWN AND OFF, and
+  broadcast propagation to ordinary light entities. Broadcast TOGGLE itself now
+  alternates correctly, but commands whose exact result is unknown still need an
+  actual-level query.
 
 ### P1 — CLI completeness
 
@@ -542,6 +595,10 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 
 - Replace the blanket ten-second startup write suppression with logic that
   distinguishes restore/default writes from intentional user commands.
+- Decide how an operator should intentionally retire a previously known group
+  member. A complete scan may remove its memberships when that gear answers, but
+  a scan that misses the address retains the prior map by design. This favors
+  avoiding destructive transient loss over automatic removal of absent gear.
 - Give input-sensor values the same packed single-word mailbox the lights use.
   `DaliInputSensor` still keeps separate `pending_raw_` and `dirty_` atomics and
   clears `dirty_` before reading the value, so a Core 1 publish landing between
@@ -575,7 +632,7 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 
 - Add CI that compiles a clean external-component checkout from the release tag and
   validates the Python schema, ESPHome C++ layer, YAML, and wrapper packaging.
-- Add the native ESP-IDF build to CI alongside the existing 21-suite host workflow.
+- Add the native ESP-IDF build to CI alongside the existing 22-suite host workflow.
 - Keep one intentional ESPHome source-inclusion path. Remove the unused component
   `CMakeLists.txt` path and stale fallback references if the Python-copy/wrapper
   route remains authoritative.

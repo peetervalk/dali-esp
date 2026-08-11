@@ -9,7 +9,8 @@ bool dali_transport_valid(const DaliTransport *transport)
 
 bool dali_transport_supports_atomic_sequence(const DaliTransport *transport)
 {
-    return transport != NULL && transport->transact_sequence != NULL;
+    return dali_transport_valid(transport) &&
+           transport->transact_sequence != NULL;
 }
 
 uint32_t dali_transport_sequence_timeout_ms(const DaliSequence *seq)
@@ -112,4 +113,19 @@ DaliError dali_transport_run_sequence(const DaliTransport *transport,
         *result_out = result;
     }
     return err;
+}
+
+DaliError dali_transport_run_sequence_atomic(const DaliTransport *transport,
+                                             const DaliSequence  *seq,
+                                             DaliSequenceResult  *result_out)
+{
+    DaliSequenceResult result;
+    result_init(&result, DALI_ERR_INVALID);
+    if (result_out != NULL) {
+        *result_out = result;
+    }
+    if (!dali_transport_supports_atomic_sequence(transport)) {
+        return DALI_ERR_INVALID;
+    }
+    return dali_transport_run_sequence(transport, seq, result_out);
 }

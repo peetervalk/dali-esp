@@ -86,15 +86,25 @@ DaliError dali_discovery_inventory_update_input_device(
     DaliDiscoveryInventory *inventory,
     const DaliDiscoveryInputDevice *input_device);
 
+/*
+ * True when at least one control gear was positively discovered and every
+ * present control-gear record has a complete 16-group observation. Pure input
+ * devices do not implement control-gear group queries and are deliberately
+ * ignored. An empty/all-timeout scan is intentionally not authoritative,
+ * because it cannot be distinguished from a disconnected bus.
+ */
+bool dali_discovery_inventory_has_complete_group_data(
+    const DaliDiscoveryInventory *inventory);
+
 /* ---------------------------------------------------------------------------
  * Sequenced queries
  *
  * Some discovery answers depend on the frame that precedes them, so the frames
- * must stay together on the bus. Those are built as a DaliSequence and run
- * through dali_transport_run_sequence(): with an atomic transport nothing can
- * be interleaved, and on the fallback path the same frames are issued
- * individually. Callers that cannot tolerate a split must check
- * dali_transport_supports_atomic_sequence() first.
+ * must stay together relative to locally scheduled traffic. Those are built as
+ * a DaliSequence and run through dali_transport_run_sequence_atomic(): no other
+ * local transaction can be interleaved, and a frame-only transport is rejected
+ * before a dependent group is issued. A separate physical bus master can still
+ * interpose; that requires bus-level arbitration beyond this transport API.
  *
  * A step that advances device-side state carries no retry budget, because a
  * lone retransmission would be answered out of step with the rest of the

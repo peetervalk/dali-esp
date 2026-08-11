@@ -70,8 +70,10 @@ DaliError dali_commissioning_decode_short_address(uint8_t encoded,
  * them: COMPARE answers about whatever the last SEARCH ADDRH/M/L triple loaded,
  * and VERIFY SHORT ADDRESS answers about whatever PROGRAM SHORT ADDRESS just
  * wrote. Those groups are built as sequences and run through
- * dali_transport_run_sequence(), so an atomic transport cannot let anything
- * separate them. On the fallback path the same frames are issued individually.
+ * dali_transport_run_sequence_atomic(), so no other locally scheduled
+ * transaction can separate them. A frame-only transport is rejected before any
+ * dependent group is issued. A separate physical bus master can still
+ * interpose; that requires bus-level arbitration beyond this transport API.
  *
  * These sequences do not address the known COMPARE collision problem: when
  * several devices answer at once the reply is undecodable and the PHY drops it,

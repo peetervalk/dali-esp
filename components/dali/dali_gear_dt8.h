@@ -128,11 +128,8 @@ uint16_t dali_dt8_mirek_to_kelvin(uint16_t mirek);
  *
  * Every step depends on the one before it, and step 3 overwrites the very
  * register step 1 set up, so the group is built as a DaliSequence and run
- * through dali_transport_run_sequence(). An atomic transport keeps other
- * traffic out; on the fallback path the same frames are issued individually and
- * a frame that writes DTR0 in between yields a wrong value rather than an error.
- * Callers that cannot tolerate that must check
- * dali_transport_supports_atomic_sequence() first.
+ * through dali_transport_run_sequence_atomic(). A frame-only transport is
+ * rejected before any frame is sent.
  *
  * The transport is the shared DaliTransport under its DT8-era names, so one
  * transport value serves this module and every other.

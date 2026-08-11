@@ -141,6 +141,25 @@ const DaliCommandInfo *dali_command_lookup(DaliCommandId id)
     return NULL;
 }
 
+bool dali_command_response_retry_safe(DaliCommandId id)
+{
+    const DaliCommandInfo *cmd = dali_command_lookup(id);
+    if (cmd == NULL || cmd->response_kind == DALI_RESP_NONE) {
+        return false;
+    }
+
+    switch (id) {
+        case DALI_CMD_QUERY_NEXT_DEVICE_TYPE:
+        case DALI_CMD_READ_MEMORY_LOCATION:
+        case DALI_CMD_WRITE_MEMORY_LOCATION:
+        case DALI_CMD_QUERY_INPUT_VALUE_LATCH:
+            return false;
+
+        default:
+            return true;
+    }
+}
+
 const DaliCommandInfo *dali_command_lookup_opcode(DaliCommandFrameKind frame_kind,
                                                   uint8_t opcode)
 {

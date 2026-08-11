@@ -172,6 +172,13 @@ const DaliCommandInfo *dali_command_lookup_opcode(DaliCommandFrameKind frame_kin
                                                   uint8_t opcode);
 uint8_t dali_command_count(void);
 
+/*
+ * Return true when retrying this command after a missing reply cannot advance
+ * device-side read state. Stateful reads (for example memory and latch cursors)
+ * must be retried as a complete higher-level sequence, never as one frame.
+ */
+bool dali_command_response_retry_safe(DaliCommandId id);
+
 typedef enum {
     DALI_DTR0 = 0,
     DALI_DTR1 = 1,

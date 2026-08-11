@@ -243,10 +243,53 @@ static DaliError mock_transact(const DaliFrame *frame,
     return mock_special_no_reply(opcode, param);
 }
 
+static DaliError mock_transact_sequence(const DaliSequence *seq,
+                                        DaliSequenceResult *result_out,
+                                        void *ctx)
+{
+    if (seq == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliSequenceResult result = {
+        .result = DALI_OK,
+        .failed_step = DALI_SEQUENCE_NO_FAILED_STEP,
+    };
+    for (uint8_t i = 0u; i < seq->step_count; i++) {
+        const DaliSequenceStep *step = &seq->steps[i];
+        DaliFrame reply = {0u, 0u};
+        DaliError err = mock_transact(&step->frame,
+                                      step->needs_reply,
+                                      step->retries_left,
+                                      step->send_twice,
+                                      step->needs_reply ? &reply : NULL,
+                                      ctx);
+        result.steps_run = (uint8_t)(i + 1u);
+        if (err != DALI_OK) {
+            result.result = err;
+            result.failed_step = i;
+            if (result_out != NULL) {
+                *result_out = result;
+            }
+            return err;
+        }
+        if (step->needs_reply) {
+            result.replies[i] = reply;
+            result.reply_mask |= (uint8_t)(1u << i);
+        }
+    }
+
+    if (result_out != NULL) {
+        *result_out = result;
+    }
+    return DALI_OK;
+}
+
 static DaliDiscoveryTransport transport(void)
 {
     return (DaliDiscoveryTransport){
         .transact = mock_transact,
+        .transact_sequence = mock_transact_sequence,
         .ctx = NULL,
     };
 }
@@ -305,6 +348,19 @@ void test_compare_timeout_is_no(void)
     TEST_ASSERT_EQUAL_UINT16(1u, s_bus.log_count);
     TEST_ASSERT_EQUAL_HEX32(0xA900u, s_bus.log[0].data);
     TEST_ASSERT_TRUE(s_bus.log[0].needs_reply);
+}
+
+void test_set_search_address_rejects_frame_only_transport_without_traffic(void)
+{
+    DaliDiscoveryTransport frame_only = {
+        .transact = mock_transact,
+        .ctx = NULL,
+    };
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_commissioning_set_search_address(&frame_only,
+                                                            0x123456u));
+    TEST_ASSERT_EQUAL_UINT16(0u, s_bus.log_count);
 }
 
 void test_find_next_random_address_binary_searches_lowest_active_device(void)
@@ -432,9 +488,16 @@ void test_commission_unaddressed_returns_without_tx_when_address_space_full(void
     TEST_ASSERT_EQUAL_UINT16(0u, s_bus.log_count);
 }
 
-void test_inventory_used_mask_marks_present_devices(void)
+void test_inventory_used_mask_marks_control_gear_only(void)
 {
     DaliDiscoveryInventory inventory;
+    DaliDiscoveryInputDevice input = {
+        .device = {
+            .address = 5u,
+            .has_instance_count = true,
+            .instance_count = 1u,
+        },
+    };
 
     TEST_ASSERT_EQUAL(DALI_OK, dali_discovery_inventory_reset(&inventory));
     TEST_ASSERT_EQUAL(DALI_OK,
@@ -445,6 +508,9 @@ void test_inventory_used_mask_marks_present_devices(void)
                       dali_discovery_inventory_store_status(&inventory,
                                                            63u,
                                                            0x00u));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_inventory_update_input_device(&inventory,
+                                                                   &input));
 
     uint64_t mask = dali_commissioning_used_mask_from_inventory(&inventory);
     TEST_ASSERT_NOT_EQUAL(0u, (mask & ((uint64_t)1u << 4u)));
@@ -881,12 +947,13 @@ int main(void)
     RUN_TEST(test_verify_from_sequence_reads_confirmation_and_failures);
     RUN_TEST(test_short_address_encoding_round_trip);
     RUN_TEST(test_set_search_address_sends_h_m_l_special_commands);
+    RUN_TEST(test_set_search_address_rejects_frame_only_transport_without_traffic);
     RUN_TEST(test_compare_timeout_is_no);
     RUN_TEST(test_find_next_random_address_binary_searches_lowest_active_device);
     RUN_TEST(test_commission_unaddressed_assigns_free_short_addresses_in_order);
     RUN_TEST(test_commission_unaddressed_respects_max_devices);
     RUN_TEST(test_commission_unaddressed_returns_without_tx_when_address_space_full);
-    RUN_TEST(test_inventory_used_mask_marks_present_devices);
+    RUN_TEST(test_inventory_used_mask_marks_control_gear_only);
     RUN_TEST(test_invalid_arguments_are_rejected);
     return UNITY_END();
 }

@@ -112,7 +112,7 @@ DaliError dali_dt8_read_colour_value_16(const DaliDt8Transport    *transport,
     }
 
     DaliSequenceResult result;
-    err = dali_transport_run_sequence(transport, &seq, &result);
+    err = dali_transport_run_sequence_atomic(transport, &seq, &result);
     if (err != DALI_OK) {
         return err;
     }

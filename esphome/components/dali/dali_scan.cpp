@@ -162,8 +162,27 @@ static bool scan_sync_wait(uint32_t wait_ms, ScanSyncCtx *taken) {
     return completed;
 }
 
+static void scan_sequence_result_init(DaliSequenceResult *result, DaliError error) {
+    if (result == nullptr) return;
+    *result = {};
+    result->result      = error;
+    result->failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
+}
+
 // One DALI round-trip is ~50 ms; 500 ms leaves ample headroom for a single frame.
 static constexpr uint32_t SCAN_SYNC_FRAME_WAIT_MS = 500u;
+static constexpr uint32_t SCAN_DRAIN_WAIT_MS = 5000u;
+
+static bool scan_wait_for_quiescent_scheduler() {
+    uint32_t started_ms = millis();
+    while (!dali_sched_is_quiescent()) {
+        if ((uint32_t)(millis() - started_ms) >= SCAN_DRAIN_WAIT_MS) {
+            return false;
+        }
+        vTaskDelay(1u);
+    }
+    return true;
+}
 
 static DaliError scan_sync_transact(const DaliFrame *frame,
                                     bool             needs_reply,
@@ -205,9 +224,13 @@ static DaliError scan_sync_transact(const DaliFrame *frame,
 static DaliError scan_sync_sequence_transact(const DaliSequence *seq,
                                              DaliSequenceResult *result_out,
                                              void *              /*transport_ctx*/) {
+    scan_sequence_result_init(result_out, DALI_ERR_INVALID);
     if (seq == nullptr) return DALI_ERR_INVALID;
 
-    if (!scan_sync_acquire()) return DALI_ERR_BUSY;
+    if (!scan_sync_acquire()) {
+        scan_sequence_result_init(result_out, DALI_ERR_BUSY);
+        return DALI_ERR_BUSY;
+    }
 
     DaliSequence local = *seq;
     local.on_complete  = scan_sync_sequence_cb;
@@ -216,16 +239,22 @@ static DaliError scan_sync_sequence_transact(const DaliSequence *seq,
     DaliError enq = dali_sched_enqueue_sequence(&local);
     if (enq != DALI_OK) {
         scan_sync_release_unused();
+        scan_sequence_result_init(result_out, enq);
         return enq;
     }
 
     ScanSyncCtx taken = {};
     if (!scan_sync_wait(dali_transport_sequence_timeout_ms(seq), &taken)) {
+        scan_sequence_result_init(result_out, DALI_ERR_TIMEOUT);
         return DALI_ERR_TIMEOUT;
     }
 
-    if (result_out != nullptr && taken.has_sequence) *result_out = taken.sequence;
-    return taken.result;
+    if (!taken.has_sequence) {
+        scan_sequence_result_init(result_out, DALI_ERR_INVALID);
+        return DALI_ERR_INVALID;
+    }
+    if (result_out != nullptr) *result_out = taken.sequence;
+    return taken.sequence.result;
 }
 
 // ---------------------------------------------------------------------------
@@ -275,10 +304,23 @@ static void log_inventory_json(const DaliDiscoveryInventory *inv) {
 // from bus-verified data, superseding any YAML-seeded or console-edited state.
 // ---------------------------------------------------------------------------
 
-static void rebuild_group_membership(const DaliDiscoveryInventory *inv, DaliComponent *component) {
+static bool rebuild_group_membership(const DaliDiscoveryInventory *inv,
+                                     DaliComponent *component) {
     DaliGroupMap map;
-    dali_group_map_rebuild_from_inventory(&map, inv);
-    component->set_group_membership_snapshot(map.members);
+    bool complete = dali_group_map_rebuild_from_inventory(&map, inv);
+    if (!complete) return false;
+    uint64_t observed_gear = 0u;
+    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        const DaliDiscoveryDeviceInfo *device =
+            dali_discovery_inventory_get(inv, addr);
+        if (device != nullptr && device->present &&
+            device->has_control_gear && device->has_groups) {
+            observed_gear |= (uint64_t)1u << addr;
+        }
+    }
+    return component->set_group_membership_snapshot(map.members,
+                                                     map.verified,
+                                                     observed_gear);
 }
 
 // ---------------------------------------------------------------------------
@@ -411,20 +453,37 @@ static void scan_task(void *arg) {
 
     ESP_LOGI(TAG, "Scanning DALI bus...");
 
+    if (!scan_wait_for_quiescent_scheduler()) {
+        ESP_LOGE(TAG, "Scan start timed out waiting for queued work to drain");
+        component->on_scan_complete(0, false, false);
+        vTaskDelete(nullptr);
+        return;
+    }
+
     uint8_t found = 0;
     DaliError err = dali_discovery_scan(&inventory, &transport, nullptr, nullptr, &found);
 
     if (err != DALI_OK) {
         ESP_LOGE(TAG, "Scan failed: %d", (int)err);
-        component->on_scan_complete(0, false);
+        component->on_scan_complete(0, false, false);
         vTaskDelete(nullptr);
         return;
     }
 
     ESP_LOGI(TAG, "---[ DALI Scan Complete: %u device(s) found ]---", (unsigned)found);
     log_inventory_json(&inventory);
-    rebuild_group_membership(&inventory, component);
-    build_and_publish_yaml(&inventory, component->get_coupler_group_mask(), component);
+    bool group_data_complete = rebuild_group_membership(&inventory, component);
+    if (!group_data_complete) {
+        ESP_LOGW(TAG, "group discovery incomplete or missed known gear; "
+                      "keeping previous membership snapshot and withholding YAML");
+        component->set_scan_yaml_pending(
+            "# DALI scan group data incomplete; previous membership map retained. "
+            "Retry the scan before using generated YAML.");
+    } else {
+        build_and_publish_yaml(&inventory,
+                               component->get_coupler_group_mask(),
+                               component);
+    }
 
     /* Build compact summary for the scan_result text sensor.
      * Format: "16 gear | groups: 0,2,3,4,5,6,7 | 0 input | YAML in logs" */
@@ -455,15 +514,23 @@ static void scan_task(void *arg) {
             gfirst = false;
         }
 
-        snprintf(summary, sizeof(summary), "%u gear | grp: %s | %u input | YAML in sensor",
-                 (unsigned)gear_count,
-                 grp_buf[0] ? grp_buf : "-",
-                 (unsigned)input_count);
+        if (group_data_complete) {
+            snprintf(summary, sizeof(summary),
+                     "%u gear | grp: %s | %u input | YAML in sensor",
+                     (unsigned)gear_count,
+                     grp_buf[0] ? grp_buf : "-",
+                     (unsigned)input_count);
+        } else {
+            snprintf(summary, sizeof(summary),
+                     "%u gear | %u input | GROUP DATA INCOMPLETE; map retained",
+                     (unsigned)gear_count,
+                     (unsigned)input_count);
+        }
 
         component->set_scan_result_pending(summary);
     }
 
-    component->on_scan_complete(found, true);
+    component->on_scan_complete(found, true, group_data_complete);
     vTaskDelete(nullptr);
 }
 

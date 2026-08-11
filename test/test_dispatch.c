@@ -410,6 +410,32 @@ void test_toggle_starts_off_and_flips(void)
     TEST_ASSERT_EQUAL_HEX32(0x8105u, s_last_tx.data); /* group 0 RECALL MAX */
 }
 
+void test_broadcast_toggle_flips_between_recall_max_and_off(void)
+{
+    DaliInputEvent ev = make_dali2(DALI_EVENT_ADDRESS_SHORT, 3, 0, 0x02u);
+    DaliDispatchEntry table[] = {
+        { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 3, 0x02u, 0u },
+          { DALI_ADDR_BROADCAST, 0 }, DALI_DISPATCH_ACTION_TOGGLE, 0 },
+    };
+    DaliDispatchToggleState state = {};
+    DaliDispatchResult result = {};
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(table, 1u, &ev, &state, &result));
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_UINT8(1u, s_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0xFF05u, s_last_tx.data);
+    TEST_ASSERT_TRUE(state.broadcast_on);
+    TEST_ASSERT_TRUE(result.is_on);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(table, 1u, &ev, &state, &result));
+    advance_to_next_forward();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_UINT8(2u, s_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0xFF00u, s_last_tx.data);
+    TEST_ASSERT_FALSE(state.broadcast_on);
+    TEST_ASSERT_FALSE(result.is_on);
+}
+
 void test_dali2_device_instance_matches_canonical_address_and_instance(void)
 {
     /* Device/Instance: short address 5, instance 3, short-press information. */
@@ -704,6 +730,7 @@ int main(void)
     RUN_TEST(test_action_off_sends_off_frame);
     RUN_TEST(test_action_scene_sends_correct_frame);
     RUN_TEST(test_toggle_starts_off_and_flips);
+    RUN_TEST(test_broadcast_toggle_flips_between_recall_max_and_off);
     RUN_TEST(test_dali2_device_instance_matches_canonical_address_and_instance);
     RUN_TEST(test_dali2_dispatch_matches_all_ten_event_information_bits);
     RUN_TEST(test_dali2_exact_00ff_does_not_collide_with_event_any);

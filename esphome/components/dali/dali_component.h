@@ -24,6 +24,7 @@ class DaliBusLight {
   virtual ~DaliBusLight() = default;
   virtual void    mark_state_from_bus(bool is_on, uint8_t level) = 0;
   virtual void    apply_bus_state() = 0;
+  virtual void    flush_pending_write() = 0;
   virtual uint8_t get_query_address() const = 0;
 };
 
@@ -64,6 +65,9 @@ class DaliComponent : public Component {
 
   void start_scan();
   void start_refresh();
+  bool is_scan_running() const {
+    return scan_running_.load(std::memory_order_acquire);
+  }
   // Blink diag_address_ between max and min for 10 s to identify a fixture.
   void start_identify();
   // Record unsolicited bus frames for 30 s; publish result to couplers_result_.
@@ -103,13 +107,16 @@ class DaliComponent : public Component {
   void set_scan_result_pending(const char *summary);
   void set_scan_yaml_pending(const char *yaml);
   // Called from scan task when finished.
-  void on_scan_complete(uint8_t count, bool success);
+  void on_scan_complete(uint8_t count, bool success, bool data_complete);
   // Returns bitmask of DALI groups that had frames observed during last coupler scan.
   uint16_t get_coupler_group_mask() const;
   // Called from scan task (Core 1) after a successful scan — replaces the
   // runtime group-membership table (masks[g] = bitmask of short addresses
   // currently in group g) used to auto-select query_address in start_refresh().
-  void set_group_membership_snapshot(const uint64_t masks[16]);
+  // Rejects partial/unverified observations so they cannot overwrite and
+  // persist the previous known-good group map.
+  bool set_group_membership_snapshot(const uint64_t masks[16], uint16_t verified,
+                                     uint64_t observed_gear);
   // Called by DaliLightOutput during codegen init (Core 0 setup phase).
   void register_light(uint8_t target_type, uint8_t target_address,
                       uint16_t member_groups, DaliBusLight *light);
@@ -142,6 +149,7 @@ class DaliComponent : public Component {
   std::atomic<bool>    scan_running_{false};
   std::atomic<uint8_t> scan_count_{0};
   std::atomic<bool>    scan_success_{false};
+  std::atomic<bool>    scan_data_complete_{false};
 
   // Periodic poll (Core 0 only).
   uint32_t poll_interval_s_{0};
@@ -162,6 +170,8 @@ class DaliComponent : public Component {
   uint32_t identify_start_ms_{0};
   uint32_t identify_last_ms_{0};
   bool     identify_phase_{false};
+  bool     identify_scan_paused_{false};
+  uint32_t identify_scan_pause_ms_{0};
 
   // Find couplers timer (Core 0); active flag is the module-level atomic.
   uint32_t find_couplers_end_ms_{0};

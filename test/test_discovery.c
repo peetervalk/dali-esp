@@ -137,6 +137,48 @@ static DaliError mock_transact(const DaliFrame *frame,
     return DALI_ERR_TIMEOUT;
 }
 
+static DaliError mock_transact_sequence(const DaliSequence *seq,
+                                        DaliSequenceResult *result_out,
+                                        void *ctx)
+{
+    if (seq == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliSequenceResult result = {
+        .result = DALI_OK,
+        .failed_step = DALI_SEQUENCE_NO_FAILED_STEP,
+    };
+    for (uint8_t i = 0u; i < seq->step_count; i++) {
+        const DaliSequenceStep *step = &seq->steps[i];
+        DaliFrame reply = {0u, 0u};
+        DaliError err = mock_transact(&step->frame,
+                                      step->needs_reply,
+                                      step->retries_left,
+                                      step->send_twice,
+                                      step->needs_reply ? &reply : NULL,
+                                      ctx);
+        result.steps_run = (uint8_t)(i + 1u);
+        if (err != DALI_OK) {
+            result.result = err;
+            result.failed_step = i;
+            if (result_out != NULL) {
+                *result_out = result;
+            }
+            return err;
+        }
+        if (step->needs_reply) {
+            result.replies[i] = reply;
+            result.reply_mask |= (uint8_t)(1u << i);
+        }
+    }
+
+    if (result_out != NULL) {
+        *result_out = result;
+    }
+    return DALI_OK;
+}
+
 /*
  * Enrichment detects "multiple device types" with a standalone QUERY DEVICE
  * TYPE, then runs the enumeration as one sequence that re-issues that query as
@@ -183,6 +225,7 @@ static DaliDiscoveryTransport transport(void)
 {
     return (DaliDiscoveryTransport){
         .transact = mock_transact,
+        .transact_sequence = mock_transact_sequence,
         .ctx = &s_bus,
     };
 }
@@ -829,6 +872,8 @@ void test_scan_stores_group_membership(void)
     TEST_ASSERT_NOT_NULL(device);
     TEST_ASSERT_TRUE(device->has_groups);
     TEST_ASSERT_EQUAL_HEX16(0x0205u, device->groups);
+    TEST_ASSERT_TRUE(
+        dali_discovery_inventory_has_complete_group_data(&inventory));
 }
 
 void test_scan_detects_input_device_by_instance_count(void)
@@ -882,6 +927,39 @@ void test_scan_detects_pure_input_device_without_gear_status(void)
     TEST_ASSERT_TRUE(device->has_instance_count);
     TEST_ASSERT_EQUAL_UINT8(3u, device->instance_count);
     TEST_ASSERT_EQUAL_UINT32(0u, s_bus.gear_memory_read_count);
+    TEST_ASSERT_TRUE(
+        dali_discovery_inventory_has_complete_group_data(&inventory));
+}
+
+void test_scan_classifies_gear_when_status_reply_is_missed(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+
+    /* QUERY STATUS times out, but the control-device and gear address spaces
+     * can both contain address 3. Positive replies from both roles must merge. */
+    add_reply(0x07FE35u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 2u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x07C0u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0x04u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x07C1u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0x00u,
+              DALI_BACKWARD_FRAME_BITS);
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    TEST_ASSERT_EQUAL_UINT8(1u, found);
+    const DaliDiscoveryDeviceInfo *device =
+        dali_discovery_inventory_get(&inventory, 3u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_FALSE(device->has_status);
+    TEST_ASSERT_TRUE(device->has_input_device);
+    TEST_ASSERT_TRUE(device->has_control_gear);
+    TEST_ASSERT_TRUE(device->has_groups);
+    TEST_ASSERT_EQUAL_HEX16(0x0004u, device->groups);
+    TEST_ASSERT_TRUE(
+        dali_discovery_inventory_has_complete_group_data(&inventory));
 }
 
 void test_scan_tolerates_group_query_timeout(void)
@@ -902,6 +980,27 @@ void test_scan_tolerates_group_query_timeout(void)
     TEST_ASSERT_NOT_NULL(device);
     TEST_ASSERT_TRUE(device->present);
     TEST_ASSERT_FALSE(device->has_groups);
+    TEST_ASSERT_FALSE(
+        dali_discovery_inventory_has_complete_group_data(&inventory));
+}
+
+void test_scan_rejects_frame_only_transport_without_traffic(void)
+{
+    DaliDiscoveryTransport frame_only = {
+        .transact = mock_transact,
+        .ctx = &s_bus,
+    };
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0xA5u;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_scan(&inventory,
+                                          &frame_only,
+                                          NULL,
+                                          NULL,
+                                          &found));
+    TEST_ASSERT_EQUAL_UINT32(0u, s_bus.tx_count);
+    TEST_ASSERT_EQUAL_HEX8(0xA5u, found);
 }
 
 void test_invalid_arguments_are_rejected(void)
@@ -925,6 +1024,8 @@ void test_invalid_arguments_are_rejected(void)
                       dali_discovery_inventory_store_status(NULL, 0u, 0u));
     TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
                       dali_discovery_inventory_store_groups(NULL, 0u, 0u));
+    TEST_ASSERT_FALSE(
+        dali_discovery_inventory_has_complete_group_data(NULL));
     TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
                       dali_discovery_query_u8(NULL, &frame, &value));
     TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
@@ -1385,6 +1486,7 @@ int main(void)
     RUN_TEST(test_scan_stores_group_membership);
     RUN_TEST(test_scan_detects_input_device_by_instance_count);
     RUN_TEST(test_scan_detects_pure_input_device_without_gear_status);
+    RUN_TEST(test_scan_classifies_gear_when_status_reply_is_missed);
     RUN_TEST(test_scan_tolerates_group_query_timeout);
     RUN_TEST(test_scan_enriches_dt6_device);
     RUN_TEST(test_scan_skips_dt6_enrichment_for_non_dt6_devices);
@@ -1400,6 +1502,7 @@ int main(void)
     RUN_TEST(test_scan_marks_excess_device_types_truncated);
     RUN_TEST(test_scan_does_not_mark_exact_device_type_capacity_truncated);
     RUN_TEST(test_scan_records_scene_levels);
+    RUN_TEST(test_scan_rejects_frame_only_transport_without_traffic);
     RUN_TEST(test_invalid_arguments_are_rejected);
     return UNITY_END();
 }

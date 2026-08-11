@@ -137,16 +137,21 @@ void test_transport_validity_and_capability(void)
 {
     DaliTransport frame_only = frame_only_transport();
     DaliTransport atomic     = atomic_transport();
+    DaliTransport sequence_only = {
+        .transact_sequence = mock_transact_sequence,
+    };
     DaliTransport empty      = {0};
 
     TEST_ASSERT_TRUE(dali_transport_valid(&frame_only));
     TEST_ASSERT_TRUE(dali_transport_valid(&atomic));
+    TEST_ASSERT_FALSE(dali_transport_valid(&sequence_only));
     TEST_ASSERT_FALSE(dali_transport_valid(&empty));
     TEST_ASSERT_FALSE(dali_transport_valid(NULL));
 
     /* A frame-only transport must not claim atomicity it cannot provide. */
     TEST_ASSERT_FALSE(dali_transport_supports_atomic_sequence(&frame_only));
     TEST_ASSERT_TRUE(dali_transport_supports_atomic_sequence(&atomic));
+    TEST_ASSERT_FALSE(dali_transport_supports_atomic_sequence(&sequence_only));
     TEST_ASSERT_FALSE(dali_transport_supports_atomic_sequence(NULL));
 }
 
@@ -186,6 +191,58 @@ void test_run_sequence_seeds_result_before_delegating(void)
     TEST_ASSERT_EQUAL_UINT8(DALI_SEQUENCE_NO_FAILED_STEP, result.failed_step);
     TEST_ASSERT_EQUAL_UINT8(0u, result.reply_mask);
     TEST_ASSERT_EQUAL_UINT8(0u, result.steps_run);
+}
+
+void test_run_sequence_atomic_delegates_as_one_group(void)
+{
+    DaliTransport transport = atomic_transport();
+    DaliSequence seq = two_step_sequence();
+    DaliSequenceResult result;
+
+    TEST_ASSERT_EQUAL(
+        DALI_OK,
+        dali_transport_run_sequence_atomic(&transport, &seq, &result));
+    TEST_ASSERT_EQUAL_UINT8(1u, s_sequence_calls);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_frame_count);
+    TEST_ASSERT_EQUAL_UINT8(2u, result.steps_run);
+}
+
+void test_run_sequence_atomic_rejects_frame_only_transport(void)
+{
+    DaliTransport transport = frame_only_transport();
+    DaliSequence seq = two_step_sequence();
+    DaliSequenceResult result;
+    memset(&result, 0xA5, sizeof(result));
+
+    TEST_ASSERT_EQUAL(
+        DALI_ERR_INVALID,
+        dali_transport_run_sequence_atomic(&transport, &seq, &result));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_sequence_calls);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_frame_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID, result.result);
+    TEST_ASSERT_EQUAL_UINT8(DALI_SEQUENCE_NO_FAILED_STEP, result.failed_step);
+    TEST_ASSERT_EQUAL_UINT8(0u, result.steps_run);
+    TEST_ASSERT_EQUAL_UINT8(0u, result.reply_mask);
+}
+
+void test_run_sequence_atomic_rejects_sequence_only_transport(void)
+{
+    DaliTransport transport = {
+        .transact_sequence = mock_transact_sequence,
+    };
+    DaliSequence seq = two_step_sequence();
+    DaliSequenceResult result;
+    memset(&result, 0xA5, sizeof(result));
+
+    TEST_ASSERT_EQUAL(
+        DALI_ERR_INVALID,
+        dali_transport_run_sequence_atomic(&transport, &seq, &result));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_sequence_calls);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_frame_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID, result.result);
+    TEST_ASSERT_EQUAL_UINT8(DALI_SEQUENCE_NO_FAILED_STEP, result.failed_step);
+    TEST_ASSERT_EQUAL_UINT8(0u, result.steps_run);
+    TEST_ASSERT_EQUAL_UINT8(0u, result.reply_mask);
 }
 
 /* ---------------------------------------------------------------------------
@@ -364,6 +421,9 @@ int main(void)
     RUN_TEST(test_transport_validity_and_capability);
     RUN_TEST(test_run_sequence_delegates_when_transport_is_atomic);
     RUN_TEST(test_run_sequence_seeds_result_before_delegating);
+    RUN_TEST(test_run_sequence_atomic_delegates_as_one_group);
+    RUN_TEST(test_run_sequence_atomic_rejects_frame_only_transport);
+    RUN_TEST(test_run_sequence_atomic_rejects_sequence_only_transport);
     RUN_TEST(test_run_sequence_falls_back_to_individual_frames);
     RUN_TEST(test_fallback_forwards_step_retry_and_send_twice);
     RUN_TEST(test_fallback_stops_at_the_failing_step);

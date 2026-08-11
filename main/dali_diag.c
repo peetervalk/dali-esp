@@ -46,6 +46,7 @@ static volatile bool s_trace_enabled;
 
 #define DIAG_SYNC_SLOT_COUNT 4u
 #define DIAG_SYNC_WAIT_MS  200u
+#define DIAG_RESET_WAIT_MS 1000u
 #define DIAG_IDENTIFY_CYCLES 5u
 #define DIAG_IDENTIFY_STEP_MS 1000u
 #define DIAG_FIND_SWITCH_DEFAULT_SECONDS 30u
@@ -263,6 +264,64 @@ static bool diag_sync_complete(DiagSyncCtx *ctx)
     taskEXIT_CRITICAL(&s_diag_sync_mux);
 
     return complete;
+}
+
+/* Runs on the DALI scheduler owner task inside the reset admission barrier. */
+static void diag_reset_owner_cb(void *cb_ctx)
+{
+    DaliError result = dali_phy_reset();
+    diag_sync_cb(result, NULL, cb_ctx);
+}
+
+static DaliError diag_reset_sync(void)
+{
+    TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
+    (void)ulTaskNotifyTake(pdTRUE, 0u);
+
+    DiagSyncCtx *ctx = diag_sync_alloc_slot(current_task);
+    if (ctx == NULL) {
+        return DALI_ERR_BUSY;
+    }
+
+    DaliError err = dali_sched_request_reset(diag_reset_owner_cb, ctx);
+    if (err != DALI_OK) {
+        diag_sync_release_slot(ctx);
+        return err;
+    }
+
+    TickType_t wait_ticks = pdMS_TO_TICKS(DIAG_RESET_WAIT_MS);
+    TickType_t start_tick = xTaskGetTickCount();
+    while (!diag_sync_complete(ctx)) {
+        TickType_t elapsed = xTaskGetTickCount() - start_tick;
+        if (elapsed >= wait_ticks) {
+            break;
+        }
+        (void)ulTaskNotifyTake(pdTRUE, wait_ticks - elapsed);
+    }
+
+    DaliError result = DALI_ERR_TIMEOUT;
+    bool completed;
+    taskENTER_CRITICAL(&s_diag_sync_mux);
+    completed = ctx->complete;
+    if (completed) {
+        result = ctx->result;
+        ctx->waiting_task = NULL;
+        ctx->in_use = false;
+        ctx->complete = false;
+    } else {
+        /* A late owner callback releases the slot after seeing no waiter. */
+        ctx->waiting_task = NULL;
+    }
+    taskEXIT_CRITICAL(&s_diag_sync_mux);
+
+    if (completed) {
+        /* The owner callback notifies just before returning; wait for the
+         * scheduler to lower the admission barrier as the final reset fence. */
+        while (dali_sched_reset_pending()) {
+            vTaskDelay(1u);
+        }
+    }
+    return result;
 }
 
 /*
@@ -1262,9 +1321,13 @@ static void cmd_trace(const char *args)
 
 static void cmd_reset(void)
 {
-    dali_sched_reset();
-    dali_phy_reset();
 #ifndef DALI_HOST_BUILD
+    DaliError err = diag_reset_sync();
+    if (err != DALI_OK) {
+        printf("reset: ERR %d\r\n", (int)err);
+        return;
+    }
+
     diag_last_rx_reset();
     diag_inventory_reset();
     diag_events_reset();
@@ -1273,6 +1336,11 @@ static void cmd_reset(void)
     diag_sensor_value_cache_reset();
     diag_capture_reset();
     printf("reset OK\r\n");
+#else
+    if (dali_sched_reset() == DALI_OK) {
+        dali_sched_run();
+        (void)dali_phy_reset();
+    }
 #endif
 }
 
@@ -1636,6 +1704,11 @@ static void diag_print_status_fields(uint8_t raw)
     printf("  Power failure:         %s\r\n", s.power_failure         ? "YES" : "no");
 }
 
+static uint8_t diag_command_reply_retries_left(DaliCommandId id)
+{
+    return dali_command_response_retry_safe(id) ? 1u : 0u;
+}
+
 static DaliError diag_query_status(DaliTarget target, DaliFrame *reply)
 {
     DaliFrame frame;
@@ -1643,7 +1716,12 @@ static DaliError diag_query_status(DaliTarget target, DaliFrame *reply)
     if (err != DALI_OK) {
         return err;
     }
-    return diag_sched_sync(&frame, true, 1u, false, reply);
+    return diag_sched_sync(
+        &frame,
+        true,
+        diag_command_reply_retries_left(DALI_CMD_QUERY_STATUS),
+        false,
+        reply);
 }
 
 static DaliError diag_query_u8(DaliTarget target,
@@ -1662,7 +1740,11 @@ static DaliError diag_query_u8(DaliTarget target,
         return err;
     }
 
-    err = diag_sched_sync(&frame, true, 1u, false, &reply);
+    err = diag_sched_sync(&frame,
+                          true,
+                          diag_command_reply_retries_left(id),
+                          false,
+                          &reply);
     if (err != DALI_OK) {
         return err;
     }
@@ -1902,7 +1984,11 @@ static void cmd_query(const char *args)
     DaliFrame reply = {0u, 0u};
     DaliError err = dali_control_build_query(target, spec->id, param, &frame);
     if (err == DALI_OK) {
-        err = diag_sched_sync(&frame, true, 1u, false, &reply);
+        err = diag_sched_sync(&frame,
+                              true,
+                              diag_command_reply_retries_left(spec->id),
+                              false,
+                              &reply);
     }
     if (err == DALI_OK) {
         diag_print_query_response(spec, &reply);
@@ -2073,7 +2159,11 @@ static void cmd_special(const char *args)
     DaliError err = dali_build_special(spec->id, param, &frame);
     if (err == DALI_OK) {
         bool needs_reply = cmd->response_kind != DALI_RESP_NONE;
-        err = diag_sched_sync(&frame, needs_reply, needs_reply ? 1u : 0u,
+        err = diag_sched_sync(&frame,
+                              needs_reply,
+                              needs_reply
+                                  ? diag_command_reply_retries_left(spec->id)
+                                  : 0u,
                               cmd->send_twice, needs_reply ? &reply : NULL);
     }
 

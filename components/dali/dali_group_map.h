@@ -46,9 +46,24 @@ void dali_group_map_seed(DaliGroupMap *map, uint8_t group, uint8_t addr);
 /* Lowest short address currently known in `group`, or 0xFF if none / invalid. */
 uint8_t dali_group_map_pick(const DaliGroupMap *map, uint8_t group);
 
-/* Replace the whole map from a completed bus scan; marks every group verified.
- * Only present, group-capable control gear counts (pure input devices skipped). */
-void dali_group_map_rebuild_from_inventory(DaliGroupMap *map,
+/* True when every address previously known as a group member was positively
+ * observed as control gear by a replacement scan. This lets integrations
+ * reject a nominally complete scan that transiently missed a known device,
+ * while still accepting a real removal from all groups when the gear itself
+ * answered the scan. */
+bool dali_group_map_scan_covers_known_members(const DaliGroupMap *map,
+                                              uint64_t observed_gear);
+
+/*
+ * Build a candidate map from a completed bus scan. Only present control gear
+ * counts; pure input devices are skipped. Returns true and marks every group
+ * verified only when every discovered control gear has complete group data and
+ * the scan found at least one gear or input device (so an empty/disconnected
+ * bus is not authoritative).
+ * On false, observed memberships are still copied into `map`, but verified is
+ * zero: the candidate is partial and must not replace a known-good snapshot.
+ */
+bool dali_group_map_rebuild_from_inventory(DaliGroupMap *map,
                                            const DaliDiscoveryInventory *inv);
 
 /* Apply an ADD TO GROUP / REMOVE FROM GROUP command that was issued to `target`,

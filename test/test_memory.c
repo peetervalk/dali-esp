@@ -54,8 +54,51 @@ static DaliError mock_transact(const DaliFrame *frame,
     return DALI_OK;
 }
 
+static DaliError mock_transact_sequence(const DaliSequence *seq,
+                                        DaliSequenceResult *result_out,
+                                        void *ctx)
+{
+    if (seq == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliSequenceResult result = {
+        .result = DALI_OK,
+        .failed_step = DALI_SEQUENCE_NO_FAILED_STEP,
+    };
+    for (uint8_t i = 0u; i < seq->step_count; i++) {
+        const DaliSequenceStep *step = &seq->steps[i];
+        DaliFrame reply = {0u, 0u};
+        DaliError err = mock_transact(&step->frame,
+                                      step->needs_reply,
+                                      step->retries_left,
+                                      step->send_twice,
+                                      step->needs_reply ? &reply : NULL,
+                                      ctx);
+        result.steps_run = (uint8_t)(i + 1u);
+        if (err != DALI_OK) {
+            result.result = err;
+            result.failed_step = i;
+            if (result_out != NULL) {
+                *result_out = result;
+            }
+            return err;
+        }
+        if (step->needs_reply) {
+            result.replies[i] = reply;
+            result.reply_mask |= (uint8_t)(1u << i);
+        }
+    }
+
+    if (result_out != NULL) {
+        *result_out = result;
+    }
+    return DALI_OK;
+}
+
 static DaliMemoryTransport s_transport = {
     .transact = mock_transact,
+    .transact_sequence = mock_transact_sequence,
     .ctx      = NULL,
 };
 
@@ -547,6 +590,25 @@ void test_read_bytes_rejects_invalid_short_addresses_without_traffic(void)
     TEST_ASSERT_EQUAL_HEX8(0x5Au, buf[1]);
 }
 
+void test_read_bytes_rejects_frame_only_transport_without_traffic(void)
+{
+    DaliMemoryTransport frame_only = {
+        .transact = mock_transact,
+        .ctx = NULL,
+    };
+    uint8_t value = 0xA5u;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_memory_read_bytes(&frame_only,
+                                             0u,
+                                             0u,
+                                             0u,
+                                             &value,
+                                             1u));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_frame_count);
+    TEST_ASSERT_EQUAL_HEX8(0xA5u, value);
+}
+
 /* ---------------------------------------------------------------------------
  * dali_memory_read_bank0_identity
  * --------------------------------------------------------------------------*/
@@ -705,6 +767,7 @@ int main(void)
     RUN_TEST(test_read_bytes_mid_sequence_error_propagates);
     RUN_TEST(test_read_bytes_null_buf_returns_invalid);
     RUN_TEST(test_read_bytes_rejects_invalid_short_addresses_without_traffic);
+    RUN_TEST(test_read_bytes_rejects_frame_only_transport_without_traffic);
 
     RUN_TEST(test_bank0_identity_layout_constants_match_standard_locations);
     RUN_TEST(test_bank0_identity_parses_standard_vector);

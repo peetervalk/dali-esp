@@ -82,22 +82,25 @@ DaliError dali_input_poll_value_from_sequence(const DaliSequenceResult *result,
     return out->complete ? DALI_OK : DALI_ERR_MALFORMED;
 }
 
-static DaliError poll_query_byte(const DaliDiscoveryTransport *transport,
-                                 uint8_t addr,
-                                 uint8_t instance,
-                                 DaliCommandId command,
-                                 uint8_t *out)
+static void poll_record_byte_errors(DaliInputPollResult      *out,
+                                    const DaliSequenceResult *result,
+                                    uint8_t                   expected_bytes,
+                                    DaliError                 run_error)
 {
-    if (transport == NULL || transport->transact == NULL || out == NULL) {
-        return DALI_ERR_INVALID;
+    for (uint8_t i = 0u; i < expected_bytes; i++) {
+        DaliFrame reply;
+        if (dali_sequence_result_reply(result, i, &reply)) {
+            out->byte_errors[i] = reply.bit_length == DALI_BACKWARD_FRAME_BITS
+                                ? DALI_OK
+                                : DALI_ERR_INVALID;
+        } else if (i < result->steps_run) {
+            out->byte_errors[i] = DALI_ERR_MALFORMED;
+        }
     }
 
-    DaliFrame frame;
-    DaliError err = dali_build_instance_command(addr, instance, command, &frame);
-    if (err != DALI_OK) {
-        return err;
+    if (run_error != DALI_OK && result->failed_step < expected_bytes) {
+        out->byte_errors[result->failed_step] = run_error;
     }
-    return dali_discovery_query_u8(transport, &frame, out);
 }
 
 DaliError dali_input_poll_value(const DaliDiscoveryTransport *transport,
@@ -106,12 +109,13 @@ DaliError dali_input_poll_value(const DaliDiscoveryTransport *transport,
                                 uint8_t expected_bytes,
                                 DaliInputPollResult *out)
 {
-    if (transport == NULL || transport->transact == NULL ||
+    if (!dali_transport_valid(transport) ||
+        !dali_transport_supports_atomic_sequence(transport) ||
         out == NULL ||
         addr >= DALI_SHORT_ADDRESS_COUNT ||
         instance >= DALI_INPUT_MAX_INSTANCES ||
         expected_bytes == 0u ||
-        expected_bytes > 4u) {
+        expected_bytes > DALI_INPUT_POLL_MAX_BYTES) {
         return DALI_ERR_INVALID;
     }
 
@@ -119,7 +123,7 @@ DaliError dali_input_poll_value(const DaliDiscoveryTransport *transport,
     out->address = addr;
     out->instance = instance;
     out->requested_bytes = expected_bytes;
-    for (uint8_t i = 0u; i < 4u; i++) {
+    for (uint8_t i = 0u; i < DALI_INPUT_POLL_MAX_BYTES; i++) {
         out->byte_errors[i] = DALI_ERR_INVALID;
     }
 
@@ -128,23 +132,23 @@ DaliError dali_input_poll_value(const DaliDiscoveryTransport *transport,
         return err;
     }
 
-    for (uint8_t i = 0u; i < expected_bytes; i++) {
-        uint8_t raw = 0u;
-        DaliCommandId command = i == 0u
-                              ? DALI_CMD_QUERY_INPUT_VALUE
-                              : DALI_CMD_QUERY_INPUT_VALUE_LATCH;
-        err = poll_query_byte(transport, addr, instance, command, &raw);
-        out->byte_errors[i] = err;
-        if (err != DALI_OK) {
-            return err;
-        }
-
-        err = dali_input_value_push(&out->value, raw);
-        if (err != DALI_OK) {
-            out->byte_errors[i] = err;
-            return err;
-        }
+    DaliSequence seq;
+    err = dali_input_poll_build_value_sequence(addr,
+                                               instance,
+                                               expected_bytes,
+                                               &seq);
+    if (err != DALI_OK) {
+        return err;
     }
 
-    return DALI_OK;
+    DaliSequenceResult result;
+    err = dali_transport_run_sequence_atomic(transport, &seq, &result);
+    poll_record_byte_errors(out, &result, expected_bytes, err);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    return dali_input_poll_value_from_sequence(&result,
+                                               expected_bytes,
+                                               &out->value);
 }
