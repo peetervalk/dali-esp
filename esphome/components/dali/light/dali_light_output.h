@@ -6,12 +6,14 @@
 #include "esphome/components/light/color_mode.h"
 #include "../dali_component.h"  // provides DaliBusLight + DaliComponent
 #include "dali_light_state_mailbox.h"
+#include "dali_light_command_mailbox.h"
 
 #include <cstdint>
 
 extern "C" {
 #include "../../../../components/dali/dali_control.h"
 #include "../../../../components/dali/dali_frame.h"
+#include "../../../../components/dali/dali_light_write.h"
 }
 
 namespace esphome {
@@ -63,23 +65,28 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
 
   // Coherent latest bus state — published on Core 1, drained on Core 0.
   DaliLightStateMailbox bus_state_mailbox_;
+  // Scheduler completion for the in-flight command — Core 1 publishes,
+  // Core 0 drains before it decides what to send next.
+  DaliLightCommandMailbox command_mailbox_;
+
+  // Core 0 only — desired/in-flight/confirmed arbitration. The confirmed state
+  // it holds is what suppresses a redundant command, and it is committed only
+  // from a scheduler completion, never from a successful enqueue.
+  DaliLightWrite    write_{};
 
   // Core 0 only — prevents re-issuing a DALI command when state is pushed
   // from the bus into ESPHome via LightCall::perform().
   uint32_t          setup_ms_{0};
-  bool              known_state_valid_{false};
-  bool              known_is_on_{false};
-  uint8_t           known_level_{0};
   bool              suppress_initial_write_{true};
   bool              skip_next_write_{false};
-  bool              scan_write_pending_{false};
-  bool              scan_pending_is_on_{false};
-  uint8_t           scan_pending_level_{0};
   light::LightState *state_{nullptr};
 
   static void clear_unused_color_fields_(light::LightColorValues &values);
   static uint8_t brightness_to_level_(float brightness);
-  DaliError enqueue_desired_state_(bool is_on, uint8_t level);
+  // Core 1 — scheduler completion for a level/off command.
+  static void on_command_complete_(DaliError result, const DaliFrame *reply, void *ctx);
+  // Core 0 — collect completions, then admit at most one command.
+  void pump_write_();
 };
 
 }  // namespace dali

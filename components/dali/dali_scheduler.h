@@ -133,6 +133,28 @@ typedef struct {
 } DaliSequence;
 
 /* ---------------------------------------------------------------------------
+ * Queue admission diagnostics.
+ *
+ * depth/capacity are instantaneous; the counters are cumulative since
+ * dali_sched_init() or the last dali_sched_reset_queue_stats(). high_water is
+ * the largest depth reached, so a value at capacity means admission was one
+ * submission away from failing even if rejected_full is still zero.
+ *
+ * rejected_full counts DALI_ERR_QUEUE_FULL and rejected_busy counts
+ * DALI_ERR_BUSY (submission during a pending reset barrier). Both are dropped
+ * work: the scheduler never retries a rejected submission, so a non-zero value
+ * means some caller's command did not reach the bus.
+ * --------------------------------------------------------------------------*/
+typedef struct {
+    uint8_t  depth;         /* entries currently queued                       */
+    uint8_t  capacity;      /* DALI_CMD_QUEUE_SIZE                            */
+    uint8_t  high_water;    /* largest depth observed                         */
+    uint32_t admitted;      /* submissions accepted                           */
+    uint32_t rejected_full; /* submissions refused with DALI_ERR_QUEUE_FULL   */
+    uint32_t rejected_busy; /* submissions refused with DALI_ERR_BUSY (reset) */
+} DaliSchedQueueStats;
+
+/* ---------------------------------------------------------------------------
  * Injected ops — PHY interface + time source.
  * Provide real implementations on device; provide mocks in host tests.
  * --------------------------------------------------------------------------*/
@@ -233,6 +255,17 @@ DaliSchedState dali_sched_state(void);
  * admitted work has drained before it starts enqueueing.
  */
 bool dali_sched_is_quiescent(void);
+
+/*
+ * Copy the current queue admission diagnostics. Safe from any task; the sample
+ * is taken under the scheduler's critical section, so depth and the counters
+ * are mutually consistent. Returns DALI_ERR_INVALID for a NULL argument or
+ * before dali_sched_init().
+ */
+DaliError dali_sched_queue_stats(DaliSchedQueueStats *out);
+
+/* Clear high_water and the cumulative counters; depth/capacity are unaffected. */
+void dali_sched_reset_queue_stats(void);
 
 #ifndef DALI_HOST_BUILD
 /*

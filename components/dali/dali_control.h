@@ -73,6 +73,24 @@ DaliError dali_control_config_with_dtr0(DaliTarget target,
                                         DaliCommandId id,
                                         uint8_t dtr0_value,
                                         uint8_t param);
+/*
+ * Level/off with a completion callback.
+ *
+ * The plain forms above are fire-and-forget: their DALI_OK means the frame was
+ * queued, which a caller must not read as "the gear is now at this level". Use
+ * these when the caller keeps state that only a confirmed transmission may
+ * update. cb is invoked from the scheduler owner task with DALI_OK once the
+ * frame has been transmitted, or with the PHY/scheduler error otherwise;
+ * passing NULL is equivalent to the fire-and-forget form.
+ */
+DaliError dali_control_set_level_cb(DaliTarget target,
+                                    uint8_t level,
+                                    DaliSchedCompletionCb cb,
+                                    void *cb_ctx);
+DaliError dali_control_off_cb(DaliTarget target,
+                              DaliSchedCompletionCb cb,
+                              void *cb_ctx);
+
 DaliError dali_control_query(DaliTarget target,
                              DaliCommandId id,
                              uint8_t param,

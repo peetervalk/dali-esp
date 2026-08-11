@@ -104,6 +104,8 @@ commands, and `0xFF` addresses all instances where supported.
 Important diagnostic commands:
 
 ```text
+stats
+queue [reset]
 bus check
 capture start|stop|clear|status|export
 scan
@@ -162,7 +164,14 @@ query <target> <query-name>
 config <target> <config-name> [dtr0]
 iquery a<N>:<instance> <query-name>
 iconfig a<N>:<instance> <config-name> [dtr0]
+queue [reset]
 ```
+
+`queue` is the only console verb that generates no bus traffic, so it is the
+only one accepted while a scan is running. It reports queue depth, capacity,
+high-water mark, and the cumulative accepted/refused submission counts, which
+`stats` also includes on the native CLI. A refused submission is dropped work,
+not deferred work; the same counters are logged whenever they advance.
 
 For ESPHome `add-group` and `remove-group`, the final group value `0-15` is
 required. Short and group targets are accepted; broadcast targets are rejected.

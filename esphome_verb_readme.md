@@ -469,6 +469,39 @@ dtrcheck a0 0 66
 
 The expected result is `66 (0x42)`.
 
+## Local Diagnostic Verbs
+
+### `queue [reset]`
+
+Reports scheduler queue admission state. This is the one verb that generates no
+bus traffic: it answers from local state and therefore remains available while a
+scan is running, which is when queue pressure is most worth inspecting.
+
+`reset` clears the high-water mark and the counters. High-water is rebased on the
+current depth rather than zero, so the reading never understates live occupancy.
+
+| Field | Meaning |
+|---|---|
+| `d=<n>/<cap>` | Entries queued now, and queue capacity. The entry currently executing has already been popped, so it is not counted. |
+| `hw=<n>` | Largest depth reached. At capacity means admission came within one submission of failing. |
+| `ok=<n>` | Submissions accepted. |
+| `full=<n>` | Submissions refused because the queue was full. |
+| `busy=<n>` | Submissions refused by a pending scheduler reset barrier. |
+
+Example:
+
+```text
+queue
+```
+
+A typical idle result is `d=0/16 hw=3 ok=214 full=0 busy=0`.
+
+A non-zero `full` or `busy` is dropped work, not deferred work: the scheduler
+never retries a refused submission on the caller's behalf. Light entities and the
+refresh pump retain their own state and retry, but a headless dispatch action
+refused this way is discarded rather than replayed against a stale physical
+context. The same counters are logged as warnings whenever they advance.
+
 ## Practical Bus Test Recipes
 
 Read a lamp level:

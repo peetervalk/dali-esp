@@ -50,6 +50,60 @@ adding broad new device support.
 
 ### Verified locally on 2026-08-11
 
+- Light command deduplication is now committed only by a scheduler completion.
+  Previously the cached on/level was written as soon as `dali_control_*`
+  returned `DALI_OK`, which means queued, not transmitted: a command that later
+  failed on the bus left the cache asserting success, and the identical retry
+  from Home Assistant was then suppressed, so the gear stayed at the old level
+  with nothing able to correct it. A failed transmission now invalidates the
+  cache instead — the real level is unknown, so nothing may be suppressed
+  against it — and re-arms the same desired state for one bounded retry.
+  `DALI_LIGHT_WRITE_TX_RETRIES` bounds it so a dead bus cannot generate traffic
+  indefinitely, while the cache stays invalid so an operator's repeat still
+  reaches the bus.
+- The same change closes a silent drop: outside a scan, a queue-full enqueue
+  previously returned without retaining the command at all. Enqueue rejection is
+  transient back-pressure, so the desired state is now retained and retried on a
+  later loop, matching what the scan path already did.
+- The arbitration is a portable header, `components/dali/dali_light_write.h`,
+  with the ESPHome entity holding one `DaliLightWrite`. Only one command per
+  light is in flight at a time, so a completion can never be attributed to the
+  wrong level, and a bus readback arriving while a command is in flight is
+  refused rather than committed over the state that command is establishing.
+  A newer desired state supersedes a failed one, so a stale level is never
+  resurrected over more recent operator intent. 19 independent host vectors
+  cover the enqueue/transmission distinction, the retry budget, observation
+  precedence, and the argument boundaries.
+- `dali_control_set_level_cb()` and `dali_control_off_cb()` are the new
+  completion-carrying forms. Three control vectors assert that their `DALI_OK`
+  precedes transmission and that a PHY failure surfaces only in the completion.
+  The completion runs on the DALI task, so it reaches Core 0 through a new
+  single-slot `DaliLightCommandMailbox` that reports how many completions it is
+  acknowledging and whether any failed.
+- The scheduler reports queue admission diagnostics through
+  `dali_sched_queue_stats()`: depth, capacity, high-water, admitted, and
+  rejections split into queue-full and reset-barrier. A rejected submission is
+  dropped work, because the scheduler never retries one on the caller's behalf.
+  Native `stats` includes them, native `queue [reset]` and the ESPHome console
+  `queue [reset]` report them directly, and ESPHome logs a warning whenever
+  either rejection counter advances. The console verb generates no bus traffic
+  and is therefore the only one accepted during a scan.
+- Remaining unchecked enqueue paths now handle their failures. The identify
+  blink retains its phase and deadline on a rejected enqueue so the next loop
+  retries that half-blink instead of stalling at one level; the diagnostic
+  on/off/max/min/refresh buttons report a rejection on the diagnostic text
+  sensor and in the log; headless dispatch distinguishes an unmappable frame,
+  which stays at debug level, from a matched entry whose action was refused,
+  which is now a warning. A refused dispatch action remains intentionally
+  dropped rather than replayed against a stale physical context.
+- All 23 host executables pass. The scheduler suite is 50 cases, control 29, and
+  the new light-write suite 19.
+- The native firmware builds with ESP-IDF 6.0.1 (`0x38AA0`-byte application
+  image). `_local/dali-diag-local.yaml` builds the working-tree component with
+  ESPHome 2026.7.4 (919515-byte image).
+- These changes are host- and compile-verified only. They have not been flashed
+  or exercised on COM6, and neither site deployment has been re-tested.
+
 - The correctness audit closed the remaining local split-transaction paths.
   Every existing dependent discovery, commissioning, memory, DT8, and input-
   polling executor now uses `dali_transport_run_sequence_atomic()` and rejects a
@@ -87,9 +141,9 @@ adding broad new device support.
   control-gear commissioning addresses.
 - Broadcast toggle state is tracked, so repeated broadcast TOGGLE alternates
   rather than always issuing RECALL MAX.
-- All 22 host executables pass. Focused totals include transport 12, input poll
-  8, discovery 47, commissioning 20, memory 40, DT8 42, scheduler 47, dispatch
-  30, group map 29, and protocol 61 tests.
+- All 23 host executables pass. Focused totals include transport 12, input poll
+  8, discovery 47, commissioning 20, memory 40, DT8 42, scheduler 50, dispatch
+  30, group map 29, control 29, light write 19, and protocol 61 tests.
 - The native firmware builds with ESP-IDF 6.0.1 (`0x387D0`-byte application
   image). `_local/dali-diag-local.yaml` builds the working-tree component with
   ESPHome 2026.7.4 (ESP-IDF 5.5.5; 918608-byte OTA image).
@@ -186,7 +240,7 @@ adding broad new device support.
   per-step retry contract, selector and address placement, argument boundaries,
   MSB/LSB assembly, and the partial and failed cases. All 42 DT8 cases pass,
   including the four pre-existing colour-read cases unchanged.
-- All 22 host suites pass.
+- All 23 host suites pass.
 - These changes are host- and compile-verified only. The atomic paths themselves
   have not been exercised on a real bus, no site has been re-scanned to confirm
   the multi-type enumeration against actual DT6/DT8 gear, and commissioning has
@@ -241,7 +295,7 @@ adding broad new device support.
   fails the read instead of silently returning the following location. The Bank 0
   identity read that discovery performs costs six extra setup frames (26 instead
   of 20) in exchange for a re-established offset at every chunk boundary.
-- All 22 host test executables pass, with 47 cases in the scheduler suite, 8 in
+- All 23 host test executables pass, with 50 cases in the scheduler suite, 8 in
   the input-poll suite, 40 in the memory suite, and 12 in the transport suite
   covering capability reporting, the atomic and fallback paths, failure
   truncation, reply retention, argument handling, and the wait budget.
@@ -352,6 +406,11 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
   `dali_transport_supports_atomic_sequence()` rather than assume it.
 - Static allocation and the buffer-first ISR model are preserved in the timing
   and protocol layers.
+- The scheduler reports queue admission diagnostics, and `dali_control` offers
+  completion-carrying level/off entry points for callers that must distinguish
+  a queued command from a transmitted one. `dali_light_write.h` is the portable,
+  integration-agnostic arbitration between desired, in-flight, and confirmed
+  light state built on that distinction.
 - Scheduler sequences run contiguously and report a `DaliSequenceResult` holding
   the overall error, the failing step, the steps attempted, and one backward
   frame per reply-bearing step. This is the primitive the atomic transaction
@@ -385,6 +444,8 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
 - Common gear commands and queries, DTR/config operations, scan/discovery,
   control-gear commissioning, inventory/export, input polling, capture, and
   coupler-finding workflows are present.
+- `stats` and `queue [reset]` report PHY/RX counters and scheduler queue
+  admission state respectively.
 - Native `raw` sends one arbitrary 16- or 24-bit frame. It is a diagnostic escape hatch, not a
   substitute for typed atomic workflows; unlike the ESPHome console it has no
   `raw2` send-twice verb.
@@ -401,9 +462,9 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
   YAML log lines.
 - Light entities currently expose brightness only. Shared DT8 support is not yet
   mapped to Home Assistant colour-temperature, XY, or RGB controls.
-- The command console includes `raw`, `raw2`, memory, DTR, instance-query, and
-  instance-configuration helpers. These do not imply equivalent native CLI or
-  hardware validation.
+- The command console includes `raw`, `raw2`, memory, DTR, instance-query,
+  instance-configuration, and `queue` helpers. These do not imply equivalent
+  native CLI or hardware validation.
 - Console enqueue results are mapped consistently. Async commands publish
   `pending`, replace it on completion, and ignore callbacks belonging to an older
   submitted command. `OK` still means queued rather than execution- or
@@ -413,15 +474,34 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
   read-back verified, and it does not exclude another physical bus master.
 - Light state transferred from the DALI task to ESPHome is one coherent packed
   update; multiple pending observations intentionally coalesce to the latest.
+- A light entity suppresses a redundant command only against state a scheduler
+  completion confirmed, never against a successful enqueue. A rejected enqueue
+  retains the desired state and retries; a failed transmission invalidates the
+  cache and re-arms one bounded retry, so a lost command cannot be masked by a
+  cache the command never established. One command per light is in flight at a
+  time, and a bus readback arriving during that window is refused rather than
+  committed over the state the command is establishing. Confirmation still means
+  transmitted, not device-acknowledged.
 - Boot, periodic, deferred, and post-scan light refreshes share a one-query-at-a-
   time pump. Queue-full leaves the current light pending for retry, and refresh
   requests arriving during a pass coalesce into one additional pass.
 - Every component-owned producer observes the scan gate. Refresh and due sensor
   polls remain pending; identify time is paused; console and diagnostic actions
-  are rejected; HA light writes retain their latest packed target and retry after
-  admission reopens. Headless events are drained so their fixed queue cannot
-  overflow, but actions observed during a scan are intentionally dropped rather
-  than replayed after their physical context is stale.
+  are rejected; HA light writes retain their latest desired target and retry after
+  admission reopens. The one exception is the local-only console `queue` verb,
+  which reads scheduler state without touching the bus. Headless events are
+  drained so their fixed queue cannot overflow, but actions observed during a
+  scan are intentionally dropped rather than replayed after their physical
+  context is stale.
+- Queue admission is observable. `dali_sched_queue_stats()` reports depth,
+  capacity, high-water, admitted, and rejections split into queue-full and
+  reset-barrier; ESPHome logs a warning whenever either rejection counter
+  advances, and both CLIs expose a `queue` verb. A rejection is dropped work,
+  since the scheduler never retries a refused submission for the caller.
+- Identify, the diagnostic buttons, and headless dispatch all handle a refused
+  enqueue: identify retries the same half-blink rather than advancing its phase,
+  the buttons surface the rejection on the diagnostic text sensor, and a dropped
+  dispatch action is logged as a warning distinct from an unmappable frame.
 - A scan waits for the local scheduler to become quiescent before its first
   transaction. This is an integration-level gate, not a scheduler reservation:
   a future client that bypasses `DaliComponent` or another physical DALI master
@@ -463,6 +543,17 @@ migrate to generic bank access.
 write fits in one queue entry. This changes the public `DaliSequence` layout and
 requires all callers to rebuild. In the ESP32 build, the active-sequence and
 16-entry scheduler queue storage increase by 612 bytes in total.
+
+`dali_scheduler.h` adds `DaliSchedQueueStats`, `dali_sched_queue_stats()`, and
+`dali_sched_reset_queue_stats()`. These are additive; existing callers are
+unaffected. `dali_control.h` likewise adds `dali_control_set_level_cb()` and
+`dali_control_off_cb()`, with the existing `dali_control_set_level()` and
+`dali_control_off()` unchanged as their NULL-callback forms.
+
+`DaliBusLight::flush_pending_write()` changes meaning: it now also collects the
+scheduler completion for an in-flight command, so `DaliComponent::loop()` calls
+it every loop rather than only outside a scan. An implementation must apply the
+scan gate itself before admitting new traffic.
 
 `DaliError` adds `DALI_ERR_TIMING = 8`, `DALI_ERR_CANCELLED = 9`, and
 `DALI_ERR_INTERVENED = 10`. Existing earlier numeric values remain unchanged;
@@ -570,10 +661,10 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   scheduler admission reservation for scans. The current quiescence check plus
   component-wide gate covers present local producers but is not an atomic
   check-and-reserve primitive.
-- Handle remaining non-console enqueue failures in identify, diagnostic, and
-  headless-dispatch paths, and expose queue depth/high-water/drop diagnostics.
-- Update light-command deduplication only after confirmed transmission, or
-  invalidate its cached state after TX/bus errors, so a failed command can be retried.
+- Give the remaining fire-and-forget scheduler clients the same
+  confirmed-transmission treatment the light entities now have. Console `OK`,
+  the refresh pump, and headless dispatch still report or act on admission
+  rather than transmission; only light writes distinguish the two.
 - Correct observed-state semantics for RECALL MAX, STEP DOWN AND OFF, and
   broadcast propagation to ordinary light entities. Broadcast TOGGLE itself now
   alternates correctly, but commands whose exact result is unknown still need an
@@ -632,7 +723,7 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 
 - Add CI that compiles a clean external-component checkout from the release tag and
   validates the Python schema, ESPHome C++ layer, YAML, and wrapper packaging.
-- Add the native ESP-IDF build to CI alongside the existing 22-suite host workflow.
+- Add the native ESP-IDF build to CI alongside the existing 23-suite host workflow.
 - Keep one intentional ESPHome source-inclusion path. Remove the unused component
   `CMakeLists.txt` path and stale fallback references if the Python-copy/wrapper
   route remains authoritative.

@@ -264,6 +264,64 @@ void test_go_to_scene_enqueues(void)
     TEST_ASSERT_EQUAL_UINT8(16u, s_last_tx.bit_length);
 }
 
+void test_set_level_cb_reports_transmission_not_admission(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_set_level_cb(target(DALI_ADDR_GROUP, 0u),
+                                                128u,
+                                                on_complete,
+                                                NULL));
+    /* Admitted, but nothing has reached the bus yet. */
+    TEST_ASSERT_EQUAL_UINT8(0u, s_cb_count);
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_UINT8(1u, s_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x8080u, s_last_tx.data);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_cb_count);
+
+    s_tick_ms += DALI_SETTLE_MS;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_UINT8(1u, s_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, s_cb_result);
+}
+
+void test_off_cb_reports_a_phy_transmit_failure(void)
+{
+    s_tx_result = DALI_ERR_BUS_STUCK;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_off_cb(target(DALI_ADDR_SHORT, 3u),
+                                          on_complete,
+                                          NULL));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_cb_count);
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_UINT8(1u, s_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x0700u, s_last_tx.data);
+    /* The enqueue said OK; only the completion reveals the bus failure. */
+    TEST_ASSERT_EQUAL_UINT8(1u, s_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK, s_cb_result);
+}
+
+void test_level_and_off_cb_accept_null_callback_and_validate_targets(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_set_level_cb(target(DALI_ADDR_SHORT, 0u),
+                                                10u, NULL, NULL));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_off_cb(target(DALI_ADDR_SHORT, 0u), NULL, NULL));
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_control_set_level_cb(target(DALI_ADDR_SHORT, 64u),
+                                                10u, on_complete, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_control_set_level_cb(target(DALI_ADDR_GROUP, 0u),
+                                                255u, on_complete, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_control_off_cb(target(DALI_ADDR_GROUP, 16u),
+                                          on_complete, NULL));
+}
+
 void test_build_generic_query_commands(void)
 {
     DaliFrame frame;
@@ -660,6 +718,9 @@ int main(void)
     RUN_TEST(test_invalid_targets_and_levels_are_rejected);
     RUN_TEST(test_output_level_commands_enqueue);
     RUN_TEST(test_go_to_scene_enqueues);
+    RUN_TEST(test_set_level_cb_reports_transmission_not_admission);
+    RUN_TEST(test_off_cb_reports_a_phy_transmit_failure);
+    RUN_TEST(test_level_and_off_cb_accept_null_callback_and_validate_targets);
     RUN_TEST(test_build_generic_query_commands);
     RUN_TEST(test_generic_query_rejects_invalid_command_classes);
     RUN_TEST(test_generic_query_enqueues_and_completes_with_reply);

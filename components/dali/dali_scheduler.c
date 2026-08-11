@@ -48,6 +48,12 @@ static uint8_t         s_q_head;    /* consumer index (dali_sched_run)    */
 static uint8_t         s_q_tail;    /* producer index (dali_sched_enqueue)*/
 static uint8_t         s_q_count;   /* number of items currently queued   */
 
+/* Admission diagnostics — mutated only inside the queue critical section. */
+static uint8_t         s_q_high_water;
+static uint32_t        s_q_admitted;
+static uint32_t        s_q_rejected_full;
+static uint32_t        s_q_rejected_busy;
+
 /* Active transaction state */
 static volatile DaliSchedState s_state;
 static DaliTransaction s_active;          /* copy of the current transaction */
@@ -278,13 +284,19 @@ static DaliError queue_push(const SchedQueueEntry *entry)
     DaliError result;
     SCHED_ENTER_CRITICAL();
     if (s_reset_requested || s_reset_applying) {
+        s_q_rejected_busy++;
         result = DALI_ERR_BUSY;
     } else if (s_q_count >= DALI_CMD_QUEUE_SIZE) {
+        s_q_rejected_full++;
         result = DALI_ERR_QUEUE_FULL;
     } else {
         s_queue[s_q_tail] = *entry;
         s_q_tail  = (uint8_t)((s_q_tail + 1u) & (DALI_CMD_QUEUE_SIZE - 1u));
         s_q_count++;
+        if (s_q_count > s_q_high_water) {
+            s_q_high_water = s_q_count;
+        }
+        s_q_admitted++;
         result = DALI_OK;
     }
     SCHED_EXIT_CRITICAL();
@@ -476,6 +488,10 @@ DaliError dali_sched_init(const DaliSchedOps *ops)
     s_q_head      = 0u;
     s_q_tail      = 0u;
     s_q_count     = 0u;
+    s_q_high_water    = 0u;
+    s_q_admitted      = 0u;
+    s_q_rejected_full = 0u;
+    s_q_rejected_busy = 0u;
     s_state       = SCHED_IDLE;
     s_send_count  = 0u;
     s_reply_received = false;
@@ -845,6 +861,33 @@ bool dali_sched_is_quiescent(void)
                 !s_reset_applying;
     SCHED_EXIT_CRITICAL();
     return quiescent;
+}
+
+DaliError dali_sched_queue_stats(DaliSchedQueueStats *out)
+{
+    if (out == NULL || !s_initialized) {
+        return DALI_ERR_INVALID;
+    }
+
+    SCHED_ENTER_CRITICAL();
+    out->depth         = s_q_count;
+    out->high_water    = s_q_high_water;
+    out->admitted      = s_q_admitted;
+    out->rejected_full = s_q_rejected_full;
+    out->rejected_busy = s_q_rejected_busy;
+    SCHED_EXIT_CRITICAL();
+    out->capacity = (uint8_t)DALI_CMD_QUEUE_SIZE;
+    return DALI_OK;
+}
+
+void dali_sched_reset_queue_stats(void)
+{
+    SCHED_ENTER_CRITICAL();
+    s_q_high_water    = s_q_count;
+    s_q_admitted      = 0u;
+    s_q_rejected_full = 0u;
+    s_q_rejected_busy = 0u;
+    SCHED_EXIT_CRITICAL();
 }
 
 /* ---------------------------------------------------------------------------

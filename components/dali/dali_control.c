@@ -60,16 +60,25 @@ static DaliError build_target_command(DaliTarget target,
     return dali_build_command(target.type, target.address, id, param, out);
 }
 
-static DaliError enqueue_target_command(DaliTarget target,
-                                        DaliCommandId id,
-                                        uint8_t param)
+static DaliError enqueue_target_command_cb(DaliTarget target,
+                                           DaliCommandId id,
+                                           uint8_t param,
+                                           DaliSchedCompletionCb cb,
+                                           void *cb_ctx)
 {
     DaliFrame frame;
     DaliError err = build_target_command(target, id, param, &frame);
     if (err != DALI_OK) {
         return err;
     }
-    return enqueue_frame(&frame, false, false, NULL, NULL);
+    return enqueue_frame(&frame, false, false, cb, cb_ctx);
+}
+
+static DaliError enqueue_target_command(DaliTarget target,
+                                        DaliCommandId id,
+                                        uint8_t param)
+{
+    return enqueue_target_command_cb(target, id, param, NULL, NULL);
 }
 
 static DaliError enqueue_config_command(DaliTarget target,
@@ -276,12 +285,27 @@ DaliError dali_control_set_dtr(DaliDtrRegister reg, uint8_t value)
 
 DaliError dali_control_set_level(DaliTarget target, uint8_t level)
 {
+    return dali_control_set_level_cb(target, level, NULL, NULL);
+}
+
+DaliError dali_control_set_level_cb(DaliTarget target,
+                                    uint8_t level,
+                                    DaliSchedCompletionCb cb,
+                                    void *cb_ctx)
+{
     DaliFrame frame;
     DaliError err = dali_control_build_dapc(target, level, &frame);
     if (err != DALI_OK) {
         return err;
     }
-    return enqueue_frame(&frame, false, false, NULL, NULL);
+    return enqueue_frame(&frame, false, false, cb, cb_ctx);
+}
+
+DaliError dali_control_off_cb(DaliTarget target,
+                              DaliSchedCompletionCb cb,
+                              void *cb_ctx)
+{
+    return enqueue_target_command_cb(target, DALI_CMD_OFF, 0u, cb, cb_ctx);
 }
 
 DaliError dali_control_set_brightness(DaliTarget target, uint8_t brightness)

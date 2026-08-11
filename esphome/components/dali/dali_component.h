@@ -4,6 +4,10 @@
 #include "esphome/core/preferences.h"
 #include "../../../components/dali/dali_refresh_cursor.h"
 
+extern "C" {
+#include "../../../components/dali/dali_frame.h"  // DaliError
+}
+
 #include <atomic>
 #include <cstdint>
 
@@ -24,6 +28,9 @@ class DaliBusLight {
   virtual ~DaliBusLight() = default;
   virtual void    mark_state_from_bus(bool is_on, uint8_t level) = 0;
   virtual void    apply_bus_state() = 0;
+  // Collect the scheduler completion for any in-flight command, then admit at
+  // most one pending write. Called every loop, scan or not; the implementation
+  // gates its own transmission on the scan.
   virtual void    flush_pending_write() = 0;
   virtual uint8_t get_query_address() const = 0;
 };
@@ -144,6 +151,11 @@ class DaliComponent : public Component {
   // Bus fault tracking (Core 0 only; reads volatile g_dali_stats.bus_idle_failures).
   uint32_t last_bus_fault_count_{0u};
 
+  // Scheduler queue drop tracking (Core 0 only). Cumulative rejections already
+  // reported, so only newly dropped work produces a log line.
+  uint32_t last_queue_rejected_full_{0u};
+  uint32_t last_queue_rejected_busy_{0u};
+
   // Scan state (Core 1 writes, Core 0 reads via atomic gate).
   std::atomic<bool>    scan_done_{false};
   std::atomic<bool>    scan_running_{false};
@@ -191,6 +203,10 @@ class DaliComponent : public Component {
   // Admit at most one eligible light query per loop; queue pressure retains the
   // cursor so that the same entry is retried instead of being dropped.
   void pump_refresh();
+  // Surface a rejected diagnostic-button enqueue; no-op on DALI_OK.
+  void report_diag_enqueue_(const char *what, DaliError err);
+  // Log a warning when the scheduler's cumulative rejection counters advance.
+  void report_queue_drops_();
 };
 
 }  // namespace dali

@@ -1299,6 +1299,47 @@ static void cmd_stats(void)
            capture_enabled ? "on" : "off",
            (unsigned)capture_count,
            capture_dropped);
+
+    DaliSchedQueueStats q;
+    if (dali_sched_queue_stats(&q) == DALI_OK) {
+        printf("Queue depth:      %u/%u (high-water %u)\r\n",
+               (unsigned)q.depth, (unsigned)q.capacity, (unsigned)q.high_water);
+        printf("Queue admitted:   %" PRIu32 "\r\n", q.admitted);
+        printf("Queue dropped:    %" PRIu32 " full, %" PRIu32 " busy\r\n",
+               q.rejected_full, q.rejected_busy);
+    }
+#endif
+}
+
+/*
+ * A rejected submission is never retried by the scheduler, so `full`/`busy` are
+ * commands that did not reach the bus. high-water at capacity means admission
+ * came within one submission of failing even while both counters read zero.
+ */
+static void cmd_queue(const char *args)
+{
+#ifndef DALI_HOST_BUILD
+    while (*args == ' ') args++;
+
+    if (*args != '\0') {
+        if (strcmp(args, "reset") != 0) {
+            printf("usage: queue [reset]\r\n");
+            return;
+        }
+        dali_sched_reset_queue_stats();
+    }
+
+    DaliSchedQueueStats q;
+    if (dali_sched_queue_stats(&q) != DALI_OK) {
+        printf("queue: ERR %d\r\n", (int)DALI_ERR_INVALID);
+        return;
+    }
+    printf("depth %u/%u  high-water %u  admitted %" PRIu32
+           "  dropped %" PRIu32 " full / %" PRIu32 " busy\r\n",
+           (unsigned)q.depth, (unsigned)q.capacity, (unsigned)q.high_water,
+           q.admitted, q.rejected_full, q.rejected_busy);
+#else
+    (void)args;
 #endif
 }
 
@@ -3544,6 +3585,7 @@ static void cmd_help(void)
 #ifndef DALI_HOST_BUILD
     printf("commands:\r\n");
     printf("  stats\r\n");
+    printf("  queue [reset]\r\n");
     printf("  bus check\r\n");
     printf("  capture start|stop|clear|status|export\r\n");
     printf("  trace on|off\r\n");
@@ -3604,6 +3646,10 @@ static void dispatch(char *line)
         cmd_help();
     } else if (strcmp(line, "stats") == 0) {
         cmd_stats();
+    } else if (strcmp(line, "queue") == 0) {
+        cmd_queue("");
+    } else if (strncmp(line, "queue ", 6) == 0) {
+        cmd_queue(line + 6);
     } else if (strncmp(line, "bus ", 4) == 0) {
         cmd_bus(line + 4);
     } else if (strncmp(line, "capture ", 8) == 0) {

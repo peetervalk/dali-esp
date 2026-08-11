@@ -588,8 +588,19 @@ static void dali_task(void *raw_component)
                 DaliDispatchResult result = {};
                 DaliError err = dali_dispatch(s_dispatch_table, s_dispatch_count,
                                               &rec.event, &s_toggle_state, &result);
-                if (err != DALI_OK) {
-                    ESP_LOGD(TAG, "dispatch err %d (%s)", (int)err, event_str);
+                if (err == DALI_ERR_QUEUE_FULL || err == DALI_ERR_BUSY) {
+                    /* A matched entry was refused by the scheduler. The action
+                     * is dropped, not deferred: replaying it later would act on
+                     * a stale physical context. Report it rather than hide it. */
+                    ESP_LOGW(TAG, "dispatch action dropped: %s (%s)",
+                             err == DALI_ERR_QUEUE_FULL ? "queue full"
+                                                        : "scheduler busy",
+                             event_str);
+                } else if (err != DALI_OK) {
+                    /* No usable mapping for this frame — expected traffic on a
+                     * mixed bus, so it stays at debug level. */
+                    ESP_LOGD(TAG, "dispatch: no mapping, err %d (%s)",
+                             (int)err, event_str);
                 } else if (result.matched) {
                     char tgt[8];
                     format_target(tgt, sizeof(tgt), result.target);
@@ -675,10 +686,12 @@ void DaliComponent::setup()
 void DaliComponent::loop()
 {
     /* ── Bus state from snooping / query replies ── */
+    /* flush_pending_write() also collects the scheduler completion for a
+     * light's in-flight command, so it runs during a scan too; the entity
+     * applies the scan gate itself before admitting any new traffic. */
     for (uint8_t i = 0u; i < s_light_count; i++) {
         s_light_registry[i].light->apply_bus_state();
-        if (!scan_running_.load(std::memory_order_acquire))
-            s_light_registry[i].light->flush_pending_write();
+        s_light_registry[i].light->flush_pending_write();
     }
 
     /* ── Boot query (lights) ── */
@@ -787,6 +800,9 @@ void DaliComponent::loop()
         }
     }
 
+    /* ── Scheduler queue drops ── */
+    report_queue_drops_();
+
     /* ── Diag level query result ── */
     if (scan_status_) {
         char tmp[sizeof(s_diag_level_str)];
@@ -817,13 +833,21 @@ void DaliComponent::loop()
                 identify_scan_paused_ = false;
             }
             if ((uint32_t)(now - identify_last_ms_) >= 500u) {
-                identify_last_ms_ = now;
-                identify_phase_   = !identify_phase_;
                 DaliTarget t;
                 t.type    = DALI_ADDR_SHORT;
                 t.address = diag_address_;
-                if (identify_phase_) dali_control_recall_max(t);
-                else                 dali_control_recall_min(t);
+                bool next_phase = !identify_phase_;
+                DaliError err = next_phase ? dali_control_recall_max(t)
+                                           : dali_control_recall_min(t);
+                if (err == DALI_OK) {
+                    identify_last_ms_ = now;
+                    identify_phase_   = next_phase;
+                } else {
+                    /* Retain the phase and the deadline so the next loop retries
+                     * this half-blink; advancing on a rejected enqueue would
+                     * silently drop it and stall the blink at one level. */
+                    ESP_LOGW(TAG, "identify enqueue failed: %d; retrying", (int)err);
+                }
             }
             if ((uint32_t)(now - identify_start_ms_) >= 10000u) {
                 identify_active_ = false;
@@ -1166,6 +1190,34 @@ void DaliComponent::execute_command(const std::string &cmd_str)
     const char *verb = tok[0];
     uint32_t cmd_generation = begin_cmd_generation();
     void *cmd_ctx = cmd_generation_ctx(cmd_generation);
+    /* Scheduler queue diagnostics: queue [reset]. Answers locally without any
+     * bus traffic, so unlike every other verb its result is a reading rather
+     * than an admission — and it stays available during a scan, which is when
+     * queue pressure is most worth inspecting. */
+    if (strcmp(verb, "queue") == 0) {
+        if (ntok == 2u && strcmp(tok[1], "reset") == 0) {
+            dali_sched_reset_queue_stats();
+            last_queue_rejected_full_ = 0u;
+            last_queue_rejected_busy_ = 0u;
+        } else if (ntok != 1u) {
+            set_cmd_result("bad queue syntax");
+            return;
+        }
+        DaliSchedQueueStats stats;
+        if (dali_sched_queue_stats(&stats) != DALI_OK) {
+            set_cmd_result("err");
+            return;
+        }
+        char buf_q[64];
+        snprintf(buf_q, sizeof(buf_q), "d=%u/%u hw=%u ok=%u full=%u busy=%u",
+                 (unsigned)stats.depth, (unsigned)stats.capacity,
+                 (unsigned)stats.high_water, (unsigned)stats.admitted,
+                 (unsigned)stats.rejected_full, (unsigned)stats.rejected_busy);
+        set_cmd_result(buf_q);
+        return;
+    }
+
+    /* Every verb below reaches the bus, so none may be admitted into a scan. */
     if (scan_running_.load(std::memory_order_acquire)) {
         set_cmd_result("scan active");
         return;
@@ -1643,39 +1695,87 @@ void DaliComponent::start_find_couplers()
     if (scan_status_) scan_status_->publish_state("Listening...");
 }
 
+/*
+ * A rejected submission is dropped work: no scheduler client retries on the
+ * caller's behalf. Report only the increments, so a bus under sustained
+ * pressure produces one line per new loss rather than one per loop.
+ */
+void DaliComponent::report_queue_drops_()
+{
+    DaliSchedQueueStats stats;
+    if (dali_sched_queue_stats(&stats) != DALI_OK) return;
+
+    if (stats.rejected_full != last_queue_rejected_full_) {
+        ESP_LOGW(TAG, "scheduler queue full: %u command(s) dropped "
+                      "(total %u, depth %u/%u, high-water %u)",
+                 (unsigned)(stats.rejected_full - last_queue_rejected_full_),
+                 (unsigned)stats.rejected_full,
+                 (unsigned)stats.depth, (unsigned)stats.capacity,
+                 (unsigned)stats.high_water);
+        last_queue_rejected_full_ = stats.rejected_full;
+    }
+    if (stats.rejected_busy != last_queue_rejected_busy_) {
+        ESP_LOGW(TAG, "scheduler reset barrier: %u command(s) dropped (total %u)",
+                 (unsigned)(stats.rejected_busy - last_queue_rejected_busy_),
+                 (unsigned)stats.rejected_busy);
+        last_queue_rejected_busy_ = stats.rejected_busy;
+    }
+}
+
+/*
+ * Diagnostic buttons are fire-and-forget, so a rejected enqueue would otherwise
+ * be invisible: the operator sees a button press and no bus activity. Report it
+ * on the diagnostic text sensor and in the log. `OK` is not published on
+ * success — as elsewhere, admission is not device acknowledgement, and the
+ * refresh button is the way to read back an actual level.
+ */
+void DaliComponent::report_diag_enqueue_(const char *what, DaliError err)
+{
+    if (err == DALI_OK) return;
+    ESP_LOGW(TAG, "diag %s enqueue failed: %d", what, (int)err);
+    if (scan_status_ == nullptr) return;
+    char buf[40];
+    snprintf(buf, sizeof(buf), "%s: %s", what,
+             err == DALI_ERR_QUEUE_FULL ? "queue full"
+                                        : (err == DALI_ERR_BUSY ? "busy" : "err"));
+    scan_status_->publish_state(buf);
+}
+
 void DaliComponent::send_diag_on()
 {
     if (scan_running_.load(std::memory_order_acquire)) return;
     DaliTarget t{ DALI_ADDR_SHORT, diag_address_ };
-    dali_control_go_to_last_active_level(t);
+    report_diag_enqueue_("on", dali_control_go_to_last_active_level(t));
 }
 
 void DaliComponent::send_diag_off()
 {
     if (scan_running_.load(std::memory_order_acquire)) return;
     DaliTarget t{ DALI_ADDR_SHORT, diag_address_ };
-    dali_control_off(t);
+    report_diag_enqueue_("off", dali_control_off(t));
 }
 
 void DaliComponent::send_diag_max()
 {
     if (scan_running_.load(std::memory_order_acquire)) return;
     DaliTarget t{ DALI_ADDR_SHORT, diag_address_ };
-    dali_control_recall_max(t);
+    report_diag_enqueue_("max", dali_control_recall_max(t));
 }
 
 void DaliComponent::send_diag_min()
 {
     if (scan_running_.load(std::memory_order_acquire)) return;
     DaliTarget t{ DALI_ADDR_SHORT, diag_address_ };
-    dali_control_recall_min(t);
+    report_diag_enqueue_("min", dali_control_recall_min(t));
 }
 
 void DaliComponent::send_diag_refresh()
 {
     if (scan_running_.load(std::memory_order_acquire)) return;
     DaliTarget qt{ DALI_ADDR_SHORT, diag_address_ };
-    dali_control_query(qt, DALI_CMD_QUERY_ACTUAL_LEVEL, 0u, on_diag_refresh_reply, nullptr);
+    report_diag_enqueue_("refresh",
+                         dali_control_query(qt, DALI_CMD_QUERY_ACTUAL_LEVEL, 0u,
+                                            on_diag_refresh_reply, nullptr));
 }
 
 void DaliComponent::set_scan_result_pending(const char *summary)

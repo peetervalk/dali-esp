@@ -1814,6 +1814,105 @@ void test_queue_full(void)
     TEST_ASSERT_EQUAL(DALI_ERR_QUEUE_FULL, dali_sched_enqueue(&txn));
 }
 
+/* 13b. Queue diagnostics: depth, high-water, admitted, and both rejections. */
+void test_queue_stats_report_depth_high_water_and_rejections(void)
+{
+    DaliSchedQueueStats stats;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID, dali_sched_queue_stats(NULL));
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_queue_stats(&stats));
+    TEST_ASSERT_EQUAL_UINT8(0u, stats.depth);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)DALI_CMD_QUEUE_SIZE, stats.capacity);
+    TEST_ASSERT_EQUAL_UINT8(0u, stats.high_water);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats.admitted);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats.rejected_full);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats.rejected_busy);
+
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0080u, .bit_length = 16u },
+        .needs_reply  = false,
+        .retries_left = 0u,
+    };
+    for (uint8_t i = 0u; i < DALI_CMD_QUEUE_SIZE; i++) {
+        TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+    }
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_queue_stats(&stats));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)DALI_CMD_QUEUE_SIZE, stats.depth);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)DALI_CMD_QUEUE_SIZE, stats.high_water);
+    TEST_ASSERT_EQUAL_UINT32(DALI_CMD_QUEUE_SIZE, stats.admitted);
+
+    /* A refused submission is dropped work, so it must be counted. */
+    TEST_ASSERT_EQUAL(DALI_ERR_QUEUE_FULL, dali_sched_enqueue(&txn));
+    TEST_ASSERT_EQUAL(DALI_ERR_QUEUE_FULL, dali_sched_enqueue(&txn));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_queue_stats(&stats));
+    TEST_ASSERT_EQUAL_UINT32(2u, stats.rejected_full);
+    TEST_ASSERT_EQUAL_UINT32(DALI_CMD_QUEUE_SIZE, stats.admitted);
+
+    /* Draining lowers depth but retains the high-water mark. depth counts only
+     * queued work: the entry the scheduler is executing has already been
+     * popped, so one run leaves DALI_CMD_QUEUE_SIZE - 1 waiting. */
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_queue_stats(&stats));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)(DALI_CMD_QUEUE_SIZE - 1u), stats.depth);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)DALI_CMD_QUEUE_SIZE, stats.high_water);
+
+    /* A pending reset barrier rejects with BUSY, counted separately. */
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_request_reset(NULL, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_BUSY, dali_sched_enqueue(&txn));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_queue_stats(&stats));
+    TEST_ASSERT_EQUAL_UINT32(1u, stats.rejected_busy);
+    TEST_ASSERT_EQUAL_UINT32(2u, stats.rejected_full);
+}
+
+/* 13c. Resetting the stats clears counters and rebases high-water on depth. */
+void test_queue_stats_reset_rebases_high_water_on_current_depth(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0080u, .bit_length = 16u },
+        .needs_reply  = false,
+        .retries_left = 0u,
+    };
+    for (uint8_t i = 0u; i < 4u; i++) {
+        TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+    }
+    dali_sched_run();   /* one entry popped for execution; depth 3, high-water 4 */
+
+    DaliSchedQueueStats stats;
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_queue_stats(&stats));
+    TEST_ASSERT_EQUAL_UINT8(3u, stats.depth);
+    TEST_ASSERT_EQUAL_UINT8(4u, stats.high_water);
+
+    dali_sched_reset_queue_stats();
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_queue_stats(&stats));
+    TEST_ASSERT_EQUAL_UINT8(3u, stats.depth);
+    /* Rebased on live depth, never below it, so the reading stays meaningful. */
+    TEST_ASSERT_EQUAL_UINT8(3u, stats.high_water);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats.admitted);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats.rejected_full);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats.rejected_busy);
+}
+
+/* 13d. A sequence occupies exactly one queue entry in the diagnostics. */
+void test_queue_stats_count_a_sequence_as_one_entry(void)
+{
+    DaliSequence seq = {
+        .steps = {
+            { .frame = { .data = 0xA300u, .bit_length = 16u } },
+            { .frame = { .data = 0xA500u, .bit_length = 16u } },
+            { .frame = { .data = 0xA700u, .bit_length = 16u } },
+        },
+        .step_count = 3u,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue_sequence(&seq));
+
+    DaliSchedQueueStats stats;
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_queue_stats(&stats));
+    TEST_ASSERT_EQUAL_UINT8(1u, stats.depth);
+    TEST_ASSERT_EQUAL_UINT8(1u, stats.high_water);
+    TEST_ASSERT_EQUAL_UINT32(1u, stats.admitted);
+}
+
 /* 14. Reset clears mid-flight state */
 void test_reset_clears_state(void)
 {
@@ -1945,6 +2044,9 @@ int main(void)
     RUN_TEST(test_sequence_result_accessors_reject_missing_replies);
     RUN_TEST(test_sequence_rejects_invalid_args);
     RUN_TEST(test_queue_full);
+    RUN_TEST(test_queue_stats_report_depth_high_water_and_rejections);
+    RUN_TEST(test_queue_stats_reset_rebases_high_water_on_current_depth);
+    RUN_TEST(test_queue_stats_count_a_sequence_as_one_entry);
     RUN_TEST(test_reset_clears_state);
     RUN_TEST(test_multiple_transactions_in_order);
     RUN_TEST(test_quiescent_reports_active_queued_and_drained_work);

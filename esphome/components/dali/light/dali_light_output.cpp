@@ -40,34 +40,60 @@ uint8_t DaliLightOutput::brightness_to_level_(float brightness) {
   return level == 0 ? 1 : level;
 }
 
-DaliError DaliLightOutput::enqueue_desired_state_(bool is_on, uint8_t level) {
-  if (!is_on) {
-    if (known_state_valid_ && !known_is_on_) return DALI_OK;
-    ESP_LOGD(TAG, "tx off to %s %u",
-             target_type_name(target_.type), (unsigned)target_.address);
-    DaliError err = dali_control_off(target_);
-    if (err != DALI_OK) {
-      ESP_LOGW(TAG, "off failed: %d", (int)err);
-      return err;
+void DaliLightOutput::on_command_complete_(DaliError result,
+                                           const DaliFrame * /*reply*/,
+                                           void *ctx) {
+  // Runs on the DALI task. Hand the outcome over; Core 0 owns write_.
+  static_cast<DaliLightOutput *>(ctx)->command_mailbox_.publish(result == DALI_OK);
+}
+
+void DaliLightOutput::pump_write_() {
+  /* Collect the completion first: an enqueue returning DALI_OK only means the
+   * frame was queued, so the confirmed state this light deduplicates against
+   * may only be committed here. A failed transmission invalidates it instead,
+   * which is what lets the identical command be retried rather than suppressed. */
+  bool success = true;
+  uint32_t completions = 0u;
+  if (command_mailbox_.take(success, completions)) {
+    if (dali_light_write_confirm(&write_, success)) {
+      ESP_LOGW(TAG, "tx to %s %u failed; state unknown, retrying",
+               target_type_name(target_.type), (unsigned)target_.address);
+    } else if (!success) {
+      ESP_LOGW(TAG, "tx to %s %u failed; retry budget spent, state unknown",
+               target_type_name(target_.type), (unsigned)target_.address);
     }
-    known_state_valid_ = true;
-    known_is_on_ = false;
-    known_level_ = 0u;
-    return DALI_OK;
   }
 
-  if (known_state_valid_ && known_is_on_ && known_level_ == level) return DALI_OK;
-  ESP_LOGD(TAG, "tx level %u to %s %u",
-           (unsigned)level, target_type_name(target_.type), (unsigned)target_.address);
-  DaliError err = dali_control_set_level(target_, level);
-  if (err != DALI_OK) {
-    ESP_LOGW(TAG, "set_level failed: %d", (int)err);
-    return err;
+  if (comp_ != nullptr && comp_->is_scan_running()) return;
+
+  uint8_t level = 0u;
+  DaliError err;
+  switch (dali_light_write_next(&write_, &level)) {
+    case DALI_LIGHT_WRITE_SEND_OFF:
+      ESP_LOGD(TAG, "tx off to %s %u",
+               target_type_name(target_.type), (unsigned)target_.address);
+      err = dali_control_off_cb(target_, on_command_complete_, this);
+      break;
+
+    case DALI_LIGHT_WRITE_SEND_LEVEL:
+      ESP_LOGD(TAG, "tx level %u to %s %u", (unsigned)level,
+               target_type_name(target_.type), (unsigned)target_.address);
+      err = dali_control_set_level_cb(target_, level, on_command_complete_, this);
+      break;
+
+    case DALI_LIGHT_WRITE_SUPPRESS:
+    case DALI_LIGHT_WRITE_IDLE:
+    default:
+      return;
   }
-  known_state_valid_ = true;
-  known_is_on_ = true;
-  known_level_ = level;
-  return DALI_OK;
+
+  /* Queue pressure is transient, so a rejected command stays pending and is
+   * retried on a later loop rather than dropped. */
+  if (err != DALI_OK) {
+    ESP_LOGW(TAG, "enqueue to %s %u failed: %d; retrying",
+             target_type_name(target_.type), (unsigned)target_.address, (int)err);
+  }
+  dali_light_write_sent(&write_, err == DALI_OK);
 }
 
 void DaliLightOutput::setup_state(light::LightState *state) {
@@ -107,30 +133,24 @@ void DaliLightOutput::write_state(light::LightState *state) {
   bool desired_is_on = target.is_on() && brightness >= (1.0f / 254.0f);
   uint8_t desired_level = desired_is_on ? brightness_to_level_(brightness) : 0u;
 
+  /* Record the desired state itself rather than relying on LightState: a
+   * bus-state publication can overwrite remote_values before this is sent. */
+  dali_light_write_request(&write_, desired_is_on, desired_level);
+
   if (comp_ != nullptr && comp_->is_scan_running()) {
-    /* Preserve the latest desired target itself: a bus-state publication can
-     * update LightState::remote_values before scan admission reopens. */
-    scan_pending_is_on_ = desired_is_on;
-    scan_pending_level_ = desired_level;
-    scan_write_pending_ = true;
     ESP_LOGD(TAG, "deferring write to %s %u while scan is active",
              target_type_name(target_.type), (unsigned)target_.address);
     return;
   }
 
-  (void) enqueue_desired_state_(desired_is_on, desired_level);
+  pump_write_();
 }
 
 void DaliLightOutput::flush_pending_write() {
-  if (!scan_write_pending_ || state_ == nullptr ||
-      (comp_ != nullptr && comp_->is_scan_running())) {
-    return;
-  }
-  /* Queue pressure is transient. Retain the packed desired state until the
-   * scheduler accepts it; this also lets more lights drain than queue slots. */
-  if (enqueue_desired_state_(scan_pending_is_on_, scan_pending_level_) == DALI_OK) {
-    scan_write_pending_ = false;
-  }
+  /* Called every loop, so this is also where an in-flight command's completion
+   * is collected — including after a scan, when nothing new is pending. */
+  if (state_ == nullptr) return;
+  pump_write_();
 }
 
 void DaliLightOutput::mark_state_from_bus(bool is_on, uint8_t level) {
@@ -144,9 +164,9 @@ void DaliLightOutput::apply_bus_state() {
   uint8_t level;
   if (!bus_state_mailbox_.take(is_on, level)) return;
 
-  known_state_valid_ = true;
-  known_is_on_ = is_on;
-  known_level_ = level;
+  /* Refused while a command is in flight: that command's own completion is the
+   * authority for the state it establishes, and this reading may predate it. */
+  dali_light_write_observe(&write_, is_on, level);
 
   skip_next_write_ = true;
   auto call = state_->make_call();

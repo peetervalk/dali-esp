@@ -85,3 +85,7 @@ add_test(NAME test_light_state_mailbox COMMAND test_light_state_mailbox)
 add_executable(test_refresh_cursor test_refresh_cursor.cpp)
 target_link_libraries(test_refresh_cursor PRIVATE unity)
 add_test(NAME test_refresh_cursor COMMAND test_refresh_cursor)
+
+add_executable(test_light_write test_light_write.cpp)
+target_link_libraries(test_light_write PRIVATE unity)
+add_test(NAME test_light_write COMMAND test_light_write)
