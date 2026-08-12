@@ -1,8 +1,16 @@
 #pragma once
 
-/* Home Assistant reserves brightness code 0 for OFF.  Spread codes 1..255
- * across the complete configured DALI on-range so MIN remains visibly on and
- * MAX is reported as 100%.  This header deliberately has no ESPHome types. */
+/* Home Assistant reserves brightness code 0 for OFF, and its percent slider
+ * emits round(255 * pct / 100) — so the lowest code the UI can produce is 3
+ * (1%), and codes 1..2 exist only for an explicit `brightness:` service call.
+ *
+ * Spread codes 3..255 across the complete configured DALI on-range.  MIN LEVEL
+ * then sits exactly on the slider's 1%, which keeps the dimmest level the gear
+ * can reach selectable and reports it as 1% instead of a 0% that reads as OFF.
+ * Pinning MIN to code 1 instead cost the whole span between code 1 and code 3:
+ * on an 85..254 window the slider bottomed out at level 106, leaving 85..105
+ * addressable only from a service call.  Codes 1..2 clamp onto MIN rather than
+ * falling below it.  This header deliberately has no ESPHome types. */
 
 #include <math.h>
 #include <stdint.h>
@@ -15,7 +23,10 @@ namespace esphome {
 namespace dali {
 
 static constexpr float DALI_HA_BRIGHTNESS_MAX = 255.0f;
-static constexpr float DALI_HA_ON_CODES = 254.0f;
+/* Lowest code Home Assistant's percent slider can emit: round(255 * 1 / 100). */
+static constexpr float DALI_HA_MIN_ON_CODE = 3.0f;
+static constexpr float DALI_HA_ON_CODES =
+    DALI_HA_BRIGHTNESS_MAX - DALI_HA_MIN_ON_CODE;
 
 inline DaliError dali_light_brightness_to_level(const DaliLevelProfile *profile,
                                                 float brightness,
@@ -24,7 +35,7 @@ inline DaliError dali_light_brightness_to_level(const DaliLevelProfile *profile,
       brightness <= 0.0f) {
     return DALI_ERR_INVALID;
   }
-  float relative = (DALI_HA_BRIGHTNESS_MAX * brightness - 1.0f) /
+  float relative = (DALI_HA_BRIGHTNESS_MAX * brightness - DALI_HA_MIN_ON_CODE) /
                    DALI_HA_ON_CODES;
   if (relative < 0.0f) relative = 0.0f;
   if (relative > 1.0f) relative = 1.0f;
@@ -38,7 +49,7 @@ inline DaliError dali_light_level_to_brightness(const DaliLevelProfile *profile,
   float relative = 0.0f;
   DaliError err = dali_level_profile_level_to_relative(profile, level, &relative);
   if (err != DALI_OK) return err;
-  *brightness = (1.0f + DALI_HA_ON_CODES * relative) /
+  *brightness = (DALI_HA_MIN_ON_CODE + DALI_HA_ON_CODES * relative) /
                 DALI_HA_BRIGHTNESS_MAX;
   return DALI_OK;
 }

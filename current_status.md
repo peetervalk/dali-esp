@@ -137,6 +137,17 @@ Not verified, and worth stating plainly:
   and accepts `min_level`, `max_level`, and `dimming_curve` overrides. The
   profile query and HA mapping are host-tested and compile in a local ESPHome
   fixture, but have no hardware result yet.
+- The Home Assistant on-code floor moved from brightness code 1 to code 3. The
+  percent slider emits `round(255 * pct / 100)`, so code 3 is the lowest it can
+  produce and codes 1-2 survive only in an explicit `brightness:` service call.
+  With MIN pinned to code 1 the gear's floor rendered as 0 % — indistinguishable
+  from OFF — and the slider could not return to it: on the 85..254 window both
+  sites report, 1 % landed on level 106, leaving levels 85-105 unreachable from
+  the UI. Codes 3..255 now span the window, so 1 % is MIN exactly and codes 1-2
+  clamp onto it. The cost is two codes of resolution: 50 % and 100 % do not move
+  and 10 % shifts by two levels. This is also what finally makes the "a
+  requested 1 % now sends level 85" claim above literally true rather than
+  approximately so. Host-tested in `test_light_profile`; no hardware result yet.
 - A group or broadcast entity maps brightness through the union of its known
   members' windows, not one representative's. Gear clamps any arc power level
   into its own MIN/MAX whatever the sender believed, so a narrower window cannot
@@ -168,7 +179,7 @@ Not verified, and worth stating plainly:
   diagnostic. 57 host vectors cover this layer.
 - Trailing tokens are now rejected for every verb instead of ignored. The table
   carries each verb's argument-count bounds and `dali_cli_resolve()` enforces
-  them before a handler runs, so `level a1 100 junk` is refused rather than
+  them before a handler runs, so `level s1 100 junk` is refused rather than
   acted on. The same class of bug remains open in the separate ESPHome console
   parser, which does not share this code.
 - Help and `list <table>` are generated from the same tables the parser

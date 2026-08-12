@@ -161,7 +161,7 @@ sensor:
     name: "Zone 2 Occupancy Raw"
     address: 0
     instance: 1
-    poll_interval: 1
+    poll_interval: 10
     # Explicit though it is the default: this is the instance that must stay
     # responsive, so a change event polls immediately instead of waiting out
     # the interval.

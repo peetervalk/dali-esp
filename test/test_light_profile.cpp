@@ -14,6 +14,8 @@ static float ha_brightness(uint8_t code) {
   return static_cast<float>(code) / 255.0f;
 }
 
+/* Code 1 reaches MIN by clamping below the on-code floor; see
+ * test_min_level_sits_on_the_lowest_ui_reachable_code for the floor itself. */
 void test_ha_endpoints_cover_every_valid_profile(void) {
   for (int curve = DALI_DIM_CURVE_STANDARD; curve <= DALI_DIM_CURVE_LINEAR; curve++) {
     for (uint16_t min_level = 1u; min_level <= DALI_DAPC_MAX_LEVEL; min_level++) {
@@ -37,6 +39,90 @@ void test_ha_endpoints_cover_every_valid_profile(void) {
       }
     }
   }
+}
+
+void test_min_level_sits_on_the_lowest_ui_reachable_code(void) {
+  /* Home Assistant's percent slider emits round(255 * pct / 100), so its
+   * lowest output is code 3 and codes 1..2 cannot be selected from it. MIN
+   * LEVEL therefore has to sit on code 3: pinned to code 1 it renders as 0% —
+   * indistinguishable from OFF — and the slider can never return to it. */
+  for (int curve = DALI_DIM_CURVE_STANDARD; curve <= DALI_DIM_CURVE_LINEAR; curve++) {
+    for (uint16_t min_level = 1u; min_level < DALI_DAPC_MAX_LEVEL; min_level++) {
+      for (uint16_t max_level = min_level + 1u; max_level <= DALI_DAPC_MAX_LEVEL;
+           max_level++) {
+        DaliLevelProfile profile = {
+            static_cast<DaliDimCurve>(curve),
+            static_cast<uint8_t>(min_level),
+            static_cast<uint8_t>(max_level),
+        };
+        uint8_t level = 0u;
+        float brightness = 0.0f;
+
+        TEST_ASSERT_EQUAL(DALI_OK,
+                          dali_light_brightness_to_level(&profile,
+                                                         ha_brightness(3u), &level));
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(min_level), level);
+
+        TEST_ASSERT_EQUAL(DALI_OK,
+                          dali_light_level_to_brightness(
+                              &profile, static_cast<uint8_t>(min_level),
+                              &brightness));
+        TEST_ASSERT_EQUAL_FLOAT(ha_brightness(3u), brightness);
+      }
+    }
+  }
+}
+
+void test_codes_below_the_on_code_floor_clamp_onto_min(void) {
+  /* Codes 1 and 2 survive only in an explicit `brightness:` service call. They
+   * must stay ON at the floor rather than dropping below MIN or being refused —
+   * a stored scene carrying one of them still has to replay as light. */
+  for (int curve = DALI_DIM_CURVE_STANDARD; curve <= DALI_DIM_CURVE_LINEAR; curve++) {
+    for (uint16_t min_level = 1u; min_level <= DALI_DAPC_MAX_LEVEL; min_level++) {
+      for (uint16_t max_level = min_level; max_level <= DALI_DAPC_MAX_LEVEL;
+           max_level++) {
+        DaliLevelProfile profile = {
+            static_cast<DaliDimCurve>(curve),
+            static_cast<uint8_t>(min_level),
+            static_cast<uint8_t>(max_level),
+        };
+        for (uint8_t code = 1u; code <= 2u; code++) {
+          uint8_t level = 0u;
+          TEST_ASSERT_EQUAL(DALI_OK,
+                            dali_light_brightness_to_level(&profile,
+                                                           ha_brightness(code),
+                                                           &level));
+          TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(min_level), level);
+          TEST_ASSERT_TRUE(level != 0u);
+        }
+      }
+    }
+  }
+}
+
+void test_ui_floor_reaches_min_on_the_bus_2_gear_window(void) {
+  /* The gear on bus 2 reports MIN LEVEL 85 (1% output) and MAX LEVEL 254 on the
+   * standard curve. With the floor at code 1 the slider's 1% landed on level
+   * 106 and levels 85..105 were unreachable from the UI. */
+  DaliLevelProfile profile = {DALI_DIM_CURVE_STANDARD, 85u, 254u};
+  uint8_t level = 0u;
+  float brightness = 0.0f;
+
+  TEST_ASSERT_EQUAL(DALI_OK,
+                    dali_light_brightness_to_level(&profile, ha_brightness(3u),
+                                                   &level));
+  TEST_ASSERT_EQUAL_UINT8(85u, level);
+
+  TEST_ASSERT_EQUAL(DALI_OK,
+                    dali_light_level_to_brightness(&profile, 85u, &brightness));
+  /* Quantized back to the byte HA publishes: 3, which the frontend renders as
+   * round(3 * 100 / 255) = 1%. Code 1 rendered as 0%. */
+  TEST_ASSERT_EQUAL_INT(3, static_cast<int>(lroundf(brightness * 255.0f)));
+
+  TEST_ASSERT_EQUAL(DALI_OK,
+                    dali_light_brightness_to_level(&profile, ha_brightness(255u),
+                                                   &level));
+  TEST_ASSERT_EQUAL_UINT8(254u, level);
 }
 
 void test_ha_on_codes_always_map_to_a_legal_profile_level(void) {
@@ -282,6 +368,9 @@ int main(void) {
   UNITY_BEGIN();
 
   RUN_TEST(test_ha_endpoints_cover_every_valid_profile);
+  RUN_TEST(test_min_level_sits_on_the_lowest_ui_reachable_code);
+  RUN_TEST(test_codes_below_the_on_code_floor_clamp_onto_min);
+  RUN_TEST(test_ui_floor_reaches_min_on_the_bus_2_gear_window);
   RUN_TEST(test_ha_on_codes_always_map_to_a_legal_profile_level);
   RUN_TEST(test_level_to_ha_to_level_is_canonical_for_every_profile_level);
   RUN_TEST(test_fixed_profile_reports_full_brightness);

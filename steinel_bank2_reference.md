@@ -105,10 +105,10 @@ Firmware with the corrected helper verbs sends the same 24-bit Part 103 frames
 as the raw examples above:
 
 ```
-devmem read a0 2 4        # C13102, C13004, 01FE3C wait
-dtrcheck a0 0 66          # C13042, 01FE36 wait
-dtrcheck a0 1 2           # C13102, 01FE37 wait
-devmem write a0 2 4 128   # unlock lock byte, then write Bank 2 offset 4 = 0x80
+devmem read 0 2 4         # C13102, C13004, 01FE3C wait
+dtrcheck 0 0 66           # C13042, 01FE36 wait
+dtrcheck 0 1 2            # C13102, 01FE37 wait
+devmem write 0 2 4 128    # unlock lock byte, then write Bank 2 offset 4 = 0x80
 ```
 
 If an older firmware is still flashed, use the raw commands instead; the stale
@@ -137,7 +137,7 @@ raw 01FE3C len=24 wait   # confirm 128 (0x80) was stored
 ### Verify occupancy state on demand
 
 ```
-iquery a0 1 input-value   # 0=Unoccupied  85=Movement  170=Present  255=Present+Moving
+iquery 0 1 input-value    # 0=Unoccupied  85=Movement  170=Present  255=Present+Moving
 ```
 
 ### Verify Section 3 factory settings
@@ -222,7 +222,7 @@ raw 01FE37 len=24 wait   # 0x37 = QUERY CONTENT DTR1
 
 ## Caveats
 
-- **DALI `RESET` wipes Bank 2.** Do not issue `config a0 reset` while tuning.
+- **DALI `RESET` wipes Bank 2.** Do not issue `config s0 reset` while tuning.
 - **Allow ~1 s after writing before cutting bus power** — NVM commit is asynchronous.
 - **Only one device should be write-enabled at a time.** `WRITE MEMORY LOCATION` is
   a broadcast; if multiple devices were enabled (e.g. after a broadcast
