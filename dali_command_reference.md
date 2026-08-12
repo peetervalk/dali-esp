@@ -23,9 +23,13 @@ and ESPHome exposure — is tracked in `dali_capability_matrix.md`.
   writes remain unverified: read the current value first, write one parameter,
   then read it back before broader use.
 - The ESPHome command console shares the native CLI's tokeniser, argument
-  parsers, and named command tables, so verbs and command names mean the same
-  thing on both. It implements the subset that suits a Home Assistant text
-  entity; see "ESPHome Command Console" for the verb list and the renames.
+  parsers, named command tables, and reply decoding, so verbs, command names,
+  and replies mean the same thing on both. It implements every native verb whose
+  answer fits one Home Assistant text state and whose execution fits one enqueue
+  and one completion — including DT6, `special` minus its commissioning
+  primitives, `memread`, and the vendor helpers. See "ESPHome Command Console"
+  for the verb list and the renames, and `dali_capability_matrix.md` for what
+  stays native-only and why.
 - The native CLI now exposes typed verbs for memory, DT6, DT8, Part 103
   instance query and configuration, vendor helpers, and control-device memory,
   plus CONTINUOUS UP/DOWN, arc power MASK, and a send-twice `raw2`. Every
@@ -284,13 +288,23 @@ into, and a result is one Home Assistant text state.
 queue [reset]
 raw <hex> len=<16|24> [wait]
 raw2 <hex> len=<16|24>
-off|max|min <target>
+dtr <0|1|2> <0-255>
+off|max|min|mask <target>
+up|down|step-up|step-down|step-off|on-step <target>
+cont-up|cont-down|dapc-seq|last <target>
 level <target> <0-254|mask>
+scene <target> <0-15>
+status <target>
 query <target> <query-name> [param]
+special <name> [param]
 config <target> <config-name> [param]
 config-dtr0 <target> <config-name> <dtr0> [param]
-iquery <addr> <instance> <query-name>
+dt6 <addr> <name> [dtr0]
+iquery <addr> <instance> <query-name> [dtr0]
 iconfig <addr> <instance> <config-name> [v0] [v1] [v2]
+vendor lunatone <addr> <instance> <name>
+vendor steinel <instance> <raw>
+memread <addr> <bank> <offset> [count]
 devmem read <addr> <bank> <offset> [count]
 devmem write <addr> <bank> <offset> <value>
 dtrcheck <addr> <0|1|2> <0-255>
@@ -301,12 +315,32 @@ Argument counts are checked against the verb table before any handler runs, so
 a trailing token is an error rather than something quietly ignored: `level s1
 100 junk` is rejected, where it used to be accepted as `level s1 100`.
 
-`queue` and `group` generate no bus traffic, so they are the only verbs accepted
-while a scan is running — which is when queue pressure and a stale group cache
-are most worth inspecting. `queue` reports queue depth, capacity, high-water
-mark, and the cumulative accepted/refused submission counts, which `stats` also
-includes on the native CLI. A refused submission is dropped work, not deferred
-work; the same counters are logged whenever they advance.
+Replies are decoded through the shared `dali_cli_format_response()`, so a
+yes/no query answers `yes` here and not `255`, and `status` returns its flags by
+name. The verbs that remain native-only, and why, are listed in
+`dali_capability_matrix.md` under "Verb parity between the two surfaces".
+
+`special` refuses the nine commissioning primitives that
+`dali_cli_special_is_commissioning()` marks: INITIALISE, RANDOMISE, the three
+SEARCH ADDRESS registers, PROGRAM SHORT ADDRESS, WITHDRAW, and both WRITE MEMORY
+LOCATION forms. This integration exposes discovery, not a guarded commissioning
+workflow; the native CLI runs them sequenced and checked inside `commission`.
+TERMINATE stays available, because it is what closes a window another tool
+opened.
+
+Every `dt6` line goes out as one sequence — DTR0 load, ENABLE DEVICE TYPE 6, and
+the command — so the enable cannot be separated from the command it qualifies.
+`dt6 <addr> select-curve` additionally invalidates that address's cached level
+profile and starts a refresh, because the dimming curve is what the light layer
+computes every brightness from.
+
+`queue`, `group`, and `vendor steinel` generate no bus traffic, so they are the
+only verbs accepted while a scan is running — which is when queue pressure and a
+stale group cache are most worth inspecting. `queue` reports queue depth,
+capacity, high-water mark, and the cumulative accepted/refused submission
+counts, which `stats` also includes on the native CLI. A refused submission is
+dropped work, not deferred work; the same counters are logged whenever they
+advance.
 
 `group forget` retires a departed member from the group-membership cache. A
 bus scan deliberately keeps the memberships of gear it did not see, so that a
@@ -370,6 +404,28 @@ drift apart in the first place.
 The console gained `config-dtr0`, `dtrcheck`, `group forget`, `level … mask`,
 and the whole of the shared query/config/iquery/iconfig tables, which are larger
 than the subsets it carried before.
+
+### Console verbs added for native-CLI parity
+
+Added 2026-08-12, all spelled as the native CLI spells them:
+
+| Verb | Notes |
+|---|---|
+| `up`, `down`, `step-up`, `step-down`, `step-off`, `on-step` | Part 102 fade and step instructions |
+| `cont-up`, `cont-down` | CONTINUOUS UP/DOWN (62386-102:2022) |
+| `dapc-seq`, `last`, `scene`, `mask` | DAPC sequence, last active level, GO TO SCENE, arc power MASK |
+| `status` | QUERY STATUS with its flags decoded by name |
+| `dtr` | Broadcast control-gear DTR load |
+| `special` | Non-commissioning special commands only |
+| `dt6` | All 24 DT6 names |
+| `memread` | Part 102 control-gear block read |
+| `vendor` | Lunatone instance queries, Steinel value decode |
+| `iquery … <dtr0>` | The DTR0-selected form, previously refused |
+
+One behaviour changed for existing verbs: `query` and `iquery` replies are now
+decoded and named (`actual: 42 (0x2A)`, `present: yes (0xFF)`) instead of being
+published as a bare `42 (0x2A)`. Anything in Home Assistant parsing the
+`command_result` string needs updating.
 
 `raw2` uses the scheduler send-twice path for commands that must be transmitted
 twice inside the DALI timing window. It avoids relying on Home Assistant to send

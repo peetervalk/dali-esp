@@ -378,6 +378,16 @@ DaliError dali_control_recall_min(DaliTarget target)
     return enqueue_target_command(target, DALI_CMD_RECALL_MIN_LEVEL, 0u);
 }
 
+DaliError dali_control_continuous_up(DaliTarget target)
+{
+    return enqueue_target_command(target, DALI_CMD_CONTINUOUS_UP, 0u);
+}
+
+DaliError dali_control_continuous_down(DaliTarget target)
+{
+    return enqueue_target_command(target, DALI_CMD_CONTINUOUS_DOWN, 0u);
+}
+
 DaliError dali_control_step_down_and_off(DaliTarget target)
 {
     return enqueue_target_command(target, DALI_CMD_STEP_DOWN_AND_OFF, 0u);

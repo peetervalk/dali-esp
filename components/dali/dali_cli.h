@@ -311,6 +311,24 @@ uint8_t                   dali_cli_special_count(void);
 const DaliCliGearCommand *dali_cli_special_at(uint8_t index);
 const DaliCliGearCommand *dali_cli_special_find(const char *name);
 
+/*
+ * True for the special commands a front end without a guarded commissioning
+ * workflow must refuse.
+ *
+ * Two groups qualify. The addressing commands — INITIALISE, RANDOMISE, the
+ * SEARCH ADDRESS registers, PROGRAM SHORT ADDRESS, WITHDRAW — are steps of a
+ * commissioning walk: sent alone they are at best inert and at worst destroy
+ * the addressing of every device on the bus, and RANDOMISE cannot be undone.
+ * WRITE MEMORY LOCATION is the other: it writes wherever DTR1/DTR0 happen to
+ * point, which is a different location for every device whose DTRs another
+ * master has moved since.
+ *
+ * TERMINATE is deliberately not in this set. It is what ends an initialise
+ * window a different tool opened, so refusing it would leave the operator
+ * holding the problem and none of the remedy.
+ */
+bool dali_cli_special_is_commissioning(DaliCommandId id);
+
 uint8_t                   dali_cli_config_count(void);
 const DaliCliGearCommand *dali_cli_config_at(uint8_t index);
 const DaliCliGearCommand *dali_cli_config_find(const char *name);
@@ -465,6 +483,43 @@ void dali_cli_print_frame(const DaliCliOut *out,
                           const DaliFrame  *frame);
 
 void dali_cli_print_status_fields(const DaliCliOut *out, uint8_t raw);
+
+/* Longest line either formatter below produces, including the NUL. */
+#define DALI_CLI_STATUS_LINE_MAX   96u
+#define DALI_CLI_RESPONSE_LINE_MAX 128u
+
+/*
+ * Format a QUERY STATUS byte as the raw value followed by the flags that are
+ * set: "0x06 lamp-fail,arc-on", or "0x00 none" when the gear reports nothing.
+ *
+ * This is the same decode dali_cli_print_status_fields() prints as a block,
+ * for a caller whose whole answer has to be one line.
+ *
+ * Returns the length written, excluding the NUL; 0 when the byte does not
+ * decode or the buffer is unusable, in which case buf is left empty.
+ */
+size_t dali_cli_format_status(char *buf, size_t cap, uint8_t raw);
+
+/*
+ * Format one command reply under `name` as a single line, with no newline.
+ *
+ * The ESPHome console's entire answer is one Home Assistant text state: it has
+ * no terminal to page a block into, and no room for a second line. Both front
+ * ends decode a reply here so that a yes/no answer cannot be "yes" on one
+ * surface and "255" on the other — dali_cli_print_response() is this function
+ * plus the newline, and plus the per-field block for a status byte.
+ *
+ * A frame that does not decode as the expected kind formats as
+ * "<name>: malformed reply" rather than as a plausible number.
+ *
+ * Returns the length written, excluding the NUL. A buffer of
+ * DALI_CLI_RESPONSE_LINE_MAX holds every kind without truncation.
+ */
+size_t dali_cli_format_response(char             *buf,
+                                size_t            cap,
+                                const char       *name,
+                                DaliResponseKind  kind,
+                                const DaliFrame  *reply);
 
 /*
  * Print one command reply under `name`. A frame that does not decode as the

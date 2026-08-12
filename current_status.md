@@ -53,6 +53,40 @@ adding broad new device support.
 
 ## Verification Baseline
 
+### Verified locally on 2026-08-12 (console verb parity)
+
+- The ESPHome console now implements every native CLI verb whose answer fits one
+  Home Assistant text state and whose execution fits one enqueue and one
+  completion. Added: the Part 102 fade/step instructions (`up`, `down`,
+  `step-up`, `step-down`, `step-off`, `on-step`, `cont-up`, `cont-down`,
+  `dapc-seq`, `last`), `scene`, `mask`, `status`, `dtr`, `special`, `dt6`,
+  `memread`, `vendor`, and the DTR0-selected form of `iquery`. What stays
+  native-only is listed with its reason in `dali_capability_matrix.md`.
+- All 24 DT6 names are reachable from the console under the native CLI's
+  spellings, through `dali_dt6_build_command_sequence()`, so a DTR0 load, ENABLE
+  DEVICE TYPE 6, and the command cannot be separated by other locally scheduled
+  traffic.
+- `dt6 select-curve` drops the address's cached level profile and starts a
+  refresh, matching what `config_changes_level_profile()` already did for
+  SET MIN/MAX LEVEL and RESET. The curve is what every brightness the light
+  layer sends is computed from, so leaving it cached would misreport and
+  miscommand in both directions.
+- Reply decoding is now shared. `dali_cli_format_response()` and
+  `dali_cli_format_status()` produce the one-line form the console publishes,
+  and `dali_cli_print_response()` is that line plus the newline, plus the
+  per-field block for a status byte. A yes/no query therefore answers `yes` on
+  both surfaces rather than `255` on one. This is an operator-visible change to
+  the `command_result` string; see the release-notes item below.
+- `special` refuses the nine commissioning primitives marked by
+  `dali_cli_special_is_commissioning()` — INITIALISE, RANDOMISE, the three
+  SEARCH ADDRESS registers, PROGRAM SHORT ADDRESS, WITHDRAW, and both WRITE
+  MEMORY LOCATION forms — because this integration exposes discovery, not a
+  guarded commissioning workflow. TERMINATE stays available as the remedy for a
+  window another tool opened. Host vectors assert the set in both directions.
+- 65 host vectors now cover `dali_cli`; all 26 suites pass. `dali-diag` and
+  `dali-1k` compile clean with no new warnings. None of this has been run on a
+  bus.
+
 ### Verified on hardware 2026-08-12
 
 - Arc power level and light output are no longer treated as the same quantity.
@@ -622,15 +656,21 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
   YAML log lines.
 - Light entities currently expose brightness only. Shared DT8 support is not yet
   mapped to Home Assistant colour-temperature, XY, or RGB controls.
-- The command console includes `raw`, `raw2`, memory, DTR, instance-query,
-  instance-configuration, and `queue` helpers. These do not imply equivalent
-  native CLI or hardware validation.
+- The command console covers control-gear output and configuration, control-gear
+  and control-device memory, DTR loads, non-commissioning special commands, DT6,
+  Part 103 instance query and configuration, vendor helpers, `raw`/`raw2`, and
+  the local `queue`/`group` verbs. It is the native CLI's verb set minus what
+  needs a terminal or a blocking transport; `dali_capability_matrix.md` lists
+  the exclusions with reasons. None of this implies hardware validation.
 - Console enqueue results are mapped consistently. Async commands publish
   `pending`, replace it on completion, and ignore callbacks belonging to an older
   submitted command. `OK` still means queued rather than execution- or
-  device-level confirmation.
-- Control-device `memwrite` is one scheduler-contiguous sequence and cannot be
-  partially enqueued. Its `OK` result means queued, not device-acknowledged or
+  device-level confirmation. A reply is decoded by the same shared function the
+  native CLI prints through, under the name of the command that asked for it;
+  the pending name/kind/step record is written before the enqueue and read back
+  under the same generation check that discards a stale completion.
+- Control-device `devmem write` is one scheduler-contiguous sequence and cannot
+  be partially enqueued. Its `OK` result means queued, not device-acknowledged or
   read-back verified, and it does not exclude another physical bus master.
 - Light state transferred from the DALI task to ESPHome is one coherent packed
   update; multiple pending observations intentionally coalesce to the latest.
@@ -878,8 +918,13 @@ The typed verb surface is in place; what is missing is evidence. Keep
 `dali_capability_matrix.md` current as each row is exercised.
 
 - Run the DT6 and DT8 verbs against real DT6/DT8 gear. Every DT8 row in the
-  matrix is host-covered and hardware-unverified, and the P2 mapping of DT8 to
-  Home Assistant colour traits is deliberately held behind this.
+  matrix is host-covered and hardware-unverified, and both the P2 mapping of DT8
+  to Home Assistant colour traits and its absence from the ESPHome console are
+  deliberately held behind this. The DT6 console verbs added on 2026-08-12 send
+  the same frames as the native ones, so one hardware session clears both
+  columns at once — start with `dt6 <a> dimming-curve` and
+  `dt6 <a> failure-status` on the 1k site's LED drivers, where a wrong answer is
+  visible rather than destructive.
 - Complete the memory read/write/read-back cycle on hardware for both
   `memread`/`meminfo` (Part 102) and `devmem` (Part 103). No write path reads
   its value back today, so `devmem write` reports transmitted, not applied.
@@ -888,12 +933,14 @@ The typed verb surface is in place; what is missing is evidence. Keep
   this is done the whole surface stays experimental.
 - Add host vectors for `identify`, `smoke`, `capture`, and the inventory JSON
   export, whose output formats are currently unasserted.
-- The ESPHome console now shares `dali_cli`'s tokeniser, argument parsers, and
-  named command tables. `dali_cli.{c,h}` moved to `components/dali/` so both
-  front ends can reach it, and `dali_cli_resolve_in()` resolves against a
-  caller-supplied verb table — the console brings the subset that suits a Home
-  Assistant text entity, and the native CLI keeps its own. Verified on hardware:
-  nothing in this migration has been exercised on a real bus.
+- The ESPHome console shares `dali_cli`'s tokeniser, argument parsers, named
+  command tables, and reply decoding. `dali_cli.{c,h}` moved to
+  `components/dali/` so both front ends can reach it, and
+  `dali_cli_resolve_in()` resolves against a caller-supplied verb table — the
+  console brings the subset that suits a Home Assistant text entity, and the
+  native CLI keeps its own. Verified on hardware: nothing in this migration, or
+  in the 2026-08-12 verb-parity work built on it, has been exercised on a real
+  bus.
 
 ### P1 — ESPHome correctness and architecture
 
@@ -951,9 +998,6 @@ Still open in this area:
   documented migration.
 - A paged or exportable Find Couplers result, rather than one truncated-with-a-
   count summary. The log already holds every frame.
-- `iquery` names whose value is selected by DTR0 (`instance-config`) are refused
-  by the console: it has no verb that loads DTR0 and reads in one sequence. The
-  native CLI handles these.
 - Define recovery after bus-only power cycles, beyond the current/cumulative
   fault split above.
 - Map brightness onto `[MIN_LEVEL, MAX_LEVEL]` instead of `[1, 254]`. The layer
@@ -962,10 +1006,14 @@ Still open in this area:
   ask for — a reduced ceiling can never report 100 %. Needs both registers
   queried per entity at boot and refreshed after a scan, since they are gear
   configuration and can change under the controller.
-- Handle DT6 gear switched to the linear dimming curve. `dali_dim_curve` is the
-  standard curve only, and it is applied unconditionally to every light entity,
-  so linear-curve gear is misreported and miscommanded in both directions.
-  Either query the curve during discovery or expose a per-entity override.
+- A level-changing console verb does not update the light entity; Home Assistant
+  catches up on the next refresh pass, as it does after a wall switch. This
+  matches what `level` and `off` already did and is not new, but the fade and
+  step verbs make it easier to hit.
+- The console's own dispatch has no host vectors. Its parsing, argument
+  validation, and reply decoding are shared code that does, but the wiring
+  between them in `dali_component.cpp` is ESPHome/FreeRTOS-bound and testable
+  only on the device.
 
 ### P1 — Release and verification quality
 
@@ -977,8 +1025,9 @@ Still open in this area:
   route remains authoritative.
 - Enforce or document the actual ESP-IDF and ESPHome version requirements; the
   current `manifest.json` is not enforcement for normal external components.
-- Synchronize `dali_command_reference.md` with implemented native and ESPHome
-  verbs, and keep local filenames hyphenated in all documentation.
+- Keep local filenames hyphenated in all documentation. `dali_command_reference.md`
+  was synchronized with both verb surfaces on 2026-08-12; it needs re-checking
+  whenever either table changes.
 - Complete release provenance: project SPDX identifiers and the full vendored
   Unity MIT license/third-party notice.
 - Document the next-release C migration before tagging it. Accumulated so far:
@@ -989,7 +1038,13 @@ Still open in this area:
   numeric command id is unaffected but `DALI_CMD_COUNT` itself moved;
   `dali_stats_t` gained `tx_frames_ok` at the end; `DaliCliCommandSpec` and
   `DaliCliInstanceConfig` gained fields, so brace-initialised tables outside
-  this repo need updating.
+  this repo need updating. Additive since: `dali_control_continuous_up/down()`,
+  `dali_cli_format_response()`, `dali_cli_format_status()`, and
+  `dali_cli_special_is_commissioning()`. One output change comes with them —
+  `dali_cli_print_response()` now prints a status byte's head line as
+  `status: 0x04 arc-on` rather than `status: 0x04`, before the same per-field
+  block, so anything scraping native CLI output for that exact line needs
+  updating.
 - Announce the ESPHome console verb renames in the release notes. They are the
   operator-visible half of the `dali_cli` adoption and have no aliases — the
   table is in `dali_command_reference.md` under "Verbs renamed when the console
@@ -1002,6 +1057,11 @@ Still open in this area:
   `query a0 actual-level` became `query s0 actual`, `config <t> <name> <dtr0>`
   became `config-dtr0`, and the Part 303/304 instance names took type prefixes
   (`hold-timer` → `occ-hold-timer`).
+- Announce the console reply-format change alongside those renames. Every query
+  reply is now named and decoded (`actual: 42 (0x2A)`, `present: yes (0xFF)`,
+  `status: 0x06 lamp-fail,arc-on`) instead of being published as a bare
+  `42 (0x2A)`, so an automation that parses `command_result` numerically breaks.
+  This is the second half of the same migration and has the same audience.
 - Clarify the bus topology: direct-control couplers also transmit. Their current
   coexistence is field-tested, but it is not equivalent to collision-safe
   single-master arbitration.

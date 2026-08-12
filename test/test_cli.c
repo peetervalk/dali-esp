@@ -861,9 +861,145 @@ static void test_print_response_status_decodes_fields(void)
     DaliCliOut out = capture_begin();
     dali_cli_print_response(&out, "status", DALI_RESP_STATUS, &reply);
 
-    TEST_ASSERT_NOT_NULL(strstr(s_capture, "status: 0x04\r\n"));
+    TEST_ASSERT_NOT_NULL(strstr(s_capture, "status: 0x04 arc-on\r\n"));
     TEST_ASSERT_NOT_NULL(strstr(s_capture, "Lamp arc power on:     YES"));
     TEST_ASSERT_NOT_NULL(strstr(s_capture, "Ballast failure:       no"));
+}
+
+/* ---------------------------------------------------------------------------
+ * Single-line response formatting
+ *
+ * The ESPHome console's whole answer is one Home Assistant text state, so it
+ * formats replies through these rather than through the printing forms. The
+ * values are written from the standard's response definitions, not read back
+ * from the formatter.
+ * --------------------------------------------------------------------------*/
+
+static void test_format_status_names_only_the_set_flags(void)
+{
+    char buf[DALI_CLI_STATUS_LINE_MAX];
+
+    TEST_ASSERT_EQUAL_UINT(strlen("0x00 none"),
+                           dali_cli_format_status(buf, sizeof(buf), 0x00u));
+    TEST_ASSERT_EQUAL_STRING("0x00 none", buf);
+
+    /* bit 1 lamp failure, bit 2 lamp arc power on */
+    dali_cli_format_status(buf, sizeof(buf), 0x06u);
+    TEST_ASSERT_EQUAL_STRING("0x06 lamp-fail,arc-on", buf);
+
+    /* bit 6 missing short address — the one a freshly reset gear reports */
+    dali_cli_format_status(buf, sizeof(buf), 0x40u);
+    TEST_ASSERT_EQUAL_STRING("0x40 no-addr", buf);
+}
+
+/*
+ * The buffer has to hold the worst case, or a gear reporting every fault at
+ * once would have its status silently clipped to the faults that fitted.
+ */
+static void test_format_status_fits_all_eight_flags(void)
+{
+    char buf[DALI_CLI_STATUS_LINE_MAX];
+    size_t len = dali_cli_format_status(buf, sizeof(buf), 0xFFu);
+
+    TEST_ASSERT_LESS_THAN_UINT(sizeof(buf) - 1u, len);
+    TEST_ASSERT_EQUAL_STRING(
+        "0xFF ballast-fail,lamp-fail,arc-on,limit-err,fading,reset,no-addr,power-fail",
+        buf);
+}
+
+static void test_format_response_matches_the_printed_forms(void)
+{
+    char buf[DALI_CLI_RESPONSE_LINE_MAX];
+
+    DaliFrame yes = backward(DALI_YES_RESPONSE);
+    dali_cli_format_response(buf, sizeof(buf), "present", DALI_RESP_YES_NO, &yes);
+    TEST_ASSERT_EQUAL_STRING("present: yes (0xFF)", buf);
+
+    DaliFrame value = backward(0x2Au);
+    dali_cli_format_response(buf, sizeof(buf), "actual", DALI_RESP_UINT8, &value);
+    TEST_ASSERT_EQUAL_STRING("actual: 42 (0x2A)", buf);
+
+    dali_cli_format_response(buf, sizeof(buf), "groups-0-7", DALI_RESP_BITSET8, &value);
+    TEST_ASSERT_EQUAL_STRING("groups-0-7: 0x2A", buf);
+
+    DaliFrame fade = backward(0x37u);
+    dali_cli_format_response(buf, sizeof(buf), "fade", DALI_RESP_FADE_TIME_RATE, &fade);
+    TEST_ASSERT_EQUAL_STRING("fade: fade_time=3 fade_rate=7 (0x37)", buf);
+
+    DaliFrame status = backward(0x04u);
+    dali_cli_format_response(buf, sizeof(buf), "status", DALI_RESP_STATUS, &status);
+    TEST_ASSERT_EQUAL_STRING("status: 0x04 arc-on", buf);
+}
+
+/* A reply that never arrived must not be formatted as a plausible number. */
+static void test_format_response_reports_malformed(void)
+{
+    char buf[DALI_CLI_RESPONSE_LINE_MAX];
+
+    DaliFrame forward = { .data = 0xFF00u, .bit_length = DALI_FORWARD_FRAME_BITS };
+    dali_cli_format_response(buf, sizeof(buf), "actual", DALI_RESP_UINT8, &forward);
+    TEST_ASSERT_EQUAL_STRING("actual: malformed reply", buf);
+
+    dali_cli_format_response(buf, sizeof(buf), "actual", DALI_RESP_UINT8, NULL);
+    TEST_ASSERT_EQUAL_STRING("actual: malformed reply", buf);
+}
+
+/*
+ * A short buffer truncates rather than overruns, and always stays terminated.
+ * The console's result buffer is fixed, so this is the behaviour it relies on.
+ */
+static void test_format_response_truncates_within_bounds(void)
+{
+    char buf[8] = { 'x', 'x', 'x', 'x', 'x', 'x', 'x', 'x' };
+    DaliFrame reply = backward(0x2Au);
+
+    size_t len = dali_cli_format_response(buf, sizeof(buf), "actual",
+                                          DALI_RESP_UINT8, &reply);
+    TEST_ASSERT_EQUAL_UINT(sizeof(buf) - 1u, len);
+    TEST_ASSERT_EQUAL_CHAR('\0', buf[sizeof(buf) - 1u]);
+    TEST_ASSERT_EQUAL_STRING("actual:", buf);
+
+    /* A zero-capacity buffer writes nothing at all. */
+    TEST_ASSERT_EQUAL_UINT(0u, dali_cli_format_response(buf, 0u, "actual",
+                                                        DALI_RESP_UINT8, &reply));
+}
+
+/*
+ * Which specials a front end without a guarded commissioning workflow refuses.
+ *
+ * The list is asserted in both directions: a name wrongly marked would either
+ * put a bus-wide readdressing behind a Home Assistant text box, or withhold
+ * TERMINATE from the operator who needs it to undo one.
+ */
+static void test_special_commissioning_set(void)
+{
+    static const char *restricted[] = {
+        "initialise", "randomize", "search-h", "search-m", "search-l",
+        "program-short", "withdraw", "write-memory", "write-memory-nr",
+    };
+    static const char *allowed[] = {
+        "terminate", "compare", "ping", "verify-short", "query-short",
+        "enable-type", "dtr0", "dtr1", "dtr2",
+    };
+
+    for (size_t i = 0u; i < sizeof(restricted) / sizeof(restricted[0]); i++) {
+        const DaliCliGearCommand *spec = dali_cli_special_find(restricted[i]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(spec, restricted[i]);
+        TEST_ASSERT_TRUE_MESSAGE(dali_cli_special_is_commissioning(spec->id),
+                                 restricted[i]);
+    }
+
+    for (size_t i = 0u; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
+        const DaliCliGearCommand *spec = dali_cli_special_find(allowed[i]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(spec, allowed[i]);
+        TEST_ASSERT_FALSE_MESSAGE(dali_cli_special_is_commissioning(spec->id),
+                                  allowed[i]);
+    }
+
+    /* Every name in the table is accounted for above. */
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)(sizeof(restricted) / sizeof(restricted[0]) +
+                                      sizeof(allowed) / sizeof(allowed[0])),
+                            dali_cli_special_count());
 }
 
 static void test_print_response_yes_no(void)
@@ -1041,6 +1177,14 @@ int main(void)
     RUN_TEST(test_table_names_round_trip);
     RUN_TEST(test_print_table_lists_every_entry);
     RUN_TEST(test_print_table_marks_send_twice_specials);
+
+    RUN_TEST(test_special_commissioning_set);
+
+    RUN_TEST(test_format_status_names_only_the_set_flags);
+    RUN_TEST(test_format_status_fits_all_eight_flags);
+    RUN_TEST(test_format_response_matches_the_printed_forms);
+    RUN_TEST(test_format_response_reports_malformed);
+    RUN_TEST(test_format_response_truncates_within_bounds);
 
     RUN_TEST(test_print_response_status_decodes_fields);
     RUN_TEST(test_print_response_yes_no);

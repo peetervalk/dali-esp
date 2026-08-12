@@ -691,6 +691,24 @@ const DaliCliGearCommand *dali_cli_special_find(const char *name)
     return gear_find(s_special_commands, dali_cli_special_count(), name);
 }
 
+bool dali_cli_special_is_commissioning(DaliCommandId id)
+{
+    switch (id) {
+        case DALI_CMD_INITIALISE:
+        case DALI_CMD_RANDOMIZE:
+        case DALI_CMD_SEARCH_ADDRH:
+        case DALI_CMD_SEARCH_ADDRM:
+        case DALI_CMD_SEARCH_ADDRL:
+        case DALI_CMD_PROGRAM_SHORT_ADDRESS:
+        case DALI_CMD_WITHDRAW:
+        case DALI_CMD_WRITE_MEMORY_LOCATION:
+        case DALI_CMD_WRITE_MEMORY_LOCATION_NO_REPLY:
+            return true;
+        default:
+            return false;
+    }
+}
+
 uint8_t dali_cli_config_count(void) { return CLI_TABLE_ENTRIES(s_config_commands); }
 const DaliCliGearCommand *dali_cli_config_at(uint8_t index)
 {
@@ -1271,6 +1289,129 @@ void dali_cli_print_frame(const DaliCliOut *out,
                     (unsigned)frame->bit_length);
 }
 
+/*
+ * Append to a bounded buffer, returning the new length.
+ *
+ * Truncation is reported by the returned length reaching cap - 1u rather than
+ * by a flag: every caller here builds one short line, and a line clipped at the
+ * buffer end is still a correct prefix of the answer.
+ */
+static size_t cli_append(char *buf, size_t cap, size_t len, const char *fmt, ...)
+{
+    if (buf == NULL || cap == 0u || fmt == NULL || len + 1u >= cap) {
+        return len;
+    }
+
+    va_list args;
+    va_start(args, fmt);
+    int written = vsnprintf(buf + len, cap - len, fmt, args);
+    va_end(args);
+
+    if (written < 0) {
+        buf[len] = '\0';
+        return len;
+    }
+    if ((size_t)written >= cap - len) {
+        return cap - 1u;  /* vsnprintf terminated at the boundary */
+    }
+    return len + (size_t)written;
+}
+
+size_t dali_cli_format_status(char *buf, size_t cap, uint8_t raw)
+{
+    if (buf == NULL || cap == 0u) {
+        return 0u;
+    }
+    buf[0] = '\0';
+
+    DaliStatus s;
+    if (dali_parse_status(raw, &s) != DALI_OK) {
+        return 0u;
+    }
+
+    const struct {
+        const char *name;
+        bool        set;
+    } flags[] = {
+        { "ballast-fail", s.ballast_failure       },
+        { "lamp-fail",    s.lamp_failure          },
+        { "arc-on",       s.lamp_arc_power_on     },
+        { "limit-err",    s.limit_error           },
+        { "fading",       s.fade_running          },
+        { "reset",        s.reset_state           },
+        { "no-addr",      s.missing_short_address },
+        { "power-fail",   s.power_failure         },
+    };
+
+    size_t len = cli_append(buf, cap, 0u, "0x%02X", (unsigned)raw);
+    bool   any = false;
+    for (uint8_t i = 0u; i < (uint8_t)(sizeof(flags) / sizeof(flags[0])); i++) {
+        if (!flags[i].set) {
+            continue;
+        }
+        len = cli_append(buf, cap, len, "%c%s", any ? ',' : ' ', flags[i].name);
+        any = true;
+    }
+    if (!any) {
+        len = cli_append(buf, cap, len, " none");
+    }
+    return len;
+}
+
+size_t dali_cli_format_response(char             *buf,
+                                size_t            cap,
+                                const char       *name,
+                                DaliResponseKind  kind,
+                                const DaliFrame  *reply)
+{
+    if (buf == NULL || cap == 0u) {
+        return 0u;
+    }
+    buf[0] = '\0';
+    if (name == NULL) {
+        return 0u;
+    }
+
+    DaliParsedResponse parsed;
+    if (dali_parse_by_kind(kind, reply, &parsed) != DALI_OK) {
+        return cli_append(buf, cap, 0u, "%s: malformed reply", name);
+    }
+
+    size_t len = cli_append(buf, cap, 0u, "%s: ", name);
+
+    switch (parsed.kind) {
+        case DALI_RESP_STATUS: {
+            char decoded[DALI_CLI_STATUS_LINE_MAX];
+            dali_cli_format_status(decoded, sizeof(decoded), parsed.raw);
+            return cli_append(buf, cap, len, "%s", decoded);
+        }
+
+        case DALI_RESP_YES_NO:
+            return cli_append(buf, cap, len, "%s (0x%02X)",
+                              parsed.yes ? "yes" : "no", (unsigned)parsed.raw);
+
+        case DALI_RESP_BITSET8:
+            return cli_append(buf, cap, len, "0x%02X", (unsigned)parsed.bitset);
+
+        case DALI_RESP_FADE_TIME_RATE:
+            return cli_append(buf, cap, len, "fade_time=%u fade_rate=%u (0x%02X)",
+                              (unsigned)parsed.fade.fade_time,
+                              (unsigned)parsed.fade.fade_rate,
+                              (unsigned)parsed.raw);
+
+        case DALI_RESP_UINT8:
+        case DALI_RESP_MEMORY_BYTE:
+        case DALI_RESP_INPUT_VALUE_MSB:
+        case DALI_RESP_INPUT_VALUE_LATCH:
+            return cli_append(buf, cap, len, "%u (0x%02X)",
+                              (unsigned)parsed.value, (unsigned)parsed.raw);
+
+        case DALI_RESP_NONE:
+        default:
+            return cli_append(buf, cap, len, "0x%02X", (unsigned)parsed.raw);
+    }
+}
+
 void dali_cli_print_status_fields(const DaliCliOut *out, uint8_t raw)
 {
     DaliStatus s;
@@ -1297,51 +1438,16 @@ void dali_cli_print_response(const DaliCliOut *out,
         return;
     }
 
+    char line[DALI_CLI_RESPONSE_LINE_MAX];
+    dali_cli_format_response(line, sizeof(line), name, kind, reply);
+    dali_cli_printf(out, "%s\r\n", line);
+
+    /* A status byte also gets its per-field block. The terminal has room for
+     * it, and the line above is a summary of the same eight bits. */
     DaliParsedResponse parsed;
-    if (dali_parse_by_kind(kind, reply, &parsed) != DALI_OK) {
-        dali_cli_printf(out, "%s: malformed reply\r\n", name);
-        return;
-    }
-
-    switch (parsed.kind) {
-        case DALI_RESP_STATUS:
-            dali_cli_printf(out, "%s: 0x%02X\r\n", name, (unsigned)parsed.raw);
-            dali_cli_print_status_fields(out, parsed.raw);
-            break;
-
-        case DALI_RESP_YES_NO:
-            dali_cli_printf(out, "%s: %s (0x%02X)\r\n",
-                            name,
-                            parsed.yes ? "yes" : "no",
-                            (unsigned)parsed.raw);
-            break;
-
-        case DALI_RESP_BITSET8:
-            dali_cli_printf(out, "%s: 0x%02X\r\n", name, (unsigned)parsed.bitset);
-            break;
-
-        case DALI_RESP_FADE_TIME_RATE:
-            dali_cli_printf(out, "%s: fade_time=%u fade_rate=%u (0x%02X)\r\n",
-                            name,
-                            (unsigned)parsed.fade.fade_time,
-                            (unsigned)parsed.fade.fade_rate,
-                            (unsigned)parsed.raw);
-            break;
-
-        case DALI_RESP_UINT8:
-        case DALI_RESP_MEMORY_BYTE:
-        case DALI_RESP_INPUT_VALUE_MSB:
-        case DALI_RESP_INPUT_VALUE_LATCH:
-            dali_cli_printf(out, "%s: %u (0x%02X)\r\n",
-                            name,
-                            (unsigned)parsed.value,
-                            (unsigned)parsed.raw);
-            break;
-
-        case DALI_RESP_NONE:
-        default:
-            dali_cli_printf(out, "%s: 0x%02X\r\n", name, (unsigned)parsed.raw);
-            break;
+    if (dali_parse_by_kind(kind, reply, &parsed) == DALI_OK &&
+        parsed.kind == DALI_RESP_STATUS) {
+        dali_cli_print_status_fields(out, parsed.raw);
     }
 }
 

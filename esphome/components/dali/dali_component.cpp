@@ -24,6 +24,9 @@ extern "C" {
 #include "../../../components/dali/dali_input_poll.h"
 #include "../../../components/dali/dali_memory.h"
 #include "../../../components/dali/dali_group_map.h"
+#include "../../../components/dali/dali_gear_dt6.h"
+#include "../../../components/dali/dali_lunatone.h"
+#include "../../../components/dali/dali_steinel.h"
 }
 
 namespace esphome {
@@ -233,6 +236,20 @@ static bool config_changes_level_profile(DaliCommandId id)
     return id == DALI_CMD_SET_MIN_LEVEL_DTR0 ||
            id == DALI_CMD_SET_MAX_LEVEL_DTR0 ||
            id == DALI_CMD_RESET;
+}
+
+/*
+ * The DT6 counterpart. SELECT DIMMING CURVE is the only command in the DT6
+ * table that changes how a level maps to light output; the others set the fast
+ * fade time or start a reference measurement, and leave both the curve and the
+ * level window where they were.
+ *
+ * Matched on the builder rather than on the name so that renaming the table
+ * entry cannot quietly detach the invalidation from the command.
+ */
+static bool dt6_changes_level_profile(const DaliCliDtCommand *spec)
+{
+    return spec != nullptr && spec->build == dali_dt6_select_dimming_curve;
 }
 
 /*
@@ -495,7 +512,10 @@ static void on_diag_refresh_reply(DaliError result, const DaliFrame *reply, void
 
 /* ── Command result (Core 1 → Core 0) ───────────────────────────────────── */
 
-static char              s_cmd_result_str[64] = {};
+/* Sized for the longest line dali_cli_format_response() produces — a status
+ * byte with all eight flags named — so a decoded reply is never clipped. Still
+ * well inside the Home Assistant state limit. */
+static char              s_cmd_result_str[DALI_CLI_RESPONSE_LINE_MAX] = {};
 static std::atomic<bool> s_cmd_result_dirty_{false};
 static std::atomic<uint32_t> s_cmd_generation_{0u};
 
@@ -555,31 +575,82 @@ static void set_cmd_result_for_generation(const char *str, void *ctx)
     portEXIT_CRITICAL(&s_string_mux);
 }
 
+/*
+ * What the in-flight query's reply means.
+ *
+ * A scheduler completion carries the frame and the caller's one context word,
+ * which is already spent on the command generation. A reply byte is only
+ * decodable with the name and response kind of the command that asked for it,
+ * so a handler records those here before it enqueues. One slot is enough: every
+ * handler publishes a new generation before it writes this, and a completion
+ * whose generation no longer matches is discarded without publishing anything.
+ *
+ * `step` is where the reply sits in a sequence — past the DTR loads and, for
+ * DT6, past its ENABLE DEVICE TYPE frame. It is ignored by single-transaction
+ * callers.
+ */
+struct PendingReply {
+    char             name[24];
+    DaliResponseKind kind;
+    uint8_t          step;
+};
+
+static PendingReply s_pending_reply = { "reply", DALI_RESP_UINT8, 0u };
+
+static void set_pending_reply(const char *name, DaliResponseKind kind, uint8_t step)
+{
+    portENTER_CRITICAL(&s_string_mux);
+    strncpy(s_pending_reply.name, name, sizeof(s_pending_reply.name) - 1u);
+    s_pending_reply.name[sizeof(s_pending_reply.name) - 1u] = '\0';
+    s_pending_reply.kind = kind;
+    s_pending_reply.step = step;
+    portEXIT_CRITICAL(&s_string_mux);
+}
+
+static PendingReply pending_reply_snapshot()
+{
+    portENTER_CRITICAL(&s_string_mux);
+    PendingReply pending = s_pending_reply;
+    portEXIT_CRITICAL(&s_string_mux);
+    return pending;
+}
+
+/*
+ * Publish a reply decoded the way the native CLI decodes it, so a yes/no answer
+ * reads as "yes" on both surfaces rather than as 255 on this one.
+ */
+static void set_cmd_reply_for_generation(const DaliFrame *reply, void *ctx)
+{
+    PendingReply pending = pending_reply_snapshot();
+    char line[DALI_CLI_RESPONSE_LINE_MAX];
+    dali_cli_format_response(line, sizeof(line), pending.name, pending.kind, reply);
+    set_cmd_result_for_generation(line, ctx);
+}
+
 static void on_cmd_query_reply(DaliError result, const DaliFrame *reply, void *ctx)
 {
     if (result != DALI_OK || reply == nullptr) {
         set_cmd_result_for_generation(result == DALI_ERR_TIMEOUT ? "no reply" : "err", ctx);
-    } else {
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%u (0x%02X)", (unsigned)(reply->data & 0xFFu),
-                 (unsigned)(reply->data & 0xFFu));
-        set_cmd_result_for_generation(buf, ctx);
+        return;
     }
+    set_cmd_reply_for_generation(reply, ctx);
 }
 
-static void on_memread_done(const DaliSequenceResult *result, void *ctx)
+/* Sequence form of the above: the reply is at the step the handler recorded. */
+static void on_cmd_sequence_reply(const DaliSequenceResult *result, void *ctx)
 {
-    DaliFrame reply;
-    if (result == nullptr || result->result != DALI_OK ||
-        !dali_sequence_result_last_reply(result, &reply)) {
+    if (result == nullptr || result->result != DALI_OK) {
         DaliError err = result != nullptr ? result->result : DALI_ERR_INVALID;
         set_cmd_result_for_generation(err == DALI_ERR_TIMEOUT ? "no reply" : "err", ctx);
-    } else {
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%u (0x%02X)", (unsigned)(reply.data & 0xFFu),
-                 (unsigned)(reply.data & 0xFFu));
-        set_cmd_result_for_generation(buf, ctx);
+        return;
     }
+
+    DaliFrame reply;
+    if (!dali_sequence_result_reply(result, pending_reply_snapshot().step, &reply)) {
+        set_cmd_result_for_generation("no reply", ctx);
+        return;
+    }
+    set_cmd_reply_for_generation(&reply, ctx);
 }
 
 static void set_raw_result(DaliError result, const DaliFrame *reply, bool sent_twice,
@@ -1246,6 +1317,25 @@ void DaliComponent::loop()
  * both bounds before a handler runs, so a trailing token is now an error rather
  * than something quietly ignored.
  *
+ * What is deliberately absent, and why:
+ *
+ *   help, list, stats, bus, capture, trace, read, rxdebug, reset
+ *       Their answer is a block of lines. There is one text state here.
+ *   scan, discover, inventory, export, identify
+ *       Already exposed as buttons and text sensors, which is the shape Home
+ *       Assistant can actually use.
+ *   commission
+ *       No guarded workflow exists here; `special` refuses its primitives for
+ *       the same reason (see console_special_).
+ *   meminfo, instances, sensor poll
+ *       Each needs a blocking transport to walk a device before it knows what
+ *       to ask next. Everything on this surface is one enqueue and one
+ *       completion, and Core 0's loop may not block. The scan covers the first
+ *       two; the sensor platform covers the third.
+ *   dt8
+ *       Implemented in the shared stack and reachable from the native CLI, held
+ *       back here until it has been run against real DT8 gear.
+ *
  * `group` carries DALI_CLI_CMD_COUNT because it has no shared id: it edits the
  * group-membership cache, which exists only in this integration.
  */
@@ -1254,19 +1344,38 @@ static const DaliCliCommandSpec s_console_commands[] = {
 
     { DALI_CLI_CMD_RAW,  "raw",  "<hex> len=<bits> [wait]", "send one arbitrary frame", 2u, 3u, NULL },
     { DALI_CLI_CMD_RAW2, "raw2", "<hex> len=<bits>", "send one frame twice within the 100 ms window", 2u, 2u, NULL },
+    { DALI_CLI_CMD_DTR,  "dtr",  "<0|1|2> <0-255>", "load a control-gear DTR register", 2u, 2u, NULL },
 
-    { DALI_CLI_CMD_LEVEL, "level", DALI_CLI_TARGET_ARG " <0-254|mask>", "direct arc power control", 2u, 2u, NULL },
-    { DALI_CLI_CMD_OFF,   "off",   DALI_CLI_TARGET_ARG, "OFF", 1u, 1u, NULL },
-    { DALI_CLI_CMD_MAX,   "max",   DALI_CLI_TARGET_ARG, "RECALL MAX LEVEL", 1u, 1u, NULL },
-    { DALI_CLI_CMD_MIN,   "min",   DALI_CLI_TARGET_ARG, "RECALL MIN LEVEL", 1u, 1u, NULL },
+    { DALI_CLI_CMD_LEVEL,      "level",      DALI_CLI_TARGET_ARG " <0-254|mask>", "direct arc power control", 2u, 2u, NULL },
+    { DALI_CLI_CMD_MASK,       "mask",       DALI_CLI_TARGET_ARG, "arc power MASK: leave the level unchanged", 1u, 1u, NULL },
+    { DALI_CLI_CMD_OFF,        "off",        DALI_CLI_TARGET_ARG, "OFF", 1u, 1u, NULL },
+    { DALI_CLI_CMD_UP,         "up",         DALI_CLI_TARGET_ARG, "UP: one fade step up", 1u, 1u, NULL },
+    { DALI_CLI_CMD_DOWN,       "down",       DALI_CLI_TARGET_ARG, "DOWN: one fade step down", 1u, 1u, NULL },
+    { DALI_CLI_CMD_STEP_UP,    "step-up",    DALI_CLI_TARGET_ARG, "STEP UP", 1u, 1u, NULL },
+    { DALI_CLI_CMD_STEP_DOWN,  "step-down",  DALI_CLI_TARGET_ARG, "STEP DOWN", 1u, 1u, NULL },
+    { DALI_CLI_CMD_STEP_OFF,   "step-off",   DALI_CLI_TARGET_ARG, "STEP DOWN AND OFF", 1u, 1u, NULL },
+    { DALI_CLI_CMD_ON_STEP,    "on-step",    DALI_CLI_TARGET_ARG, "ON AND STEP UP", 1u, 1u, NULL },
+    { DALI_CLI_CMD_CONT_UP,    "cont-up",    DALI_CLI_TARGET_ARG, "CONTINUOUS UP: fade toward max", 1u, 1u, NULL },
+    { DALI_CLI_CMD_CONT_DOWN,  "cont-down",  DALI_CLI_TARGET_ARG, "CONTINUOUS DOWN: fade toward min", 1u, 1u, NULL },
+    { DALI_CLI_CMD_DAPC_SEQ,   "dapc-seq",   DALI_CLI_TARGET_ARG, "ENABLE DAPC SEQUENCE", 1u, 1u, NULL },
+    { DALI_CLI_CMD_LAST,       "last",       DALI_CLI_TARGET_ARG, "GO TO LAST ACTIVE LEVEL", 1u, 1u, NULL },
+    { DALI_CLI_CMD_SCENE,      "scene",      DALI_CLI_TARGET_ARG " <0-15>", "GO TO SCENE", 2u, 2u, NULL },
+    { DALI_CLI_CMD_MAX,        "max",        DALI_CLI_TARGET_ARG, "RECALL MAX LEVEL", 1u, 1u, NULL },
+    { DALI_CLI_CMD_MIN,        "min",        DALI_CLI_TARGET_ARG, "RECALL MIN LEVEL", 1u, 1u, NULL },
+    { DALI_CLI_CMD_STATUS,     "status",     DALI_CLI_TARGET_ARG, "QUERY STATUS with decoded flags", 1u, 1u, NULL },
 
     { DALI_CLI_CMD_QUERY,       "query",       DALI_CLI_TARGET_ARG " <query-name> [param]", "addressed control-gear query", 2u, 3u, NULL },
+    { DALI_CLI_CMD_SPECIAL,     "special",     "<name> [param]", "special/broadcast command", 1u, 2u, NULL },
     { DALI_CLI_CMD_CONFIG,      "config",      DALI_CLI_TARGET_ARG " <config-name> [param]", "addressed configuration command", 2u, 3u, NULL },
     { DALI_CLI_CMD_CONFIG_DTR0, "config-dtr0", DALI_CLI_TARGET_ARG " <config-name> <dtr0> [param]", "load DTR0 and configure atomically", 3u, 4u, NULL },
 
-    { DALI_CLI_CMD_IQUERY,  "iquery",  "<addr> <instance> <name>", "Part 103 instance query", 3u, 3u, NULL },
-    { DALI_CLI_CMD_ICONFIG, "iconfig", "<addr> <instance> <name> [v0] [v1] [v2]", "Part 103 instance configuration", 3u, 6u, NULL },
+    { DALI_CLI_CMD_DT6, "dt6", "<addr> <name> [dtr0]", "device type 6 (LED) command", 2u, 3u, NULL },
 
+    { DALI_CLI_CMD_IQUERY,  "iquery",  "<addr> <instance> <name> [dtr0]", "Part 103 instance query", 3u, 4u, NULL },
+    { DALI_CLI_CMD_ICONFIG, "iconfig", "<addr> <instance> <name> [v0] [v1] [v2]", "Part 103 instance configuration", 3u, 6u, NULL },
+    { DALI_CLI_CMD_VENDOR,  "vendor",  "lunatone <addr> <instance> <name> | steinel <instance> <raw>", "vendor helpers", 3u, 4u, "lunatone steinel" },
+
+    { DALI_CLI_CMD_MEMREAD,  "memread",  "<addr> <bank> <offset> [count]", "control-gear memory read (Part 102)", 3u, 4u, NULL },
     { DALI_CLI_CMD_DEVMEM,   "devmem",   "read|write <addr> <bank> <offset> [count|value]", "control-device memory (Part 103)", 4u, 5u, "read write" },
     { DALI_CLI_CMD_DTRCHECK, "dtrcheck", "<addr> <0|1|2> <0-255>", "load a control-device DTR and read it back", 3u, 3u, NULL },
 
@@ -1294,7 +1403,13 @@ static void set_cmd_usage(const DaliCliCommandSpec *spec)
 
 /* ── Multi-byte memory read result (Core 1 -> Core 0) ────────────────────── */
 
-static void on_devmem_read_done(const DaliSequenceResult *result, void *ctx)
+/*
+ * Shared by the control-gear (`memread`) and control-device (`devmem read`)
+ * forms. Both builders lay a read sequence out the same way — DTR setup steps
+ * that answer nothing, then one reply per byte — so the reporting is identical
+ * even though the frames on the bus are not.
+ */
+static void on_memory_read_done(const DaliSequenceResult *result, void *ctx)
 {
     if (result == nullptr || result->result != DALI_OK) {
         DaliError err = result != nullptr ? result->result : DALI_ERR_INVALID;
@@ -1480,12 +1595,368 @@ void DaliComponent::console_devmem_(const DaliCliTokens &t, void *ctx)
 
     err = dali_memory_build_control_device_read_sequence(addr, bank, offset, count, &seq);
     if (err == DALI_OK) {
-        seq.on_complete = on_devmem_read_done;
+        seq.on_complete = on_memory_read_done;
         seq.cb_ctx      = ctx;
         set_cmd_result("pending");
         err = dali_sched_enqueue_sequence(&seq);
     }
     set_cmd_enqueue_error(err);
+}
+
+/*
+ * Special (broadcast) commands.
+ *
+ * The commissioning primitives are refused here. This integration exposes
+ * discovery, not a guarded commissioning workflow, and these are the commands
+ * that can destroy the addressing of every device on the bus in one line typed
+ * into a Home Assistant text box — RANDOMISE irreversibly. The native CLI runs
+ * them inside `commission`, which sequences and checks them; use it.
+ *
+ * TERMINATE stays available on purpose: it is what closes an initialise window
+ * another tool left open, and refusing it would leave an operator holding the
+ * problem without the remedy.
+ */
+void DaliComponent::console_special_(const DaliCliTokens &t, void *ctx)
+{
+    const DaliCliGearCommand *spec = dali_cli_special_find(t.tok[1]);
+    if (spec == nullptr) {
+        set_cmd_result("unknown special");
+        return;
+    }
+    if (dali_cli_special_is_commissioning(spec->id)) {
+        set_cmd_result("commissioning special; use the native CLI");
+        return;
+    }
+
+    uint8_t param = 0u;
+    if (spec->needs_param) {
+        if (t.count != 3u || !dali_cli_parse_u8(t.tok[2], spec->max_param, &param)) {
+            char buf[sizeof(s_cmd_result_str)];
+            snprintf(buf, sizeof(buf), "usage: special %s <0-%u>", spec->name,
+                     (unsigned)spec->max_param);
+            set_cmd_result(buf);
+            return;
+        }
+    } else if (t.count != 2u) {
+        char buf[sizeof(s_cmd_result_str)];
+        snprintf(buf, sizeof(buf), "usage: special %s", spec->name);
+        set_cmd_result(buf);
+        return;
+    }
+
+    const DaliCommandInfo *info = dali_command_lookup(spec->id);
+    if (info == nullptr || info->frame_kind != DALI_CMD_FRAME_SPECIAL) {
+        set_cmd_result("err");
+        return;
+    }
+
+    DaliFrame frame;
+    DaliError err = dali_build_special(spec->id, param, &frame);
+    if (err != DALI_OK) {
+        set_cmd_enqueue_result(err);
+        return;
+    }
+
+    const bool needs_reply = info->response_kind != DALI_RESP_NONE;
+
+    DaliTransaction txn = {};
+    txn.frame       = frame;
+    txn.needs_reply = needs_reply;
+    txn.send_twice  = info->send_twice;
+    if (!needs_reply) {
+        set_cmd_enqueue_result(dali_sched_enqueue(&txn));
+        return;
+    }
+
+    set_pending_reply(spec->name, info->response_kind, 0u);
+    txn.on_complete = on_cmd_query_reply;
+    txn.cb_ctx      = ctx;
+    set_cmd_result("pending");
+    set_cmd_enqueue_error(dali_sched_enqueue(&txn));
+}
+
+/*
+ * Control-gear (Part 102) block read.
+ *
+ * Named apart from `devmem` for the reason the native CLI names them apart: the
+ * two use different DTR and memory opcodes, and picking the wrong one addresses
+ * a different class of device entirely.
+ */
+void DaliComponent::console_memread_(const DaliCliTokens &t, void *ctx)
+{
+    uint8_t addr, bank, offset;
+    if (!dali_cli_parse_short_addr(t.tok[1], &addr) ||
+        !dali_cli_parse_u8(t.tok[2], 255u, &bank) ||
+        !dali_cli_parse_u8(t.tok[3], 255u, &offset)) {
+        set_cmd_result("memread: bad args");
+        return;
+    }
+
+    uint8_t count = 1u;
+    if (t.count == 5u &&
+        (!dali_cli_parse_u8(t.tok[4], DALI_MEMORY_MAX_SEQUENCE_READ_BYTES, &count) ||
+         count == 0u)) {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "memread count 1-%u",
+                 (unsigned)DALI_MEMORY_MAX_SEQUENCE_READ_BYTES);
+        set_cmd_result(buf);
+        return;
+    }
+    if ((unsigned)offset + (unsigned)count > 256u) {
+        set_cmd_result("memread: past end of bank");
+        return;
+    }
+
+    DaliSequence seq;
+    DaliError err = dali_memory_build_read_sequence(addr, bank, offset, count, &seq);
+    if (err == DALI_OK) {
+        seq.on_complete = on_memory_read_done;
+        seq.cb_ctx      = ctx;
+        set_cmd_result("pending");
+        err = dali_sched_enqueue_sequence(&seq);
+    }
+    set_cmd_enqueue_error(err);
+}
+
+/*
+ * Part 103 instance query.
+ *
+ * A name whose value is selected by DTR0 takes the selector as a fourth
+ * argument and goes out as one sequence, because a DTR0 written by a separate
+ * transaction can be replaced before the query that reads it arrives.
+ */
+void DaliComponent::console_iquery_(const DaliCliTokens &t, void *ctx)
+{
+    uint8_t addr, instance;
+    if (!dali_cli_parse_short_addr(t.tok[1], &addr) ||
+        !dali_cli_parse_instance(t.tok[2], &instance)) {
+        set_cmd_result("iquery: addr 0-63, inst 0-31");
+        return;
+    }
+
+    const DaliCliInstanceQuery *spec = dali_cli_iquery_find(t.tok[3]);
+    if (spec == nullptr) {
+        set_cmd_result("unknown iquery");
+        return;
+    }
+
+    uint8_t dtr0 = 0u;
+    if (spec->needs_dtr0) {
+        if (t.count != 5u || !dali_cli_parse_u8(t.tok[4], 255u, &dtr0)) {
+            char buf[sizeof(s_cmd_result_str)];
+            snprintf(buf, sizeof(buf), "%s needs dtr0: %s", spec->name,
+                     spec->dtr0_help != nullptr ? spec->dtr0_help : "0-255");
+            set_cmd_result(buf);
+            return;
+        }
+    } else if (t.count != 4u) {
+        char buf[sizeof(s_cmd_result_str)];
+        snprintf(buf, sizeof(buf), "%s takes no dtr0", spec->name);
+        set_cmd_result(buf);
+        return;
+    }
+
+    DaliFrame frame = spec->build(addr, instance);
+    if (frame.bit_length == 0u) {
+        set_cmd_result("iquery: bad args");
+        return;
+    }
+
+    if (spec->needs_dtr0) {
+        DaliSequence seq;
+        DaliError err = dali_input_build_config_sequence(frame, false, true, &dtr0, 1u,
+                                                         &seq);
+        if (err == DALI_OK) {
+            set_pending_reply(spec->name, spec->response_kind,
+                              DALI_INPUT_CONFIG_COMMAND_STEP(1u));
+            seq.on_complete = on_cmd_sequence_reply;
+            seq.cb_ctx      = ctx;
+            set_cmd_result("pending");
+            err = dali_sched_enqueue_sequence(&seq);
+        }
+        set_cmd_enqueue_error(err);
+        return;
+    }
+
+    set_pending_reply(spec->name, spec->response_kind, 0u);
+    DaliTransaction txn = {};
+    txn.frame       = frame;
+    txn.needs_reply = true;
+    txn.on_complete = on_cmd_query_reply;
+    txn.cb_ctx      = ctx;
+    set_cmd_result("pending");
+    set_cmd_enqueue_error(dali_sched_enqueue(&txn));
+}
+
+/* Steinel readings are decoded, not transmitted: the conversion is the whole
+ * point of the verb, and it answers without touching the bus. */
+static void console_steinel_decode(uint8_t instance, uint16_t raw)
+{
+    const DaliSteinelInstanceInfo *info = dali_steinel_hf360_instance_lookup(instance);
+    if (info == nullptr) {
+        set_cmd_result("not an HF 360 II instance");
+        return;
+    }
+
+    char buf[sizeof(s_cmd_result_str)];
+    switch (instance) {
+        case DALI_STEINEL_HF360_INSTANCE_TEMPERATURE: {
+            int32_t deci = dali_steinel_temperature_deci_c(raw);
+            snprintf(buf, sizeof(buf), "%s: %ld.%ld C", info->name, (long)(deci / 10),
+                     (long)(deci < 0 ? -(deci % 10) : deci % 10));
+            break;
+        }
+        case DALI_STEINEL_HF360_INSTANCE_HUMIDITY: {
+            uint32_t deci = dali_steinel_humidity_deci_percent(raw);
+            snprintf(buf, sizeof(buf), "%s: %lu.%lu %%", info->name,
+                     (unsigned long)(deci / 10u), (unsigned long)(deci % 10u));
+            break;
+        }
+        case DALI_STEINEL_HF360_INSTANCE_BRIGHTNESS:
+            snprintf(buf, sizeof(buf), "%s: %lu.%02lu lx", info->name,
+                     (unsigned long)(raw / 100u), (unsigned long)(raw % 100u));
+            break;
+        default:
+            snprintf(buf, sizeof(buf), "%s: raw=%u", info->name, (unsigned)raw);
+            break;
+    }
+    set_cmd_result(buf);
+}
+
+void DaliComponent::console_vendor_(const DaliCliTokens &t, void *ctx)
+{
+    if (strcmp(t.tok[1], "steinel") == 0) {
+        uint8_t  instance;
+        uint32_t raw;
+        if (t.count != 4u || !dali_cli_parse_instance(t.tok[2], &instance) ||
+            !dali_cli_parse_u32(t.tok[3], 0xFFFFu, &raw)) {
+            set_cmd_result("usage: vendor steinel <instance> <raw>");
+            return;
+        }
+        console_steinel_decode(instance, (uint16_t)raw);
+        return;
+    }
+
+    uint8_t addr, instance;
+    if (t.count != 5u || !dali_cli_parse_short_addr(t.tok[2], &addr) ||
+        !dali_cli_parse_instance(t.tok[3], &instance)) {
+        set_cmd_result("usage: vendor lunatone <addr> <inst> <name>");
+        return;
+    }
+
+    const DaliCliLunatoneCommand *spec = dali_cli_lunatone_find(t.tok[4]);
+    if (spec == nullptr) {
+        set_cmd_result("unknown lunatone query");
+        return;
+    }
+
+    DaliFrame frame;
+    DaliError err = dali_lunatone_build_instance_command(addr, instance, spec->id,
+                                                          &frame);
+    if (err != DALI_OK) {
+        set_cmd_enqueue_result(err);
+        return;
+    }
+
+    const DaliLunatoneCommandInfo *info = dali_lunatone_command_lookup(spec->id);
+    set_pending_reply(spec->name,
+                      info != nullptr ? info->response_kind : DALI_RESP_UINT8, 0u);
+
+    DaliTransaction txn = {};
+    txn.frame       = frame;
+    txn.needs_reply = true;
+    txn.on_complete = on_cmd_query_reply;
+    txn.cb_ctx      = ctx;
+    set_cmd_result("pending");
+    set_cmd_enqueue_error(dali_sched_enqueue(&txn));
+}
+
+/*
+ * Device type 6 (IEC 62386-207).
+ *
+ * The command table, its names, and the DTR0 byte each one consumes are the
+ * native CLI's (dali_cli_dt6_*), and the frames go out through
+ * dali_dt6_build_command_sequence() so that ENABLE DEVICE TYPE 6, any DTR load,
+ * and the command itself cannot be separated by other locally scheduled
+ * traffic. A DT6 command that ran without its enable would be interpreted by
+ * the gear as whatever its default device type says.
+ */
+void DaliComponent::console_dt6_(const DaliCliTokens &t, void *ctx)
+{
+    uint8_t addr;
+    if (!dali_cli_parse_short_addr(t.tok[1], &addr)) {
+        set_cmd_result("dt6: addr 0-63");
+        return;
+    }
+
+    const DaliCliDtCommand *spec = dali_cli_dt6_find(t.tok[2]);
+    if (spec == nullptr) {
+        set_cmd_result("unknown dt6 cmd");
+        return;
+    }
+
+    uint8_t dtr[DALI_DT6_MAX_DTR_BYTES] = {};
+    if (t.count != (uint8_t)(3u + spec->dtr_count)) {
+        char buf[sizeof(s_cmd_result_str)];
+        snprintf(buf, sizeof(buf), "%s needs %u value(s)%s%s", spec->name,
+                 (unsigned)spec->dtr_count,
+                 spec->dtr_help != nullptr ? ": " : "",
+                 spec->dtr_help != nullptr ? spec->dtr_help : "");
+        set_cmd_result(buf);
+        return;
+    }
+    for (uint8_t i = 0u; i < spec->dtr_count; i++) {
+        if (!dali_cli_parse_u8(t.tok[3u + i], 255u, &dtr[i])) {
+            set_cmd_result("dt6: value 0-255");
+            return;
+        }
+    }
+
+    DaliFrame command = spec->build(addr);
+    if (command.bit_length == 0u) {
+        set_cmd_result("dt6: bad args");
+        return;
+    }
+
+    const bool send_twice    = spec->kind == DALI_CLI_DT_CONFIG;
+    const bool expects_reply = spec->kind == DALI_CLI_DT_QUERY;
+
+    DaliSequence seq;
+    DaliError err = dali_dt6_build_command_sequence(command, send_twice, expects_reply,
+                                                    dtr, spec->dtr_count, &seq);
+    if (err != DALI_OK) {
+        set_cmd_enqueue_result(err);
+        return;
+    }
+
+    if (expects_reply) {
+        /* Past the DTR loads and past ENABLE DEVICE TYPE 6. */
+        set_pending_reply(spec->name, spec->response_kind,
+                          (uint8_t)(spec->dtr_count + 1u));
+        seq.on_complete = on_cmd_sequence_reply;
+        seq.cb_ctx      = ctx;
+        set_cmd_result("pending");
+        set_cmd_enqueue_error(dali_sched_enqueue_sequence(&seq));
+        return;
+    }
+
+    err = dali_sched_enqueue_sequence(&seq);
+    if (err == DALI_OK && dt6_changes_level_profile(spec)) {
+        /*
+         * The dimming curve and the level window are what every brightness this
+         * component sends is computed from, so a command that moves either one
+         * makes the cached profile wrong in both directions. Drop it and
+         * re-read, exactly as the equivalent Part 102 configuration commands do
+         * — the write is fire-and-forget, so the re-read is also what tells us
+         * whether the gear took it.
+         */
+        DaliTarget tgt{};
+        tgt.type    = DALI_ADDR_SHORT;
+        tgt.address = addr;
+        forget_level_profile_cache(tgt);
+        start_refresh();
+    }
+    set_cmd_enqueue_result(err);
 }
 
 void DaliComponent::console_iconfig_(const DaliCliTokens &t)
@@ -1594,6 +2065,13 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         console_group_(tokens);
         return;
     }
+    /* `vendor steinel` is a unit conversion applied to a value the operator
+     * already has, not a transmission, so it belongs with these rather than
+     * behind the scan gate. `vendor lunatone` does reach the bus. */
+    if (spec->id == DALI_CLI_CMD_VENDOR && strcmp(tokens.tok[1], "steinel") == 0) {
+        console_vendor_(tokens, cmd_ctx);
+        return;
+    }
 
     /* Every verb below reaches the bus, so none may be admitted into a scan. */
     if (scan_running_.load(std::memory_order_acquire)) {
@@ -1610,17 +2088,106 @@ void DaliComponent::execute_command(const std::string &cmd_str)
             console_raw_(tokens, true, cmd_ctx);
             return;
 
+        case DALI_CLI_CMD_DTR: {
+            uint8_t reg, value;
+            if (!dali_cli_parse_u8(tokens.tok[1], 2u, &reg) ||
+                !dali_cli_parse_u8(tokens.tok[2], 255u, &value)) {
+                set_cmd_usage(spec);
+                return;
+            }
+            /* Broadcast, and consumed by whichever command reads it next: a
+             * DTR loaded from here is only reliable if nothing else transmits
+             * in between. The verbs that need one atomically — config-dtr0,
+             * iquery, iconfig, dt6 — carry their own load. */
+            set_cmd_enqueue_result(dali_control_set_dtr((DaliDtrRegister)reg, value));
+            return;
+        }
+
+        /*
+         * One frame, no reply, no local state to keep in step: the gear's level
+         * moves and the next refresh reads it back, exactly as it does after a
+         * `level` typed here or a physical wall switch.
+         */
         case DALI_CLI_CMD_OFF:
         case DALI_CLI_CMD_MAX:
         case DALI_CLI_CMD_MIN:
+        case DALI_CLI_CMD_UP:
+        case DALI_CLI_CMD_DOWN:
+        case DALI_CLI_CMD_STEP_UP:
+        case DALI_CLI_CMD_STEP_DOWN:
+        case DALI_CLI_CMD_STEP_OFF:
+        case DALI_CLI_CMD_ON_STEP:
+        case DALI_CLI_CMD_CONT_UP:
+        case DALI_CLI_CMD_CONT_DOWN:
+        case DALI_CLI_CMD_DAPC_SEQ:
+        case DALI_CLI_CMD_LAST: {
             if (!dali_cli_parse_target(tokens.tok[1], &tgt)) {
                 set_cmd_result("bad target");
                 return;
             }
-            set_cmd_enqueue_result(spec->id == DALI_CLI_CMD_OFF ? dali_control_off(tgt)
-                                 : spec->id == DALI_CLI_CMD_MAX ? dali_control_recall_max(tgt)
-                                                                : dali_control_recall_min(tgt));
+            DaliError err;
+            switch (spec->id) {
+                case DALI_CLI_CMD_OFF:       err = dali_control_off(tgt); break;
+                case DALI_CLI_CMD_MAX:       err = dali_control_recall_max(tgt); break;
+                case DALI_CLI_CMD_MIN:       err = dali_control_recall_min(tgt); break;
+                case DALI_CLI_CMD_UP:        err = dali_control_up(tgt); break;
+                case DALI_CLI_CMD_DOWN:      err = dali_control_down(tgt); break;
+                case DALI_CLI_CMD_STEP_UP:   err = dali_control_step_up(tgt); break;
+                case DALI_CLI_CMD_STEP_DOWN: err = dali_control_step_down(tgt); break;
+                case DALI_CLI_CMD_STEP_OFF:  err = dali_control_step_down_and_off(tgt); break;
+                case DALI_CLI_CMD_ON_STEP:   err = dali_control_on_and_step_up(tgt); break;
+                case DALI_CLI_CMD_CONT_UP:   err = dali_control_continuous_up(tgt); break;
+                case DALI_CLI_CMD_CONT_DOWN: err = dali_control_continuous_down(tgt); break;
+                case DALI_CLI_CMD_DAPC_SEQ:  err = dali_control_enable_dapc_sequence(tgt); break;
+                default:                     err = dali_control_go_to_last_active_level(tgt); break;
+            }
+            set_cmd_enqueue_result(err);
             return;
+        }
+
+        case DALI_CLI_CMD_SCENE: {
+            uint8_t scene;
+            if (!dali_cli_parse_target(tokens.tok[1], &tgt)) {
+                set_cmd_result("bad target");
+                return;
+            }
+            if (!dali_cli_parse_u8(tokens.tok[2], 15u, &scene)) {
+                set_cmd_result("scene 0-15");
+                return;
+            }
+            set_cmd_enqueue_result(dali_control_go_to_scene(tgt, scene));
+            return;
+        }
+
+        case DALI_CLI_CMD_MASK: {
+            /* MASK leaves the level unchanged; it is not a DAPC value, so it
+             * cannot go through dali_control_set_level(). */
+            if (!dali_cli_parse_target(tokens.tok[1], &tgt)) {
+                set_cmd_result("bad target");
+                return;
+            }
+            DaliFrame frame;
+            DaliError err = dali_control_build_dapc_mask(tgt, &frame);
+            if (err == DALI_OK) {
+                DaliTransaction txn = {};
+                txn.frame = frame;
+                err = dali_sched_enqueue(&txn);
+            }
+            set_cmd_enqueue_result(err);
+            return;
+        }
+
+        case DALI_CLI_CMD_STATUS: {
+            if (!dali_cli_parse_target(tokens.tok[1], &tgt)) {
+                set_cmd_result("bad target");
+                return;
+            }
+            set_pending_reply("status", DALI_RESP_STATUS, 0u);
+            set_cmd_result("pending");
+            set_cmd_enqueue_error(
+                dali_control_query_status(tgt, on_cmd_query_reply, cmd_ctx));
+            return;
+        }
 
         case DALI_CLI_CMD_LEVEL: {
             if (!dali_cli_parse_target(tokens.tok[1], &tgt)) {
@@ -1670,6 +2237,12 @@ void DaliComponent::execute_command(const std::string &cmd_str)
                 set_cmd_usage(spec);
                 return;
             }
+            /* Command metadata says how the reply decodes, so a yes/no query
+             * answers "yes" here and not 255. */
+            const DaliCommandInfo *info = dali_command_lookup(q->id);
+            set_pending_reply(q->name,
+                              info != nullptr ? info->response_kind : DALI_RESP_UINT8,
+                              0u);
             set_cmd_result("pending");
             set_cmd_enqueue_error(
                 dali_control_query(tgt, q->id, param, on_cmd_query_reply, cmd_ctx));
@@ -1732,41 +2305,28 @@ void DaliComponent::execute_command(const std::string &cmd_str)
             return;
         }
 
-        case DALI_CLI_CMD_IQUERY: {
-            uint8_t addr, instance;
-            if (!dali_cli_parse_short_addr(tokens.tok[1], &addr) ||
-                !dali_cli_parse_instance(tokens.tok[2], &instance)) {
-                set_cmd_result("iquery: addr 0-63, inst 0-31");
-                return;
-            }
-            const DaliCliInstanceQuery *q = dali_cli_iquery_find(tokens.tok[3]);
-            if (q == nullptr) {
-                set_cmd_result("unknown iquery");
-                return;
-            }
-            if (q->needs_dtr0) {
-                /* DTR0 selects which value comes back, so the load and the read
-                 * must share a sequence; the console has no verb for that yet. */
-                set_cmd_result("iquery: needs DTR0; use the native CLI");
-                return;
-            }
-            DaliFrame frame = q->build(addr, instance);
-            if (frame.bit_length == 0u) {
-                set_cmd_result("iquery: bad args");
-                return;
-            }
-            DaliTransaction txn = {};
-            txn.frame       = frame;
-            txn.needs_reply = true;
-            txn.on_complete = on_cmd_query_reply;
-            txn.cb_ctx      = cmd_ctx;
-            set_cmd_result("pending");
-            set_cmd_enqueue_error(dali_sched_enqueue(&txn));
+        case DALI_CLI_CMD_SPECIAL:
+            console_special_(tokens, cmd_ctx);
             return;
-        }
+
+        case DALI_CLI_CMD_DT6:
+            console_dt6_(tokens, cmd_ctx);
+            return;
+
+        case DALI_CLI_CMD_IQUERY:
+            console_iquery_(tokens, cmd_ctx);
+            return;
 
         case DALI_CLI_CMD_ICONFIG:
             console_iconfig_(tokens);
+            return;
+
+        case DALI_CLI_CMD_VENDOR:
+            console_vendor_(tokens, cmd_ctx);
+            return;
+
+        case DALI_CLI_CMD_MEMREAD:
+            console_memread_(tokens, cmd_ctx);
             return;
 
         case DALI_CLI_CMD_DEVMEM:

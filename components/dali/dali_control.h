@@ -70,6 +70,8 @@ DaliError dali_control_step_up(DaliTarget target);
 DaliError dali_control_step_down(DaliTarget target);
 DaliError dali_control_recall_max(DaliTarget target);
 DaliError dali_control_recall_min(DaliTarget target);
+DaliError dali_control_continuous_up(DaliTarget target);
+DaliError dali_control_continuous_down(DaliTarget target);
 DaliError dali_control_step_down_and_off(DaliTarget target);
 DaliError dali_control_on_and_step_up(DaliTarget target);
 DaliError dali_control_enable_dapc_sequence(DaliTarget target);

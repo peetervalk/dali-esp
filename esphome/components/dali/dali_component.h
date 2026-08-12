@@ -236,8 +236,13 @@ class DaliComponent : public Component {
   void console_queue_(const DaliCliTokens &tokens);
   void console_group_(const DaliCliTokens &tokens);
   void console_raw_(const DaliCliTokens &tokens, bool send_twice, void *ctx);
+  void console_special_(const DaliCliTokens &tokens, void *ctx);
+  void console_dt6_(const DaliCliTokens &tokens, void *ctx);
+  void console_memread_(const DaliCliTokens &tokens, void *ctx);
   void console_devmem_(const DaliCliTokens &tokens, void *ctx);
+  void console_iquery_(const DaliCliTokens &tokens, void *ctx);
   void console_iconfig_(const DaliCliTokens &tokens);
+  void console_vendor_(const DaliCliTokens &tokens, void *ctx);
   // Log a warning when the scheduler's cumulative rejection counters advance.
   void report_queue_drops_();
 };
