@@ -1,5 +1,7 @@
 #include "dali_input_config.h"
 
+#include <stddef.h>
+
 /* IEC 62386-103:2022 common instance configuration opcodes. */
 #define INPUT_SET_EVENT_PRIORITY          0x61u
 #define INPUT_ENABLE_INSTANCE             0x62u

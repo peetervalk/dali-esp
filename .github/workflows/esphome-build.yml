@@ -38,7 +38,7 @@ jobs:
     # from the link. This catches either omission in seconds instead of after a
     # full toolchain download and a confusing undefined-reference dump.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check every C source has a shim and a CMakeLists entry
         run: |
@@ -73,12 +73,14 @@ jobs:
     # against the configs this repo actually ships. This is the job that would
     # have caught poll_on_event breaking validation on 2026-08-12.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      # No `cache: pip` here: it needs a requirements.txt or pyproject.toml to
+      # key on, and this repo has neither, so it fails the job outright rather
+      # than degrading to a miss.
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-          cache: pip
 
       - name: Install ESPHome
         run: pip install esphome
@@ -113,15 +115,17 @@ jobs:
         config: [dali_1k.yaml, dali_2k.yaml]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      # No `cache: pip` here: it needs a requirements.txt or pyproject.toml to
+      # key on, and this repo has neither, so it fails the job outright rather
+      # than degrading to a miss.
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-          cache: pip
 
       - name: Cache PlatformIO toolchains
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           # The xtensa toolchain and ESP-IDF framework downloads dominate a
           # cold run. The build tree itself is deliberately not cached: a stale
@@ -162,12 +166,14 @@ jobs:
     # updating before release. Kept as its own job so that attribution is
     # visible in the checks list rather than buried in a shared log.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      # No `cache: pip` here: it needs a requirements.txt or pyproject.toml to
+      # key on, and this repo has neither, so it fails the job outright rather
+      # than degrading to a miss.
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-          cache: pip
 
       - name: Install ESPHome
         run: pip install esphome

@@ -1024,12 +1024,24 @@ below for what changed for an operator.
   `release-packaging.yml` were added on 2026-08-12 to cover the native ESP-IDF
   build, the ESPHome Python/C++/YAML layers, and clean-room release packaging —
   everything outside `test/` that no machine but a workstation had ever built.
-  They were dry-run locally, not observed green; none has run on GitHub yet. The
-  clean-room job in `release-packaging.yml` is the one most likely to fail first,
-  and that failure is the point: it is the first test of whether a consumer can
-  build from a release tag with none of this repo around them, and it decides the
-  `_protocol_source_dir()` question in the next item. See "Continuous integration"
-  under Build and Test Commands for what each job covers.
+  See "Continuous integration" under Build and Test Commands for what each job
+  covers. First run on `dev` (42a7ebd):
+  - `idf-build` passed. The native firmware builds clean on IDF 6.0.1 from
+    `sdkconfig.defaults` alone, so `dali_cli.{c,h}` moving to `components/dali/`
+    did not strand `main/`.
+  - `esphome-build`'s `sources` job passed; the rest was a workflow defect, not a
+    code one — `actions/setup-python`'s `cache: pip` needs a `requirements.txt`
+    or `pyproject.toml` to key on and fails the job when it finds neither. Fixed
+    by dropping the cache; the ESPHome layers are therefore still unbuilt by CI.
+  - `host-tests` on `dev` failed on its first run, which is the whole point of
+    running CI on a non-Windows toolchain: `dali_input_config.c` used `NULL`
+    while including nothing that defines it. mingw/ucrt headers supply it
+    transitively and glibc does not, so 26 green suites on Windows hid a real
+    portability defect. Fixed with an explicit `<stddef.h>`. An include-closure
+    audit over all 22 host-compiled modules found no second instance.
+  - `release-packaging` has still never run; it triggers on a tag. It remains
+    the item most likely to fail, and it decides the `_protocol_source_dir()`
+    question in the next item.
 - Keep one intentional ESPHome source-inclusion path. The unused component
   `CMakeLists.txt` is gone and the Python-copy/wrapper route is authoritative;
   what is left is the second candidate in `_protocol_source_dir()`,
