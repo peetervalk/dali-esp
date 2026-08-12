@@ -120,3 +120,8 @@ add_test(NAME test_refresh_cursor COMMAND test_refresh_cursor)
 add_executable(test_light_write test_light_write.cpp)
 target_link_libraries(test_light_write PRIVATE unity)
 add_test(NAME test_light_write COMMAND test_light_write)
+
+add_executable(test_light_profile test_light_profile.cpp ${DALI_SRC})
+target_include_directories(test_light_profile PRIVATE ${DALI_INC})
+target_link_libraries(test_light_profile PRIVATE unity ${DALI_LIBM})
+add_test(NAME test_light_profile COMMAND test_light_profile)

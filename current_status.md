@@ -79,7 +79,7 @@ adding broad new device support.
   Measured cost on the live bus: every lux poll delayed the next occupancy event
   by about 95 ms, and roughly one poll in ten returned no reading at all.
   Occupancy keeps `true` for latency; lux, temperature and humidity are `false`.
-- 25 host test executables pass. The ESPHome protocol wrapper set matches the 22
+- 26 host test executables pass. The ESPHome protocol wrapper set matches the 22
   reusable C source files.
 - The 2k site configuration compiles against the working tree as a local ESPHome
   2026.7.4 external component; the image is 938591 bytes.
@@ -89,17 +89,24 @@ Not verified, and worth stating plainly:
 - The 2k site has not been reflashed, so `poll_on_event` has no hardware result.
   Everything above about the poll rates is measurement of the old behavior plus
   a compile of the new.
-- MIN LEVEL and MAX LEVEL are still invisible to the ESPHome layer. Gear clamps
-  a DAPC into that window and answers QUERY ACTUAL LEVEL with the clamped value,
-  so an entity on gear with a reduced ceiling can never report 100 %. The curve
-  is correct either way; the range is not. Mapping 0-100 % onto
-  `[MIN_LEVEL, MAX_LEVEL]` is the fix and is not implemented.
-- `dali_dim_curve` implements the standard curve only. DT6 gear can be switched
-  to a linear curve (`dt6 <addr> select-curve`, DTR0 `1`), and an entity pointed
-  at such gear would be wrong in both directions. The 1k address 0 driver
-  answered QUERY DIMMING CURVE with `0`, but the preceding ENABLE DEVICE TYPE
-  had expired by then, so that reading is weak; the standard default is
-  logarithmic and the hardware result above is consistent with it.
+- ESPHome now acquires and caches a per-short-address MIN/MAX/curve profile for
+  refreshes, uses physical-output interpolation for standard and linear curves,
+  and accepts `min_level`, `max_level`, and `dimming_curve` overrides. The
+  profile query and HA mapping are host-tested and compile in a local ESPHome
+  fixture, but have no hardware result yet.
+- A group or broadcast entity maps brightness through the union of its known
+  members' windows, not one representative's. Gear clamps any arc power level
+  into its own MIN/MAX whatever the sender believed, so a narrower window cannot
+  make a mixed group uniform — it can only make levels the hardware could reach
+  unreachable, and would cap the group at its dimmest member's ceiling. Each
+  member therefore dims until it hits its own floor and holds. Members are only
+  counted once a scan has read their limits; until then the union is whatever is
+  known, which for a fresh device is the representative alone. A group whose
+  members disagree on the dimming curve falls back to the standard curve, since
+  no single mapping drives both correctly.
+- An observed level outside an entity's window is reported as the nearest level
+  in it rather than refused. That happens legitimately — a narrower configured
+  window, or a group member answering for a level the whole group was given.
 - Existing Home Assistant scenes and automations that store a brightness
   percentage now produce very different light output — 20 % was level 51
   (0.4 % light) and is now level 195 (20 % light). They need re-tuning. Home

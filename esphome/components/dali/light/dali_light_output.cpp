@@ -32,12 +32,72 @@ void DaliLightOutput::clear_unused_color_fields_(light::LightColorValues &values
   values.set_warm_white(0.0f);
 }
 
-uint8_t DaliLightOutput::brightness_to_level_(float brightness) {
-  return dali_dim_curve_output_to_level(brightness);
+bool DaliLightOutput::brightness_to_level_(float brightness,
+                                           uint8_t *level) const {
+  return dali_light_brightness_to_level(&profile_, brightness, level) == DALI_OK;
 }
 
-float DaliLightOutput::level_to_brightness_(uint8_t level) {
-  return dali_dim_curve_level_to_output(level);
+bool DaliLightOutput::level_to_brightness_(uint8_t level,
+                                           float *brightness) const {
+  return dali_light_level_to_brightness(&profile_, level, brightness) == DALI_OK;
+}
+
+void DaliLightOutput::map_logical_request_() {
+  if (!profile_ready_ || !logical_pending_) return;
+
+  uint8_t level = 0u;
+  if (logical_is_on_ && !brightness_to_level_(logical_brightness_, &level)) {
+    ESP_LOGW(TAG, "cannot map brightness for %s %u under current profile",
+             target_type_name(target_.type), (unsigned) target_.address);
+    logical_pending_ = false;
+    return;
+  }
+  dali_light_write_request(&write_, logical_is_on_, level);
+  mapped_revision_ = logical_revision_;
+  mapped_generation_ = profile_generation_;
+}
+
+void DaliLightOutput::begin_level_profile_update(uint32_t generation) {
+  /* Stops transmission until the new profile lands, but deliberately keeps the
+   * deduplication cache: nothing can be sent while !profile_ready_, and if the
+   * profile comes back unchanged — the common case, since MIN/MAX/curve are
+   * commissioning data — the cached level still means what it meant. Dropping
+   * it every refresh would make every repeat command retransmit. */
+  profile_generation_ = generation;
+  profile_ready_ = false;
+  write_.pending = false;
+  echo_valid_ = false;
+}
+
+void DaliLightOutput::set_level_profile(const DaliLevelProfile &profile,
+                                        uint32_t generation) {
+  if (generation != profile_generation_) return;
+
+  DaliLevelProfile effective = profile;
+  if (has_min_level_override_) effective.min_level = min_level_override_;
+  if (has_max_level_override_) effective.max_level = max_level_override_;
+  if (has_curve_override_) effective.curve = curve_override_;
+  if (dali_level_profile_validate(&effective) != DALI_OK) {
+    ESP_LOGW(TAG,
+             "invalid overridden profile for %s %u; using discovered profile",
+             target_type_name(target_.type), (unsigned) target_.address);
+    effective = profile;
+  }
+  if (dali_level_profile_validate(&effective) != DALI_OK) {
+    ESP_LOGW(TAG,
+             "invalid discovered profile for %s %u; using standard 1..254",
+             target_type_name(target_.type), (unsigned) target_.address);
+    effective = {DALI_DIM_CURVE_STANDARD, 1u, DALI_DAPC_MAX_LEVEL};
+  }
+
+  const bool changed = !profile_ready_ || effective.curve != profile_.curve ||
+                       effective.min_level != profile_.min_level ||
+                       effective.max_level != profile_.max_level;
+  profile_ = effective;
+  profile_ready_ = true;
+  /* Only a real change makes the cached level ambiguous. */
+  if (changed) dali_light_write_invalidate(&write_);
+  map_logical_request_();
 }
 
 void DaliLightOutput::on_command_complete_(DaliError result,
@@ -55,20 +115,39 @@ void DaliLightOutput::pump_write_() {
   bool success = true;
   uint32_t completions = 0u;
   if (command_mailbox_.take(success, completions)) {
-    if (dali_light_write_confirm(&write_, success)) {
+    const uint32_t completed_revision = in_flight_revision_;
+    const uint32_t completed_generation = in_flight_generation_;
+    const bool retry = dali_light_write_confirm(&write_, success);
+    if (retry) {
       ESP_LOGW(TAG, "tx to %s %u failed; state unknown, retrying",
                target_type_name(target_.type), (unsigned)target_.address);
     } else if (!success) {
       ESP_LOGW(TAG, "tx to %s %u failed; retry budget spent, state unknown",
                target_type_name(target_.type), (unsigned)target_.address);
     }
+
+    const bool current = logical_pending_ &&
+                         completed_revision == logical_revision_ &&
+                         completed_generation == profile_generation_;
+    if (success && current) {
+      logical_pending_ = false;
+    } else if (!success && current) {
+      if (!retry) logical_pending_ = false;
+    } else if (logical_pending_) {
+      if (profile_ready_) {
+        map_logical_request_();
+      } else {
+        write_.pending = false;
+      }
+    }
   }
 
-  if (comp_ != nullptr && comp_->is_scan_running()) return;
+  if (!profile_ready_ || (comp_ != nullptr && comp_->is_scan_running())) return;
 
   uint8_t level = 0u;
   DaliError err;
-  switch (dali_light_write_next(&write_, &level)) {
+  DaliLightWriteAction action = dali_light_write_next(&write_, &level);
+  switch (action) {
     case DALI_LIGHT_WRITE_SEND_OFF:
       ESP_LOGD(TAG, "tx off to %s %u",
                target_type_name(target_.type), (unsigned)target_.address);
@@ -82,6 +161,11 @@ void DaliLightOutput::pump_write_() {
       break;
 
     case DALI_LIGHT_WRITE_SUPPRESS:
+      if (logical_pending_ && mapped_revision_ == logical_revision_ &&
+          mapped_generation_ == profile_generation_) {
+        logical_pending_ = false;
+      }
+      return;
     case DALI_LIGHT_WRITE_IDLE:
     default:
       return;
@@ -94,6 +178,10 @@ void DaliLightOutput::pump_write_() {
              target_type_name(target_.type), (unsigned)target_.address, (int)err);
   }
   dali_light_write_sent(&write_, err == DALI_OK);
+  if (err == DALI_OK) {
+    in_flight_revision_ = mapped_revision_;
+    in_flight_generation_ = mapped_generation_;
+  }
 }
 
 void DaliLightOutput::setup_state(light::LightState *state) {
@@ -144,7 +232,9 @@ void DaliLightOutput::write_state(light::LightState *state) {
    * 0.1 %, well under the 1/254 a linear reading treated as the floor, and OFF
    * is a separate command rather than the bottom of the curve. */
   bool desired_is_on = target.is_on() && brightness > 0.0f;
-  uint8_t desired_level = desired_is_on ? brightness_to_level_(brightness) : 0u;
+  uint8_t desired_level = 0u;
+  bool desired_level_valid =
+      !desired_is_on || brightness_to_level_(brightness, &desired_level);
 
   if (suppress_initial_write_) {
     suppress_initial_write_ = false;
@@ -154,8 +244,9 @@ void DaliLightOutput::write_state(light::LightState *state) {
     return;
   }
 
-  if (echo_valid_ && echo_is_on_ == desired_is_on &&
-      (!desired_is_on || echo_level_ == desired_level)) {
+  if (echo_valid_ && echo_profile_generation_ == profile_generation_ &&
+      echo_is_on_ == desired_is_on &&
+      (!desired_is_on || (desired_level_valid && echo_level_ == desired_level))) {
     echo_valid_ = false;
     return;  // state came from the bus — do not send it back
   }
@@ -163,7 +254,13 @@ void DaliLightOutput::write_state(light::LightState *state) {
 
   /* Record the desired state itself rather than relying on LightState: a
    * bus-state publication can overwrite remote_values before this is sent. */
-  dali_light_write_request(&write_, desired_is_on, desired_level);
+  logical_pending_ = true;
+  logical_is_on_ = desired_is_on;
+  logical_brightness_ = desired_is_on ? brightness : 0.0f;
+  logical_revision_++;
+  if (logical_revision_ == 0u) logical_revision_ = 1u;
+  write_.pending = false;
+  map_logical_request_();
 
   if (comp_ != nullptr && comp_->is_scan_running()) {
     ESP_LOGD(TAG, "deferring write to %s %u while scan is active",
@@ -182,6 +279,8 @@ void DaliLightOutput::flush_pending_write() {
 }
 
 void DaliLightOutput::mark_state_from_bus(bool is_on, uint8_t level) {
+  // 0xFF is MASK/no valid actual level, never an on-state brightness.
+  if (level == DALI_DAPC_MASK_LEVEL || (is_on && level == 0u)) return;
   bus_state_mailbox_.publish(is_on, level);
 }
 
@@ -192,9 +291,13 @@ void DaliLightOutput::apply_bus_state() {
   uint8_t level;
   if (!bus_state_mailbox_.take(is_on, level)) return;
 
+  // Profile acquisition deliberately precedes ACTUAL LEVEL. A snoop that
+  // races acquisition is discarded rather than decoded with stale limits.
+  if (!profile_ready_) return;
+
   /* Refused while a command is in flight: that command's own completion is the
    * authority for the state it establishes, and this reading may predate it. */
-  dali_light_write_observe(&write_, is_on, level);
+  if (!dali_light_write_observe(&write_, is_on, level)) return;
 
   /* A real reading also settles what the gear is doing, so the restore write is
    * no longer pending arbitration — disarm it here as well as on first use, so
@@ -202,23 +305,48 @@ void DaliLightOutput::apply_bus_state() {
    * later operator command. */
   suppress_initial_write_ = false;
 
-  /* What LightCall::perform() below will schedule as a write. Recorded so that
-   * write_state() can recognise it as this reading coming back rather than as
-   * something a person asked for.
-   *
-   * The level survives the round trip unchanged: this pushes the level's light
-   * output as the brightness and write_state() converts it back through the
-   * inverse curve, which test_dim_curve asserts for all 254 levels. A level
-   * that did not come back intact would be mistaken for an operator command
-   * and sent to the bus. remote_values carries the un-gamma-corrected value,
-   * so nothing else is applied in between. */
-  echo_valid_ = true;
-  echo_is_on_ = is_on;
-  echo_level_ = is_on ? level : 0u;
-
   auto call = state_->make_call();
   call.set_state(is_on);
-  if (is_on) call.set_brightness(level_to_brightness_(level));
+  float brightness = 0.0f;
+  if (is_on) {
+    /* A level outside the window is reported, not refused. Refusing it left
+     * Home Assistant on a stale value and, because it asked for a re-read of
+     * the very level it had just rejected, refreshed the whole registry on
+     * every loop for as long as the gear stayed there.
+     *
+     * The observation above kept the raw level, so a later command that really
+     * does need to move the gear is still not suppressed against the clamp. */
+    uint8_t decoded = 0u;
+    if (dali_light_observed_level_to_brightness(&profile_, level, &decoded,
+                                                &brightness) != DALI_OK) {
+      ESP_LOGW(TAG, "cannot decode level %u for %s %u under %u..%u",
+               (unsigned) level, target_type_name(target_.type),
+               (unsigned) target_.address, (unsigned) profile_.min_level,
+               (unsigned) profile_.max_level);
+      return;
+    }
+    if (decoded != level) {
+      ESP_LOGD(TAG, "level %u outside %u..%u for %s %u; reporting %u",
+               (unsigned) level, (unsigned) profile_.min_level,
+               (unsigned) profile_.max_level, target_type_name(target_.type),
+               (unsigned) target_.address, (unsigned) decoded);
+    }
+    call.set_brightness(brightness);
+  }
+
+  /* Record the exact bus state which LightCall::perform() will schedule back
+   * into write_state(). The unrounded local float maps to the same raw level;
+   * Home Assistant may independently quantize its externally visible byte. */
+  echo_valid_ = true;
+  echo_is_on_ = is_on;
+  echo_profile_generation_ = profile_generation_;
+  echo_level_ = 0u;
+  if (is_on && !brightness_to_level_(brightness, &echo_level_)) {
+    ESP_LOGW(TAG, "cannot canonicalize level %u for %s %u",
+             (unsigned) level, target_type_name(target_.type),
+             (unsigned) target_.address);
+    echo_valid_ = false;
+  }
   call.set_transition_length(0);
   clear_unused_color_fields_(state_->remote_values);
   clear_unused_color_fields_(state_->current_values);

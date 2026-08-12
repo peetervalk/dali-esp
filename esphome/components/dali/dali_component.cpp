@@ -54,11 +54,72 @@ struct LightEntry {
     uint8_t       target_address;
     uint16_t      member_groups;  /* bitmask: bit N = this entity is in group N */
     DaliBusLight *light;
+    uint32_t      profile_generation;
 };
 
 static LightEntry s_light_registry[MAX_LIGHT_ENTITIES];
 static uint8_t    s_light_count = 0u;
 static std::atomic<bool> s_refresh_query_in_flight_{false};
+
+enum ProfileRefreshPhase {
+    PROFILE_REFRESH_DEVICE_TYPE,
+    PROFILE_REFRESH_DEVICE_TYPES,
+    PROFILE_REFRESH_PROFILE,
+};
+
+struct LevelProfileCacheEntry {
+    bool             valid;
+    bool             curve_capability_known;
+    bool             query_dt6_curve;
+    DaliLevelProfile profile;
+};
+
+struct ScanLevelProfileRecord {
+    bool             valid;
+    bool             curve_capability_known;
+    bool             query_dt6_curve;
+    DaliLevelProfile profile;
+};
+
+struct ProfileRefreshQuery {
+    LightEntry        *entry;
+    uint8_t            query_address;
+    uint32_t           generation;
+    bool               query_dt6_curve;
+    ProfileRefreshPhase phase;
+    DaliSequenceResult result;
+    std::atomic<bool>  result_ready;
+    bool               active;
+    bool               actual_level_pending;
+};
+
+static LevelProfileCacheEntry s_level_profile_cache[DALI_SHORT_ADDRESS_COUNT] = {};
+static ScanLevelProfileRecord
+    s_scan_level_profile_snapshot[DALI_SHORT_ADDRESS_COUNT] = {};
+static std::atomic<bool> s_scan_level_profile_snapshot_pending_{false};
+static ProfileRefreshQuery s_profile_refresh_query = {};
+
+static DaliLevelProfile default_level_profile()
+{
+    return { DALI_DIM_CURVE_STANDARD, 1u, DALI_DAPC_MAX_LEVEL };
+}
+
+static DaliLevelProfile cached_level_profile(uint8_t address)
+{
+    if (address < DALI_SHORT_ADDRESS_COUNT &&
+        s_level_profile_cache[address].valid) {
+        return s_level_profile_cache[address].profile;
+    }
+    return default_level_profile();
+}
+
+static uint32_t begin_light_profile_update(LightEntry *entry)
+{
+    entry->profile_generation++;
+    if (entry->profile_generation == 0u) entry->profile_generation = 1u;
+    entry->light->begin_level_profile_update(entry->profile_generation);
+    return entry->profile_generation;
+}
 
 /* ── Group membership (auto-selects query_address for group-type lights) ──── */
 /* Pure decision logic lives in dali_group_map.c; this layer owns one instance,
@@ -92,6 +153,59 @@ static uint8_t pick_group_member(uint8_t group)
     return addr;
 }
 
+static uint64_t group_member_mask(uint8_t group)
+{
+    if (group >= DALI_GROUP_COUNT) return 0u;
+    portENTER_CRITICAL(&s_group_map_mux);
+    uint64_t mask = s_group_map.members[group];
+    portEXIT_CRITICAL(&s_group_map_mux);
+    return mask;
+}
+
+/* Union of every cached member profile in `mask`; see dali_level_profile_widen
+ * for why a multi-gear target takes the widest window rather than the common
+ * one. Members whose profile has never been read (no scan yet) abstain rather
+ * than being assumed: a guessed 1..254 would widen the result to the maximum
+ * and make the union meaningless. */
+static bool union_level_profile(uint64_t mask, DaliLevelProfile *out)
+{
+    bool any = false;
+    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        if (((mask >> addr) & 1ull) == 0ull) continue;
+        if (!s_level_profile_cache[addr].valid) continue;
+        const DaliLevelProfile &member = s_level_profile_cache[addr].profile;
+        if (!any) {
+            *out = member;
+            any  = true;
+        } else {
+            (void)dali_level_profile_widen(out, &member);
+        }
+    }
+    return any;
+}
+
+/* The window an entity's brightness is mapped through: the union across known
+ * members for a multi-gear target, the queried gear's own profile otherwise. */
+static DaliLevelProfile entity_level_profile(const LightEntry *entry,
+                                             uint8_t query_address)
+{
+    DaliLevelProfile profile;
+    if (entry->target_type == (uint8_t)DALI_ADDR_GROUP) {
+        if (union_level_profile(group_member_mask(entry->target_address), &profile))
+            return profile;
+    } else if (entry->target_type == (uint8_t)DALI_ADDR_BROADCAST) {
+        if (union_level_profile(~0ull, &profile)) return profile;
+    }
+    return cached_level_profile(query_address);
+}
+
+static void set_light_profile(LightEntry *entry, uint8_t address,
+                              uint32_t generation)
+{
+    entry->light->set_level_profile(entity_level_profile(entry, address),
+                                    generation);
+}
+
 static void update_group_members_from_config(DaliTarget target,
                                              DaliCommandId id,
                                              uint8_t group)
@@ -109,6 +223,40 @@ static void update_group_members_from_config(DaliTarget target,
                  (unsigned)group,
                  (unsigned)group,
                  res == DALI_GROUP_MAP_UNVERIFIED_REMOVE ? "cleared" : "left partial");
+    }
+}
+
+static bool config_changes_level_profile(DaliCommandId id)
+{
+    /* RESET restores the gear's default MIN/MAX, so it moves the window just
+     * as much as setting either limit does. */
+    return id == DALI_CMD_SET_MIN_LEVEL_DTR0 ||
+           id == DALI_CMD_SET_MAX_LEVEL_DTR0 ||
+           id == DALI_CMD_RESET;
+}
+
+/*
+ * Drop cached profiles the command just invalidated.
+ *
+ * The refresh that follows only re-reads addresses some entity queries, so a
+ * group member that is not its group's representative would otherwise keep a
+ * stale window in the union until the next scan. Dropping the entry makes that
+ * member abstain from the union instead of skewing it.
+ */
+static void forget_level_profile_cache(DaliTarget target)
+{
+    if (target.type == DALI_ADDR_SHORT) {
+        if (target.address < DALI_SHORT_ADDRESS_COUNT)
+            s_level_profile_cache[target.address].valid = false;
+        return;
+    }
+
+    uint64_t mask = target.type == DALI_ADDR_GROUP
+                        ? group_member_mask(target.address)
+                        : ~0ull;
+    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        if (((mask >> addr) & 1ull) != 0ull)
+            s_level_profile_cache[addr].valid = false;
     }
 }
 
@@ -199,6 +347,12 @@ static void on_level_query_reply(DaliError result, const DaliFrame *reply, void 
         return;
     }
     uint8_t     level = (uint8_t)(reply->data & 0xFFu);
+    if (level == DALI_DAPC_MASK_LEVEL) {
+        ESP_LOGD(TAG, "query actual level unavailable: light target type=%u addr=%u",
+                 (unsigned)e->target_type, (unsigned)e->target_address);
+        s_refresh_query_in_flight_.store(false, std::memory_order_release);
+        return;
+    }
     bool        is_on = (level != 0u);
     ESP_LOGD(TAG, "query actual level reply: light target type=%u addr=%u level=%u",
              (unsigned)e->target_type, (unsigned)e->target_address, (unsigned)level);
@@ -208,6 +362,102 @@ static void on_level_query_reply(DaliError result, const DaliFrame *reply, void 
     output.address = e->target_address;
     dali_dispatch_seed_toggle(&s_toggle_state, output, is_on);
     s_refresh_query_in_flight_.store(false, std::memory_order_release);
+}
+
+static void publish_level_profile_query_result(const DaliSequenceResult *result)
+{
+    if (result != nullptr) {
+        s_profile_refresh_query.result = *result;
+    } else {
+        s_profile_refresh_query.result = {};
+        s_profile_refresh_query.result.result = DALI_ERR_INVALID;
+        s_profile_refresh_query.result.failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
+    }
+    s_profile_refresh_query.result_ready.store(true, std::memory_order_release);
+    s_refresh_query_in_flight_.store(false, std::memory_order_release);
+}
+
+static void on_level_profile_query_done(const DaliSequenceResult *result,
+                                        void * /*ctx*/)
+{
+    publish_level_profile_query_result(result);
+}
+
+static void on_level_profile_device_type_done(DaliError result,
+                                              const DaliFrame *reply,
+                                              void * /*ctx*/)
+{
+    DaliSequenceResult sequence_result = {};
+    sequence_result.result = result;
+    sequence_result.failed_step = result == DALI_OK
+                                      ? DALI_SEQUENCE_NO_FAILED_STEP
+                                      : DALI_DISCOVERY_DEVICE_TYPES_STEP_FIRST;
+    sequence_result.steps_run = 1u;
+    if (reply != nullptr) {
+        sequence_result.replies[DALI_DISCOVERY_DEVICE_TYPES_STEP_FIRST] = *reply;
+        sequence_result.reply_mask = 1u << DALI_DISCOVERY_DEVICE_TYPES_STEP_FIRST;
+    }
+    publish_level_profile_query_result(&sequence_result);
+}
+
+static DaliError enqueue_level_profile_sequence(DaliSequence *sequence)
+{
+    if (sequence == nullptr) return DALI_ERR_INVALID;
+    sequence->on_complete = on_level_profile_query_done;
+    sequence->cb_ctx = nullptr;
+    s_profile_refresh_query.result_ready.store(false, std::memory_order_relaxed);
+    s_refresh_query_in_flight_.store(true, std::memory_order_release);
+    DaliError err = dali_sched_enqueue_sequence(sequence);
+    if (err != DALI_OK) {
+        s_refresh_query_in_flight_.store(false, std::memory_order_release);
+    }
+    return err;
+}
+
+static DaliError enqueue_level_profile_device_type_query(uint8_t address)
+{
+    DaliTarget target = { DALI_ADDR_SHORT, address };
+    s_profile_refresh_query.result_ready.store(false, std::memory_order_relaxed);
+    s_refresh_query_in_flight_.store(true, std::memory_order_release);
+    DaliError err = dali_control_query(target, DALI_CMD_QUERY_DEVICE_TYPE, 0u,
+                                       on_level_profile_device_type_done, nullptr);
+    if (err != DALI_OK) {
+        s_refresh_query_in_flight_.store(false, std::memory_order_release);
+    }
+    return err;
+}
+
+static DaliError enqueue_level_profile_device_types_query(uint8_t address)
+{
+    DaliSequence sequence;
+    DaliError err = dali_discovery_build_device_types_sequence(address, &sequence);
+    if (err != DALI_OK) return err;
+    return enqueue_level_profile_sequence(&sequence);
+}
+
+static DaliError enqueue_level_profile_query(uint8_t address,
+                                             bool query_dt6_curve)
+{
+    DaliSequence sequence;
+    DaliError err = dali_discovery_build_profile_sequence(address,
+                                                           query_dt6_curve,
+                                                           &sequence);
+    if (err != DALI_OK) return err;
+    return enqueue_level_profile_sequence(&sequence);
+}
+
+static DaliError enqueue_actual_level_query(LightEntry *entry, uint8_t query_address)
+{
+    DaliTarget query_target;
+    query_target.type = DALI_ADDR_SHORT;
+    query_target.address = query_address;
+    s_refresh_query_in_flight_.store(true, std::memory_order_release);
+    DaliError err = dali_control_query(query_target, DALI_CMD_QUERY_ACTUAL_LEVEL,
+                                       0u, on_level_query_reply, entry);
+    if (err != DALI_OK) {
+        s_refresh_query_in_flight_.store(false, std::memory_order_release);
+    }
+    return err;
 }
 
 /* ── Cross-core string handoff (Core 1 → Core 0) ────────────────────────── */
@@ -971,7 +1221,10 @@ void DaliComponent::loop()
             scan_status_->publish_state("Scan error");
         }
     }
-    if (scan_success) start_refresh();
+    if (scan_success) {
+        apply_scan_level_profile_snapshot_();
+        start_refresh();
+    }
 }
 
 /* ── Public methods ──────────────────────────────────────────────────────── */
@@ -1470,8 +1723,11 @@ void DaliComponent::execute_command(const std::string &cmd_str)
             DaliError err = with_dtr0
                                 ? dali_control_config_with_dtr0(tgt, c->id, dtr0, param)
                                 : dali_control_config(tgt, c->id, param);
-            if (err == DALI_OK && group_edit)
-                update_group_members_from_config(tgt, c->id, param);
+            if (err == DALI_OK) {
+                if (group_edit) update_group_members_from_config(tgt, c->id, param);
+                if (config_changes_level_profile(c->id)) forget_level_profile_cache(tgt);
+                if (group_edit || config_changes_level_profile(c->id)) start_refresh();
+            }
             set_cmd_enqueue_result(err);
             return;
         }
@@ -1549,9 +1805,82 @@ void DaliComponent::register_light(uint8_t type, uint8_t address,
                                    uint16_t member_groups, DaliBusLight *light)
 {
     if (s_light_count < MAX_LIGHT_ENTITIES) {
-        s_light_registry[s_light_count++] = { type, address, member_groups, light };
+        LightEntry &entry = s_light_registry[s_light_count++];
+        entry.target_type = type;
+        entry.target_address = address;
+        entry.member_groups = member_groups;
+        entry.light = light;
+        entry.profile_generation = 0u;
+        begin_light_profile_update(&entry);
     } else {
         ESP_LOGW(TAG, "light registry full — increase MAX_LIGHT_ENTITIES");
+    }
+}
+
+void DaliComponent::set_scan_level_profile_snapshot(
+    const DaliDiscoveryInventory *inventory)
+{
+    if (inventory == nullptr) return;
+
+    s_scan_level_profile_snapshot_pending_.store(false, std::memory_order_relaxed);
+    for (uint8_t address = 0u; address < DALI_SHORT_ADDRESS_COUNT; address++) {
+        ScanLevelProfileRecord &record = s_scan_level_profile_snapshot[address];
+        record.valid = false;
+
+        const DaliDiscoveryDeviceInfo *device =
+            dali_discovery_inventory_get(inventory, address);
+        if (device == nullptr || !device->present || !device->has_control_gear ||
+            !device->has_level_limits) {
+            continue;
+        }
+
+        DaliLevelProfile profile = {
+            device->has_dimming_curve ? device->dimming_curve
+                                       : DALI_DIM_CURVE_STANDARD,
+            device->min_level,
+            device->max_level,
+        };
+        if (dali_level_profile_validate(&profile) != DALI_OK) continue;
+        record.valid = true;
+        record.curve_capability_known =
+            dali_discovery_has_device_type(device, 6u);
+        record.query_dt6_curve = record.curve_capability_known;
+        record.profile = profile;
+    }
+    s_scan_level_profile_snapshot_pending_.store(true, std::memory_order_release);
+}
+
+void DaliComponent::apply_scan_level_profile_snapshot_()
+{
+    if (!s_scan_level_profile_snapshot_pending_.exchange(false,
+                                                          std::memory_order_acq_rel)) {
+        return;
+    }
+
+    s_profile_refresh_query.active = false;
+    s_profile_refresh_query.actual_level_pending = false;
+    s_profile_refresh_query.result_ready.store(false, std::memory_order_relaxed);
+
+    for (uint8_t address = 0u; address < DALI_SHORT_ADDRESS_COUNT; address++) {
+        const ScanLevelProfileRecord &record = s_scan_level_profile_snapshot[address];
+        if (!record.valid) continue;
+        s_level_profile_cache[address].valid = true;
+        s_level_profile_cache[address].curve_capability_known =
+            record.curve_capability_known;
+        s_level_profile_cache[address].query_dt6_curve = record.query_dt6_curve;
+        s_level_profile_cache[address].profile = record.profile;
+    }
+
+    for (uint8_t index = 0u; index < s_light_count; index++) {
+        LightEntry *entry = &s_light_registry[index];
+        uint8_t query_address = entry->target_type == (uint8_t)DALI_ADDR_GROUP
+                                    ? pick_group_member(entry->target_address)
+                                    : entry->light->get_query_address();
+        /* 0xFF (no representative) still resolves: a group falls back to the
+         * union across its known members, and anything else to the default
+         * window. An entity without a profile cannot transmit at all. */
+        const uint32_t generation = begin_light_profile_update(entry);
+        set_light_profile(entry, query_address, generation);
     }
 }
 
@@ -1636,44 +1965,18 @@ void DaliComponent::start_refresh()
 
 void DaliComponent::pump_refresh()
 {
-    if (scan_running_.load(std::memory_order_acquire) ||
-        s_refresh_query_in_flight_.load(std::memory_order_acquire)) {
-        return;
-    }
+    if (scan_running_.load(std::memory_order_acquire)) return;
 
-    uint8_t i;
-    while (dali_refresh_cursor_current(&refresh_cursor_, s_light_count, &i)) {
-        LightEntry *e = &s_light_registry[i];
-        uint8_t     qa = 0xFFu;
-        if (e->target_type == (uint8_t)DALI_ADDR_GROUP) {
-            qa = pick_group_member(e->target_address);
-        } else {
-            qa = e->light->get_query_address();
+    auto reject_profile_stage = [&](LightEntry *entry,
+                                    uint8_t query_address,
+                                    uint32_t generation,
+                                    DaliError err) {
+        s_profile_refresh_query.active = false;
+        /* Whatever went wrong, the entity must not be left waiting on a profile
+         * that is no longer coming: without one it cannot transmit at all. */
+        if (entry != nullptr && generation == entry->profile_generation) {
+            set_light_profile(entry, query_address, generation);
         }
-        if (qa == 0xFFu) {
-            dali_refresh_cursor_complete(&refresh_cursor_, s_light_count,
-                                         DALI_REFRESH_ADVANCE);
-            continue;
-        }
-
-        DaliTarget qt;
-        qt.type    = DALI_ADDR_SHORT;
-        qt.address = qa;
-        s_refresh_query_in_flight_.store(true, std::memory_order_release);
-        DaliError err =
-            dali_control_query(qt, DALI_CMD_QUERY_ACTUAL_LEVEL, 0u,
-                               on_level_query_reply, e);
-        if (err == DALI_OK) {
-            refresh_queue_blocked_ = false;
-            dali_refresh_cursor_complete(&refresh_cursor_, s_light_count,
-                                         DALI_REFRESH_ADVANCE);
-            ESP_LOGD(TAG, "query actual level: light target type=%u addr=%u via short %u",
-                     (unsigned)e->target_type, (unsigned)e->target_address,
-                     (unsigned)qa);
-            return;
-        }
-
-        s_refresh_query_in_flight_.store(false, std::memory_order_release);
         if (err == DALI_ERR_QUEUE_FULL) {
             dali_refresh_cursor_complete(&refresh_cursor_, s_light_count,
                                          DALI_REFRESH_RETRY);
@@ -1687,8 +1990,247 @@ void DaliComponent::pump_refresh()
         refresh_queue_blocked_ = false;
         dali_refresh_cursor_complete(&refresh_cursor_, s_light_count,
                                      DALI_REFRESH_ADVANCE);
-        ESP_LOGW(TAG, "light refresh rejected: target type=%u addr=%u result=%d",
-                 (unsigned)e->target_type, (unsigned)e->target_address, (int)err);
+        if (entry != nullptr) {
+            ESP_LOGW(TAG, "level profile refresh rejected: target type=%u addr=%u result=%d",
+                     (unsigned)entry->target_type, (unsigned)entry->target_address,
+                     (int)err);
+        }
+    };
+
+    if (s_profile_refresh_query.active) {
+        if (!s_profile_refresh_query.actual_level_pending) {
+            if (s_refresh_query_in_flight_.load(std::memory_order_acquire) ||
+                !s_profile_refresh_query.result_ready.exchange(
+                    false, std::memory_order_acq_rel)) {
+                return;
+            }
+
+            LightEntry *entry = s_profile_refresh_query.entry;
+            const uint8_t query_address = s_profile_refresh_query.query_address;
+            const uint32_t generation = s_profile_refresh_query.generation;
+            if (entry == nullptr || generation != entry->profile_generation) {
+                s_profile_refresh_query.active = false;
+                dali_refresh_cursor_complete(&refresh_cursor_, s_light_count,
+                                             DALI_REFRESH_RETRY);
+                return;
+            }
+
+            DaliError err = DALI_OK;
+            switch (s_profile_refresh_query.phase) {
+            case PROFILE_REFRESH_DEVICE_TYPE: {
+                uint8_t device_type = 0u;
+                err = dali_discovery_u8_from_sequence(
+                    &s_profile_refresh_query.result,
+                    DALI_DISCOVERY_DEVICE_TYPES_STEP_FIRST, &device_type);
+                if (err != DALI_OK) {
+                    /* Not knowing the device type only rules out the curve, not
+                     * the limits — read MIN/MAX anyway. curve_capability_known
+                     * stays false so a gear that answers later still gets its
+                     * curve, at the cost of one unanswered query per refresh. */
+                    ESP_LOGD(TAG, "device-type query failed for short %u: %d; reading limits only",
+                             (unsigned)query_address, (int)err);
+                    s_profile_refresh_query.query_dt6_curve = false;
+                    s_profile_refresh_query.phase = PROFILE_REFRESH_PROFILE;
+                    err = enqueue_level_profile_query(query_address, false);
+                    if (err == DALI_OK) {
+                        refresh_queue_blocked_ = false;
+                        return;
+                    }
+                    reject_profile_stage(entry, query_address, generation, err);
+                    return;
+                }
+
+                if (device_type == DALI_DISCOVERY_DEVICE_TYPE_MULTIPLE) {
+                    s_profile_refresh_query.phase = PROFILE_REFRESH_DEVICE_TYPES;
+                    err = enqueue_level_profile_device_types_query(query_address);
+                    if (err == DALI_OK) {
+                        refresh_queue_blocked_ = false;
+                        return;
+                    }
+                    reject_profile_stage(entry, query_address, generation, err);
+                    return;
+                }
+
+                s_level_profile_cache[query_address].curve_capability_known = true;
+                s_level_profile_cache[query_address].query_dt6_curve =
+                    device_type == 6u;
+                s_profile_refresh_query.query_dt6_curve =
+                    s_level_profile_cache[query_address].query_dt6_curve;
+                s_profile_refresh_query.phase = PROFILE_REFRESH_PROFILE;
+                err = enqueue_level_profile_query(
+                    query_address, s_profile_refresh_query.query_dt6_curve);
+                if (err == DALI_OK) {
+                    refresh_queue_blocked_ = false;
+                    return;
+                }
+                reject_profile_stage(entry, query_address, generation, err);
+                return;
+            }
+
+            case PROFILE_REFRESH_DEVICE_TYPES: {
+                DaliDiscoveryDeviceInfo device = {};
+                err = dali_discovery_device_types_from_sequence(
+                    &s_profile_refresh_query.result, &device);
+                const bool supports_dt6 = dali_discovery_has_device_type(&device, 6u);
+                const bool complete = err == DALI_OK &&
+                                      s_profile_refresh_query.result.result == DALI_OK &&
+                                      !device.device_types_truncated;
+                if (!supports_dt6 && !complete) {
+                    /* DT6 may be in the part of the list that never arrived, so
+                     * the capability stays unknown — but the limits do not
+                     * depend on it, so read them with the two-step sequence. */
+                    ESP_LOGD(TAG, "device-type enumeration incomplete for short %u; reading limits only",
+                             (unsigned)query_address);
+                    s_profile_refresh_query.query_dt6_curve = false;
+                    s_profile_refresh_query.phase = PROFILE_REFRESH_PROFILE;
+                    err = enqueue_level_profile_query(query_address, false);
+                    if (err == DALI_OK) {
+                        refresh_queue_blocked_ = false;
+                        return;
+                    }
+                    reject_profile_stage(entry, query_address, generation, err);
+                    return;
+                }
+
+                s_level_profile_cache[query_address].curve_capability_known = true;
+                s_level_profile_cache[query_address].query_dt6_curve = supports_dt6;
+                s_profile_refresh_query.query_dt6_curve = supports_dt6;
+                s_profile_refresh_query.phase = PROFILE_REFRESH_PROFILE;
+                err = enqueue_level_profile_query(query_address, supports_dt6);
+                if (err == DALI_OK) {
+                    refresh_queue_blocked_ = false;
+                    return;
+                }
+                reject_profile_stage(entry, query_address, generation, err);
+                return;
+            }
+
+            case PROFILE_REFRESH_PROFILE: {
+                DaliDiscoveryGearProfile discovered = {};
+                if (s_level_profile_cache[query_address].valid) {
+                    const DaliLevelProfile &cached =
+                        s_level_profile_cache[query_address].profile;
+                    discovered.has_level_limits = true;
+                    discovered.min_level = cached.min_level;
+                    discovered.max_level = cached.max_level;
+                    discovered.has_dimming_curve = true;
+                    discovered.dimming_curve = cached.curve;
+                }
+
+                DaliError profile_err = dali_discovery_profile_from_sequence(
+                    &s_profile_refresh_query.result,
+                    s_profile_refresh_query.query_dt6_curve, &discovered);
+                if (profile_err == DALI_OK && discovered.has_level_limits) {
+                    DaliLevelProfile profile = {
+                        discovered.has_dimming_curve ? discovered.dimming_curve
+                                                     : DALI_DIM_CURVE_STANDARD,
+                        discovered.min_level,
+                        discovered.max_level,
+                    };
+                    if (dali_level_profile_validate(&profile) == DALI_OK) {
+                        s_level_profile_cache[query_address].valid = true;
+                        s_level_profile_cache[query_address].profile = profile;
+                    }
+                } else {
+                    ESP_LOGD(TAG, "level profile refresh failed for short %u: %d; retaining prior profile",
+                             (unsigned)query_address, (int)profile_err);
+                }
+                set_light_profile(entry, query_address, generation);
+                s_profile_refresh_query.actual_level_pending = true;
+                break;
+            }
+
+            default:
+                set_light_profile(entry, query_address, generation);
+                s_profile_refresh_query.actual_level_pending = true;
+                break;
+            }
+        }
+
+        if (s_refresh_query_in_flight_.load(std::memory_order_acquire)) return;
+
+        LightEntry *entry = s_profile_refresh_query.entry;
+        const uint8_t query_address = s_profile_refresh_query.query_address;
+        DaliError err = enqueue_actual_level_query(entry, query_address);
+        if (err == DALI_OK) {
+            s_profile_refresh_query.active = false;
+            refresh_queue_blocked_ = false;
+            dali_refresh_cursor_complete(&refresh_cursor_, s_light_count,
+                                         DALI_REFRESH_ADVANCE);
+            ESP_LOGD(TAG, "query actual level: light target type=%u addr=%u via short %u",
+                     (unsigned)entry->target_type, (unsigned)entry->target_address,
+                     (unsigned)query_address);
+            return;
+        }
+        if (err == DALI_ERR_QUEUE_FULL) {
+            if (!refresh_queue_blocked_) {
+                ESP_LOGD(TAG, "light refresh paused: scheduler queue full");
+                refresh_queue_blocked_ = true;
+            }
+            return;
+        }
+
+        s_profile_refresh_query.active = false;
+        refresh_queue_blocked_ = false;
+        dali_refresh_cursor_complete(&refresh_cursor_, s_light_count,
+                                     DALI_REFRESH_ADVANCE);
+        ESP_LOGW(TAG, "actual-level refresh rejected: target type=%u addr=%u result=%d",
+                 (unsigned)entry->target_type, (unsigned)entry->target_address,
+                 (int)err);
+        return;
+    }
+
+    if (s_refresh_query_in_flight_.load(std::memory_order_acquire)) return;
+
+    uint8_t i;
+    while (dali_refresh_cursor_current(&refresh_cursor_, s_light_count, &i)) {
+        LightEntry *e = &s_light_registry[i];
+        uint8_t     qa = 0xFFu;
+        if (e->target_type == (uint8_t)DALI_ADDR_GROUP) {
+            qa = pick_group_member(e->target_address);
+        } else {
+            qa = e->light->get_query_address();
+        }
+        if (qa == 0xFFu) {
+            /* No gear to query — a broadcast entity with no query_address, or a
+             * group whose membership is not known yet. It still needs a profile
+             * before it will transmit anything, including OFF, so give it one
+             * from whatever is known and move on. Passing the current
+             * generation keeps this idempotent across passes: an entity already
+             * holding this profile keeps its deduplication cache. */
+            set_light_profile(e, qa, e->profile_generation);
+            dali_refresh_cursor_complete(&refresh_cursor_, s_light_count,
+                                         DALI_REFRESH_ADVANCE);
+            continue;
+        }
+
+        const uint32_t generation = begin_light_profile_update(e);
+        s_profile_refresh_query.entry = e;
+        s_profile_refresh_query.query_address = qa;
+        s_profile_refresh_query.generation = generation;
+        s_profile_refresh_query.actual_level_pending = false;
+        s_profile_refresh_query.active = true;
+        DaliError err;
+        if (s_level_profile_cache[qa].curve_capability_known) {
+            s_profile_refresh_query.query_dt6_curve =
+                s_level_profile_cache[qa].query_dt6_curve;
+            s_profile_refresh_query.phase = PROFILE_REFRESH_PROFILE;
+            err = enqueue_level_profile_query(
+                qa, s_profile_refresh_query.query_dt6_curve);
+        } else {
+            s_profile_refresh_query.query_dt6_curve = false;
+            s_profile_refresh_query.phase = PROFILE_REFRESH_DEVICE_TYPE;
+            err = enqueue_level_profile_device_type_query(qa);
+        }
+        if (err == DALI_OK) {
+            refresh_queue_blocked_ = false;
+            ESP_LOGD(TAG, "query level profile: light target type=%u addr=%u via short %u",
+                     (unsigned)e->target_type, (unsigned)e->target_address,
+                     (unsigned)qa);
+            return;
+        }
+
+        reject_profile_stage(e, qa, generation, err);
         return;
     }
     refresh_queue_blocked_ = false;

@@ -7,6 +7,7 @@
 extern "C" {
 #include "../../../components/dali/dali_frame.h"  // DaliError
 #include "../../../components/dali/dali_cli.h"    // DaliCliTokens
+#include "../../../components/dali/dali_discovery.h"
 }
 
 #include <atomic>
@@ -34,6 +35,11 @@ class DaliBusLight {
   // gates its own transmission on the scan.
   virtual void    flush_pending_write() = 0;
   virtual uint8_t get_query_address() const = 0;
+  // Core 0 only. Logical intent remains owned by the entity while a new
+  // profile is acquired; raw levels from older generations cannot be sent.
+  virtual void begin_level_profile_update(uint32_t generation) = 0;
+  virtual void set_level_profile(const DaliLevelProfile &profile,
+                                 uint32_t generation) = 0;
 };
 
 /*
@@ -131,6 +137,9 @@ class DaliComponent : public Component {
   // persist the previous known-good group map.
   bool set_group_membership_snapshot(const uint64_t masks[16], uint16_t verified,
                                      uint64_t observed_gear);
+  // Called by the scan task before on_scan_complete(). Copies only control-gear
+  // profile metadata; scan_done_'s release/acquire handoff publishes the copy.
+  void set_scan_level_profile_snapshot(const DaliDiscoveryInventory *inventory);
   // Called by DaliLightOutput during codegen init (Core 0 setup phase).
   void register_light(uint8_t target_type, uint8_t target_address,
                       uint16_t member_groups, DaliBusLight *light);
@@ -215,6 +224,8 @@ class DaliComponent : public Component {
   // Admit at most one eligible light query per loop; queue pressure retains the
   // cursor so that the same entry is retried instead of being dropped.
   void pump_refresh();
+  // Apply the scan task's level-profile snapshot on Core 0.
+  void apply_scan_level_profile_snapshot_();
   // Surface a rejected diagnostic-button enqueue; no-op on DALI_OK.
   void report_diag_enqueue_(const char *what, DaliError err);
   // Publish current bus availability alongside its cumulative fault count.

@@ -7,6 +7,7 @@
 #include "../dali_component.h"  // provides DaliBusLight + DaliComponent
 #include "dali_light_state_mailbox.h"
 #include "dali_light_command_mailbox.h"
+#include "dali_light_profile.h"
 
 #include <cstdint>
 
@@ -57,6 +58,22 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   void mark_state_from_bus(bool is_on, uint8_t level) override;
   void apply_bus_state() override;
   void flush_pending_write() override;
+  void begin_level_profile_update(uint32_t generation) override;
+  void set_level_profile(const DaliLevelProfile &profile,
+                         uint32_t generation) override;
+
+  void set_min_level_override(uint8_t level) {
+    min_level_override_ = level;
+    has_min_level_override_ = true;
+  }
+  void set_max_level_override(uint8_t level) {
+    max_level_override_ = level;
+    has_max_level_override_ = true;
+  }
+  void set_dimming_curve_override(uint8_t curve) {
+    curve_override_ = static_cast<DaliDimCurve>(curve);
+    has_curve_override_ = true;
+  }
 
  protected:
   DaliTarget      target_{};
@@ -74,6 +91,27 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   // it holds is what suppresses a redundant command, and it is committed only
   // from a scheduler completion, never from a successful enqueue.
   DaliLightWrite    write_{};
+  // Logical HA intent is retained until the raw command mapped under the same
+  // profile generation is confirmed. This prevents a boot/scan profile change
+  // from transmitting a queued raw level calculated from an obsolete profile.
+  DaliLevelProfile  profile_{DALI_DIM_CURVE_STANDARD, 1u, 254u};
+  uint32_t          profile_generation_{0u};
+  bool              profile_ready_{false};
+  bool              logical_pending_{false};
+  bool              logical_is_on_{false};
+  float             logical_brightness_{0.0f};
+  uint32_t          logical_revision_{0u};
+  uint32_t          mapped_revision_{0u};
+  uint32_t          mapped_generation_{0u};
+  uint32_t          in_flight_revision_{0u};
+  uint32_t          in_flight_generation_{0u};
+
+  bool              has_min_level_override_{false};
+  bool              has_max_level_override_{false};
+  uint8_t           min_level_override_{1u};
+  uint8_t           max_level_override_{254u};
+  bool              has_curve_override_{false};
+  DaliDimCurve      curve_override_{DALI_DIM_CURVE_STANDARD};
 
   // Core 0 only — tells apart the two write_state() calls that are not an
   // operator's intent. See the comment on write_state().
@@ -86,13 +124,15 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   bool              echo_valid_{false};
   bool              echo_is_on_{false};
   uint8_t           echo_level_{0};
+  uint32_t          echo_profile_generation_{0u};
   light::LightState *state_{nullptr};
 
   static void clear_unused_color_fields_(light::LightColorValues &values);
   // ESPHome brightness is a fraction of light output; the bus carries arc power
   // levels. dali_dim_curve owns the conversion — see the note on write_state().
-  static uint8_t brightness_to_level_(float brightness);
-  static float   level_to_brightness_(uint8_t level);
+  bool brightness_to_level_(float brightness, uint8_t *level) const;
+  bool level_to_brightness_(uint8_t level, float *brightness) const;
+  void map_logical_request_();
   // Core 1 — scheduler completion for a level/off command.
   static void on_command_complete_(DaliError result, const DaliFrame *reply, void *ctx);
   // Core 0 — collect completions, then admit at most one command.

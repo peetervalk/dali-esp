@@ -7,11 +7,11 @@
 
 /* DALI-2 QUERY DEVICE TYPE / QUERY NEXT DEVICE TYPE sentinel replies. */
 #define DALI_DISCOVERY_QUERY_RETRIES_LEFT      1u
-#define DALI_DISCOVERY_DEVICE_TYPE_NONE_OR_END 0xFEu
-#define DALI_DISCOVERY_DEVICE_TYPE_MULTIPLE    0xFFu
 
 _Static_assert(DALI_SEQUENCE_MAX_STEPS >= DALI_DISCOVERY_DEVICE_TYPES_SEQUENCE_STEPS,
                "device-type enumeration must fit in one sequence");
+_Static_assert(DALI_SEQUENCE_MAX_STEPS >= DALI_DISCOVERY_PROFILE_DT6_STEPS,
+               "gear profile must fit in one sequence");
 
 typedef DaliError (*DaliDiscoveryInputQueryBuilder)(uint8_t addr,
                                                     uint8_t instance,
@@ -219,6 +219,59 @@ DaliError dali_discovery_build_device_type_query_sequence(uint8_t device_type,
     return DALI_OK;
 }
 
+DaliError dali_discovery_build_profile_sequence(uint8_t addr,
+                                                bool query_dt6_curve,
+                                                DaliSequence *out)
+{
+    if (out == NULL || addr >= DALI_SHORT_ADDRESS_COUNT) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = addr };
+    DaliFrame min_query;
+    DaliError err = dali_control_build_query(target, DALI_CMD_QUERY_MIN_LEVEL,
+                                             0u, &min_query);
+    if (err != DALI_OK) {
+        return err;
+    }
+    DaliFrame max_query;
+    err = dali_control_build_query(target, DALI_CMD_QUERY_MAX_LEVEL,
+                                   0u, &max_query);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    memset(out, 0, sizeof(*out));
+
+    DaliSequenceStep *min_step =
+        &out->steps[DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL];
+    min_step->frame = min_query;
+    min_step->needs_reply = true;
+    min_step->retries_left = DALI_DISCOVERY_QUERY_RETRIES_LEFT;
+
+    DaliSequenceStep *max_step =
+        &out->steps[DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL];
+    max_step->frame = max_query;
+    max_step->needs_reply = true;
+    max_step->retries_left = DALI_DISCOVERY_QUERY_RETRIES_LEFT;
+
+    if (!query_dt6_curve) {
+        out->step_count = DALI_DISCOVERY_PROFILE_LIMIT_STEPS;
+        return DALI_OK;
+    }
+
+    /* ENABLE DEVICE TYPE applies only to the command immediately following
+     * it. Keep the pair adjacent and give neither step a local retry. */
+    out->steps[DALI_DISCOVERY_PROFILE_STEP_DT6_ENABLE].frame = dali_dt6_enable();
+    DaliSequenceStep *curve_step =
+        &out->steps[DALI_DISCOVERY_PROFILE_STEP_CURVE];
+    curve_step->frame = dali_dt6_query_dimming_curve(addr);
+    curve_step->needs_reply = true;
+
+    out->step_count = DALI_DISCOVERY_PROFILE_DT6_STEPS;
+    return DALI_OK;
+}
+
 DaliError dali_discovery_build_groups_sequence(uint8_t addr, DaliSequence *out)
 {
     if (out == NULL || addr >= DALI_SHORT_ADDRESS_COUNT) {
@@ -405,6 +458,93 @@ DaliError dali_discovery_device_types_from_sequence(const DaliSequenceResult *re
     return device->device_type_count > 0u ? DALI_OK : DALI_ERR_MALFORMED;
 }
 
+/* Read one profile reply and preserve the error from a failed required step. */
+static DaliError profile_step_u8(const DaliSequenceResult *result,
+                                 uint8_t step,
+                                 uint8_t *out)
+{
+    if (result == NULL || out == NULL || step >= DALI_SEQUENCE_MAX_STEPS) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliFrame reply;
+    if (dali_sequence_result_reply(result, step, &reply) &&
+        reply.bit_length == DALI_BACKWARD_FRAME_BITS) {
+        *out = (uint8_t)(reply.data & 0xFFu);
+        return DALI_OK;
+    }
+
+    if (result->result != DALI_OK &&
+        result->failed_step != DALI_SEQUENCE_NO_FAILED_STEP &&
+        result->failed_step <= step) {
+        return result->result;
+    }
+    return DALI_ERR_MALFORMED;
+}
+
+DaliError dali_discovery_profile_from_sequence(const DaliSequenceResult *result,
+                                               bool query_dt6_curve,
+                                               DaliDiscoveryGearProfile *profile)
+{
+    if (result == NULL || profile == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    uint8_t min_level = 0u;
+    DaliError err = profile_step_u8(result,
+                                    DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL,
+                                    &min_level);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    uint8_t max_level = 0u;
+    err = profile_step_u8(result,
+                          DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL,
+                          &max_level);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    /* 0 is OFF and 255 is MASK, not an addressable on-level. Commit neither
+     * limit unless the pair is both legal and internally consistent. */
+    if (min_level == 0u || min_level == DALI_DAPC_MASK_LEVEL ||
+        max_level == 0u || max_level == DALI_DAPC_MASK_LEVEL ||
+        min_level > max_level) {
+        return DALI_ERR_MALFORMED;
+    }
+
+    /* The curve degrades on its own. QUERY DIMMING CURVE is a DT6 extension,
+     * and gear that claims DT6 without answering it would otherwise discard a
+     * perfectly good MIN/MAX pair — which is exactly the gear whose MIN matters
+     * most. An unreadable curve keeps the last known one, or falls back to the
+     * standard curve the whole 102 dimming model defaults to. */
+    DaliDimCurve curve = DALI_DIM_CURVE_STANDARD;
+    bool has_curve = true;
+    if (query_dt6_curve) {
+        uint8_t raw_curve = 0u;
+        if (profile_step_u8(result, DALI_DISCOVERY_PROFILE_STEP_CURVE,
+                            &raw_curve) == DALI_OK &&
+            raw_curve <= DALI_DIM_CURVE_LINEAR) {
+            curve = (DaliDimCurve)raw_curve;
+        } else if (profile->has_dimming_curve) {
+            curve = profile->dimming_curve;
+        } else {
+            has_curve = false;
+        }
+    }
+
+    DaliDiscoveryGearProfile candidate = {
+        .has_level_limits = true,
+        .min_level = min_level,
+        .max_level = max_level,
+        .has_dimming_curve = has_curve,
+        .dimming_curve = curve,
+    };
+    *profile = candidate;
+    return DALI_OK;
+}
+
 DaliError dali_discovery_query_u8(const DaliDiscoveryTransport *transport,
                                   const DaliFrame *frame,
                                   uint8_t *out)
@@ -518,6 +658,68 @@ DaliError dali_discovery_query_actual_level(const DaliDiscoveryTransport *transp
     return discovery_query_simple(transport, addr, DALI_CMD_QUERY_ACTUAL_LEVEL, level_out);
 }
 
+static DaliError discovery_query_level_limit(const DaliDiscoveryTransport *transport,
+                                             uint8_t addr,
+                                             DaliCommandId command,
+                                             uint8_t *level_out)
+{
+    if (!transport_valid(transport) || level_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    uint8_t level = 0u;
+    DaliError err = discovery_query_simple(transport, addr, command, &level);
+    if (err != DALI_OK) {
+        return err;
+    }
+    if (level == 0u || level == DALI_DAPC_MASK_LEVEL) {
+        return DALI_ERR_MALFORMED;
+    }
+
+    *level_out = level;
+    return DALI_OK;
+}
+
+DaliError dali_discovery_query_min_level(const DaliDiscoveryTransport *transport,
+                                         uint8_t addr,
+                                         uint8_t *level_out)
+{
+    return discovery_query_level_limit(transport, addr, DALI_CMD_QUERY_MIN_LEVEL,
+                                       level_out);
+}
+
+DaliError dali_discovery_query_max_level(const DaliDiscoveryTransport *transport,
+                                         uint8_t addr,
+                                         uint8_t *level_out)
+{
+    return discovery_query_level_limit(transport, addr, DALI_CMD_QUERY_MAX_LEVEL,
+                                       level_out);
+}
+
+DaliError dali_discovery_query_dt6_dimming_curve(
+    const DaliDiscoveryTransport *transport,
+    uint8_t addr,
+    DaliDimCurve *curve_out)
+{
+    if (!transport_valid(transport) || curve_out == NULL ||
+        addr >= DALI_SHORT_ADDRESS_COUNT) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliFrame query = dali_dt6_query_dimming_curve(addr);
+    uint8_t raw_curve = 0u;
+    DaliError err = discovery_query_dt6(transport, &query, &raw_curve);
+    if (err != DALI_OK) {
+        return err;
+    }
+    if (raw_curve > DALI_DIM_CURVE_LINEAR) {
+        return DALI_ERR_MALFORMED;
+    }
+
+    *curve_out = (DaliDimCurve)raw_curve;
+    return DALI_OK;
+}
+
 const char *dali_discovery_device_type_name(uint8_t type)
 {
     switch (type) {
@@ -580,6 +782,41 @@ static void discovery_enrich_device_types(const DaliDiscoveryTransport *transpor
     (void)dali_discovery_device_types_from_sequence(&result, device);
 }
 
+static void discovery_enrich_gear_profile(const DaliDiscoveryTransport *transport,
+                                          uint8_t addr,
+                                          DaliDiscoveryDeviceInfo *device)
+{
+    bool query_dt6_curve = dali_discovery_has_device_type(device, 6u);
+    DaliSequence seq;
+    if (dali_discovery_build_profile_sequence(addr, query_dt6_curve, &seq) != DALI_OK) {
+        return;
+    }
+
+    DaliSequenceResult result;
+    (void)dali_transport_run_sequence_atomic(transport, &seq, &result);
+
+    /* The parser commits only a complete profile, so a failed sequence leaves
+     * this device's previously known-good metadata untouched. */
+    DaliDiscoveryGearProfile profile = {
+        .has_level_limits = device->has_level_limits,
+        .min_level = device->min_level,
+        .max_level = device->max_level,
+        .has_dimming_curve = device->has_dimming_curve,
+        .dimming_curve = device->dimming_curve,
+    };
+    if (dali_discovery_profile_from_sequence(&result,
+                                             query_dt6_curve,
+                                             &profile) != DALI_OK) {
+        return;
+    }
+
+    device->has_level_limits = profile.has_level_limits;
+    device->min_level = profile.min_level;
+    device->max_level = profile.max_level;
+    device->has_dimming_curve = profile.has_dimming_curve;
+    device->dimming_curve = profile.dimming_curve;
+}
+
 static void discovery_enrich_device(const DaliDiscoveryTransport *transport,
                                     uint8_t addr,
                                     DaliDiscoveryDeviceInfo *device)
@@ -608,6 +845,10 @@ static void discovery_enrich_device(const DaliDiscoveryTransport *transport,
     if (dali_discovery_query_actual_level(transport, addr, &level) == DALI_OK) {
         device->has_actual_level = true;
         device->actual_level = level;
+    }
+
+    if (device->has_control_gear) {
+        discovery_enrich_gear_profile(transport, addr, device);
     }
 
     DaliFrame instances_frame;

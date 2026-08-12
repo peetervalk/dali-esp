@@ -9,6 +9,7 @@ typedef struct {
     bool      malformed[DALI_SHORT_ADDRESS_COUNT];
     int       bus_error_addr;
     uint32_t  tx_count;
+    uint32_t  sequence_count;
     uint32_t  query_next_device_type_count;
     uint32_t  gear_memory_read_count;
     uint32_t  found_cb_count;
@@ -145,6 +146,10 @@ static DaliError mock_transact_sequence(const DaliSequence *seq,
         return DALI_ERR_INVALID;
     }
 
+    MockDiscoveryBus *bus = (MockDiscoveryBus *)ctx;
+    TEST_ASSERT_NOT_NULL(bus);
+    bus->sequence_count++;
+
     DaliSequenceResult result = {
         .result = DALI_OK,
         .failed_step = DALI_SEQUENCE_NO_FAILED_STEP,
@@ -258,11 +263,12 @@ void test_scan_records_responders_and_callback(void)
     TEST_ASSERT_EQUAL_UINT8(2u, found);
     TEST_ASSERT_EQUAL_UINT8(2u, inventory.found_count);
     /* 64 status + per found device (all queries timeout):
-     *  groups-0-7(1), device_type(1), version(1), actual_level(1), num_instances(1),
+     *  groups-0-7(1), device_type(1), version(1), actual_level(1),
+     *  profile MIN(1; MAX is skipped after the timeout), num_instances(1),
      *  bank0 identity attempt: DTR1(1)+DTR0(1)+READ(1),
      *  scene-levels: QUERY_SCENE_LEVEL 0-15(16)
      * + 62 QUERY_NUMBER_OF_INSTANCES probes for the 62 absent addresses */
-    TEST_ASSERT_EQUAL_UINT32(2u * DALI_SHORT_ADDRESS_COUNT + 2u * 24u - 2u,
+    TEST_ASSERT_EQUAL_UINT32(2u * DALI_SHORT_ADDRESS_COUNT + 2u * 25u - 2u,
                              s_bus.tx_count);
     TEST_ASSERT_EQUAL_UINT32(2u, s_bus.found_cb_count);
     TEST_ASSERT_EQUAL_UINT8(12u, s_bus.found_cb_last_addr);
@@ -477,6 +483,61 @@ void test_query_actual_level_returns_value(void)
     TEST_ASSERT_EQUAL_UINT8(254u, level);
 }
 
+void test_query_level_limits_validate_replies(void)
+{
+    add_reply(0x0BA2u, DALI_FORWARD_FRAME_BITS, DALI_OK, 85u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA1u, DALI_FORWARD_FRAME_BITS, DALI_OK, 200u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA2u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA1u, DALI_FORWARD_FRAME_BITS, DALI_OK,
+              DALI_DAPC_MASK_LEVEL, DALI_BACKWARD_FRAME_BITS);
+
+    DaliDiscoveryTransport t = transport();
+    uint8_t level = 0xAAu;
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_query_min_level(&t, 5u, &level));
+    TEST_ASSERT_EQUAL_UINT8(85u, level);
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_query_max_level(&t, 5u, &level));
+    TEST_ASSERT_EQUAL_UINT8(200u, level);
+
+    level = 0xAAu;
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_discovery_query_min_level(&t, 5u, &level));
+    TEST_ASSERT_EQUAL_UINT8(0xAAu, level);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_discovery_query_max_level(&t, 5u, &level));
+    TEST_ASSERT_EQUAL_UINT8(0xAAu, level);
+}
+
+void test_query_dt6_dimming_curve_is_atomic_and_typed(void)
+{
+    add_reply(0x0BEEu, DALI_FORWARD_FRAME_BITS, DALI_OK,
+              DALI_DIM_CURVE_LINEAR, DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BEEu, DALI_FORWARD_FRAME_BITS, DALI_OK,
+              DALI_DIM_CURVE_STANDARD, DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BEEu, DALI_FORWARD_FRAME_BITS, DALI_OK, 2u,
+              DALI_BACKWARD_FRAME_BITS);
+
+    DaliDiscoveryTransport t = transport();
+    DaliDimCurve curve = DALI_DIM_CURVE_STANDARD;
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_query_dt6_dimming_curve(&t, 5u, &curve));
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_LINEAR, curve);
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_query_dt6_dimming_curve(&t, 5u, &curve));
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_STANDARD, curve);
+
+    curve = DALI_DIM_CURVE_LINEAR;
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_discovery_query_dt6_dimming_curve(&t, 5u, &curve));
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_LINEAR, curve);
+    TEST_ASSERT_EQUAL_UINT32(3u, s_bus.sequence_count);
+    TEST_ASSERT_EQUAL_UINT32(6u, s_bus.tx_count);
+}
+
 void test_scan_stores_device_type_version_and_level(void)
 {
     DaliDiscoveryInventory inventory;
@@ -488,6 +549,8 @@ void test_scan_stores_device_type_version_and_level(void)
     add_reply(0x0B99u, DALI_FORWARD_FRAME_BITS, DALI_OK, 8u,   DALI_BACKWARD_FRAME_BITS);
     add_reply(0x0B97u, DALI_FORWARD_FRAME_BITS, DALI_OK, 4u,   DALI_BACKWARD_FRAME_BITS);
     add_reply(0x0BA0u, DALI_FORWARD_FRAME_BITS, DALI_OK, 254u, DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA2u, DALI_FORWARD_FRAME_BITS, DALI_OK, 85u,  DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA1u, DALI_FORWARD_FRAME_BITS, DALI_OK, 200u, DALI_BACKWARD_FRAME_BITS);
 
     DaliDiscoveryTransport t = transport();
     TEST_ASSERT_EQUAL(DALI_OK,
@@ -506,6 +569,11 @@ void test_scan_stores_device_type_version_and_level(void)
     TEST_ASSERT_EQUAL_UINT8(4u, device->version);
     TEST_ASSERT_TRUE(device->has_actual_level);
     TEST_ASSERT_EQUAL_UINT8(254u, device->actual_level);
+    TEST_ASSERT_TRUE(device->has_level_limits);
+    TEST_ASSERT_EQUAL_UINT8(85u, device->min_level);
+    TEST_ASSERT_EQUAL_UINT8(200u, device->max_level);
+    TEST_ASSERT_TRUE(device->has_dimming_curve);
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_STANDARD, device->dimming_curve);
     TEST_ASSERT_FALSE(device->has_input_device);
 }
 
@@ -586,6 +654,65 @@ void test_build_device_type_query_sequence_rejects_bad_arguments(void)
                       dali_discovery_build_device_type_query_sequence(6u, &backward, &seq));
     TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
                       dali_discovery_build_device_type_query_sequence(6u, &empty, &seq));
+}
+
+void test_build_profile_sequence_layout(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_build_profile_sequence(5u, false, &seq));
+    TEST_ASSERT_EQUAL_UINT8(DALI_DISCOVERY_PROFILE_LIMIT_STEPS,
+                            seq.step_count);
+
+    const DaliSequenceStep *min_step =
+        &seq.steps[DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL];
+    TEST_ASSERT_EQUAL_HEX32(0x0BA2u, min_step->frame.data);
+    TEST_ASSERT_EQUAL_UINT8(DALI_FORWARD_FRAME_BITS,
+                            min_step->frame.bit_length);
+    TEST_ASSERT_TRUE(min_step->needs_reply);
+    TEST_ASSERT_GREATER_THAN_UINT8(0u, min_step->retries_left);
+
+    const DaliSequenceStep *max_step =
+        &seq.steps[DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL];
+    TEST_ASSERT_EQUAL_HEX32(0x0BA1u, max_step->frame.data);
+    TEST_ASSERT_TRUE(max_step->needs_reply);
+    TEST_ASSERT_GREATER_THAN_UINT8(0u, max_step->retries_left);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_build_profile_sequence(5u, true, &seq));
+    TEST_ASSERT_EQUAL_UINT8(DALI_DISCOVERY_PROFILE_DT6_STEPS,
+                            seq.step_count);
+
+    const DaliSequenceStep *enable =
+        &seq.steps[DALI_DISCOVERY_PROFILE_STEP_DT6_ENABLE];
+    TEST_ASSERT_EQUAL_HEX32(0xC106u, enable->frame.data);
+    TEST_ASSERT_EQUAL_UINT8(DALI_FORWARD_FRAME_BITS,
+                            enable->frame.bit_length);
+    TEST_ASSERT_FALSE(enable->needs_reply);
+    TEST_ASSERT_EQUAL_UINT8(0u, enable->retries_left);
+
+    const DaliSequenceStep *curve =
+        &seq.steps[DALI_DISCOVERY_PROFILE_STEP_CURVE];
+    TEST_ASSERT_EQUAL_HEX32(0x0BEEu, curve->frame.data);
+    TEST_ASSERT_EQUAL_UINT8(DALI_FORWARD_FRAME_BITS,
+                            curve->frame.bit_length);
+    TEST_ASSERT_TRUE(curve->needs_reply);
+    TEST_ASSERT_EQUAL_UINT8(0u, curve->retries_left);
+}
+
+void test_build_profile_sequence_rejects_bad_arguments(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_build_profile_sequence(0u, false, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_build_profile_sequence(
+                          DALI_SHORT_ADDRESS_COUNT, false, &seq));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_build_profile_sequence(
+                          DALI_SHORT_ADDRESS_COUNT - 1u, true, &seq));
 }
 
 void test_build_groups_sequence_layout(void)
@@ -675,6 +802,195 @@ static void result_reset(DaliSequenceResult *result)
     memset(result, 0, sizeof(*result));
     result->result = DALI_OK;
     result->failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
+}
+
+void test_profile_from_sequence_distinguishes_standard_and_linear_curves(void)
+{
+    DaliSequenceResult result;
+    DaliDiscoveryGearProfile profile = {0};
+
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 85u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL, 200u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_CURVE,
+               DALI_DIM_CURVE_STANDARD, DALI_BACKWARD_FRAME_BITS);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_profile_from_sequence(&result, true,
+                                                           &profile));
+    TEST_ASSERT_TRUE(profile.has_level_limits);
+    TEST_ASSERT_EQUAL_UINT8(85u, profile.min_level);
+    TEST_ASSERT_EQUAL_UINT8(200u, profile.max_level);
+    TEST_ASSERT_TRUE(profile.has_dimming_curve);
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_STANDARD, profile.dimming_curve);
+
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 40u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL, 220u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_CURVE,
+               DALI_DIM_CURVE_LINEAR, DALI_BACKWARD_FRAME_BITS);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_profile_from_sequence(&result, true,
+                                                           &profile));
+    TEST_ASSERT_EQUAL_UINT8(40u, profile.min_level);
+    TEST_ASSERT_EQUAL_UINT8(220u, profile.max_level);
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_LINEAR, profile.dimming_curve);
+}
+
+void test_profile_from_sequence_keeps_limits_when_curve_is_unavailable(void)
+{
+    DaliSequenceResult result;
+    const DaliDiscoveryGearProfile last_good = {
+        .has_level_limits = true,
+        .min_level = 40u,
+        .max_level = 220u,
+        .has_dimming_curve = true,
+        .dimming_curve = DALI_DIM_CURVE_LINEAR,
+    };
+    DaliDiscoveryGearProfile profile = last_good;
+
+    /* An unanswered curve step must not cost the gear the MIN/MAX it did
+     * answer; the previously read curve carries over. */
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 85u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL, 200u,
+               DALI_BACKWARD_FRAME_BITS);
+    result.result = DALI_ERR_TIMEOUT;
+    result.failed_step = DALI_DISCOVERY_PROFILE_STEP_CURVE;
+    result.steps_run = DALI_DISCOVERY_PROFILE_DT6_STEPS;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_profile_from_sequence(&result, true,
+                                                           &profile));
+    TEST_ASSERT_TRUE(profile.has_level_limits);
+    TEST_ASSERT_EQUAL_UINT8(85u, profile.min_level);
+    TEST_ASSERT_EQUAL_UINT8(200u, profile.max_level);
+    TEST_ASSERT_TRUE(profile.has_dimming_curve);
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_LINEAR, profile.dimming_curve);
+
+    /* Same for a reserved curve code, which is no more readable than silence. */
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 20u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL, 180u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_CURVE, 2u,
+               DALI_BACKWARD_FRAME_BITS);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_profile_from_sequence(&result, true,
+                                                           &profile));
+    TEST_ASSERT_EQUAL_UINT8(20u, profile.min_level);
+    TEST_ASSERT_EQUAL_UINT8(180u, profile.max_level);
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_LINEAR, profile.dimming_curve);
+
+    /* With no curve ever read, the limits still commit and the caller is told
+     * the curve is unknown rather than being handed a guess as fact. */
+    DaliDiscoveryGearProfile fresh = {0};
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 30u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL, 150u,
+               DALI_BACKWARD_FRAME_BITS);
+    result.result = DALI_ERR_TIMEOUT;
+    result.failed_step = DALI_DISCOVERY_PROFILE_STEP_CURVE;
+    result.steps_run = DALI_DISCOVERY_PROFILE_DT6_STEPS;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_profile_from_sequence(&result, true,
+                                                           &fresh));
+    TEST_ASSERT_TRUE(fresh.has_level_limits);
+    TEST_ASSERT_EQUAL_UINT8(30u, fresh.min_level);
+    TEST_ASSERT_EQUAL_UINT8(150u, fresh.max_level);
+    TEST_ASSERT_FALSE(fresh.has_dimming_curve);
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_STANDARD, fresh.dimming_curve);
+
+    /* A missing MIN/MAX pair is still fatal: those are what the window is. */
+    profile = last_good;
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 85u,
+               DALI_BACKWARD_FRAME_BITS);
+    result.result = DALI_ERR_TIMEOUT;
+    result.failed_step = DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL;
+    result.steps_run = DALI_DISCOVERY_PROFILE_DT6_STEPS;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT,
+                      dali_discovery_profile_from_sequence(&result, true,
+                                                           &profile));
+    TEST_ASSERT_EQUAL_MEMORY(&last_good, &profile, sizeof(profile));
+
+    /* A non-DT6 profile has no curve query, so the required standard curve is
+     * committed along with its complete MIN/MAX pair. */
+    profile = last_good;
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 20u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL, 180u,
+               DALI_BACKWARD_FRAME_BITS);
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_profile_from_sequence(&result, false,
+                                                           &profile));
+    TEST_ASSERT_TRUE(profile.has_dimming_curve);
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_STANDARD, profile.dimming_curve);
+    TEST_ASSERT_EQUAL_UINT8(20u, profile.min_level);
+    TEST_ASSERT_EQUAL_UINT8(180u, profile.max_level);
+}
+
+void test_profile_from_sequence_preserves_output_on_invalid_or_incomplete_limits(void)
+{
+    DaliSequenceResult result;
+    const DaliDiscoveryGearProfile last_good = {
+        .has_level_limits = true,
+        .min_level = 40u,
+        .max_level = 220u,
+        .has_dimming_curve = true,
+        .dimming_curve = DALI_DIM_CURVE_LINEAR,
+    };
+    DaliDiscoveryGearProfile profile = last_good;
+
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 80u,
+               DALI_BACKWARD_FRAME_BITS);
+    result.result = DALI_ERR_TIMEOUT;
+    result.failed_step = DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL;
+    result.steps_run = DALI_DISCOVERY_PROFILE_LIMIT_STEPS;
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT,
+                      dali_discovery_profile_from_sequence(&result, false,
+                                                           &profile));
+    TEST_ASSERT_EQUAL_MEMORY(&last_good, &profile, sizeof(profile));
+
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 201u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL, 200u,
+               DALI_BACKWARD_FRAME_BITS);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_discovery_profile_from_sequence(&result, false,
+                                                           &profile));
+    TEST_ASSERT_EQUAL_MEMORY(&last_good, &profile, sizeof(profile));
+
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 0u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL,
+               DALI_DAPC_MASK_LEVEL, DALI_BACKWARD_FRAME_BITS);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_discovery_profile_from_sequence(&result, false,
+                                                           &profile));
+    TEST_ASSERT_EQUAL_MEMORY(&last_good, &profile, sizeof(profile));
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_profile_from_sequence(NULL, false,
+                                                           &profile));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_profile_from_sequence(&result, false,
+                                                           NULL));
 }
 
 void test_groups_from_sequence_assembles_low_and_high_bytes(void)
@@ -1014,6 +1330,7 @@ void test_invalid_arguments_are_rejected(void)
     };
     uint8_t value = 0u;
     uint16_t groups = 0u;
+    DaliDimCurve curve = DALI_DIM_CURVE_STANDARD;
 
     TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
                       dali_discovery_inventory_reset(NULL));
@@ -1053,6 +1370,25 @@ void test_invalid_arguments_are_rejected(void)
     TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
                       dali_discovery_query_actual_level(&t, 0u, NULL));
     TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_query_min_level(NULL, 0u, &value));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_query_min_level(&t, 0u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_query_min_level(&t,
+                                                     DALI_SHORT_ADDRESS_COUNT,
+                                                     &value));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_query_max_level(NULL, 0u, &value));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_query_max_level(&t, 0u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_query_dt6_dimming_curve(NULL, 0u, &curve));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_query_dt6_dimming_curve(&t, 0u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_query_dt6_dimming_curve(
+                          &t, DALI_SHORT_ADDRESS_COUNT, &curve));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
                       dali_discovery_scan(NULL, &t, NULL, NULL, NULL));
     TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
                       dali_discovery_query_input_device(&t, 0u, NULL));
@@ -1083,6 +1419,10 @@ void test_scan_enriches_dt6_device(void)
     add_reply(0x0B99u, DALI_FORWARD_FRAME_BITS, DALI_OK, 6u,    DALI_BACKWARD_FRAME_BITS);
     add_reply(0x0B97u, DALI_FORWARD_FRAME_BITS, DALI_OK, 2u,    DALI_BACKWARD_FRAME_BITS);
     add_reply(0x0BA0u, DALI_FORWARD_FRAME_BITS, DALI_OK, 200u,  DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA2u, DALI_FORWARD_FRAME_BITS, DALI_OK, 85u,   DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA1u, DALI_FORWARD_FRAME_BITS, DALI_OK, 220u,  DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BEEu, DALI_FORWARD_FRAME_BITS, DALI_OK,
+              DALI_DIM_CURVE_LINEAR, DALI_BACKWARD_FRAME_BITS);
     add_reply(0x0BF1u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0x03u, DALI_BACKWARD_FRAME_BITS);
     add_reply(0x0BF0u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0x05u, DALI_BACKWARD_FRAME_BITS);
 
@@ -1095,6 +1435,11 @@ void test_scan_enriches_dt6_device(void)
     TEST_ASSERT_NOT_NULL(device);
     TEST_ASSERT_TRUE(device->has_device_type);
     TEST_ASSERT_EQUAL_UINT8(6u, device->device_type);
+    TEST_ASSERT_TRUE(device->has_level_limits);
+    TEST_ASSERT_EQUAL_UINT8(85u, device->min_level);
+    TEST_ASSERT_EQUAL_UINT8(220u, device->max_level);
+    TEST_ASSERT_TRUE(device->has_dimming_curve);
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_LINEAR, device->dimming_curve);
     TEST_ASSERT_TRUE(device->has_dt6);
     TEST_ASSERT_EQUAL_HEX8(0x03u, device->dt6_failure_status);
     TEST_ASSERT_EQUAL_HEX8(0x05u, device->dt6_features);
@@ -1467,15 +1812,22 @@ int main(void)
     RUN_TEST(test_query_device_type_returns_value);
     RUN_TEST(test_query_version_returns_value);
     RUN_TEST(test_query_actual_level_returns_value);
+    RUN_TEST(test_query_level_limits_validate_replies);
+    RUN_TEST(test_query_dt6_dimming_curve_is_atomic_and_typed);
     RUN_TEST(test_scan_stores_device_type_version_and_level);
     RUN_TEST(test_query_groups_returns_bitmask);
     RUN_TEST(test_build_device_type_query_sequence_layout);
     RUN_TEST(test_build_device_type_query_sequence_carries_the_requested_type);
     RUN_TEST(test_build_device_type_query_sequence_rejects_bad_arguments);
+    RUN_TEST(test_build_profile_sequence_layout);
+    RUN_TEST(test_build_profile_sequence_rejects_bad_arguments);
     RUN_TEST(test_build_groups_sequence_layout);
     RUN_TEST(test_build_groups_sequence_rejects_bad_arguments);
     RUN_TEST(test_build_device_types_sequence_layout);
     RUN_TEST(test_build_device_types_sequence_rejects_bad_arguments);
+    RUN_TEST(test_profile_from_sequence_distinguishes_standard_and_linear_curves);
+    RUN_TEST(test_profile_from_sequence_keeps_limits_when_curve_is_unavailable);
+    RUN_TEST(test_profile_from_sequence_preserves_output_on_invalid_or_incomplete_limits);
     RUN_TEST(test_groups_from_sequence_assembles_low_and_high_bytes);
     RUN_TEST(test_groups_from_sequence_reports_failure_and_missing_replies);
     RUN_TEST(test_device_types_from_sequence_collects_ascending_list);

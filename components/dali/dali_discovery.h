@@ -8,16 +8,31 @@
  */
 
 #include "dali_control.h"
+#include "dali_dim_curve.h"
 #include "dali_input_device.h"
 #include "dali_memory.h"
 
 #define DALI_DISCOVERY_MAX_DEVICE_TYPES  4u
+#define DALI_DISCOVERY_DEVICE_TYPE_NONE_OR_END 0xFEu
+#define DALI_DISCOVERY_DEVICE_TYPE_MULTIPLE    0xFFu
 
 /* The shared DaliTransport under its discovery-era names. Discovery, memory,
  * commissioning, and input polling all take the same struct, so one transport
  * value serves every module without conversion. */
 typedef DaliTransactionFn DaliDiscoveryTransactionFn;
 typedef DaliTransport     DaliDiscoveryTransport;
+
+/* Coherent control-gear level metadata. The limits are committed only when
+ * both MIN and MAX return a legal, consistent pair. Non-DT6 gear uses the
+ * standard curve; DT6 gear supplies its selected curve explicitly, and gear
+ * that claims DT6 but cannot answer leaves has_dimming_curve false. */
+typedef struct {
+    bool                      has_level_limits;
+    uint8_t                   min_level;
+    uint8_t                   max_level;
+    bool                      has_dimming_curve;
+    DaliDimCurve              dimming_curve;
+} DaliDiscoveryGearProfile;
 
 typedef struct {
     DaliInputDeviceInfo device;
@@ -38,6 +53,11 @@ typedef struct {
     uint8_t                  version;
     bool                     has_actual_level;
     uint8_t                  actual_level;
+    bool                     has_level_limits;
+    uint8_t                  min_level;
+    uint8_t                  max_level;
+    bool                     has_dimming_curve;
+    DaliDimCurve             dimming_curve;
     bool                     has_control_gear;  /* true if QUERY STATUS responded (Part 209) */
     bool                     has_input_device;
     bool                     has_instance_count;
@@ -116,6 +136,15 @@ bool dali_discovery_inventory_has_complete_group_data(
 #define DALI_DISCOVERY_DT_STEP_ENABLE    0u
 #define DALI_DISCOVERY_DT_STEP_QUERY     1u
 
+/* QUERY MIN LEVEL, QUERY MAX LEVEL, and optionally the inseparable
+ * ENABLE DEVICE TYPE 6 + QUERY DIMMING CURVE pair. */
+#define DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL  0u
+#define DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL  1u
+#define DALI_DISCOVERY_PROFILE_LIMIT_STEPS     2u
+#define DALI_DISCOVERY_PROFILE_STEP_DT6_ENABLE 2u
+#define DALI_DISCOVERY_PROFILE_STEP_CURVE      3u
+#define DALI_DISCOVERY_PROFILE_DT6_STEPS       4u
+
 /* QUERY GROUPS 0-7, then QUERY GROUPS 8-15. */
 #define DALI_DISCOVERY_GROUPS_SEQUENCE_STEPS 2u
 #define DALI_DISCOVERY_GROUPS_STEP_0_7       0u
@@ -140,6 +169,13 @@ bool dali_discovery_inventory_has_complete_group_data(
 DaliError dali_discovery_build_device_type_query_sequence(uint8_t device_type,
                                                           const DaliFrame *query,
                                                           DaliSequence *out);
+
+/* Build one atomic profile read. With query_dt6_curve false the sequence has
+ * the two independent MIN/MAX queries. With it true, ENABLE DT6 and QUERY
+ * DIMMING CURVE immediately follow them in the same sequence. */
+DaliError dali_discovery_build_profile_sequence(uint8_t addr,
+                                                bool query_dt6_curve,
+                                                DaliSequence *out);
 
 /* Build the two group queries. Both steps are idempotent, so both may retry. */
 DaliError dali_discovery_build_groups_sequence(uint8_t addr, DaliSequence *out);
@@ -170,6 +206,15 @@ DaliError dali_discovery_groups_from_sequence(const DaliSequenceResult *result,
 DaliError dali_discovery_device_types_from_sequence(const DaliSequenceResult *result,
                                                     DaliDiscoveryDeviceInfo *device);
 
+/* Parse one profile sequence. A valid MIN/MAX pair is required; on any error
+ * profile is left unchanged so callers retain their last known-good profile.
+ * The DT6 curve is optional even when queried: an unreadable or reserved reply
+ * keeps profile's existing curve, or reports has_dimming_curve false, rather
+ * than discarding limits the gear did answer. */
+DaliError dali_discovery_profile_from_sequence(const DaliSequenceResult *result,
+                                               bool query_dt6_curve,
+                                               DaliDiscoveryGearProfile *profile);
+
 DaliError dali_discovery_query_u8(const DaliDiscoveryTransport *transport,
                                   const DaliFrame *frame,
                                   uint8_t *out);
@@ -188,6 +233,16 @@ DaliError dali_discovery_query_version(const DaliDiscoveryTransport *transport,
 DaliError dali_discovery_query_actual_level(const DaliDiscoveryTransport *transport,
                                             uint8_t addr,
                                             uint8_t *level_out);
+DaliError dali_discovery_query_min_level(const DaliDiscoveryTransport *transport,
+                                         uint8_t addr,
+                                         uint8_t *level_out);
+DaliError dali_discovery_query_max_level(const DaliDiscoveryTransport *transport,
+                                         uint8_t addr,
+                                         uint8_t *level_out);
+DaliError dali_discovery_query_dt6_dimming_curve(
+    const DaliDiscoveryTransport *transport,
+    uint8_t addr,
+    DaliDimCurve *curve_out);
 const char *dali_discovery_device_type_name(uint8_t type);
 DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
                               const DaliDiscoveryTransport *transport,

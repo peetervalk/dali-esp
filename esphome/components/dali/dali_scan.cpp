@@ -473,6 +473,7 @@ static void scan_task(void *arg) {
 
     ESP_LOGI(TAG, "---[ DALI Scan Complete: %u device(s) found ]---", (unsigned)found);
     log_inventory_json(&inventory);
+    component->set_scan_level_profile_snapshot(&inventory);
     bool group_data_complete = rebuild_group_membership(&inventory, component);
     if (!group_data_complete) {
         ESP_LOGW(TAG, "group discovery incomplete or missed known gear; "
