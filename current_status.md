@@ -1020,9 +1020,16 @@ below for what changed for an operator.
 
 ### P1 — Release and verification quality
 
-- Add CI that compiles a clean external-component checkout from the release tag and
-  validates the Python schema, ESPHome C++ layer, YAML, and wrapper packaging.
-- Add the native ESP-IDF build to CI alongside the existing 26-suite host workflow.
+- Observe the new CI workflows pass. `idf-build.yml`, `esphome-build.yml`, and
+  `release-packaging.yml` were added on 2026-08-12 to cover the native ESP-IDF
+  build, the ESPHome Python/C++/YAML layers, and clean-room release packaging —
+  everything outside `test/` that no machine but a workstation had ever built.
+  They were dry-run locally, not observed green; none has run on GitHub yet. The
+  clean-room job in `release-packaging.yml` is the one most likely to fail first,
+  and that failure is the point: it is the first test of whether a consumer can
+  build from a release tag with none of this repo around them, and it decides the
+  `_protocol_source_dir()` question in the next item. See "Continuous integration"
+  under Build and Test Commands for what each job covers.
 - Keep one intentional ESPHome source-inclusion path. The unused component
   `CMakeLists.txt` is gone and the Python-copy/wrapper route is authoritative;
   what is left is the second candidate in `_protocol_source_dir()`,
@@ -1030,6 +1037,13 @@ below for what changed for an operator.
   Either make it a real packaging layout or drop it.
 - Enforce or document the actual ESP-IDF and ESPHome version requirements; the
   current `manifest.json` is not enforcement for normal external components.
+  Half-answered: `idf-build.yml` pins IDF 6.0.1, so the native requirement is now
+  stated somewhere that fails when it stops holding. The ESPHome side is still
+  advisory — CI installs whatever `pip install esphome` resolves to, so
+  `manifest.json`'s `esphome_version: ">=2026.6.0"` is tested against the latest
+  release and against nothing else. Note also that the two builds compile the same
+  `components/dali` C with different toolchains: the native build uses IDF 6.0.1,
+  ESPHome uses whatever its `framework: type: esp-idf` pins through PlatformIO.
 - Keep local filenames hyphenated in all documentation. `dali_command_reference.md`
   was synchronized with both verb surfaces on 2026-08-12; it needs re-checking
   whenever either table changes.
@@ -1164,6 +1178,38 @@ cd test
 C:\msys64\ucrt64\bin\mingw32-make.exe --directory build
 C:\msys64\ucrt64\bin\mingw32-make.exe --directory build test CTEST_OUTPUT_ON_FAILURE=1
 ```
+
+### Continuous integration
+
+Four workflows in `.github/workflows/`. Everything but `host-tests.yml` was added
+on 2026-08-12 and has not yet been observed passing on GitHub.
+
+| Workflow | Job | Covers | Trigger |
+|---|---|---|---|
+| `host-tests.yml` | `test` | 26 host suites, cmake/ctest over `test/` | push main/dev, PR to main |
+| `idf-build.yml` | `build` | native firmware, `idf.py build` for esp32 on IDF 6.0.1 | push main/dev, PR to main |
+| `esphome-build.yml` | `sources` | sources ↔ `proto_dali_*.c` shims ↔ CMakeLists `SRCS` agree | push main/dev, PR to main |
+| | `config` | Python schema and pin validators against `dali_1k`/`dali_2k` | " |
+| | `compile` | ESPHome C++ and vendored C, both configs in parallel | " |
+| | `pinned-tag-config` | `dali_diag.yaml` still validates against the tag it pins | " |
+| `release-packaging.yml` | `clean-checkout` | `esphome compile` from a git tag in an empty directory | tag `v*`, manual |
+
+Notes an operator needs:
+
+- `secrets.yaml` is gitignored, so every ESPHome job writes its own dummy one at
+  the values the tracked configs reference. The clean-room job needs none: the
+  component's only ESPHome dependency is `esp32`, so its consumer config carries
+  no wifi, api, or ota.
+- The `compile` matrix builds both site configs because they cover different
+  platform modules — `dali_1k` has light/number/button/text, `dali_2k` adds the
+  sensor platform and its polling paths, which nothing else in CI compiles.
+- A `pinned-tag-config` failure does not mean the branch is broken. It means the
+  tracked diagnostic config has drifted out of schema with the release tag it
+  names, and either the pin or the config needs updating before release.
+- `release-packaging.yml` deliberately never runs `actions/checkout` and caches
+  nothing. Run it inside a repo checkout and it passes for the wrong reason.
+  `workflow_dispatch` takes a ref, so a branch can be packaging-tested before it
+  is tagged.
 
 ## Documentation Policy
 

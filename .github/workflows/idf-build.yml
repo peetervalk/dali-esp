@@ -1,0 +1,39 @@
+name: ESP-IDF Build
+
+# The native diagnostic firmware — root CMakeLists.txt + main/ + components/dali
+# — is a real ESP-IDF project that otherwise only ever builds on a maintainer's
+# workstation. The host suites in test/ compile the same components/dali C with
+# a host compiler and stubs, so they structurally cannot see IRAM_ATTR
+# placement, gptimer/gpio/esp_timer API drift, or a second consumer stranded by
+# a refactor: main/ is the other consumer of the stack, and only a target build
+# links it.
+#
+# The IDF version is pinned to the one recorded in the tracked sdkconfig header
+# (6.0.1). sdkconfig itself is gitignored, so this build regenerates it from
+# sdkconfig.defaults — which also proves those defaults are sufficient on their
+# own, without a workstation's accumulated menuconfig state.
+#
+# Note that components/dali/CMakeLists.txt lists SRCS explicitly. A new .c added
+# there without a CMakeLists entry is silently never compiled; the
+# source-manifest job in esphome-build.yml is what catches that.
+
+on:
+  push:
+    branches: ["main", "dev"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build:
+    name: idf.py build (esp32, IDF 6.0.1)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build native firmware
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.0.1
+          target: esp32
+          path: "."
