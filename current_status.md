@@ -45,7 +45,7 @@ DALI bus
 |---|---|
 | CLI completeness | **Surface complete, verification incomplete.** Every shared capability now has a typed native verb, including memory, DT6, DT8, input-device query/configuration, vendor helpers, control-device memory, CONTINUOUS UP/DOWN, arc power MASK, and send-twice `raw2`. `dali_capability_matrix.md` tracks the gap that remains: DT6, DT8, memory writes, and input-device configuration have host vectors but no real-bus result. |
 | ESP32 / ESPHome controller | **Working installation-grade baseline.** The two known sites have operational brightness control, observation, sensor polling, diagnostics, and discovery. It is not yet a general, fully state-correct DALI controller. |
-| Protocol separation | **Directionally strong.** The reusable C stack is independent of ESPHome, but several protocol sequences and raw opcode paths still need to move out of `dali_component.cpp`. |
+| Protocol separation | **Directionally strong.** The reusable C stack is independent of ESPHome, and every frame and sequence the ESPHome layer sends is now built by a shared builder in `components/dali` — no hand-assembled opcodes or steps remain in `dali_component.cpp`. What is still ESPHome-bound is the wiring: console dispatch, the refresh pump, and the entity registries, none of which host tests can reach. |
 | Standards confidence | **Selected workflows verified, not complete conformance.** Host tests and recorded hardware results provide useful evidence, but some tests repeat implementation constants rather than independent standard-derived vectors. The project is not DALI Alliance certified. |
 
 The next development phase should prioritize protocol and state correctness before
@@ -83,6 +83,15 @@ adding broad new device support.
   MEMORY LOCATION forms — because this integration exposes discovery, not a
   guarded commissioning workflow. TERMINATE stays available as the remedy for a
   window another tool opened. Host vectors assert the set in both directions.
+- A console verb that moves the level now arms the deferred level query the
+  Part 103 dispatch path already used after a dim or scene, instead of leaving
+  Home Assistant to catch up on the next periodic poll. It covers `level`, `off`,
+  `up`, `down`, the four step verbs, `cont-up`/`cont-down`, `last`, `max`, `min`,
+  and `scene`; `mask` and `dapc-seq` are excluded because neither changes the
+  level. The 600 ms arming window is unchanged, so a burst of step commands still
+  costs one refresh rather than one query each. Verified by compile only — the
+  wiring is in `dali_component.cpp` and has no host vectors, like the rest of the
+  console's dispatch.
 - 65 host vectors now cover `dali_cli`; all 26 suites pass. `dali-diag` and
   `dali-1k` compile clean with no new warnings. None of this has been run on a
   bus.
@@ -585,6 +594,12 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
   `dali_transport_supports_atomic_sequence()` rather than assume it.
 - Static allocation and the buffer-first ISR model are preserved in the timing
   and protocol layers.
+- `dali_phy_init()` checks every acquisition it makes — both `gpio_config()`
+  calls, `gpio_set_level()`, `gpio_isr_handler_add()`, and the GPTIMER
+  alarm/callback/enable calls — and releases what earlier steps acquired before
+  returning an error. Core affinity is not hardcoded: `dali_worker_core()` in
+  `dali_core_affinity.h` asks for no affinity on a single-core target, where
+  pinning to core 1 would fail outright.
 - The scheduler reports queue admission diagnostics, and `dali_control` offers
   completion-carrying level/off entry points for callers that must distinguish
   a queued command from a transmitted one. `dali_light_write.h` is the portable,
@@ -656,6 +671,16 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
   YAML log lines.
 - Light entities currently expose brightness only. Shared DT8 support is not yet
   mapped to Home Assistant colour-temperature, XY, or RGB controls.
+- Brightness is mapped through the gear's own window and curve, not `[1, 254]`.
+  Each entity's MIN LEVEL, MAX LEVEL, and — for DT6 gear — dimming curve are
+  queried per short address at boot, on every refresh pass, after a scan, and
+  after any command that moves them (SET MIN/MAX LEVEL, RESET, DT6
+  `select-curve`, each of which drops the cached profile first). A group or
+  broadcast entity uses the union of its known members' windows, and YAML
+  `min_level`, `max_level`, and `dimming_curve` options override what was read.
+  A reduced ceiling therefore reports 100 % at MAX LEVEL, and an observed level
+  outside the window is reported as the nearest level inside it rather than
+  refused.
 - The command console covers control-gear output and configuration, control-gear
   and control-device memory, DTR loads, non-commissioning special commands, DT6,
   Part 103 instance query and configuration, vendor helpers, `raw`/`raw2`, and
@@ -674,6 +699,22 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
   read-back verified, and it does not exclude another physical bus master.
 - Light state transferred from the DALI task to ESPHome is one coherent packed
   update; multiple pending observations intentionally coalesce to the latest.
+  `DaliInputSensor` uses the same packed single-word mailbox
+  (`DaliInputValueMailbox`), so neither surface has a lost-update window between
+  clearing the dirty flag and reading the value.
+- Writes the operator did not issue are identified by what they are, not by when
+  they arrive. ESPHome's restore/default write is the first `write_state()`
+  after `setup()`, which is exactly the one `LightState::setup()` performs; a bus
+  reading pushed back through ESPHome is matched on the exact `(is_on, level)`
+  pair `apply_bus_state()` sent. There is no startup time window, so a command
+  issued in the first seconds after boot reaches the bus.
+- A level-changing console verb arms the same deferred re-read the Part 103
+  dispatch path uses after a dim or scene, so Home Assistant follows a console
+  `level`, `off`, fade, step, or `scene` without waiting for the periodic poll.
+  The delay both lets a fade land before it is read and collapses a burst of
+  step commands into one refresh; a fade longer than that window is read
+  mid-fade and corrected by the next poll. `mask` and `dapc-seq` arm nothing —
+  neither moves the level.
 - A light entity suppresses a redundant command only against state a scheduler
   completion confirmed, never against a successful enqueue. A rejected enqueue
   retains the desired state and retries; a failed transmission invalidates the
@@ -709,13 +750,26 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
 - Only complete group discovery replaces and persists membership. Optional query
   failure or a missed previously known member retains the prior `DGP2` map and
   withholds generated YAML; HA reports group data as incomplete.
+  `group forget <addr> [group]` retires a departed member from the cache without
+  touching the bus; the scan's own retention stays conservative, which is right
+  for gear that is merely offline.
 - Matching Device/Instance events request an immediate authoritative sensor
   poll; event information is never published as a generic sensor value.
 - A sensor reading is one scheduler sequence, so a two-byte instance cannot have
   its latching query and its latch read separated by other traffic. Admission is
   all-or-nothing, and a rejected poll simply retries on the next interval.
 - Bus monitoring and Find Couplers retain and format the canonical Part 103
-  source scheme, selectors, and full event information.
+  source scheme, selectors, and full event information. The Find Couplers
+  summary fits the 255-character Home Assistant limit and appends `+N more`
+  rather than truncating silently; every captured frame is still logged in full.
+- `bus_fault` separates current availability from cumulative history. The
+  `tx_frames_ok` PHY counter is the recovery signal, since the fault counters
+  only grow: the sensor publishes `Bus stuck (N total)` and returns to
+  `OK (N past faults)` once a frame is clocked out in full.
+- The GPIO schema is board-aware (`pins.internal_gpio_output_pin_number` /
+  `..._input_pin_number`), rejects TX equal to RX, and rejects GPIO16/17 for the
+  WROVER PSRAM restriction. DALI-task creation is checked and fails the
+  component rather than running without a bus task.
 - ESPHome exposes discovery, not a guarded commissioning workflow.
 - `esphome/dali_esphome.h` is an unused legacy placeholder.
 
@@ -892,13 +946,6 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 
 ### P0 — Transaction and runtime reliability
 
-- Keep new multi-frame workflows on `DaliSequence`. The atomic-transaction
-  migration is done for everything that exists today, so the open risk is
-  regression: a future workflow that issues dependent frames as separate
-  transactions reintroduces the class of bug this removed. The tell is a query
-  whose answer depends on a register or enumeration pointer that the same query
-  or an immediately preceding frame modifies. The strict transport runner and
-  command retry-safety metadata enforce this for every workflow known today.
 - If new scheduler clients are added outside `DaliComponent`, add a true
   scheduler admission reservation for scans. The current quiescence check plus
   component-wide gate covers present local producers but is not an atomic
@@ -908,9 +955,15 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   the refresh pump, and headless dispatch still report or act on admission
   rather than transmission; only light writes distinguish the two.
 - Correct observed-state semantics for RECALL MAX, STEP DOWN AND OFF, and
-  broadcast propagation to ordinary light entities. Broadcast TOGGLE itself now
-  alternates correctly, but commands whose exact result is unknown still need an
-  actual-level query.
+  broadcast propagation to ordinary light entities. `dali_dispatch` asserts a
+  state for two commands whose result it cannot know: RECALL MAX (and TOGGLE's
+  on branch) claims level 254, which is wrong for any gear whose MAX LEVEL is
+  reduced, and the legacy-observe path for STEP DOWN AND OFF claims off, which
+  only holds if the gear was already at its minimum. Both should report unknown
+  and let the deferred actual-level query answer, as RECALL MIN, the dim/step
+  actions, and the console's level-changing verbs already do. Separately,
+  `notify_lights()` matches a broadcast result only against broadcast entities,
+  so ordinary short-address lights never see it.
 
 ### P1 — CLI verification on real hardware
 
@@ -944,52 +997,12 @@ The typed verb surface is in place; what is missing is evidence. Keep
 
 ### P1 — ESPHome correctness and architecture
 
-Everything listed here has been implemented and builds clean. The 1k site flash
-on 2026-08-12 is the first real-bus exercise of any of it; the 2k paths —
-sensor polling, `poll_on_event`, the Steinel workflows — remain unexercised.
-See "ESPHome console verb renames" below for what changed for an operator.
-
-- **Done.** The blanket ten-second startup write suppression is gone. A restore
-  write is identified as the first `write_state()` after setup (which is exactly
-  what `LightState::setup()` issues), and a bus reading coming back through
-  ESPHome is matched on the exact `(is_on, level)` pair `apply_bus_state()`
-  pushed, replacing the one-shot `skip_next_write_` flag that the wrong call
-  could consume. A user command in the first ten seconds now reaches the bus.
-- **Done.** `group forget <addr> [group]` retires a departed member from the
-  group cache without touching the bus, backed by `dali_group_map_forget()` and
-  host vectors. The scan's conservative retention is unchanged: it is right for
-  gear that is merely offline, and this is the explicit statement that the gear
-  is gone.
-- **Done.** `DaliInputSensor` uses a packed single-word mailbox
-  (`DaliInputValueMailbox`), removing the lost-update window between clearing
-  `dirty_` and reading the value.
-- **Done.** Trailing tokens are rejected. Each console verb declares argument
-  bounds in the shared `DaliCliCommandSpec` table and `dali_cli_resolve_in()`
-  checks both before a handler runs, so `level a1 100 junk` now fails.
-- **Done.** The Find Couplers summary no longer truncates silently: it fits the
-  255-character Home Assistant limit and appends `+N more` when entries are left
-  out. Every captured frame is still logged in full.
-- **Done.** The remaining raw opcodes are out of `dali_component.cpp`.
-  `dtrcheck` uses `dali_input_build_dtr_check_sequence()` and the typed
-  `DALI_CMD_QUERY_DEVICE_CONTENT_DTR0/1/2` control-device commands instead of
-  hand-built `0x36`/`0x37`; `iconfig` uses
-  `dali_input_build_config_sequence()` instead of assembling its own DTR0 step.
-- **Done.** The GPIO schema is board-aware
-  (`pins.internal_gpio_output_pin_number` / `..._input_pin_number`), rejects
-  TX equal to RX, and rejects GPIO16/17 for the WROVER PSRAM restriction.
-  `dali_phy_init()` now checks both `gpio_config()` calls, `gpio_set_level()`,
-  `gpio_isr_handler_add()`, and the GPTIMER alarm/callback/enable calls, and
-  releases what earlier steps acquired before returning an error.
-- **Done.** DALI-task creation is checked and fails the component. Core 1 is no
-  longer hardcoded: `dali_worker_core()` in `dali_core_affinity.h` asks for no
-  affinity on a single-core target, where pinning to core 1 would fail outright.
-- **Done.** Bus faults distinguish current availability from cumulative history.
-  A new `tx_frames_ok` PHY counter is the recovery signal, since the fault
-  counters only grow; `bus_fault` publishes `Bus stuck (N total)` and returns to
-  `OK (N past faults)` once a frame is clocked out in full. Recovery after a
-  bus-only power cycle is still undefined beyond this.
-
-Still open in this area:
+The correctness work previously tracked here is implemented and recorded under
+"Current Software State" and the verification baseline; per the documentation
+policy it is out of the backlog. The 1k site flash on 2026-08-12 is the first
+real-bus exercise of any of it; the 2k paths — sensor polling, `poll_on_event`,
+the Steinel workflows — remain unexercised. See "ESPHome console verb renames"
+below for what changed for an operator.
 
 - Extend the compact Part 103 dispatch key if a site needs to distinguish
   Device-Group from Instance-Group sources or match instance type; the canonical
@@ -999,17 +1012,7 @@ Still open in this area:
 - A paged or exportable Find Couplers result, rather than one truncated-with-a-
   count summary. The log already holds every frame.
 - Define recovery after bus-only power cycles, beyond the current/cumulative
-  fault split above.
-- Map brightness onto `[MIN_LEVEL, MAX_LEVEL]` instead of `[1, 254]`. The layer
-  reads neither register, so gear that clamps a DAPC answers QUERY ACTUAL LEVEL
-  with the clamped value and the entity settles somewhere the operator did not
-  ask for — a reduced ceiling can never report 100 %. Needs both registers
-  queried per entity at boot and refreshed after a scan, since they are gear
-  configuration and can change under the controller.
-- A level-changing console verb does not update the light entity; Home Assistant
-  catches up on the next refresh pass, as it does after a wall switch. This
-  matches what `level` and `off` already did and is not new, but the fade and
-  step verbs make it easier to hit.
+  fault split described under "Current Software State".
 - The console's own dispatch has no host vectors. Its parsing, argument
   validation, and reply decoding are shared code that does, but the wiring
   between them in `dali_component.cpp` is ESPHome/FreeRTOS-bound and testable
@@ -1019,10 +1022,12 @@ Still open in this area:
 
 - Add CI that compiles a clean external-component checkout from the release tag and
   validates the Python schema, ESPHome C++ layer, YAML, and wrapper packaging.
-- Add the native ESP-IDF build to CI alongside the existing 24-suite host workflow.
-- Keep one intentional ESPHome source-inclusion path. Remove the unused component
-  `CMakeLists.txt` path and stale fallback references if the Python-copy/wrapper
-  route remains authoritative.
+- Add the native ESP-IDF build to CI alongside the existing 26-suite host workflow.
+- Keep one intentional ESPHome source-inclusion path. The unused component
+  `CMakeLists.txt` is gone and the Python-copy/wrapper route is authoritative;
+  what is left is the second candidate in `_protocol_source_dir()`,
+  `esphome/components/dali/protocol/`, which no build in this repo exercises.
+  Either make it a real packaging layout or drop it.
 - Enforce or document the actual ESP-IDF and ESPHome version requirements; the
   current `manifest.json` is not enforcement for normal external components.
 - Keep local filenames hyphenated in all documentation. `dali_command_reference.md`
@@ -1074,8 +1079,10 @@ Still open in this area:
   illuminance profiles.
 - Add guarded commissioning to ESPHome only after shared commissioning is robust;
   otherwise retain commissioning as a native diagnostic workflow.
-- Improve scene/fade UX, targeted deferred refresh, and post-transition final
-  readback.
+- Improve scene/fade UX. A level-changing command now arms a deferred re-read,
+  but the refresh it triggers is a full pass over every light entity rather than
+  a query of the one that moved, and nothing reads a final value after a
+  transition longer than the arming window.
 - Add capture replay, parser fuzzing, and hardware-in-loop tests for timing,
   collisions, queue pressure, bus faults, and power restoration.
 - Add DT1 and other device types only when an installation requires them, following
@@ -1089,6 +1096,13 @@ Still open in this area:
   transmissions remain a risk.
 - Treat input-device configuration writes as experimental until real-bus
   read/write/read-back validation is complete.
+- Build every new multi-frame workflow on `DaliSequence`. The atomic-transaction
+  migration covers everything that exists today, and the strict transport runner
+  and command retry-safety metadata enforce it, so what remains is a regression
+  risk: issuing dependent frames as separate transactions reintroduces the class
+  of bug this removed. The tell is a query whose answer depends on a register or
+  enumeration pointer that the same query, or an immediately preceding frame,
+  modifies.
 - Do not use GPIO16 or GPIO17 on the WROVER-E target.
 
 ## Source Layout

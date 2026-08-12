@@ -335,11 +335,30 @@ static bool enqueue_sensor_poll(SensorEntry *e, uint32_t now_ms)
     return false;
 }
 
+/*
+ * Ask for a level re-read after a command that moved the gear without saying
+ * where it landed.
+ *
+ * Shared by the dispatch path below and by the console's level-changing verbs.
+ * Both are in the same position: the frame carries no reply, and for the fade
+ * and step commands not even the sender knows the resulting level, so the only
+ * way the entity learns it is to query. The arming is deliberately deferred
+ * rather than immediate — see the 600 ms window in loop(), which lets a fade
+ * finish before it is read and collapses a burst of step commands into one
+ * refresh instead of one query per keystroke.
+ *
+ * A fade longer than that window is read mid-fade and corrected by the next
+ * periodic poll; `cont-up`/`cont-down` are the ones that can do this.
+ */
+static void arm_deferred_level_query()
+{
+    s_deferred_query_pending_.store(true, std::memory_order_release);
+}
+
 static void notify_lights(const DaliDispatchResult *res)
 {
     if (!res->has_state) {
-        if (res->matched)
-            s_deferred_query_pending_.store(true, std::memory_order_release);
+        if (res->matched) arm_deferred_level_query();
         return;
     }
     for (uint8_t i = 0u; i < s_light_count; i++) {
@@ -2104,9 +2123,11 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         }
 
         /*
-         * One frame, no reply, no local state to keep in step: the gear's level
-         * moves and the next refresh reads it back, exactly as it does after a
-         * `level` typed here or a physical wall switch.
+         * One frame and no reply: the gear's level moves and a deferred refresh
+         * reads it back, exactly as it does after a dim or scene dispatched from
+         * a Part 103 event. ENABLE DAPC SEQUENCE is the one member of this group
+         * that does not move the level — it opens a window for the DAPC commands
+         * that follow — so it arms nothing.
          */
         case DALI_CLI_CMD_OFF:
         case DALI_CLI_CMD_MAX:
@@ -2141,6 +2162,8 @@ void DaliComponent::execute_command(const std::string &cmd_str)
                 case DALI_CLI_CMD_DAPC_SEQ:  err = dali_control_enable_dapc_sequence(tgt); break;
                 default:                     err = dali_control_go_to_last_active_level(tgt); break;
             }
+            if (err == DALI_OK && spec->id != DALI_CLI_CMD_DAPC_SEQ)
+                arm_deferred_level_query();
             set_cmd_enqueue_result(err);
             return;
         }
@@ -2155,7 +2178,9 @@ void DaliComponent::execute_command(const std::string &cmd_str)
                 set_cmd_result("scene 0-15");
                 return;
             }
-            set_cmd_enqueue_result(dali_control_go_to_scene(tgt, scene));
+            DaliError err = dali_control_go_to_scene(tgt, scene);
+            if (err == DALI_OK) arm_deferred_level_query();
+            set_cmd_enqueue_result(err);
             return;
         }
 
@@ -2212,7 +2237,9 @@ void DaliComponent::execute_command(const std::string &cmd_str)
                 set_cmd_enqueue_result(err);
                 return;
             }
-            set_cmd_enqueue_result(dali_control_set_level(tgt, level.level));
+            DaliError err = dali_control_set_level(tgt, level.level);
+            if (err == DALI_OK) arm_deferred_level_query();
+            set_cmd_enqueue_result(err);
             return;
         }
 
