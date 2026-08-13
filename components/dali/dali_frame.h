@@ -89,6 +89,7 @@ typedef enum {
     DALI_ERR_TIMING     = 8,    /* required protocol timing window was missed */
     DALI_ERR_CANCELLED  = 9,    /* queued/active work cancelled by reset      */
     DALI_ERR_INTERVENED = 10,   /* another forward frame invalidated a reply  */
+    DALI_ERR_FULL       = 11,   /* fixed-capacity registration table is full  */
 } DaliError;
 
 /* ---------------------------------------------------------------------------

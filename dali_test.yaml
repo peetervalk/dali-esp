@@ -1,0 +1,256 @@
+# CI coverage config — not a deployable firmware.
+#
+# Every address, group, instance and credential below is fictitious. Nothing
+# here describes hardware that exists. The file's only job is to be the widest
+# config this repo can validate and compile against its own tree, so that a
+# change to the Python schema or to the ESPHome C++ layer fails in CI rather
+# than on someone's bus.
+#
+# Why it exists: the site configs that used to serve this purpose (dali_1k,
+# dali_2k) were real deployments, and tracking a real deployment to get CI
+# coverage is the wrong trade — they carried an address layout nobody else
+# could use, and they had to be edited whenever the site changed. The tracked
+# diagnostic config, dali_diag.yaml, cannot replace them either: it declares no
+# light: and no sensor: platform, and it consumes the component the way a user
+# does (`type: git` at a ref), so building it would build that ref rather than
+# the branch under test.
+#
+# This one uses `type: local`, so it and the component beside it always agree
+# within a commit — which is the property that would have caught poll_on_event
+# breaking validation on 2026-08-12.
+#
+# ── What it is meant to cover ─────────────────────────────────────────────────
+#   dali:      every optional text sensor, group-state polling, the diagnostic
+#              shell, and headless_dispatch across both frame kinds
+#   light:     short / group / broadcast targets, member_groups, the level
+#              clamps, and each dimming curve
+#   number:    the target-address selector
+#   button:    all eight button types
+#   text:      the command console
+#   sensor:    1-byte and 2-byte input instances, scale and offset, and both
+#              sides of poll_on_event
+#
+# Adding an option to the schema without adding it here is how that option
+# stops being compiled. Any dali*.yaml in this repo is picked up by
+# .github/workflows/esphome-build.yml automatically; this is the one that is
+# also compiled, because it is the one that builds this checkout.
+
+esphome:
+  name: dali-test
+  friendly_name: "DALI CI Test"
+
+esp32:
+  variant: esp32
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: esphome/components
+    components: [dali]
+
+# Inline dummies rather than !secret, so this config validates in a bare
+# checkout with no secrets.yaml — including a fork's first CI run.
+wifi:
+  ssid: "DUMMY_COMPILE_ONLY_NETWORK"
+  password: "DUMMY-COMPILE-ONLY"
+  ap:
+    ssid: "dali-test-ap"
+    password: "DUMMY-COMPILE-ONLY"
+captive_portal:
+
+api:
+  encryption:
+    key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+ota:
+  - platform: esphome
+    password: "DUMMY-COMPILE-ONLY"
+
+logger:
+  level: DEBUG
+
+# ── DALI bus ──────────────────────────────────────────────────────────────────
+dali:
+  id: dali_bus
+  tx_pin: 18
+  rx_pin: 19
+
+  # Non-zero so set_poll_interval() is actually reached; the default of 0 skips
+  # the call entirely and leaves the group-state polling path uncompiled.
+  poll_interval: 60
+
+  # The diagnostic shell. Absent = dali_shell_tcp.cpp and dali_shell.c are not
+  # compiled at all, which is why it is present here even though nothing in CI
+  # connects to it. allow_commissioning is true only to compile the guarded
+  # branch — this firmware is never flashed.
+  shell:
+    port: 2323
+    idle_timeout: 5min
+    allow_commissioning: true
+
+  # Every optional text sensor, so each to_code() branch is taken.
+  command_result:
+    name: "DALI Command Result"
+  scan_status:
+    name: "Scan Status"
+  scan_result:
+    name: "Scan Result"
+  yaml_result:
+    name: "Group Map"
+  couplers_result:
+    name: "Couplers Result"
+  bus_monitor:
+    name: "Bus Monitor"
+  bus_fault:
+    name: "Bus Fault"
+
+  # Spread across the validator's whole surface: both frame kinds, all four
+  # source address kinds, event_information and its event_code alias, an
+  # explicit instance, a scene action, and each output type.
+  headless_dispatch:
+    # Legacy 16-bit coupler on group 0, state observed only.
+    - { frame_kind: legacy_16bit, address_kind: group, address: 0,
+        action: observe, output_type: group, output_address: 0 }
+    # Legacy broadcast, matched on the compatibility event_code alias.
+    - { frame_kind: legacy_16bit, address_kind: broadcast, address: 0,
+        event_code: 0x05, action: mirror,
+        output_type: broadcast, output_address: 0 }
+    # Part-103 input device, exact instance and 10-bit event information.
+    - { frame_kind: input_24bit, address_kind: short, address: 3, instance: 1,
+        event_information: 0x2A, action: recall_max,
+        output_type: group, output_address: 2 }
+    # Part-103 Instance source scheme (no address), driving a scene.
+    - { frame_kind: input_24bit, address_kind: none, address: 0,
+        action: scene, scene: 4,
+        output_type: short, output_address: 7 }
+    # Part-103 group source; carries no instance number by rule.
+    - { frame_kind: input_24bit, address_kind: group, address: 20,
+        action: toggle, output_type: group, output_address: 5 }
+
+# ── Lights ────────────────────────────────────────────────────────────────────
+light:
+  # Group target: needs a representative gear address to query, and exercises
+  # the level clamps and the linear curve.
+  - platform: dali
+    dali_id: dali_bus
+    name: "Test Group 0"
+    target_type: group
+    target_address: 0
+    query_address: 2
+    min_level: 10
+    max_level: 240
+    dimming_curve: linear
+
+  # Short target: member_groups is only meaningful here, so group-addressed
+  # dispatch results still update this entity.
+  - platform: dali
+    dali_id: dali_bus
+    name: "Test Gear 3"
+    target_type: short
+    target_address: 3
+    member_groups: [0, 2, 5]
+    dimming_curve: standard
+
+  # Broadcast target, default (auto) curve.
+  - platform: dali
+    dali_id: dali_bus
+    name: "Test Broadcast"
+    target_type: broadcast
+
+# ── Target address selector ───────────────────────────────────────────────────
+number:
+  - platform: dali
+    dali_id: dali_bus
+    name: "Target Address"
+    icon: "mdi:numeric"
+    mode: box
+
+# ── Buttons ───────────────────────────────────────────────────────────────────
+# All eight types: each maps to a distinct branch in the button component.
+button:
+  - platform: dali
+    dali_id: dali_bus
+    name: "Scan DALI Bus"
+    type: scan
+  - platform: dali
+    dali_id: dali_bus
+    name: "Refresh State"
+    type: refresh
+  - platform: dali
+    dali_id: dali_bus
+    name: "Identify"
+    type: identify
+  - platform: dali
+    dali_id: dali_bus
+    name: "Find Couplers"
+    type: find_couplers
+  - platform: dali
+    dali_id: dali_bus
+    name: "Turn On"
+    type: turn_on
+  - platform: dali
+    dali_id: dali_bus
+    name: "Turn Off"
+    type: turn_off
+  - platform: dali
+    dali_id: dali_bus
+    name: "Max"
+    type: max
+  - platform: dali
+    dali_id: dali_bus
+    name: "Min"
+    type: min
+
+# ── DALI command console ──────────────────────────────────────────────────────
+text:
+  - platform: dali
+    dali_id: dali_bus
+    name: "DALI Command"
+    mode: text
+
+# ── Input sensors ─────────────────────────────────────────────────────────────
+sensor:
+  # 16-bit instance, scaled. Reports on its own timer, so it does not poll on
+  # event — following it would pull the poll rate down to the report rate.
+  - platform: dali
+    dali_id: dali_bus
+    name: "Test Lux"
+    address: 0
+    instance: 0
+    poll_interval: 30
+    poll_on_event: false
+    value_bytes: 2
+    scale: 0.01
+    unit_of_measurement: "lx"
+    device_class: illuminance
+    state_class: measurement
+    accuracy_decimals: 0
+
+  # 8-bit instance, polled on event: the value should follow a change without
+  # waiting out the interval.
+  - platform: dali
+    dali_id: dali_bus
+    name: "Test Occupancy"
+    address: 0
+    instance: 1
+    poll_interval: 5
+    poll_on_event: true
+    value_bytes: 1
+    accuracy_decimals: 0
+
+  # The offset path, which nothing else here reaches.
+  - platform: dali
+    dali_id: dali_bus
+    name: "Test Temperature"
+    address: 0
+    instance: 2
+    poll_interval: 60
+    value_bytes: 2
+    scale: 0.1
+    offset: -20.0
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1

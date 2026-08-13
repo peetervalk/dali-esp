@@ -25,9 +25,14 @@ CONF_POLL_INTERVAL     = "poll_interval"
 CONF_HEADLESS_DISPATCH = "headless_dispatch"
 CONF_EVENT_INFORMATION = "event_information"
 CONF_EVENT_CODE        = "event_code"
+CONF_SHELL              = "shell"
+CONF_SHELL_PORT         = "port"
+CONF_SHELL_IDLE_TIMEOUT = "idle_timeout"
+CONF_ALLOW_COMMISSIONING = "allow_commissioning"
 
 dali_ns = cg.esphome_ns.namespace("dali")
 DaliComponent = dali_ns.class_("DaliComponent", cg.Component)
+DaliShellServer = dali_ns.class_("DaliShellServer", cg.Component)
 
 # ── Dispatch entry enum mappings ──────────────────────────────────────────────
 # Values must match the C enums in dali_event.h, dali_frame.h, dali_dispatch.h.
@@ -255,6 +260,33 @@ def _validate_distinct_pins(config):
     return config
 
 
+# ── Diagnostic shell ──────────────────────────────────────────────────────────
+#
+# Exposes the full native CLI — including discover, commission, capture, and
+# export — on a TCP port, for a terminal in Home Assistant. The console `text:`
+# entity stays what it is: a one-shot line whose answer is one text state.
+#
+# The port is unauthenticated, the same posture as OTA and the web server. That
+# is a lower bar than physical access to the UART, so the commissioning verbs
+# are refused unless this block opts in: `commission` and the nine primitives
+# dali_cli_special_is_commissioning() marks can readdress an entire bus from one
+# typed line, and RANDOMISE cannot be undone.
+
+_SHELL_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.declare_id(DaliShellServer),
+        cv.Optional(CONF_SHELL_PORT, default=2323): cv.port,
+        # Reclaims the single session from a terminal window that was closed
+        # without quitting; 0 disables it.
+        cv.Optional(CONF_SHELL_IDLE_TIMEOUT, default="10min"): cv.All(
+            cv.positive_time_period_seconds,
+            cv.Range(max=cv.TimePeriod(seconds=86400)),
+        ),
+        cv.Optional(CONF_ALLOW_COMMISSIONING, default=False): cv.boolean,
+    }
+).extend(cv.COMPONENT_SCHEMA)
+
+
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
     {
@@ -282,6 +314,8 @@ CONFIG_SCHEMA = cv.All(
         cv.Optional(CONF_HEADLESS_DISPATCH, default=[]): cv.ensure_list(
             _DISPATCH_ENTRY_SCHEMA
         ),
+        # Network front end for the diagnostic shell. Absent = not compiled in.
+        cv.Optional(CONF_SHELL): _SHELL_SCHEMA,
     }
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_distinct_pins,
@@ -337,4 +371,17 @@ async def to_code(config):
             entry["output_address"],
             _DISPATCH_ACTION[entry["action"]],
             entry["scene"],
+        ))
+
+    if CONF_SHELL in config:
+        shell_conf = config[CONF_SHELL]
+        shell = cg.new_Pvariable(shell_conf[CONF_ID])
+        await cg.register_component(shell, shell_conf)
+        cg.add(shell.set_dali_component(var))
+        cg.add(shell.set_port(shell_conf[CONF_SHELL_PORT]))
+        cg.add(shell.set_idle_timeout(
+            int(shell_conf[CONF_SHELL_IDLE_TIMEOUT].total_seconds)
+        ))
+        cg.add(shell.set_allow_commissioning(
+            shell_conf[CONF_ALLOW_COMMISSIONING]
         ))

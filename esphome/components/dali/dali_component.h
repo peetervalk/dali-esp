@@ -83,6 +83,17 @@ class DaliComponent : public Component {
   bool is_scan_running() const {
     return scan_running_.load(std::memory_order_acquire);
   }
+
+  // Exclusive bus access for a long-running workflow started outside this
+  // component — currently a shell session's scan or commissioning walk. Reuses
+  // the scan gate rather than adding a second one, so a shell scan pauses the
+  // light refresh pump and the diagnostic buttons exactly as a button-initiated
+  // scan does, and the two cannot run at once.
+  //
+  // Returns false when the bus is already claimed. Every true must be matched
+  // by one release_bus(). Callable from a worker task.
+  bool try_claim_bus(const char *what);
+  void release_bus();
   // Blink diag_address_ between max and min for 10 s to identify a fixture.
   void start_identify();
   // Record unsolicited bus frames for 30 s; publish result to couplers_result_.
@@ -190,6 +201,10 @@ class DaliComponent : public Component {
   bool     boot_query_done_{false};
   DaliRefreshCursor refresh_cursor_{};
   bool     refresh_queue_blocked_{false};
+  // Set by release_bus() on a worker task, consumed by loop() on Core 0, which
+  // is what keeps refresh_cursor_ single-owner while still letting a shell
+  // workflow ask for a re-read when it puts the bus down.
+  std::atomic<bool> external_refresh_request_{false};
 
   // Deferred query after dim/scene (Core 0 only, signalled via module atomic).
   bool     deferred_query_armed_{false};

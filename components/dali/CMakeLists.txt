@@ -22,6 +22,7 @@ idf_component_register(
         "dali_dispatch.c"
         "dali_group_map.c"
         "dali_cli.c"
+        "dali_shell.c"
 
     INCLUDE_DIRS "."
     REQUIRES

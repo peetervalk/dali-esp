@@ -142,6 +142,7 @@ static const DaliCliCommandSpec s_commands[] = {
     { DALI_CLI_CMD_RESET, "reset", "", "reset PHY, scheduler, and diagnostic state", 0u, 0u, NULL },
 
     { DALI_CLI_CMD_LIST, "list", "<table>", "print a named command table", 1u, 1u, NULL },
+    { DALI_CLI_CMD_SCHEMA, "schema", "", "print every command table as JSON", 0u, 0u, NULL },
     { DALI_CLI_CMD_QUERY_LIST, "query-list", "", "alias for 'list query'", 0u, 0u, NULL },
     { DALI_CLI_CMD_SPECIAL_LIST, "special-list", "", "alias for 'list special'", 0u, 0u, NULL },
     { DALI_CLI_CMD_CONFIG_LIST, "config-list", "", "alias for 'list config'", 0u, 0u, NULL },

@@ -23,11 +23,18 @@ been run against physical gear and the result recorded, not that it is certified
 | n/a | not applicable at this layer |
 
 Real-bus results predate the 2026-08-10 static audit unless stated. Nothing in
-the 2026-08-11 or 2026-08-12 verb-parity work has been flashed to hardware.
+the 2026-08-11 or 2026-08-12 verb-parity work, and nothing in the 2026-08-13
+shell work, has been flashed to hardware.
 
 The ESPHome column names the surface that exposes a capability: `console` is the
-`text:` command entity, `light`/`button`/`sensor` are entities, and `scan` is the
-discovery workflow. "Console" never implies real-bus verification.
+`text:` command entity, `light`/`button`/`sensor` are entities, `scan` is the
+discovery workflow, and `shell` is the TCP diagnostic shell. Neither "console"
+nor "shell" ever implies real-bus verification.
+
+`shell` differs in kind from the others. The rest of the ESPHome column
+describes code written for that surface; `shell` means the surface runs the
+native CLI's own implementation of the verb, so parity there is structural
+rather than something to be re-checked verb by verb.
 
 ## Control gear — IEC 62386-102
 
@@ -76,17 +83,28 @@ section.
 
 | Capability | Shared API | Native CLI verb | Host vector | Real bus | ESPHome |
 |---|---|---|---|---|---|
-| Short-address scan | `dali_discovery_scan` | `scan`, `discover` | yes | yes | yes |
-| Device-type enumeration | `dali_discovery_build_device_types_sequence` | via `discover` | yes | no | yes |
-| Group membership query | `dali_discovery_build_groups_sequence` | via `discover` | yes | yes | yes |
-| Bank 0 identity read | `dali_memory_read_bank0_identity` | `meminfo` | yes | partial | via scan |
-| Inventory export | `dali_discovery_inventory_*` | `inventory`, `export inventory` | partial | yes | yes (YAML lines) |
-| Commission unaddressed | `dali_commissioning_commission_unaddressed` | `commission unaddressed` | yes | partial | no |
-| Identify blink | n/a | `identify` | no | yes | yes |
-| Smoke check | n/a | `smoke` | no | yes | no |
+| Short-address scan | `dali_discovery_scan` | `scan`, `discover` | yes | yes | yes (scan, shell) |
+| Device-type enumeration | `dali_discovery_build_device_types_sequence` | via `discover` | yes | no | yes (scan, shell) |
+| Group membership query | `dali_discovery_build_groups_sequence` | via `discover` | yes | yes | yes (scan, shell) |
+| Bank 0 identity read | `dali_memory_read_bank0_identity` | `meminfo` | yes | partial | via scan; `meminfo` via shell |
+| Inventory export | `dali_discovery_inventory_*` | `inventory`, `export inventory` | partial | yes | yes (YAML lines, shell) |
+| Commission unaddressed | `dali_commissioning_commission_unaddressed` | `commission unaddressed` | yes | partial | shell, opt-in |
+| Identify blink | n/a | `identify` | no | yes | yes (button, shell) |
+| Smoke check | n/a | `smoke` | no | yes | shell |
 
 Commissioning is dependable only with a single unaddressed device on the bus;
 the COMPARE collision inversion recorded in `current_status.md` is unfixed.
+
+The `shell` entries above are the same code the native CLI runs, reached through
+the TCP front end in `esphome/components/dali/dali_shell_tcp.cpp`: the verb, its
+argument checking, its blocking transport, and its output are one
+implementation, so the ESPHome column no longer means a separately written
+subset for these rows. `commission` and the nine primitives
+`dali_cli_special_is_commissioning()` marks are refused there unless the YAML
+sets `allow_commissioning: true`, because the port is unauthenticated.
+
+None of the shell work has been flashed or run against a real bus as of
+2026-08-13; the "Real bus" column above still refers to the native CLI only.
 
 ## Memory banks
 

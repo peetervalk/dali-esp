@@ -32,9 +32,16 @@ DALI bus
 ```
 
 `components/dali` is the reusable protocol, scheduler, discovery, dispatch, and
-PHY stack. `main/main.c` is the native ESP-IDF diagnostic entry point.
-`main/dali_diag.c/.h` is the app-specific serial CLI. The active ESPHome
-component is `esphome/components/dali`.
+PHY stack, plus `dali_shell.c` — the diagnostic CLI as a session, owning every
+verb, the blocking transport, and the caches a workflow accumulates.
+`main/main.c` is the native ESP-IDF entry point and `main/dali_diag.c/.h` is now
+only the UART0 binding for that shell. The active ESPHome component is
+`esphome/components/dali`, whose `dali_shell_tcp.cpp` is the second binding.
+
+A front end moves bytes and owns a session's lifetime. It must not implement,
+gate, or reword a verb: that is what keeps the Home Assistant shell identical to
+the serial one rather than an approximation of it. A surface that must refuse a
+verb declares a `DALI_SHELL_ALLOW_*` policy instead of editing the verb table.
 
 Do not put protocol, timing, sensor, or addressing logic into ESPHome entities.
 The ESPHome layer should map configured entities to `DaliTarget` values and call
@@ -48,7 +55,9 @@ the control/protocol APIs.
 | `dali_mapping` | `components/dali` | Generic enough to stay; move to `main/` if the component is published separately |
 | `dali_dispatch` | `components/dali` | Headless dispatch engine; pure C, no ESPHome dependency |
 | `dali_headless` | `esphome/components/dali` | Installation-specific dispatch table; edit per site; active only with `headless_dispatch: true` |
-| `dali_diag` | `main/` | App-specific CLI; no component depends on it |
+| `dali_shell` | `components/dali` | Every CLI verb, the blocking transport, and session caches; one implementation both front ends run |
+| `dali_diag` | `main/` | UART0 binding for the shell; moves bytes only |
+| `dali_shell_tcp` | `esphome/components/dali` | TCP binding for the shell; one session, idle timeout, policy from YAML |
 | `main.c` | `main/` | App entry point |
 
 ### Device Type Coverage

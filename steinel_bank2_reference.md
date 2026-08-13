@@ -1,7 +1,7 @@
 # Steinel HF 360-2 DALI-2 IPD — Memory Bank 2 Sensitivity Reference
 
 Product: Steinel HF 360-2 DALI-2 IPD (art. 064280)  
-Firmware context: `dali_2k` / `dali_2k_local`, sensor at short address 0  
+Firmware context: the second-floor site firmware (`_local/dali-2k.yaml`), sensor at short address 0  
 Last reviewed: 2026-06-27
 
 ---
@@ -50,10 +50,13 @@ close-range events.
 
 ---
 
-## Commands (dali_2k firmware)
+## Commands (DALI Command console)
 
 Commands are entered via the **DALI Command** text entity in Home Assistant.
-Results appear in **DALI Command Result**.
+Results appear in **DALI Command Result**. Nothing below is specific to the
+second-floor firmware — any configuration declaring the `text:` platform and a
+`command_result:` text sensor has the same console, `dali_diag.yaml` included.
+The diagnostic shell spells the same verbs identically.
 
 ### Raw read (recommended)
 

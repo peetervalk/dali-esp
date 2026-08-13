@@ -1,40 +1,27 @@
 #pragma once
 
 /*
- * dali_diag.h - diagnostic serial CLI
+ * dali_diag.h — serial front end for the diagnostic shell
  *
  * Transport : UART0, 115200 baud, text-based line interface
  * Task      : lower priority than DALI processing task
  *
- * Supported commands:
- *   help             - print command summary
- *   stats            - print all diagnostic counters
- *   trace on|off     - enable/disable per-frame bus trace logging
- *   read             - print the last received raw frame
- *   rxdebug          - print the last malformed RX timing snapshot
- *   reset            - reset PHY, scheduler, and diagnostic state
- *   raw <hex> len=<n> [wait] - transmit arbitrary frame, optionally wait for reply
- *   level/off/up/down/step-up/step-down/step-off/on-step/dapc-seq/last/scene
- *                    - output helpers for addr/sN/gN/b targets
- *   max/min/status   - query/control helpers for addr/sN/gN/b targets
- *   query <target> [query-name] [param] - generic addressed control-gear query
- *   query-list       - print supported generic query names
- *   config <target> <config-name> [param] - generic addressed configuration
- *   config-list      - print supported generic config names
- *   scan             - scan all short addresses; brief output (control gear only)
- *   discover         - scan all short addresses; full output including DALI-2
- *                      input device instances (use this to find sensors/couplers)
- *   inventory        - print the last discovered inventory
- *   commission unaddressed [first-addr] [max-devices]
- *                    - assign short addresses to currently unaddressed gear
- *   instances <addr> - query generic DALI-2 input-device instance types
- *   identify <addr>  - blink one short-addressed lamp candidate
+ * The shell itself — every verb, the blocking transport, and the caches a
+ * session accumulates — lives in `components/dali/dali_shell.c`. This file is
+ * only the binding that reads bytes off UART0 and writes the shell's output
+ * back to stdout, so that the same commands with the same output are available
+ * over any other transport a front end cares to add.
+ *
+ * For the command set, run `help` at the prompt: the verb table in
+ * `dali_cli.c` is the one authority on what exists and how each verb spells its
+ * arguments, and it is shared with every other front end.
  */
 
 #include "dali_frame.h"
 
-/* Initialise the diagnostic CLI and start its FreeRTOS task. */
+/*
+ * Initialise the serial front end and start its FreeRTOS task. Call after
+ * dali_shell_init(); the session is attached for the life of the firmware,
+ * because physical access to the UART is already physical access to the bus.
+ */
 DaliError dali_diag_init(void);
-
-/* Returns true if per-frame trace logging is currently enabled. */
-bool dali_diag_trace_enabled(void);

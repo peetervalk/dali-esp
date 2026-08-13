@@ -1,0 +1,731 @@
+#!/usr/bin/env python3
+"""
+dali-shell — terminal client for the DALI diagnostic shell.
+
+Drop this into the Home Assistant "Advanced SSH & Web Terminal" add-on (or any
+host that can reach the device) and run it. Copying over Samba or the file
+editor drops the execute bit, so `chmod +x dali-shell` first, or run it as
+`python3 dali-shell`:
+
+    ./dali-shell                          interactive session
+    ./dali-shell discover                 run one command and exit
+    ./dali-shell export inventory > /config/dali_inventory.json
+    ./dali-shell --list                   show the nodes on this network
+
+The device end is components/dali/dali_shell.c, reached over the TCP front end
+configured by the `shell:` block in the ESPHome YAML.
+
+WHAT THIS IS NOT
+    It holds no knowledge of DALI. Every verb, every argument rule, and every
+    reply format belongs to the firmware, which is what keeps this client and
+    the serial console showing the same shell. `nc <host> 2323` remains a
+    complete, if unfriendly, substitute for this program.
+
+WHAT IT ADDS
+    line editing and history, tab completion driven by the device's own command
+    tables (the `schema` verb), a one-shot mode so output composes with shell
+    redirection — which is what turns a scan into a file in /config instead of
+    a log you have to post-process — and finding the device for you.
+
+FINDING THE DEVICE
+    With no --host and no DALI_SHELL_HOST, this browses mDNS for ESPHome nodes
+    and offers the ones whose shell answers. That is worth more than saving you
+    a flag: it resolves the address itself, over a multicast socket, and then
+    connects by IP. The add-on's resolver has no mDNS, so `dali-1k.local` does
+    not resolve there even though the node is answering — bypassing the
+    resolver is what makes zero-configuration work in the place this program
+    was written for.
+
+DEPENDENCIES
+    The standard library only, and it degrades rather than fails if `readline`
+    is missing. Discovery is raw DNS over a UDP socket for the same reason:
+    `zeroconf` would do it in a tenth of the code, and would be one more thing
+    to install into an add-on that gets rebuilt from under you.
+"""
+
+import argparse
+import concurrent.futures
+import json
+import os
+import socket
+import struct
+import sys
+import time
+
+try:
+    import readline
+except ImportError:  # Windows, or a stripped build
+    readline = None
+
+# Unset unless the operator exported it. There is deliberately no baked-in
+# hostname: a wrong default sends you debugging the network instead of reading
+# "no node found", and discovery answers the question a default was guessing at.
+DEFAULT_HOST = os.environ.get("DALI_SHELL_HOST")
+DEFAULT_PORT = int(os.environ.get("DALI_SHELL_PORT", "2323"))
+HISTORY_FILE = os.path.expanduser("~/.dali_shell_history")
+HISTORY_LEN = 1000
+
+# The device writes this after every dispatched line and nothing else omits a
+# trailing newline, which is what makes it usable as an end-of-reply marker.
+PROMPT = "> "
+
+# `find switches 300` is the longest verb by design. The socket read timeout is
+# short and independent of this so Ctrl-C stays responsive.
+DEFAULT_COMMAND_TIMEOUT = 400.0
+SOCKET_POLL_TIMEOUT = 0.5
+
+
+class ShellError(Exception):
+    pass
+
+
+def _normalise_stdout():
+    """
+    Emit LF regardless of platform.
+
+    The device ends every line with CRLF, and Python's text-mode stdout adds a
+    second CR on Windows. Left alone, `dali-shell export inventory > file`
+    produces a file with CRLF endings, which matters when the destination is
+    YAML or JSON that something else has to parse.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(newline="\n", errors="replace")
+        except (AttributeError, ValueError):
+            pass  # older Python, or a stream that cannot be reconfigured
+
+
+# ── discovery ───────────────────────────────────────────────────────────────
+#
+# ESPHome advertises every node under _esphomelib._tcp, and the shell port is
+# not advertised at all — the component registers no mDNS service of its own.
+# So the browse finds every ESPHome node on the network, DALI or not, and the
+# shell port decides which ones to offer.
+#
+# Filtering on the reply rather than on a `dali-` name prefix is deliberate: a
+# node you named something else still gets found, and a node named for DALI
+# whose YAML omits the `shell:` block does not get offered a session it would
+# refuse.
+
+MDNS_ADDR = "224.0.0.251"
+MDNS_PORT = 5353
+MDNS_SERVICE = "_esphomelib._tcp.local"
+
+# Long enough for a sleepy responder, short enough not to feel like a hang.
+BROWSE_SECONDS = 2.5
+RECV_POLL = 0.25
+
+# Probes run concurrently, so this bounds the whole sweep rather than each node.
+PROBE_TIMEOUT = 1.5
+
+_TYPE_A, _TYPE_PTR, _TYPE_SRV = 1, 12, 33
+
+
+def _dns_encode_name(name):
+    out = b""
+    for label in name.split("."):
+        if label:
+            out += bytes([len(label)]) + label.encode()
+    return out + b"\x00"
+
+
+def _dns_read_name(buf, off):
+    """
+    Read one possibly-compressed name, returning it and the offset after it.
+
+    A pointer means the name continues elsewhere in the packet, but the field
+    that held it is only two bytes wide — so the caller must resume after the
+    pointer, not after wherever it led.
+    """
+    parts, jumped, resume = [], False, off
+    while True:
+        length = buf[off]
+        if length & 0xC0 == 0xC0:
+            target = struct.unpack("!H", buf[off:off + 2])[0] & 0x3FFF
+            if not jumped:
+                resume = off + 2
+            off, jumped = target, True
+            continue
+        off += 1
+        if length == 0:
+            break
+        parts.append(buf[off:off + length].decode("utf-8", "replace"))
+        off += length
+    return ".".join(parts), (resume if jumped else off)
+
+
+def _dns_records(buf):
+    """Yield (type, name, value) for every answer, authority, and additional."""
+    try:
+        counts = struct.unpack("!HHHH", buf[4:12])
+    except struct.error:
+        return
+    off = 12
+    try:
+        for _ in range(counts[0]):          # questions carry no rdata
+            _, off = _dns_read_name(buf, off)
+            off += 4
+        for _ in range(sum(counts[1:])):
+            name, off = _dns_read_name(buf, off)
+            rtype, _cls, _ttl, rdlen = struct.unpack("!HHIH", buf[off:off + 10])
+            off += 10
+            if rtype == _TYPE_PTR:
+                yield _TYPE_PTR, name, _dns_read_name(buf, off)[0]
+            elif rtype == _TYPE_SRV:
+                yield _TYPE_SRV, name, _dns_read_name(buf, off + 6)[0]
+            elif rtype == _TYPE_A and rdlen == 4:
+                yield _TYPE_A, name, socket.inet_ntoa(buf[off:off + 4])
+            off += rdlen
+    except (IndexError, struct.error):
+        # A malformed or truncated packet costs us the rest of that packet and
+        # nothing else; other responders are still answering.
+        return
+
+
+def _mdns_query(qname, qtype):
+    # The top bit of the class is the QU bit, asking responders to reply to our
+    # source port. Without it the answers go to multicast port 5353, which we
+    # would have to own — and the add-on's own mDNS responder may already.
+    return (struct.pack("!HHHHHH", 0, 0, 1, 0, 0, 0)
+            + _dns_encode_name(qname)
+            + struct.pack("!HH", qtype, 0x8001))
+
+
+def _local_addresses():
+    """
+    Every local IPv4 worth sending a query from.
+
+    One send from the default interface is enough on a simple host and wrong on
+    this one: a Home Assistant machine is covered in docker bridges, and the
+    kernel's idea of where multicast goes is not necessarily the LAN the lights
+    are on. Querying from each address costs three extra datagrams.
+    """
+    found = set()
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # Connecting a UDP socket sends nothing; it just picks the route, which
+        # is how we learn which address owns the default one.
+        probe.connect(("192.0.2.1", 9))  # TEST-NET-1: routable, never answers
+        found.add(probe.getsockname()[0])
+    except OSError:
+        pass
+    finally:
+        probe.close()
+
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            found.add(info[4][0])
+    except (socket.gaierror, UnicodeError):
+        pass
+
+    found.discard("127.0.0.1")
+    return sorted(found) or [None]  # None = let the kernel choose
+
+
+def browse_esphome(seconds=BROWSE_SECONDS):
+    """
+    Return [(instance, hostname, address)] for the ESPHome nodes that answer.
+
+    Instances arrive as PTR records naming an SRV that names an A, and a
+    responder may send all three unprompted or only the first. So each round
+    asks for whatever is still missing.
+
+    The browse always runs for its full window. Stopping once the known nodes
+    resolve looks like an optimisation and is a correctness bug: the first
+    packet to arrive completes one node, and there is nothing in it that says
+    whether four more responders are about to answer. Nothing here knows how
+    many nodes exist — that is what the window is for.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
+    sock.bind(("0.0.0.0", 0))
+    sock.settimeout(RECV_POLL)
+
+    interfaces = _local_addresses()
+
+    def ask(qname, qtype):
+        for addr in interfaces:
+            try:
+                if addr is not None:
+                    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
+                                    socket.inet_aton(addr))
+                sock.sendto(_mdns_query(qname, qtype), (MDNS_ADDR, MDNS_PORT))
+            except OSError:
+                continue  # an interface that cannot carry multicast
+
+    instances, hosts, addresses = set(), {}, {}
+    asked = set()  # one query per name: responders repeat, we need not
+    try:
+        ask(MDNS_SERVICE, _TYPE_PTR)
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            try:
+                packet, _ = sock.recvfrom(9000)
+            except socket.timeout:
+                packet = None
+            except OSError:
+                break
+            if packet:
+                for rtype, name, value in _dns_records(packet):
+                    if rtype == _TYPE_PTR and name == MDNS_SERVICE:
+                        instances.add(value)
+                    elif rtype == _TYPE_SRV:
+                        hosts[name] = value
+                    elif rtype == _TYPE_A:
+                        addresses[name] = value
+            for instance in list(instances):
+                if instance not in hosts:
+                    target, qtype = instance, _TYPE_SRV
+                elif hosts[instance] not in addresses:
+                    target, qtype = hosts[instance], _TYPE_A
+                else:
+                    continue
+                if (target, qtype) not in asked:
+                    asked.add((target, qtype))
+                    ask(target, qtype)
+    finally:
+        sock.close()
+
+    found = []
+    for instance in sorted(instances):
+        host = hosts.get(instance)
+        address = addresses.get(host) if host else None
+        if address:
+            # "dali-1k._esphomelib._tcp.local" is the node's name plus noise.
+            found.append((instance.split(".")[0], host, address))
+    return found
+
+
+def probe_shell(address, port, timeout=PROBE_TIMEOUT):
+    """
+    True if the DALI shell is listening at this address.
+
+    The greeting and the one-session refusal both name the shell, and either
+    answer identifies the node — so a session you already have open elsewhere
+    does not hide it. Closing immediately is what keeps this harmless: the
+    device treats an orderly close as the end of the session and releases it,
+    rather than holding it for the YAML's idle timeout.
+    """
+    try:
+        with socket.create_connection((address, port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            greeting = sock.recv(256).decode("utf-8", "replace")
+    except OSError:
+        return False
+    return "dali" in greeting.lower()
+
+
+def discover_shells(port, seconds=BROWSE_SECONDS):
+    """Return [(name, address)] for the browsed nodes whose shell answers."""
+    nodes = browse_esphome(seconds)
+    if not nodes:
+        return []
+    # A node that has gone off the network holds up the sweep for the whole
+    # probe timeout, and there is no reason to wait for them one at a time.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(nodes))) as pool:
+        answered = pool.map(lambda n: probe_shell(n[2], port), nodes)
+        return [(name, address)
+                for (name, _host, address), ok in zip(nodes, answered) if ok]
+
+
+def choose_host(port, seconds=BROWSE_SECONDS):
+    """
+    Find the device to talk to, asking only if the answer is ambiguous.
+
+    Every message here goes to stderr. The menu is a conversation with the
+    operator, and `dali-shell export inventory > file` must put the inventory
+    in the file and nothing else.
+    """
+    print("searching for DALI nodes...", file=sys.stderr, flush=True)
+    nodes = discover_shells(port, seconds)
+
+    if not nodes:
+        raise ShellError(
+            f"no DALI shell found on port {port}.\n"
+            "Either no node has a `shell:` block in its `dali:` config, or "
+            "multicast is not reaching this network.\n"
+            "Pass --host <address> to connect directly."
+        )
+
+    if len(nodes) == 1:
+        name, address = nodes[0]
+        print(f"found {name} at {address}", file=sys.stderr)
+        return address
+
+    listing = "\n".join(f"  {i + 1}. {name:<16} {address}"
+                        for i, (name, address) in enumerate(nodes))
+
+    # Prompting a program that cannot answer would hang a cron job forever.
+    if not sys.stdin.isatty():
+        raise ShellError(f"several DALI nodes found:\n{listing}\n"
+                         "Pass --host to choose one.")
+
+    print(f"several DALI nodes found:\n{listing}", file=sys.stderr)
+    while True:
+        sys.stderr.write(f"connect to [1-{len(nodes)}]: ")
+        sys.stderr.flush()
+        try:
+            choice = input().strip()
+        except (EOFError, KeyboardInterrupt):
+            # Reachable without a human present: Windows reports the NUL device
+            # as a terminal, so a scheduled task can land here. Failing with the
+            # flag that avoids the question beats failing with "no".
+            raise ShellError("no node chosen; pass --host to skip the question")
+        if choice.isdigit() and 1 <= int(choice) <= len(nodes):
+            return nodes[int(choice) - 1][1]
+        print("not one of the listed numbers", file=sys.stderr)
+
+
+class DaliShell:
+    """One connection to the device, and the read loop that frames replies."""
+
+    def __init__(self, host, port, timeout=DEFAULT_COMMAND_TIMEOUT):
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self.sock = None
+
+    # ── connection ──────────────────────────────────────────────────────────
+
+    def connect(self):
+        try:
+            self.sock = socket.create_connection((self.host, self.port), timeout=10)
+        except OSError as exc:
+            raise ShellError(f"cannot reach {self.host}:{self.port}: {exc}") from exc
+        self.sock.settimeout(SOCKET_POLL_TIMEOUT)
+
+        # The device greets with a banner and a prompt; consume both so the
+        # first command's reply starts at a known point in the stream.
+        banner = self._read_until_prompt(echo_to=None, deadline_s=10.0)
+        if "busy" in banner.lower():
+            raise ShellError(
+                "the device already has a shell session open.\n"
+                "Only one is allowed at a time; it is reclaimed by the idle "
+                "timeout set in the YAML."
+            )
+        return banner
+
+    def close(self):
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            finally:
+                self.sock = None
+
+    # ── command / reply ─────────────────────────────────────────────────────
+
+    def run(self, line, echo_to=sys.stdout):
+        """
+        Send one line and stream the reply.
+
+        Output is written as it arrives rather than collected and returned at
+        the end: a discover prints for tens of seconds and a find for minutes,
+        and watching it work is most of its value.
+        """
+        if self.sock is None:
+            raise ShellError("not connected")
+
+        # CRLF is what a network client should send; the device swallows the LF
+        # of the pair rather than reading it as a second, empty line.
+        self.sock.sendall((line + "\r\n").encode("utf-8", "replace"))
+        return self._read_until_prompt(echo_to=echo_to, suppress_echo_of=line)
+
+    def _read_until_prompt(self, echo_to, suppress_echo_of=None, deadline_s=None):
+        """
+        Read until the device writes its prompt.
+
+        The device echoes the line it was given before running it, which a
+        client with its own line editing has already shown the operator. That
+        first line is dropped rather than printed twice.
+        """
+        deadline = (deadline_s if deadline_s is not None else self.timeout)
+        collected = []
+        buf = ""
+        echo_line = f"{PROMPT}{suppress_echo_of}" if suppress_echo_of is not None else None
+        echo_dropped = echo_line is None
+        elapsed = 0.0
+
+        while True:
+            # Emit whole lines as they complete, holding back any partial tail.
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                clean = line.rstrip("\r")
+                if not echo_dropped and clean == echo_line:
+                    echo_dropped = True
+                    continue
+                collected.append(clean)
+                if echo_to is not None:
+                    print(clean, file=echo_to, flush=True)
+
+            # A tail with no newline is the prompt, and the reply is complete.
+            if buf == PROMPT or buf.endswith("\n" + PROMPT):
+                return "\n".join(collected)
+
+            try:
+                chunk = self.sock.recv(4096)
+            except socket.timeout:
+                elapsed += SOCKET_POLL_TIMEOUT
+                if elapsed >= deadline:
+                    raise ShellError(
+                        f"no prompt after {deadline:.0f}s; the device may still "
+                        f"be working. Reconnect to see its state."
+                    )
+                continue
+            except OSError as exc:
+                raise ShellError(f"connection lost: {exc}") from exc
+
+            if not chunk:
+                raise ShellError("device closed the connection")
+            buf += chunk.decode("utf-8", "replace")
+
+    # ── schema ──────────────────────────────────────────────────────────────
+
+    def fetch_schema(self):
+        """
+        Ask the device what it accepts.
+
+        Completion built from a table written here would be wrong the first
+        time a verb gained an argument, and wrong in the worst way: confidently
+        offering something the firmware refuses. Asking the device means this
+        client is stale only when the firmware is.
+        """
+        try:
+            raw = self.run("schema", echo_to=None)
+            return json.loads(raw)
+        except (ShellError, json.JSONDecodeError):
+            # An older firmware has no `schema` verb. History and editing still
+            # work; only completion is lost.
+            return None
+
+
+class Completer:
+    """Context-aware completion over the tables the device reported."""
+
+    def __init__(self, schema):
+        self.schema = schema
+        self.verbs = {v["name"]: v for v in schema.get("verbs", [])}
+        self.tables = {
+            name: [entry["name"] if isinstance(entry, dict) else entry
+                   for entry in schema.get(name, [])]
+            for name in ("query", "special", "config", "dt6", "dt8",
+                         "iquery", "iconfig")
+        }
+        # Which table completes at which argument position, per verb. Anything
+        # not listed falls back to no completion, which is better than offering
+        # the wrong table.
+        self.arg_tables = {
+            "query": {2: "query"},
+            "config": {2: "config"},
+            "config-dtr0": {2: "config"},
+            "special": {1: "special"},
+            "dt6": {2: "dt6"},
+            "dt8": {2: "dt8"},
+            "iquery": {3: "iquery"},
+            "iconfig": {3: "iconfig"},
+        }
+
+    def candidates(self, line, word):
+        tokens = line.split()
+        # Position of the token being completed: a trailing space means the
+        # cursor has moved on to the next one.
+        index = len(tokens) if line.endswith(" ") else max(len(tokens) - 1, 0)
+
+        if index == 0:
+            return sorted(self.verbs)
+
+        verb = tokens[0]
+        spec = self.verbs.get(verb)
+        if spec is None:
+            return []
+
+        # A verb whose first argument is a fixed keyword says so in its spec,
+        # so this needs no list of its own.
+        if index == 1 and spec.get("subcommands"):
+            return sorted(spec["subcommands"].split())
+
+        table = self.arg_tables.get(verb, {}).get(index)
+        if table:
+            return sorted(self.tables.get(table, []))
+
+        # Targets are generated rather than listed: 64 short addresses is too
+        # many to show unprompted, so they appear once a prefix narrows them.
+        if "<addr|sN|gN|b>" in spec.get("args", "") and index == 1:
+            if word.startswith("a"):
+                return [f"a{n}" for n in range(64) if f"a{n}".startswith(word)]
+            if word.startswith("g"):
+                return [f"g{n}" for n in range(16) if f"g{n}".startswith(word)]
+            return ["b"] + [f"a{n}" for n in range(10)]
+        return []
+
+    def complete(self, text, state):
+        if readline is None:
+            return None
+        try:
+            line = readline.get_line_buffer()[: readline.get_endidx()]
+            matches = [c for c in self.candidates(line, text) if c.startswith(text)]
+            return matches[state] if state < len(matches) else None
+        except Exception:
+            # A completer that raises inside readline corrupts the terminal;
+            # returning nothing merely means no suggestion.
+            return None
+
+
+def setup_readline(shell):
+    if readline is None:
+        print("note: readline unavailable: no history or completion",
+              file=sys.stderr)
+        return
+
+    try:
+        readline.read_history_file(HISTORY_FILE)
+    except OSError:
+        pass
+    readline.set_history_length(HISTORY_LEN)
+
+    schema = shell.fetch_schema()
+    if schema is None:
+        print("note: device did not answer `schema`: completion disabled",
+              file=sys.stderr)
+        return
+
+    completer = Completer(schema)
+    readline.set_completer(completer.complete)
+    readline.set_completer_delims(" \t\n")
+    readline.parse_and_bind("tab: complete")
+
+    policy = schema.get("policy", {})
+    if not policy.get("commission", False):
+        print("note: this session refuses commissioning verbs "
+              "(set allow_commissioning: true in the YAML to enable)",
+              file=sys.stderr)
+
+
+def repl(shell):
+    setup_readline(shell)
+    # A piped script wants the command output and nothing else; a prompt with
+    # no typed line after it just corrupts the transcript.
+    interactive = sys.stdin.isatty()
+    if interactive:
+        print("Connected. 'help' for commands, Ctrl-D to quit.")
+
+    while True:
+        try:
+            line = input(PROMPT) if interactive else input()
+        except EOFError:
+            print()
+            break
+        except KeyboardInterrupt:
+            print("^C")
+            continue
+
+        line = line.strip()
+        if not line:
+            continue
+        if line in ("quit", "exit"):
+            break
+
+        try:
+            shell.run(line)
+        except KeyboardInterrupt:
+            # The shell has no interrupt, but dropping the connection is one:
+            # the device polls for a departed peer between bus steps and stops
+            # the workflow rather than holding the bus for a reader that left.
+            print("\n^C - disconnecting to stop the command on the device")
+            shell.close()
+            try:
+                shell.connect()
+                print("reconnected")
+            except ShellError as exc:
+                print(f"reconnect failed: {exc}", file=sys.stderr)
+                break
+        except ShellError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            break
+
+    if readline is not None:
+        try:
+            readline.write_history_file(HISTORY_FILE)
+        except OSError:
+            pass
+
+
+def list_nodes(port):
+    """
+    Print every ESPHome node found, and which of them answer as a DALI shell.
+
+    Listing the nodes without a shell is the point: "my node is missing" and
+    "my node is there but has no `shell:` block" are different problems, and
+    only one of them is about the network.
+    """
+    print("searching...", file=sys.stderr, flush=True)
+    nodes = browse_esphome()
+    if not nodes:
+        print("no ESPHome nodes answered. Multicast may not reach this network.",
+              file=sys.stderr)
+        return 1
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(nodes))) as pool:
+        answered = list(pool.map(lambda n: probe_shell(n[2], port), nodes))
+
+    width = max(len(name) for name, _host, _address in nodes)
+    for (name, _host, address), ok in zip(nodes, answered):
+        print(f"{name:<{width}}  {address:<15}  "
+              f"{'DALI shell on ' + str(port) if ok else '-'}")
+    if not any(answered):
+        print(f"\nNo node answered on port {port}. A node needs a `shell:` block "
+              "inside its `dali:` config;\nwithout one the shell is not compiled in.",
+              file=sys.stderr)
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Terminal client for the DALI diagnostic shell.",
+        epilog="With no command, opens an interactive session.",
+    )
+    parser.add_argument("--host", default=DEFAULT_HOST,
+                        help="device hostname or IP (default: $DALI_SHELL_HOST, "
+                             "or found on the network)")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT,
+                        help=f"shell port (default: {DEFAULT_PORT})")
+    parser.add_argument("--timeout", type=float, default=DEFAULT_COMMAND_TIMEOUT,
+                        help="seconds to wait for a command to finish")
+    parser.add_argument("--list", action="store_true",
+                        help="list the ESPHome nodes on this network and exit")
+    parser.add_argument("command", nargs="*",
+                        help="run one command and exit, instead of the REPL")
+    args = parser.parse_args()
+    _normalise_stdout()
+
+    if args.list:
+        return list_nodes(args.port)
+
+    try:
+        host = args.host if args.host else choose_host(args.port)
+    except ShellError as exc:
+        print(f"dali-shell: {exc}", file=sys.stderr)
+        return 1
+
+    shell = DaliShell(host, args.port, timeout=args.timeout)
+    try:
+        banner = shell.connect()
+        if not args.command:
+            print(banner.strip())
+            repl(shell)
+        else:
+            # One-shot: only the command's own output reaches stdout, so
+            # redirection produces a clean file.
+            shell.run(" ".join(args.command))
+    except ShellError as exc:
+        print(f"dali-shell: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        shell.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

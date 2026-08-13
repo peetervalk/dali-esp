@@ -1098,6 +1098,10 @@ void DaliComponent::loop()
         boot_sensor_query_done_ = true;
     }
 
+    /* ── A shell workflow put the bus down; re-read what it may have moved ── */
+    if (external_refresh_request_.exchange(false, std::memory_order_acq_rel))
+        dali_refresh_cursor_request(&refresh_cursor_);
+
     /* ── Persist group membership when a scan/console edit dirtied it ── */
     if (s_group_members_dirty_.exchange(false, std::memory_order_acq_rel))
         save_group_membership();
@@ -2834,6 +2838,28 @@ void DaliComponent::start_scan()
         scan_running_.store(false);
         if (scan_status_) scan_status_->publish_state("Scan start failed");
     }
+}
+
+bool DaliComponent::try_claim_bus(const char *what)
+{
+    if (scan_running_.exchange(true)) {
+        ESP_LOGW(TAG, "%s: bus already in use", what != nullptr ? what : "claim");
+        return false;
+    }
+    ESP_LOGI(TAG, "Bus claimed by %s", what != nullptr ? what : "shell");
+    return true;
+}
+
+void DaliComponent::release_bus()
+{
+    /*
+     * A claimed workflow may have moved levels or changed which addresses
+     * exist, so ask for a refresh pass. The request is handed over as an atomic
+     * rather than by touching refresh_cursor_ directly: this runs on the shell
+     * task, and the cursor belongs to Core 0's loop.
+     */
+    external_refresh_request_.store(true, std::memory_order_release);
+    scan_running_.store(false, std::memory_order_release);
 }
 
 void DaliComponent::start_identify()
