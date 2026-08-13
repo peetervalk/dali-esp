@@ -2560,6 +2560,15 @@ static uint8_t shell_discover_bus(bool detailed)
         return 0u;
     }
 
+    /*
+     * A backward frame that arrives after its reply window has closed is the one
+     * bus fault a scan cannot see: the transaction reports a plain timeout, and
+     * an address that answered a shade too late is indistinguishable from an
+     * empty one. Report the count so under-reporting a populated bus reads as a
+     * timing problem rather than as missing hardware.
+     */
+    uint32_t late_replies_before = g_dali_stats.rx_ignored_outside_reply;
+
     shell_printf("Scanning short addresses 0-%u...\r\n", (unsigned)DALI_MAX_SHORT_ADDRESS);
     DaliError err = dali_discovery_scan(inventory,
                                         &transport,
@@ -2607,7 +2616,20 @@ static uint8_t shell_discover_bus(bool detailed)
         s_session.hooks.inventory_changed(s_session.hooks.ctx, inventory);
     }
 
+    uint32_t late_replies =
+        g_dali_stats.rx_ignored_outside_reply - late_replies_before;
     shell_printf("Scan complete: %u device(s) found.\r\n", (unsigned)found);
+    if (late_replies > 0u) {
+        /* Not a failure on its own: the retry hold-off exists to cover exactly
+         * this, and a bus whose gear answers a shade late reports a steady count
+         * on every scan. It earns a line because it is the one condition that
+         * can drop a present device from the list above without any other trace. */
+        shell_printf("  note: %" PRIu32 " backward frame(s) answered after the "
+                     "%u ms reply window — marginal gear timing on this bus. "
+                     "Retries cover it; if a known device is missing above, "
+                     "re-run.\r\n",
+                     late_replies, (unsigned)DALI_REPLY_TIMEOUT_MS);
+    }
     return found;
 }
 
