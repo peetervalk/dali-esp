@@ -35,11 +35,13 @@ Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The controller has
 2. Commission the bus, either way round:
    - **From a terminal.** Run [tools/dali-shell](tools/dali-shell) from any host
      that can reach the device — standard library only, nothing to install, and
-     it drops straight into the HA "Advanced SSH & Web Terminal" add-on.
-     `discover` maps short addresses, device types and groups; `identify <addr>`
-     blinks one fixture; `export inventory > /config/dali_inventory.json` writes
-     the result as JSON. `help` lists every verb. With no client to hand,
-     `nc dali-diag.local 2323` is a complete if unfriendly substitute.
+     it drops straight into the HA "Advanced SSH & Web Terminal" add-on. With no
+     `--host` it finds the device over mDNS and connects, asking only if more
+     than one answers; `--list` shows what is out there. `discover` maps short
+     addresses, device types and groups; `identify <addr>` blinks one fixture;
+     `export inventory > /config/dali_inventory.json` writes the result as JSON.
+     `help` lists every verb. With no client to hand, `nc <address> 2323` is a
+     complete if unfriendly substitute.
    - **From Home Assistant.** **Scan DALI Bus**, **Find Couplers**, and
      **Identify** do the same walk from a phone. A scan publishes ready-to-paste
      light YAML only when group discovery is complete; otherwise it retains the
