@@ -1,119 +1,167 @@
 #pragma once
 
 /*
- * dali_input_config.h — IEC 62386-103 instance configuration frame builders
- *                        and type-specific configuration for DT301/303/304.
+ * IEC 62386 input-device instance command frame builders.
  *
- * All configuration commands require send_twice = true in the scheduler.
- * DTR loading (before sending the command) is the caller's responsibility.
+ * Common commands are from IEC 62386-103:2022. Type-specific commands are
+ * from Parts 301, 303, and 304.
  *
- * Opcodes are in the 24-bit instance command byte. Type-specific helper names
- * intentionally carry their instance type because identical command names can
- * map to different command bytes in different IEC 62386-3xx parts.
- *
- * Opcode source: IEC 62386-103:2014 Table 15, cross-referenced with
- * python-dali (https://github.com/sde1000/python-dali).
- * Verify against hardware before shipping.
+ * For each configuration command, load every named control-device DTR once,
+ * then send the returned frame twice within 100 ms with no intervening
+ * command. ENABLE INSTANCE and DISABLE INSTANCE are also sent twice but use no
+ * DTR. Instance control commands marked "send once" use one transmission.
+ * Queries use one transmission and expect an 8-bit backward frame.
+ * These Part 103/3xx commands do not use ENABLE DEVICE TYPE.
  */
 
 #include "dali_protocol.h"
+#include "dali_scheduler.h"
 
 /* ---------------------------------------------------------------------------
- * Generic IEC 62386-103 instance configuration
+ * Atomic command grouping
  * --------------------------------------------------------------------------*/
 
-/* Set Event Priority (DTR0 = priority value 1–5).  send_twice. */
+#define DALI_INPUT_CONFIG_MAX_DTR_BYTES 3u
+/* Up to three control-device DTR loads plus the command itself. */
+#define DALI_INPUT_CONFIG_MAX_SEQUENCE_STEPS (DALI_INPUT_CONFIG_MAX_DTR_BYTES + 1u)
+
+/*
+ * Build [DTR0..DTRn] + command as one sequence for any builder in this file.
+ *
+ * These are Part 103 control-device commands, so the DTR loads use the 24-bit
+ * control-device DTR frames, not the 16-bit control-gear ones, and there is no
+ * ENABLE DEVICE TYPE step. Keeping the loads and the command in one sequence is
+ * what stops another locally scheduled frame from replacing a DTR between the
+ * write and the command that consumes it.
+ *
+ * dtr supplies DTR0, DTR1, DTR2 in that order; pass dtr_count 0 for commands
+ * that take none. Send-twice expansion is the scheduler's job, so a send-twice
+ * command still occupies one step. No step carries a retry budget: a repeated
+ * DTR write is indistinguishable from the caller's next value, and a repeated
+ * configuration command would be a second, unpaired transmission.
+ *
+ * command must be a 24-bit forward frame carrying its own address and instance.
+ */
+DaliError dali_input_build_config_sequence(DaliFrame      command,
+                                           bool           send_twice,
+                                           bool           expects_reply,
+                                           const uint8_t *dtr,
+                                           uint8_t        dtr_count,
+                                           DaliSequence  *out);
+
+/* Index of the command step in a sequence built with dtr_count DTR loads. */
+#define DALI_INPUT_CONFIG_COMMAND_STEP(dtr_count) ((uint8_t)(dtr_count))
+
+/* Common instance configuration (IEC 62386-103:2022). */
+
+/* SET EVENT PRIORITY: DTR0 = priority [2, 5]. Send twice. */
 DaliFrame dali_input_build_set_event_priority(uint8_t addr, uint8_t instance);
 
-/* Enable Instance. send_twice. */
+/* ENABLE INSTANCE: no DTR. Send twice. */
 DaliFrame dali_input_build_enable_instance(uint8_t addr, uint8_t instance);
 
-/* Disable Instance. send_twice. */
+/* DISABLE INSTANCE: no DTR. Send twice. */
 DaliFrame dali_input_build_disable_instance(uint8_t addr, uint8_t instance);
 
-/* Set Primary Instance Group (DTR0 = group 0–15 or 0xFF to clear). send_twice. */
+/* SET PRIMARY INSTANCE GROUP: DTR0 = group [0, 31] or MASK (0xFF). Send twice. */
 DaliFrame dali_input_build_set_primary_group(uint8_t addr, uint8_t instance);
 
-/* Set Instance Group 1 (DTR0 = group or 0xFF). send_twice. */
+/* SET INSTANCE GROUP 1: DTR0 = group [0, 31] or MASK (0xFF). Send twice. */
 DaliFrame dali_input_build_set_instance_group1(uint8_t addr, uint8_t instance);
 
-/* Set Instance Group 2 (DTR0 = group or 0xFF). send_twice. */
+/* SET INSTANCE GROUP 2: DTR0 = group [0, 31] or MASK (0xFF). Send twice. */
 DaliFrame dali_input_build_set_instance_group2(uint8_t addr, uint8_t instance);
 
-/* Set Event Scheme (DTR0 = scheme, e.g. 0=instance, 1=device, 2=device+instance). send_twice. */
+/* SET EVENT SCHEME: DTR0 = event scheme [0, 4]. Send twice. */
 DaliFrame dali_input_build_set_event_scheme(uint8_t addr, uint8_t instance);
 
-/* Set Event Filter (DTR0/1/2 = 3 filter bytes). send_twice. */
+/* SET EVENT FILTER: DTR2:DTR1:DTR0 = eventFilter[23:0]. Send twice. */
 DaliFrame dali_input_build_set_event_filter(uint8_t addr, uint8_t instance);
 
-/* Set Report Timer (DTR0 = timer value). send_twice. */
-DaliFrame dali_input_build_set_report_timer(uint8_t addr, uint8_t instance);
+/*
+ * SET INSTANCE TYPE: DTR0[7:5] = 0 and DTR0[4:0] = a supported instance type.
+ * Send twice. Changing the type can reset instance variables and restart the
+ * input device.
+ */
+DaliFrame dali_input_build_set_instance_type(uint8_t addr, uint8_t instance);
 
-/* Set Input Hysteresis (DTR0 = hysteresis value). send_twice. */
-DaliFrame dali_input_build_set_hysteresis(uint8_t addr, uint8_t instance);
+/*
+ * SET INSTANCE CONFIGURATION: DTR0 selects instanceConfiguration[], and
+ * DTR2:DTR1 supplies its 16-bit value. DTR0 = 191 with DTR2:DTR1 = 0x55CC
+ * restores all instance configurations to factory defaults. Send twice.
+ */
+DaliFrame dali_input_build_set_instance_configuration(uint8_t addr, uint8_t instance);
 
-/* Set Deadtime Timer (DTR0 = deadtime value). send_twice. */
-DaliFrame dali_input_build_set_deadtime_timer(uint8_t addr, uint8_t instance);
+/* Part 301 push button / binary input (instance type 1). */
 
-/* ---------------------------------------------------------------------------
- * DT301 push-button type-specific configuration (IEC 62386-301)
- * --------------------------------------------------------------------------*/
+/* SET SHORT TIMER: DTR0 = tShort [tShortMin, 255], in 20 ms units. Send twice. */
+DaliFrame dali_input_pb_build_set_short_timer(uint8_t addr, uint8_t instance);
 
-/* Set push-button hysteresis / bounce filter (DTR0 = value). send_twice. */
-DaliFrame dali_input_pb_build_set_hysteresis(uint8_t addr, uint8_t instance);
+/* SET DOUBLE TIMER: DTR0 = 0 or [tDoubleMin, 100], in 20 ms units. Send twice. */
+DaliFrame dali_input_pb_build_set_double_timer(uint8_t addr, uint8_t instance);
 
-/* Set push-button dead-time between events (DTR0 = value). send_twice. */
-DaliFrame dali_input_pb_build_set_deadtime(uint8_t addr, uint8_t instance);
+/* SET REPEAT TIMER: DTR0 = tRepeat [5, 100], in 20 ms units. Send twice. */
+DaliFrame dali_input_pb_build_set_repeat_timer(uint8_t addr, uint8_t instance);
 
-/* Set double-click detection priority (DTR0 = priority). send_twice. */
-DaliFrame dali_input_pb_build_set_double_click_priority(uint8_t addr, uint8_t instance);
+/* SET STUCK TIMER: DTR0 = tStuck [5, 255], in 1 s units. Send twice. */
+DaliFrame dali_input_pb_build_set_stuck_timer(uint8_t addr, uint8_t instance);
 
-/* Set repeat period for held-button auto-repeat (DTR0 = value). send_twice. */
-DaliFrame dali_input_pb_build_set_repeat_period(uint8_t addr, uint8_t instance);
+/* Part 301 timer queries: send once; expect an 8-bit reply. */
+DaliFrame dali_input_pb_build_query_short_timer(uint8_t addr, uint8_t instance);
+DaliFrame dali_input_pb_build_query_short_timer_min(uint8_t addr, uint8_t instance);
+DaliFrame dali_input_pb_build_query_double_timer(uint8_t addr, uint8_t instance);
+DaliFrame dali_input_pb_build_query_double_timer_min(uint8_t addr, uint8_t instance);
+DaliFrame dali_input_pb_build_query_repeat_timer(uint8_t addr, uint8_t instance);
+DaliFrame dali_input_pb_build_query_stuck_timer(uint8_t addr, uint8_t instance);
 
-/* Set hold timer (DTR0 = value). send_twice. */
-DaliFrame dali_input_pb_build_set_hold_timer(uint8_t addr, uint8_t instance);
+/* Part 303 occupancy sensor (instance type 3), including Amendment 1:2024. */
 
-/* ---------------------------------------------------------------------------
- * DT303 occupancy sensor type-specific configuration (IEC 62386-303)
- * --------------------------------------------------------------------------*/
+/* CATCH MOVEMENT: no DTR; send once. */
+DaliFrame dali_input_occ_build_catch_movement(uint8_t addr, uint8_t instance);
 
-/* Set occupancy dead-time before re-trigger (DTR0 = value). send_twice. */
-DaliFrame dali_input_occ_build_set_deadtime(uint8_t addr, uint8_t instance);
-
-/* Set occupancy report timer (DTR0 = value). send_twice. */
-DaliFrame dali_input_occ_build_set_report_timer(uint8_t addr, uint8_t instance);
-
-/* Set hold timer for "occupied" state (DTR0 = value). send_twice. */
+/* SET HOLD TIMER: DTR0 [0, 254], in 10 s units; 0 selects 1 s. Send twice. */
 DaliFrame dali_input_occ_build_set_hold_timer(uint8_t addr, uint8_t instance);
 
-/* ---------------------------------------------------------------------------
- * DT304 light sensor type-specific configuration (IEC 62386-304)
- * --------------------------------------------------------------------------*/
+/* SET REPORT TIMER: DTR0 [0, 255], in 1 s units; 0 disables it. Send twice. */
+DaliFrame dali_input_occ_build_set_report_timer(uint8_t addr, uint8_t instance);
 
-/* Set light sensor hysteresis (DTR0 = value). send_twice. */
-DaliFrame dali_input_light_build_set_hysteresis(uint8_t addr, uint8_t instance);
+/* SET DEADTIME TIMER: DTR0 [0, 255], 50 ms units; 0 disables it. Send twice. */
+DaliFrame dali_input_occ_build_set_deadtime(uint8_t addr, uint8_t instance);
 
-/* Set light sensor deadband (DTR0 = value). send_twice. */
-DaliFrame dali_input_light_build_set_deadband(uint8_t addr, uint8_t instance);
+/* CANCEL HOLD TIMER: no DTR; send once. */
+DaliFrame dali_input_occ_build_cancel_hold_timer(uint8_t addr, uint8_t instance);
 
-/* ---------------------------------------------------------------------------
- * Generic IEC 62386-103 instance query frame builders
- * Single transmission, expects 8-bit reply. No DTR0, no send_twice.
- * --------------------------------------------------------------------------*/
+/* SET DETECTION RANGE: DTR0 [0, 100], if supported. Send twice. */
+DaliFrame dali_input_occ_build_set_detection_range(uint8_t addr, uint8_t instance);
 
-/* Generic IEC 62386-103 instance parameter queries (single send, reply expected).
- * instance_type, resolution, instance_enabled, instance_status are declared in
- * dali_input_device.h (different signature); adapters are in dali_component.cpp. */
-DaliFrame dali_input_build_query_hysteresis(uint8_t addr, uint8_t instance);
-DaliFrame dali_input_build_query_deadtime_timer(uint8_t addr, uint8_t instance);
-DaliFrame dali_input_build_query_report_timer(uint8_t addr, uint8_t instance);
+/* SET SENSITIVITY: DTR0 [0, 100], if supported. Send twice. */
+DaliFrame dali_input_occ_build_set_sensitivity(uint8_t addr, uint8_t instance);
 
-/* DT303 occupancy sensor type-specific queries (IEC 62386-303) */
+/* Part 303 queries: send once; expect an 8-bit reply. */
+DaliFrame dali_input_occ_build_query_capabilities(uint8_t addr, uint8_t instance);
+DaliFrame dali_input_occ_build_query_detection_range(uint8_t addr, uint8_t instance);
+DaliFrame dali_input_occ_build_query_sensitivity(uint8_t addr, uint8_t instance);
 DaliFrame dali_input_occ_build_query_deadtime(uint8_t addr, uint8_t instance);
 DaliFrame dali_input_occ_build_query_hold_timer(uint8_t addr, uint8_t instance);
 DaliFrame dali_input_occ_build_query_report_timer(uint8_t addr, uint8_t instance);
+DaliFrame dali_input_occ_build_query_catching(uint8_t addr, uint8_t instance);
 
-/* DT304 light sensor type-specific queries (IEC 62386-304) */
+/* Part 304 light sensor (instance type 4). */
+
+/* SET REPORT TIMER: DTR0 [0, 255], in 1 s units; 0 disables it. Send twice. */
+DaliFrame dali_input_light_build_set_report_timer(uint8_t addr, uint8_t instance);
+
+/* SET HYSTERESIS: DTR0 = percentage [0, 25]. Send twice. */
+DaliFrame dali_input_light_build_set_hysteresis(uint8_t addr, uint8_t instance);
+
+/* SET DEADTIME TIMER: DTR0 [0, 255], 50 ms units; 0 disables it. Send twice. */
+DaliFrame dali_input_light_build_set_deadtime(uint8_t addr, uint8_t instance);
+
+/* SET HYSTERESIS MIN: DTR0 = absolute minimum [0, 255]. Send twice. */
+DaliFrame dali_input_light_build_set_hysteresis_min(uint8_t addr, uint8_t instance);
+
+/* Part 304 queries: send once; expect an 8-bit reply. */
+DaliFrame dali_input_light_build_query_hysteresis_min(uint8_t addr, uint8_t instance);
+DaliFrame dali_input_light_build_query_deadtime(uint8_t addr, uint8_t instance);
+DaliFrame dali_input_light_build_query_report_timer(uint8_t addr, uint8_t instance);
 DaliFrame dali_input_light_build_query_hysteresis(uint8_t addr, uint8_t instance);
-DaliFrame dali_input_light_build_query_deadband(uint8_t addr, uint8_t instance);

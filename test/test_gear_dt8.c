@@ -430,6 +430,48 @@ static DaliError dt8_mock_transact(const DaliFrame *frame,
     return DALI_ERR_TIMEOUT;
 }
 
+static DaliError dt8_mock_transact_sequence(const DaliSequence *seq,
+                                            DaliSequenceResult *result_out,
+                                            void *ctx)
+{
+    if (seq == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliSequenceResult result = {
+        .result = DALI_OK,
+        .failed_step = DALI_SEQUENCE_NO_FAILED_STEP,
+    };
+    for (uint8_t i = 0u; i < seq->step_count; i++) {
+        const DaliSequenceStep *step = &seq->steps[i];
+        DaliFrame reply = {0u, 0u};
+        DaliError err = dt8_mock_transact(&step->frame,
+                                          step->needs_reply,
+                                          step->retries_left,
+                                          step->send_twice,
+                                          step->needs_reply ? &reply : NULL,
+                                          ctx);
+        result.steps_run = (uint8_t)(i + 1u);
+        if (err != DALI_OK) {
+            result.result = err;
+            result.failed_step = i;
+            if (result_out != NULL) {
+                *result_out = result;
+            }
+            return err;
+        }
+        if (step->needs_reply) {
+            result.replies[i] = reply;
+            result.reply_mask |= (uint8_t)(1u << i);
+        }
+    }
+
+    if (result_out != NULL) {
+        *result_out = result;
+    }
+    return DALI_OK;
+}
+
 static void dt8_mock_reset(void)
 {
     memset(s_dt8_script, 0, sizeof(s_dt8_script));
@@ -465,7 +507,11 @@ static void dt8_add_error(uint32_t data, uint8_t bit_length, DaliError err)
 
 static DaliDt8Transport dt8_transport(void)
 {
-    return (DaliDt8Transport){ .transact = dt8_mock_transact, .ctx = NULL };
+    return (DaliDt8Transport){
+        .transact = dt8_mock_transact,
+        .transact_sequence = dt8_mock_transact_sequence,
+        .ctx = NULL,
+    };
 }
 
 /* ---------------------------------------------------------------------------
@@ -483,6 +529,28 @@ void test_read_colour_value_16_rejects_invalid_args(void)
                                                         DALI_DT8_VALUE_X_COORDINATE, &out));
     TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
                           dali_dt8_read_colour_value_16(&t, 5u, DALI_DT8_VALUE_X_COORDINATE, NULL));
+}
+
+void test_read_colour_value_16_rejects_frame_only_transport_without_traffic(void)
+{
+    dt8_mock_reset();
+    DaliFrame selector =
+        dali_dt8_build_dtr0_selector(DALI_DT8_VALUE_X_COORDINATE);
+    dt8_add_no_reply(selector.data, selector.bit_length);
+    DaliDt8Transport frame_only = {
+        .transact = dt8_mock_transact,
+        .ctx = NULL,
+    };
+    uint16_t result = 0xA5A5u;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_dt8_read_colour_value_16(
+                          &frame_only,
+                          5u,
+                          DALI_DT8_VALUE_X_COORDINATE,
+                          &result));
+    TEST_ASSERT_FALSE(s_dt8_script[0].consumed);
+    TEST_ASSERT_EQUAL_HEX16(0xA5A5u, result);
 }
 
 void test_read_colour_value_16_returns_combined_word(void)
@@ -557,12 +625,260 @@ void test_read_colour_value_16_propagates_query_error(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * Colour value sequence builder and reader
+ *
+ * Frames come from IEC 62386-102/209 rather than from the builders: DTR0 DATA
+ * is special command 0xA3, ENABLE DEVICE TYPE is 0xC1 carrying the type,
+ * QUERY COLOUR VALUE is DT8 opcode 0xFA, and QUERY CONTENT DTR0 is 0x98. Short
+ * address 5 encodes as address byte (5 << 1) | 1 = 0x0B.
+ * --------------------------------------------------------------------------*/
+
+void test_build_colour_value_sequence_layout(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+        dali_dt8_build_colour_value_sequence(5u, DALI_DT8_VALUE_COLOUR_TEMP_TC, &seq));
+    TEST_ASSERT_EQUAL_UINT8(DALI_DT8_COLOUR_VALUE_SEQUENCE_STEPS, seq.step_count);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT8(DALI_SEQUENCE_MAX_STEPS, seq.step_count);
+
+    const DaliSequenceStep *dtr0 = &seq.steps[DALI_DT8_COLOUR_VALUE_STEP_DTR0];
+    TEST_ASSERT_EQUAL_HEX32(0xA302u, dtr0->frame.data);  /* selector Tc = 2 */
+    TEST_ASSERT_FALSE(dtr0->needs_reply);
+    TEST_ASSERT_EQUAL_UINT8(0u, dtr0->retries_left);
+
+    const DaliSequenceStep *enable = &seq.steps[DALI_DT8_COLOUR_VALUE_STEP_ENABLE];
+    TEST_ASSERT_EQUAL_HEX32(0xC108u, enable->frame.data);
+    TEST_ASSERT_FALSE(enable->needs_reply);
+    TEST_ASSERT_EQUAL_UINT8(0u, enable->retries_left);
+
+    const DaliSequenceStep *query = &seq.steps[DALI_DT8_COLOUR_VALUE_STEP_QUERY];
+    TEST_ASSERT_EQUAL_HEX32(0x0BFAu, query->frame.data);
+    TEST_ASSERT_TRUE(query->needs_reply);
+    /* This step is answered under the ENABLE above and overwrites DTR0 with the
+     * result's low byte, so repeating it alone would request a different
+     * selector entirely. */
+    TEST_ASSERT_EQUAL_UINT8(0u, query->retries_left);
+
+    const DaliSequenceStep *read = &seq.steps[DALI_DT8_COLOUR_VALUE_STEP_DTR0_READ];
+    TEST_ASSERT_EQUAL_HEX32(0x0B98u, read->frame.data);
+    TEST_ASSERT_TRUE(read->needs_reply);
+    /* A pure read of DTR0 changes nothing, so this one may retry. */
+    TEST_ASSERT_EQUAL_UINT8(DALI_DT8_QUERY_RETRIES_LEFT, read->retries_left);
+
+    for (uint8_t i = 0u; i < DALI_DT8_COLOUR_VALUE_SEQUENCE_STEPS; i++) {
+        TEST_ASSERT_EQUAL_UINT8(DALI_FORWARD_FRAME_BITS, seq.steps[i].frame.bit_length);
+        TEST_ASSERT_FALSE(seq.steps[i].send_twice);
+    }
+}
+
+void test_build_colour_value_sequence_carries_selector_and_address(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+        dali_dt8_build_colour_value_sequence(0u, DALI_DT8_VALUE_X_COORDINATE, &seq));
+    TEST_ASSERT_EQUAL_HEX32(0xA300u,
+        seq.steps[DALI_DT8_COLOUR_VALUE_STEP_DTR0].frame.data);
+    /* addr 0 encodes as address byte 0x01 */
+    TEST_ASSERT_EQUAL_HEX32(0x01FAu,
+        seq.steps[DALI_DT8_COLOUR_VALUE_STEP_QUERY].frame.data);
+    TEST_ASSERT_EQUAL_HEX32(0x0198u,
+        seq.steps[DALI_DT8_COLOUR_VALUE_STEP_DTR0_READ].frame.data);
+
+    /* Both reads must target the same gear. */
+    TEST_ASSERT_EQUAL_HEX8(
+        (uint8_t)((seq.steps[DALI_DT8_COLOUR_VALUE_STEP_QUERY].frame.data >> 8u) & 0xFFu),
+        (uint8_t)((seq.steps[DALI_DT8_COLOUR_VALUE_STEP_DTR0_READ].frame.data >> 8u) & 0xFFu));
+}
+
+void test_build_colour_value_sequence_rejects_bad_arguments(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
+        dali_dt8_build_colour_value_sequence(5u, DALI_DT8_VALUE_X_COORDINATE, NULL));
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
+        dali_dt8_build_colour_value_sequence(DALI_SHORT_ADDRESS_COUNT,
+                                             DALI_DT8_VALUE_X_COORDINATE, &seq));
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+        dali_dt8_build_colour_value_sequence(DALI_SHORT_ADDRESS_COUNT - 1u,
+                                             DALI_DT8_VALUE_X_COORDINATE, &seq));
+}
+
+static void dt8_result_reset(DaliSequenceResult *result)
+{
+    memset(result, 0, sizeof(*result));
+    result->result      = DALI_OK;
+    result->failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
+    result->steps_run   = DALI_DT8_COLOUR_VALUE_SEQUENCE_STEPS;
+}
+
+static void dt8_seed_reply(DaliSequenceResult *result,
+                           uint8_t step,
+                           uint8_t value,
+                           uint8_t bit_length)
+{
+    result->replies[step] = (DaliFrame){ .data = value, .bit_length = bit_length };
+    result->reply_mask |= (uint8_t)(1u << step);
+}
+
+void test_colour_value_from_sequence_combines_msb_and_lsb(void)
+{
+    DaliSequenceResult result;
+    uint16_t out = 0u;
+
+    dt8_result_reset(&result);
+    dt8_seed_reply(&result, DALI_DT8_COLOUR_VALUE_STEP_QUERY, 0xABu,
+                   DALI_BACKWARD_FRAME_BITS);
+    dt8_seed_reply(&result, DALI_DT8_COLOUR_VALUE_STEP_DTR0_READ, 0xCDu,
+                   DALI_BACKWARD_FRAME_BITS);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_dt8_colour_value_from_sequence(&result, &out));
+    TEST_ASSERT_EQUAL_HEX16(0xABCDu, out);
+}
+
+void test_colour_value_from_sequence_reports_failures(void)
+{
+    DaliSequenceResult result;
+    uint16_t out = 0x1234u;
+
+    /* A failed sequence surfaces its error, never a half-assembled word. */
+    dt8_result_reset(&result);
+    result.result      = DALI_ERR_TIMEOUT;
+    result.failed_step = DALI_DT8_COLOUR_VALUE_STEP_DTR0_READ;
+    dt8_seed_reply(&result, DALI_DT8_COLOUR_VALUE_STEP_QUERY, 0xABu,
+                   DALI_BACKWARD_FRAME_BITS);
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_TIMEOUT,
+                          dali_dt8_colour_value_from_sequence(&result, &out));
+
+    /* A nominally successful sequence missing the LSB is malformed. */
+    dt8_result_reset(&result);
+    dt8_seed_reply(&result, DALI_DT8_COLOUR_VALUE_STEP_QUERY, 0xABu,
+                   DALI_BACKWARD_FRAME_BITS);
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_MALFORMED,
+                          dali_dt8_colour_value_from_sequence(&result, &out));
+
+    /* So is a reply that came back the wrong width. */
+    dt8_result_reset(&result);
+    dt8_seed_reply(&result, DALI_DT8_COLOUR_VALUE_STEP_QUERY, 0xABu,
+                   DALI_FORWARD_FRAME_BITS);
+    dt8_seed_reply(&result, DALI_DT8_COLOUR_VALUE_STEP_DTR0_READ, 0xCDu,
+                   DALI_BACKWARD_FRAME_BITS);
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_MALFORMED,
+                          dali_dt8_colour_value_from_sequence(&result, &out));
+
+    TEST_ASSERT_EQUAL_HEX16(0x1234u, out);
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
+                          dali_dt8_colour_value_from_sequence(&result, NULL));
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
+                          dali_dt8_colour_value_from_sequence(NULL, &out));
+}
+
+/* ---------------------------------------------------------------------------
+ * Atomic command sequences
+ *
+ * Same contract as the DT6 form: the DTR loads, ENABLE DEVICE TYPE 8, and the
+ * command travel as one group, because the command is answered under that
+ * enable and reads whatever the DTRs hold when it arrives.
+ * --------------------------------------------------------------------------*/
+
+static void test_dt8_command_sequence_without_dtr(void)
+{
+    DaliSequence seq;
+    DaliFrame command = dali_dt8_activate(3u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_dt8_build_command_sequence(command, false, false,
+                                                          NULL, 0u, &seq));
+    TEST_ASSERT_EQUAL_UINT8(2u, seq.step_count);
+    TEST_ASSERT_EQUAL_HEX32(0xC108u, seq.steps[0].frame.data);
+    TEST_ASSERT_EQUAL_HEX32(command.data, seq.steps[1].frame.data);
+    TEST_ASSERT_FALSE(seq.steps[1].needs_reply);
+    TEST_ASSERT_EQUAL_UINT8(1u, DALI_DT8_COMMAND_STEP(0u));
+}
+
+static void test_dt8_command_sequence_loads_three_dtrs_in_order(void)
+{
+    DaliSequence seq;
+    const uint8_t dtr[3] = { 0xAAu, 0xBBu, 0xCCu };
+    DaliFrame command = dali_dt8_set_temporary_rgb_dim_level(1u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_dt8_build_command_sequence(command, false, false,
+                                                          dtr, 3u, &seq));
+    TEST_ASSERT_EQUAL_UINT8(5u, seq.step_count);
+    TEST_ASSERT_EQUAL_HEX32(0xA3AAu, seq.steps[0].frame.data);  /* DTR0 = R */
+    TEST_ASSERT_EQUAL_HEX32(0xC3BBu, seq.steps[1].frame.data);  /* DTR1 = G */
+    TEST_ASSERT_EQUAL_HEX32(0xC5CCu, seq.steps[2].frame.data);  /* DTR2 = B */
+    TEST_ASSERT_EQUAL_HEX32(0xC108u, seq.steps[3].frame.data);
+    TEST_ASSERT_EQUAL_HEX32(command.data, seq.steps[4].frame.data);
+    TEST_ASSERT_EQUAL_UINT8(4u, DALI_DT8_COMMAND_STEP(3u));
+}
+
+static void test_dt8_command_sequence_marks_send_twice_and_reply(void)
+{
+    DaliSequence seq;
+    const uint8_t dtr[1] = { 0x0Fu };
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_dt8_build_command_sequence(
+                              dali_dt8_store_gear_features_status(2u),
+                              true, false, dtr, 1u, &seq));
+    TEST_ASSERT_TRUE(seq.steps[2].send_twice);
+    TEST_ASSERT_FALSE(seq.steps[2].needs_reply);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_dt8_build_command_sequence(
+                              dali_dt8_query_colour_status(2u),
+                              false, true, NULL, 0u, &seq));
+    TEST_ASSERT_FALSE(seq.steps[1].send_twice);
+    TEST_ASSERT_TRUE(seq.steps[1].needs_reply);
+
+    for (uint8_t i = 0u; i < seq.step_count; i++) {
+        TEST_ASSERT_EQUAL_UINT8(0u, seq.steps[i].retries_left);
+    }
+}
+
+static void test_dt8_command_sequence_rejects_invalid_arguments(void)
+{
+    DaliSequence seq;
+    const uint8_t dtr[3] = { 0u, 0u, 0u };
+    DaliFrame command = dali_dt8_activate(1u);
+    DaliFrame empty = { 0u, 0u };
+
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
+                          dali_dt8_build_command_sequence(command, false, false,
+                                                          dtr, 3u, NULL));
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
+                          dali_dt8_build_command_sequence(empty, false, false,
+                                                          NULL, 0u, &seq));
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
+                          dali_dt8_build_command_sequence(command, false, false,
+                                                          dtr, 4u, &seq));
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
+                          dali_dt8_build_command_sequence(command, false, false,
+                                                          NULL, 2u, &seq));
+}
+
+/* ---------------------------------------------------------------------------
  * Runner
  * --------------------------------------------------------------------------*/
 
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_dt8_command_sequence_without_dtr);
+    RUN_TEST(test_dt8_command_sequence_loads_three_dtrs_in_order);
+    RUN_TEST(test_dt8_command_sequence_marks_send_twice_and_reply);
+    RUN_TEST(test_dt8_command_sequence_rejects_invalid_arguments);
+
+    RUN_TEST(test_build_colour_value_sequence_layout);
+    RUN_TEST(test_build_colour_value_sequence_carries_selector_and_address);
+    RUN_TEST(test_build_colour_value_sequence_rejects_bad_arguments);
+    RUN_TEST(test_colour_value_from_sequence_combines_msb_and_lsb);
+    RUN_TEST(test_colour_value_from_sequence_reports_failures);
 
     RUN_TEST(test_enable_matches_protocol_enable_device_type_8);
     RUN_TEST(test_enable_differs_from_dt6_enable);
@@ -605,6 +921,7 @@ int main(void)
     RUN_TEST(test_parse_colour_status_tc_with_out_of_range);
 
     RUN_TEST(test_read_colour_value_16_rejects_invalid_args);
+    RUN_TEST(test_read_colour_value_16_rejects_frame_only_transport_without_traffic);
     RUN_TEST(test_read_colour_value_16_returns_combined_word);
     RUN_TEST(test_read_colour_value_16_uses_selector_for_dtr0);
     RUN_TEST(test_read_colour_value_16_propagates_query_error);

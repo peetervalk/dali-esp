@@ -7,9 +7,11 @@
 
 /* ── Match key ────────────────────────────────────────────────────────────── */
 
-/* Use in event_code to match any opcode or DALI-2 event code. */
-#define DALI_DISPATCH_OPCODE_ANY   0xFFu
-/* Use in instance to match any DALI-2 instance (INPUT_24BIT frames only). */
+/* Use in event_information to match any legacy data or Part-103 event. */
+#define DALI_DISPATCH_EVENT_ANY    0xFFFFu
+/* Backwards-compatible name for existing legacy dispatch tables. */
+#define DALI_DISPATCH_OPCODE_ANY   DALI_DISPATCH_EVENT_ANY
+/* Use in instance to match any Part-103 instance, including an absent one. */
 #define DALI_DISPATCH_INSTANCE_ANY 0xFFu
 
 /*
@@ -17,26 +19,40 @@
  *
  * For BF6 / legacy couplers (DALI_EVENT_FRAME_LEGACY_16BIT):
  *   address_kind = DALI_EVENT_ADDRESS_GROUP, address = group number
- *   event_code   = DALI_DISPATCH_OPCODE_ANY  (coupler encodes ON/OFF itself)
+ *   event_information = DALI_DISPATCH_EVENT_ANY (coupler encodes ON/OFF itself)
  *   instance     = DALI_DISPATCH_INSTANCE_ANY (not used for 16-bit frames)
  *
  * For phantom-address remapping (still LEGACY_16BIT, couplers reprogrammed):
  *   address_kind = DALI_EVENT_ADDRESS_SHORT, address = phantom short address
- *   event_code   = DALI_DISPATCH_OPCODE_ANY
+ *   event_information = DALI_DISPATCH_EVENT_ANY
  *   instance     = DALI_DISPATCH_INSTANCE_ANY
  *
- * For DALI-2 push buttons (DALI_EVENT_FRAME_INPUT_24BIT):
- *   address_kind = DALI_EVENT_ADDRESS_SHORT, address = input device short addr
- *   event_code   = 0x02 (short-press) or 0x03 (double-press) per device config
- *   instance     = instance number (0, 1, …) or DALI_DISPATCH_INSTANCE_ANY
+ * Part-103 sources are projected onto the same five-field key as follows:
+ *
+ *   Device / Device-Instance:
+ *     address_kind = DALI_EVENT_ADDRESS_SHORT
+ *     address      = source device short address
+ *
+ *   Device-Group / Instance-Group:
+ *     address_kind = DALI_EVENT_ADDRESS_GROUP
+ *     address      = source device-group or instance-group number
+ *
+ *   Instance (no device or group identifier):
+ *     address_kind = DALI_EVENT_ADDRESS_INVALID
+ *     address      = ignored
+ *
+ * instance matches the canonical source instance when one is present; use
+ * DALI_DISPATCH_INSTANCE_ANY when it is absent or irrelevant. The compact key
+ * cannot distinguish Device-Group from Instance-Group or match instance type.
+ * event_information matches all 10 Part-103 information bits (0x000-0x3FF).
+ * For DT301, short press is 0x002 and double press is 0x005.
  */
 typedef struct {
     DaliEventFrameKind   frame_kind;
     DaliEventAddressKind address_kind;
     uint8_t              address;
-    uint8_t              event_code;  /* DALI_DISPATCH_OPCODE_ANY   = match all */
-    uint8_t              instance;    /* DALI_DISPATCH_INSTANCE_ANY = match all;
-                                         only checked for INPUT_24BIT frames */
+    uint16_t             event_information; /* exact value or DALI_DISPATCH_EVENT_ANY */
+    uint8_t              instance;          /* exact value or DALI_DISPATCH_INSTANCE_ANY */
 } DaliDispatchKey;
 
 /* ── Actions ──────────────────────────────────────────────────────────────── */
@@ -99,6 +115,7 @@ typedef struct {
 typedef struct {
     uint16_t group_on;  /* bit N = group N considered on */
     uint64_t short_on;  /* bit N = short address N considered on */
+    bool     broadcast_on; /* broadcast target considered on */
 } DaliDispatchToggleState;
 
 /* ── Inferred state result ────────────────────────────────────────────────── */

@@ -22,6 +22,7 @@
  */
 
 #include "dali_protocol.h"
+#include "dali_transport.h"
 
 /* ---------------------------------------------------------------------------
  * Constants and enumerations
@@ -122,24 +123,45 @@ uint16_t dali_dt8_mirek_to_kelvin(uint16_t mirek);
  * full value requires a 4-step sequence:
  *   1. DTR0 = selector           (no reply, broadcast special)
  *   2. ENABLE DEVICE TYPE 8      (no reply, broadcast special)
- *   3. QueryColourValue at addr  (reply = MSB)
+ *   3. QueryColourValue at addr  (reply = MSB, and the gear puts the LSB in DTR0)
  *   4. QUERY CONTENT DTR0        (reply = LSB of combined result)
  *
- * DaliDt8Transport uses the same function-pointer signature as DaliMemoryTransport
- * so the same mock or real implementation can be cast and reused safely.
+ * Every step depends on the one before it, and step 3 overwrites the very
+ * register step 1 set up, so the group is built as a DaliSequence and run
+ * through dali_transport_run_sequence_atomic(). A frame-only transport is
+ * rejected before any frame is sent.
+ *
+ * The transport is the shared DaliTransport under its DT8-era names, so one
+ * transport value serves this module and every other.
  * --------------------------------------------------------------------------*/
 
-typedef DaliError (*DaliDt8TransactionFn)(const DaliFrame *frame,
-                                          bool             needs_reply,
-                                          uint8_t          retries_left,
-                                          bool             send_twice,
-                                          DaliFrame       *reply_out,
-                                          void            *ctx);
+typedef DaliTransactionFn DaliDt8TransactionFn;
+typedef DaliTransport     DaliDt8Transport;
 
-typedef struct {
-    DaliDt8TransactionFn transact;
-    void                *ctx;
-} DaliDt8Transport;
+#define DALI_DT8_COLOUR_VALUE_SEQUENCE_STEPS 4u
+#define DALI_DT8_COLOUR_VALUE_STEP_DTR0      0u
+#define DALI_DT8_COLOUR_VALUE_STEP_ENABLE    1u
+#define DALI_DT8_COLOUR_VALUE_STEP_QUERY     2u
+#define DALI_DT8_COLOUR_VALUE_STEP_DTR0_READ 3u
+
+/* Retry budget for the DT8 reads that are safe to repeat on their own. */
+#define DALI_DT8_QUERY_RETRIES_LEFT 1u
+
+/*
+ * Build the four-step colour value read for one address and selector.
+ *
+ * The QueryColourValue step carries no retry budget: it is answered under the
+ * preceding ENABLE DEVICE TYPE 8, and it replaces the selector in DTR0 with the
+ * result's low byte. A lone retransmission would therefore be read as a request
+ * for whatever selector that low byte happens to name. Retry the sequence.
+ */
+DaliError dali_dt8_build_colour_value_sequence(uint8_t                    addr,
+                                               DaliDt8ColourValueSelector selector,
+                                               DaliSequence              *out);
+
+/* Assemble the 16-bit value from a completed colour value sequence. */
+DaliError dali_dt8_colour_value_from_sequence(const DaliSequenceResult *result,
+                                              uint16_t                 *out);
 
 /*
  * Read a 16-bit colour value (XY coordinate, Tc, or RGBWAF dim level) using
@@ -158,6 +180,38 @@ DaliError dali_dt8_read_colour_value_16(const DaliDt8Transport    *transport,
  * --------------------------------------------------------------------------*/
 
 DaliFrame dali_dt8_enable(void);
+
+/* ---------------------------------------------------------------------------
+ * Atomic command grouping
+ * --------------------------------------------------------------------------*/
+
+#define DALI_DT8_MAX_DTR_BYTES 3u
+/* Up to three DTR loads, ENABLE DEVICE TYPE 8, and the command itself. */
+#define DALI_DT8_MAX_SEQUENCE_STEPS (DALI_DT8_MAX_DTR_BYTES + 2u)
+
+/*
+ * Build [DTR0..DTRn] + ENABLE DEVICE TYPE 8 + command as one sequence.
+ *
+ * The DT8 equivalent of dali_dt6_build_command_sequence(), and it exists for
+ * the same reason: the command is answered under the enable that precedes it,
+ * and it reads whatever the DTRs hold when it arrives. Splitting the group lets
+ * another locally scheduled frame change either, and the gear then answers a
+ * different question than the caller asked.
+ *
+ * dtr supplies DTR0, DTR1, DTR2 in that order. No step carries a retry budget.
+ * command must be a 16-bit forward frame carrying its own address. Use
+ * dali_dt8_build_colour_value_sequence() for the 16-bit colour value read,
+ * which needs a different four-step shape.
+ */
+DaliError dali_dt8_build_command_sequence(DaliFrame      command,
+                                          bool           send_twice,
+                                          bool           expects_reply,
+                                          const uint8_t *dtr,
+                                          uint8_t        dtr_count,
+                                          DaliSequence  *out);
+
+/* Index of the command step in a sequence built with dtr_count DTR loads. */
+#define DALI_DT8_COMMAND_STEP(dtr_count) ((uint8_t)((dtr_count) + 1u))
 
 /* ---------------------------------------------------------------------------
  * Temporary register command frames

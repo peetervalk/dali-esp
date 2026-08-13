@@ -137,12 +137,15 @@ button:
 
 # ── DALI command console ──────────────────────────────────────────────────────
 # Type commands in HA; result appears in "DALI Command Result" text sensor.
-# Verbs: off/max/min/level/query/config/iquery/iconfig/memread/memwrite/devquery/dtrcheck
+# Verb names, argument forms, and command names are shared with the native CLI.
+# Verbs: queue/raw/raw2/off/max/min/level/query/config/config-dtr0/
+#        iquery/iconfig/devmem/dtrcheck/group
+# Trailing tokens are rejected, so a mistyped line fails instead of running short.
 # raw <hex> len=<16|24> [wait]  — send an arbitrary frame, optional wait for reply
-# raw2 <hex> len=<16|24> [wait] — send twice inside the DALI send-twice window
+# raw2 <hex> len=<16|24>        — send twice inside the DALI send-twice window
 # Targets: a<N>=short, g<N>=group, b=broadcast
 # Examples:
-#   query a0 actual-level
+#   query a0 actual
 #   query b status
 #   raw FF05 len=16          (broadcast RECALL MAX)
 #   raw 0101 len=16 wait     (short addr 0, QUERY STATUS)

@@ -34,6 +34,11 @@ static uint32_t mock_get_tick_ms(void)
     return s_tick_ms;
 }
 
+static void advance_to_next_forward(void)
+{
+    s_tick_ms += (DALI_FORWARD_INTERFRAME_US + 999u) / 1000u;
+}
+
 /* ---------------------------------------------------------------------------
  * Completion capture
  * --------------------------------------------------------------------------*/
@@ -259,6 +264,64 @@ void test_go_to_scene_enqueues(void)
     TEST_ASSERT_EQUAL_UINT8(16u, s_last_tx.bit_length);
 }
 
+void test_set_level_cb_reports_transmission_not_admission(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_set_level_cb(target(DALI_ADDR_GROUP, 0u),
+                                                128u,
+                                                on_complete,
+                                                NULL));
+    /* Admitted, but nothing has reached the bus yet. */
+    TEST_ASSERT_EQUAL_UINT8(0u, s_cb_count);
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_UINT8(1u, s_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x8080u, s_last_tx.data);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_cb_count);
+
+    s_tick_ms += DALI_SETTLE_MS;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_UINT8(1u, s_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, s_cb_result);
+}
+
+void test_off_cb_reports_a_phy_transmit_failure(void)
+{
+    s_tx_result = DALI_ERR_BUS_STUCK;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_off_cb(target(DALI_ADDR_SHORT, 3u),
+                                          on_complete,
+                                          NULL));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_cb_count);
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_UINT8(1u, s_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x0700u, s_last_tx.data);
+    /* The enqueue said OK; only the completion reveals the bus failure. */
+    TEST_ASSERT_EQUAL_UINT8(1u, s_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK, s_cb_result);
+}
+
+void test_level_and_off_cb_accept_null_callback_and_validate_targets(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_set_level_cb(target(DALI_ADDR_SHORT, 0u),
+                                                10u, NULL, NULL));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_off_cb(target(DALI_ADDR_SHORT, 0u), NULL, NULL));
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_control_set_level_cb(target(DALI_ADDR_SHORT, 64u),
+                                                10u, on_complete, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_control_set_level_cb(target(DALI_ADDR_GROUP, 0u),
+                                                255u, on_complete, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_control_off_cb(target(DALI_ADDR_GROUP, 16u),
+                                          on_complete, NULL));
+}
+
 void test_build_generic_query_commands(void)
 {
     DaliFrame frame;
@@ -479,7 +542,7 @@ void test_config_enqueue_sends_twice(void)
     TEST_ASSERT_EQUAL_UINT8(16u, s_last_tx.bit_length);
     TEST_ASSERT_EQUAL(SCHED_WAIT_SETTLE, dali_sched_state());
 
-    s_tick_ms += DALI_SETTLE_MS;
+    advance_to_next_forward();
     dali_sched_run();
     TEST_ASSERT_EQUAL_UINT8(2u, s_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0x0B20u, s_last_tx.data);
@@ -521,13 +584,13 @@ void test_config_with_dtr0_sequences_load_before_send_twice_config(void)
     TEST_ASSERT_EQUAL_HEX32(0xA3C8u, s_last_tx.data);
     TEST_ASSERT_EQUAL_UINT8(16u, s_last_tx.bit_length);
 
-    s_tick_ms += DALI_SETTLE_MS;
+    advance_to_next_forward();
     dali_sched_run();
     TEST_ASSERT_EQUAL_UINT8(2u, s_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0x0B2Au, s_last_tx.data);
     TEST_ASSERT_EQUAL_UINT8(16u, s_last_tx.bit_length);
 
-    s_tick_ms += DALI_SETTLE_MS;
+    advance_to_next_forward();
     dali_sched_run();
     TEST_ASSERT_EQUAL_UINT8(3u, s_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0x0B2Au, s_last_tx.data);
@@ -640,6 +703,60 @@ void test_query_status_allows_group_broadcast_and_rejects_null_callback(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * CONTINUOUS UP/DOWN and arc power MASK through the control layer
+ * --------------------------------------------------------------------------*/
+
+static void test_build_continuous_up_down(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_build_continuous_up(target(DALI_ADDR_SHORT, 7u),
+                                                       &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x0F0Bu, frame.data);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_build_continuous_down(target(DALI_ADDR_GROUP, 2u),
+                                                         &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x850Cu, frame.data);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_build_continuous_up(target(DALI_ADDR_BROADCAST, 0u),
+                                                       &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xFF0Bu, frame.data);
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_control_build_continuous_up(target(DALI_ADDR_SHORT, 64u),
+                                                       &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_control_build_continuous_down(target(DALI_ADDR_GROUP, 16u),
+                                                         &frame));
+}
+
+static void test_build_dapc_mask_through_control(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_build_dapc_mask(target(DALI_ADDR_SHORT, 7u), &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x0EFFu, frame.data);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_control_build_dapc_mask(target(DALI_ADDR_BROADCAST, 0u),
+                                                   &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xFEFFu, frame.data);
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_control_build_dapc_mask(target(DALI_ADDR_SHORT, 64u), &frame));
+
+    /* The level path keeps rejecting MASK, so a caller cannot reach it by
+     * passing 255 to the ordinary level builder. */
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_control_build_dapc(target(DALI_ADDR_SHORT, 7u),
+                                              DALI_DAPC_MASK_LEVEL, &frame));
+}
+
+/* ---------------------------------------------------------------------------
  * Main
  * --------------------------------------------------------------------------*/
 int main(void)
@@ -650,11 +767,16 @@ int main(void)
     RUN_TEST(test_build_short_and_broadcast_dapc);
     RUN_TEST(test_build_off_for_group_and_broadcast);
     RUN_TEST(test_build_recall_min_for_short_group_and_broadcast);
+    RUN_TEST(test_build_continuous_up_down);
+    RUN_TEST(test_build_dapc_mask_through_control);
     RUN_TEST(test_build_output_level_commands);
     RUN_TEST(test_build_go_to_scene_for_group);
     RUN_TEST(test_invalid_targets_and_levels_are_rejected);
     RUN_TEST(test_output_level_commands_enqueue);
     RUN_TEST(test_go_to_scene_enqueues);
+    RUN_TEST(test_set_level_cb_reports_transmission_not_admission);
+    RUN_TEST(test_off_cb_reports_a_phy_transmit_failure);
+    RUN_TEST(test_level_and_off_cb_accept_null_callback_and_validate_targets);
     RUN_TEST(test_build_generic_query_commands);
     RUN_TEST(test_generic_query_rejects_invalid_command_classes);
     RUN_TEST(test_generic_query_enqueues_and_completes_with_reply);

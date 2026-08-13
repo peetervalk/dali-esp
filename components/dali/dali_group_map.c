@@ -34,12 +34,51 @@ uint8_t dali_group_map_pick(const DaliGroupMap *map, uint8_t group)
     return 0xFFu;
 }
 
-void dali_group_map_rebuild_from_inventory(DaliGroupMap *map,
+bool dali_group_map_forget(DaliGroupMap *map, uint8_t addr, uint8_t group)
+{
+    if (map == NULL || addr >= DALI_SHORT_ADDRESS_COUNT) {
+        return false;
+    }
+    if (group != DALI_GROUP_MAP_ALL_GROUPS && group >= DALI_GROUP_COUNT) {
+        return false;
+    }
+
+    const uint64_t bit = (uint64_t)1u << addr;
+    bool changed = false;
+
+    for (uint8_t g = 0u; g < DALI_GROUP_COUNT; g++) {
+        if (group != DALI_GROUP_MAP_ALL_GROUPS && g != group) {
+            continue;
+        }
+        if ((map->members[g] & bit) == 0u) {
+            continue;
+        }
+        map->members[g] &= ~bit;
+        changed = true;
+    }
+    return changed;
+}
+
+bool dali_group_map_scan_covers_known_members(const DaliGroupMap *map,
+                                              uint64_t observed_gear)
+{
+    if (map == NULL) {
+        return false;
+    }
+    uint64_t known_members = 0u;
+    for (uint8_t group = 0u; group < DALI_GROUP_COUNT; group++) {
+        known_members |= map->members[group];
+    }
+    return (known_members & ~observed_gear) == 0u;
+}
+
+bool dali_group_map_rebuild_from_inventory(DaliGroupMap *map,
                                            const DaliDiscoveryInventory *inv)
 {
     if (map == NULL || inv == NULL) {
-        return;
+        return false;
     }
+    bool complete = dali_discovery_inventory_has_complete_group_data(inv);
     dali_group_map_reset(map);
     for (uint8_t a = 0u; a < DALI_SHORT_ADDRESS_COUNT; a++) {
         const DaliDiscoveryDeviceInfo *d = dali_discovery_inventory_get(inv, a);
@@ -52,7 +91,8 @@ void dali_group_map_rebuild_from_inventory(DaliGroupMap *map,
             }
         }
     }
-    map->verified = 0xFFFFu;
+    map->verified = complete ? 0xFFFFu : 0u;
+    return complete;
 }
 
 DaliGroupMapResult dali_group_map_apply_config(DaliGroupMap *map,

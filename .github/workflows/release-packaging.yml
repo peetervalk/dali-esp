@@ -1,0 +1,168 @@
+name: Release Packaging
+
+# Proves a consumer can build the component from a release tag with none of
+# this repository around them.
+#
+# The tracked configs use `type: local, path: esphome/components`, which works
+# only because the whole repo surrounds them. A real user does what
+# dali_diag.yaml does: `type: git` at a tag. That route depends on
+# _protocol_source_dir() resolving component_dir.parents[2]/components/dali
+# inside ESPHome's clone — that is, on the repo-root C sources being present in
+# the tag at that exact relative position. Nothing else here tests it.
+#
+# The test only means anything in a directory with no checkout in it, so this
+# workflow deliberately never runs actions/checkout. Everything it needs comes
+# from the published tag over HTTPS, exactly as a user's machine would fetch
+# it. Nothing is cached either: a cold environment is the honest one for a
+# packaging check.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or branch to build as an external component"
+        required: true
+        default: "main"
+
+jobs:
+  clean-checkout:
+    name: esphome compile from a clean external-component checkout
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install ESPHome
+        run: pip install esphome
+
+      - name: Build a consumer project in an empty directory
+        env:
+          DALI_URL: https://github.com/${{ github.repository }}.git
+          DALI_REF: ${{ inputs.ref || github.ref_name }}
+        run: |
+          project="$RUNNER_TEMP/consumer"
+          mkdir -p "$project"
+          cd "$project"
+
+          echo "Building against $DALI_URL @ $DALI_REF"
+
+          # No wifi/api/ota: the component's only ESPHome dependency is esp32,
+          # so the smallest config that still instantiates every platform is
+          # also the one with no secrets and no network. Each platform is
+          # present on purpose — a packaging layout can carry the main
+          # component and still omit a platform subdirectory.
+          cat > consumer.yaml <<EOF
+          esphome:
+            name: dali-packaging-check
+
+          esp32:
+            variant: esp32
+            framework:
+              type: esp-idf
+
+          external_components:
+            - source:
+                type: git
+                url: $DALI_URL
+                ref: $DALI_REF
+              components: [dali]
+              refresh: 0s
+
+          logger:
+
+          dali:
+            id: dali_bus
+            tx_pin: 18
+            rx_pin: 19
+            command_result:
+              name: "DALI Command Result"
+            scan_status:
+              name: "Scan Status"
+            scan_result:
+              name: "Scan Result"
+            yaml_result:
+              name: "Group Map"
+            couplers_result:
+              name: "Couplers Result"
+            bus_monitor:
+              name: "Bus Monitor"
+            bus_fault:
+              name: "Bus Fault"
+
+          light:
+            - platform: dali
+              dali_id: dali_bus
+              name: "Packaging Check Light"
+              target_type: group
+              target_address: 0
+              query_address: 0
+
+          number:
+            - platform: dali
+              dali_id: dali_bus
+              name: "Target Address"
+              mode: box
+
+          button:
+            - platform: dali
+              dali_id: dali_bus
+              name: "Scan DALI Bus"
+              type: scan
+
+          sensor:
+            - platform: dali
+              dali_id: dali_bus
+              name: "Packaging Check Lux"
+              address: 0
+              instance: 0
+              poll_interval: 30
+              value_bytes: 2
+              scale: 0.01
+              unit_of_measurement: "lx"
+              device_class: illuminance
+              state_class: measurement
+              accuracy_decimals: 0
+
+          text:
+            - platform: dali
+              dali_id: dali_bus
+              name: "DALI Command"
+              mode: text
+          EOF
+
+          esphome compile consumer.yaml
+
+      - name: Confirm the protocol stack was vendored whole
+        run: |
+          # Compile success already implies _protocol_source_dir() resolved,
+          # but assert the vendored artefacts explicitly so a packaging change
+          # that alters *which* candidate wins, or that ships a partial stack,
+          # shows up as a named failure rather than a silent behaviour swap.
+          project="$RUNNER_TEMP/consumer"
+          vendored="$project/.esphome/build/dali-packaging-check/src/components/dali"
+
+          if [ ! -f "$vendored/dali_phy.c.inc" ] || [ ! -f "$vendored/dali_phy.h" ]; then
+            echo "::error::protocol stack not vendored into $vendored"
+            ls -la "$vendored" 2>/dev/null || echo "(directory does not exist)"
+            exit 1
+          fi
+
+          # One .c.inc per shim, counted against the component ESPHome actually
+          # fetched rather than a hardcoded number, so this stays true for an
+          # older tag with a smaller stack.
+          shims=$(find "$project/.esphome/external_components" -name 'proto_dali_*.c' 2>/dev/null | wc -l)
+          units=$(find "$vendored" -name 'dali_*.c.inc' | wc -l)
+          echo "Fetched component declares $shims shims; $units translation units vendored."
+
+          if [ "$shims" -gt 0 ] && [ "$shims" -ne "$units" ]; then
+            echo "::error::vendored $units of $shims protocol modules"
+            exit 1
+          fi
+          if [ "$shims" -eq 0 ] && [ "$units" -lt 10 ]; then
+            echo "::error::could not locate the fetched component, and only $units modules vendored"
+            exit 1
+          fi

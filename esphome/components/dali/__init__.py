@@ -3,6 +3,7 @@ import shutil
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
+import esphome.pins as pins
 from esphome.components import text_sensor
 from esphome.const import CONF_ID
 from esphome.core import CORE
@@ -22,6 +23,8 @@ CONF_COMMAND_RESULT    = "command_result"
 CONF_BUS_FAULT         = "bus_fault"
 CONF_POLL_INTERVAL     = "poll_interval"
 CONF_HEADLESS_DISPATCH = "headless_dispatch"
+CONF_EVENT_INFORMATION = "event_information"
+CONF_EVENT_CODE        = "event_code"
 
 dali_ns = cg.esphome_ns.namespace("dali")
 DaliComponent = dali_ns.class_("DaliComponent", cg.Component)
@@ -35,6 +38,8 @@ _FRAME_KIND = {
 }
 
 _ADDRESS_KIND = {
+    "none":      0,   # DALI_EVENT_ADDRESS_INVALID (Instance source scheme)
+    "invalid":   0,   # explicit alias for the C enum name
     "short":     1,   # DALI_EVENT_ADDRESS_SHORT
     "group":     2,   # DALI_EVENT_ADDRESS_GROUP
     "broadcast": 3,   # DALI_EVENT_ADDRESS_BROADCAST
@@ -59,28 +64,126 @@ _DISPATCH_ACTION = {
     "toggle":     9,   # DALI_DISPATCH_ACTION_TOGGLE
 }
 
-_ANY = 0xFF  # DALI_DISPATCH_OPCODE_ANY / DALI_DISPATCH_INSTANCE_ANY
+_EVENT_ANY = 0xFFFF  # DALI_DISPATCH_EVENT_ANY
+_INSTANCE_ANY = 0xFF  # DALI_DISPATCH_INSTANCE_ANY
 
 
-def _any_or_uint8(value):
-    """Accept 'any' (→ 0xFF) or an integer 0-255."""
+def _any_or_event_information(value):
+    """Accept 'any' or the full 10-bit Part-103 event information."""
     if isinstance(value, str) and value.lower() == "any":
-        return _ANY
-    return cv.int_range(min=0, max=255)(value)
+        return _EVENT_ANY
+    return cv.int_range(min=0, max=0x3FF)(value)
 
 
-_DISPATCH_ENTRY_SCHEMA = cv.Schema({
-    cv.Required("frame_kind"):    cv.one_of(*_FRAME_KIND,   lower=True),
-    cv.Required("address_kind"):  cv.one_of(*_ADDRESS_KIND, lower=True),
-    cv.Optional("address", default=0):     cv.int_range(min=0, max=63),
-    cv.Optional("event_code", default="any"): _any_or_uint8,
-    cv.Optional("instance",   default="any"): _any_or_uint8,
-    cv.Required("output_type"):   cv.one_of(*_OUTPUT_TYPE,  lower=True),
-    cv.Optional("output_address", default=0): cv.int_range(min=0, max=63),
-    cv.Required("action"):        cv.one_of(*_DISPATCH_ACTION, lower=True),
-    cv.Optional("scene", default=0): cv.int_range(min=0, max=15),
-})
+def _any_or_event_code(value):
+    """Accept the legacy uint8 event-code range and its ANY sentinel."""
+    if isinstance(value, str) and value.lower() == "any":
+        return 0xFF
+    return cv.int_range(min=0, max=0xFF)(value)
 
+
+def _any_or_instance(value):
+    """Accept 'any' or a Part-103 instance number."""
+    if isinstance(value, str) and value.lower() == "any":
+        return _INSTANCE_ANY
+    value = cv.int_(value)
+    if value == _INSTANCE_ANY:
+        return value
+    return cv.int_range(min=0, max=31)(value)
+
+
+def _normalize_dispatch_event_information(config):
+    """Keep event_code as a compatibility alias for event_information."""
+    has_information = CONF_EVENT_INFORMATION in config
+    has_code = CONF_EVENT_CODE in config
+    if has_information and has_code:
+        raise cv.Invalid(
+            f"Specify only one of {CONF_EVENT_INFORMATION} or {CONF_EVENT_CODE}"
+        )
+    if has_code:
+        legacy_code = config.pop(CONF_EVENT_CODE)
+        # The old uint8 field used 0xFF as its ANY sentinel. Preserve that
+        # meaning; use event_information when an exact value 255 is required.
+        config[CONF_EVENT_INFORMATION] = (
+            _EVENT_ANY if legacy_code == 0xFF else legacy_code
+        )
+    elif not has_information:
+        config[CONF_EVENT_INFORMATION] = _EVENT_ANY
+    return config
+
+
+def _validate_dispatch_entry(config):
+    """Reject dispatch keys/outputs that cannot match a valid wire frame."""
+    frame_kind = config["frame_kind"]
+    address_kind = config["address_kind"]
+    address = config["address"]
+    event_information = config[CONF_EVENT_INFORMATION]
+    instance = config["instance"]
+
+    if frame_kind == "legacy_16bit":
+        if address_kind in ("none", "invalid"):
+            raise cv.Invalid("legacy_16bit requires short, group, or broadcast")
+        if address_kind == "group" and address > 15:
+            raise cv.Invalid("legacy_16bit group address must be 0..15")
+        if address_kind == "broadcast" and address != 0:
+            raise cv.Invalid("broadcast dispatch address must be 0")
+        if event_information != _EVENT_ANY and event_information > 0xFF:
+            raise cv.Invalid("legacy_16bit event_information must be 0..255 or any")
+        if instance != _INSTANCE_ANY:
+            raise cv.Invalid("legacy_16bit does not carry an instance; use any")
+    else:
+        if address_kind == "broadcast":
+            raise cv.Invalid("input_24bit events do not use a broadcast source")
+        if address_kind == "group" and address > 31:
+            raise cv.Invalid("Part-103 source group must be 0..31")
+        if address_kind in ("none", "invalid") and address != 0:
+            raise cv.Invalid("an Instance source has no address; use address: 0")
+        if address_kind == "group" and instance != _INSTANCE_ANY:
+            raise cv.Invalid("Part-103 group sources do not carry an instance number")
+        if config["action"] in ("observe", "mirror"):
+            raise cv.Invalid("observe and mirror are only valid for legacy_16bit")
+
+    if config["output_type"] == "group" and config["output_address"] > 15:
+        raise cv.Invalid("DALI output group address must be 0..15")
+    if config["output_type"] == "broadcast" and config["output_address"] != 0:
+        raise cv.Invalid("broadcast output_address must be 0")
+    return config
+
+
+_DISPATCH_ENTRY_SCHEMA = cv.All(
+    cv.Schema({
+        cv.Required("frame_kind"):    cv.one_of(*_FRAME_KIND,   lower=True),
+        cv.Required("address_kind"):  cv.one_of(*_ADDRESS_KIND, lower=True),
+        cv.Optional("address", default=0):     cv.int_range(min=0, max=63),
+        cv.Optional(CONF_EVENT_INFORMATION): _any_or_event_information,
+        cv.Optional(CONF_EVENT_CODE): _any_or_event_code,
+        cv.Optional("instance", default="any"): _any_or_instance,
+        cv.Required("output_type"):   cv.one_of(*_OUTPUT_TYPE,  lower=True),
+        cv.Optional("output_address", default=0): cv.int_range(min=0, max=63),
+        cv.Required("action"):        cv.one_of(*_DISPATCH_ACTION, lower=True),
+        cv.Optional("scene", default=0): cv.int_range(min=0, max=15),
+    }),
+    _normalize_dispatch_event_information,
+    _validate_dispatch_entry,
+)
+
+
+# ── Protocol stack vendoring ──────────────────────────────────────────────────
+#
+# The DALI stack is plain C99 in the repo-root components/dali/ IDF component,
+# shared with the native app in main/ and the host tests in test/. ESPHome
+# copies only THIS directory into its build tree, so those sources would never
+# reach the compiler on their own. _copy_protocol_stack() vendors them into
+# <build>/src/components/dali/ at codegen time, and the proto_dali_*.c shims
+# here pull each one into a translation unit the build does compile.
+#
+# Each .c is vendored as .c.inc deliberately: ESPHome generates a src
+# CMakeLists doing FILE(GLOB_RECURSE app_sources src/*.*), which sweeps the
+# vendored directory too. Under a .c name every module would compile twice —
+# once via the glob, once via its shim — and every non-static symbol would
+# collide at link. CMake skips the unknown .inc extension, leaving the shims
+# as the only entry point; one shim per module keeps one translation unit per
+# module, so static helpers keep file scope.
 
 def _protocol_source_dir():
     component_dir = Path(__file__).resolve().parent
@@ -108,13 +211,56 @@ def _copy_protocol_stack():
     for header in src_dir.glob("dali_*.h"):
         shutil.copyfile(header, dst_dir / header.name)
     for source in src_dir.glob("dali_*.c"):
+        # .inc so ESPHome's src/*.* glob cannot compile these behind the shims.
         shutil.copyfile(source, dst_dir / f"{source.name}.inc")
 
-CONFIG_SCHEMA = cv.Schema(
+# ── Pin validation ────────────────────────────────────────────────────────────
+#
+# The DALI-2 Click needs a pin it can actually drive for TX and one that can
+# raise an edge interrupt for RX. A plain int_range(0, 39) accepts neither
+# constraint: GPIO34-39 on the classic ESP32 are input-only, so a config naming
+# one as TX passes validation and then silently never transmits. The
+# internal_gpio_*_pin_number validators know each variant's real capabilities
+# and reject those at compile time.
+
+# WROVER modules wire GPIO16/17 to the PSRAM die. Driving them corrupts PSRAM
+# or the DALI line depending on which wins, and ESPHome only knows to reserve
+# them when PSRAM is configured in the YAML — which the DALI configs do not do.
+_WROVER_PSRAM_PINS = (16, 17)
+
+
+def _dali_gpio(validator):
+    """Board-aware pin number, plus the WROVER PSRAM restriction."""
+
+    def validate(value):
+        number = validator(value)
+        if number in _WROVER_PSRAM_PINS:
+            raise cv.Invalid(
+                f"GPIO{number} is wired to PSRAM on WROVER modules and must not "
+                f"be used for DALI. Pick another pin."
+            )
+        return number
+
+    return validate
+
+
+def _validate_distinct_pins(config):
+    """A single pin cannot be both the transmit and the receive line."""
+    if config[CONF_TX_PIN] == config[CONF_RX_PIN]:
+        raise cv.Invalid(
+            f"{CONF_TX_PIN} and {CONF_RX_PIN} must be different pins "
+            f"(both are GPIO{config[CONF_TX_PIN]}). The DALI-2 Click drives TX "
+            f"and reads RX independently."
+        )
+    return config
+
+
+CONFIG_SCHEMA = cv.All(
+    cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(DaliComponent),
-        cv.Required(CONF_TX_PIN): cv.int_range(min=0, max=39),
-        cv.Required(CONF_RX_PIN): cv.int_range(min=0, max=39),
+        cv.Required(CONF_TX_PIN): _dali_gpio(pins.internal_gpio_output_pin_number),
+        cv.Required(CONF_RX_PIN): _dali_gpio(pins.internal_gpio_input_pin_number),
         # Scan-status: "Idle" / "Scanning..." / "Found N devices"
         cv.Optional(CONF_SCAN_STATUS): text_sensor.text_sensor_schema(),
         # Scan-result: compact last-scan summary persisted in HA
@@ -137,7 +283,9 @@ CONFIG_SCHEMA = cv.Schema(
             _DISPATCH_ENTRY_SCHEMA
         ),
     }
-).extend(cv.COMPONENT_SCHEMA)
+    ).extend(cv.COMPONENT_SCHEMA),
+    _validate_distinct_pins,
+)
 
 
 async def to_code(config):
@@ -183,7 +331,7 @@ async def to_code(config):
             _FRAME_KIND[entry["frame_kind"]],
             _ADDRESS_KIND[entry["address_kind"]],
             entry["address"],
-            entry["event_code"],
+            entry[CONF_EVENT_INFORMATION],
             entry["instance"],
             _OUTPUT_TYPE[entry["output_type"]],
             entry["output_address"],

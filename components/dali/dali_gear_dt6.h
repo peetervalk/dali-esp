@@ -17,6 +17,7 @@
  */
 
 #include "dali_protocol.h"
+#include "dali_scheduler.h"
 
 /* ---------------------------------------------------------------------------
  * Response types
@@ -86,3 +87,38 @@ DaliFrame dali_dt6_query_extended_version_number(uint8_t addr);
 
 /* Parse a QUERY FAILURE STATUS response byte into individual fault flags. */
 DaliError dali_dt6_parse_failure_status(uint8_t raw, DaliDt6FailureStatus *out);
+
+/* ---------------------------------------------------------------------------
+ * Atomic command grouping
+ * --------------------------------------------------------------------------*/
+
+#define DALI_DT6_MAX_DTR_BYTES 3u
+/* Up to three DTR loads, ENABLE DEVICE TYPE 6, and the command itself. */
+#define DALI_DT6_MAX_SEQUENCE_STEPS (DALI_DT6_MAX_DTR_BYTES + 2u)
+
+/*
+ * Build [DTR0..DTRn] + ENABLE DEVICE TYPE 6 + command as one sequence.
+ *
+ * Every DT6 command is answered under the ENABLE DEVICE TYPE that precedes it,
+ * so the pair must not be split: a frame landing between them leaves the
+ * command to be interpreted under the device's default type. DTR loads join the
+ * same group for the same reason — a DT6 command reads whatever DTR0 holds when
+ * it arrives, not what this caller wrote.
+ *
+ * dtr supplies DTR0, DTR1, DTR2 in that order; pass dtr_count 0 for commands
+ * that take none. No step carries a retry budget, because a lone retransmission
+ * of the command would run without its enable, and a repeated DTR write cannot
+ * be told apart from the caller's own next value.
+ *
+ * command must be a 16-bit forward frame; the caller is responsible for its
+ * address. The sequence has no completion callback.
+ */
+DaliError dali_dt6_build_command_sequence(DaliFrame      command,
+                                          bool           send_twice,
+                                          bool           expects_reply,
+                                          const uint8_t *dtr,
+                                          uint8_t        dtr_count,
+                                          DaliSequence  *out);
+
+/* Index of the command step in a sequence built with dtr_count DTR loads. */
+#define DALI_DT6_COMMAND_STEP(dtr_count) ((uint8_t)((dtr_count) + 1u))

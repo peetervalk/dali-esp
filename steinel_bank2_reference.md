@@ -105,10 +105,10 @@ Firmware with the corrected helper verbs sends the same 24-bit Part 103 frames
 as the raw examples above:
 
 ```
-memread a0 2 4          # C13102, C13004, 01FE3C wait
-dtrcheck a0 0 66        # C13042, 01FE36 wait
-dtrcheck a0 1 2         # C13102, 01FE37 wait
-memwrite a0 2 4 128     # unlock lock byte, then write Bank 2 offset 4 = 0x80
+devmem read 0 2 4         # C13102, C13004, 01FE3C wait
+dtrcheck 0 0 66           # C13042, 01FE36 wait
+dtrcheck 0 1 2            # C13102, 01FE37 wait
+devmem write 0 2 4 128    # unlock lock byte, then write Bank 2 offset 4 = 0x80
 ```
 
 If an older firmware is still flashed, use the raw commands instead; the stale
@@ -137,18 +137,18 @@ raw 01FE3C len=24 wait   # confirm 128 (0x80) was stored
 ### Verify occupancy state on demand
 
 ```
-iquery a0:1 input-value   # 0=Unoccupied  85=Movement  170=Present  255=Present+Moving
+iquery 0 1 input-value    # 0=Unoccupied  85=Movement  170=Present  255=Present+Moving
 ```
 
 ### Verify Section 3 factory settings
 
 Steinel section 3 lists optimized occupancy defaults: hold timer `1`, report
-timer `5`, and event filter `7`. Corrected firmware maps the DT303 `iquery`
+timer `5`, and event filter `7`. Corrected firmware maps the Part 303/type 3 `iquery`
 timer helpers to the same opcodes as these raw commands.
 
 ```
-raw 01012D len=24 wait   # DT303 query hold timer; expected 1 = 10 seconds
-raw 01012E len=24 wait   # DT303 query report timer; expected 5 = 5 seconds
+raw 01012D len=24 wait   # Part 303/type 3 query hold timer; expected 1 = 10 seconds
+raw 01012E len=24 wait   # Part 303/type 3 query report timer; expected 5 = 5 seconds
 raw 010190 len=24 wait   # Part 103 query event filter bits 0-7; expected 7
 ```
 
@@ -159,7 +159,7 @@ To restore the Steinel report timer to 5 seconds:
 
 ```
 raw  C13005 len=24       # DTR0 = 5
-raw2 010122 len=24       # DT303 set report timer from DTR0; send twice
+raw2 010122 len=24       # Part 303/type 3 set report timer from DTR0; send twice
 raw  01012E len=24 wait  # verify report timer; expected 5
 ```
 
@@ -212,19 +212,17 @@ raw C13102 len=24        # set DTR1 = 0x02 (Bank 2)
 raw 01FE37 len=24 wait   # query DTR1; reply 2 = SET works
 ```
 
-Use `devquery` or `raw` for raw 24-bit queries:
+Use `raw` for raw 24-bit device queries:
 ```
 raw 01FE30 len=24 wait   # 0x30 = QUERY DEVICE STATUS
 raw 01FE35 len=24 wait   # 0x35 = QUERY NUMBER OF INSTANCES (should return 4)
 raw 01FE36 len=24 wait   # 0x36 = QUERY CONTENT DTR0
 raw 01FE37 len=24 wait   # 0x37 = QUERY CONTENT DTR1
-devquery a0 54           # 0x36 = QUERY CONTENT DTR0
-devquery a0 55           # 0x37 = QUERY CONTENT DTR1
 ```
 
 ## Caveats
 
-- **DALI `RESET` wipes Bank 2.** Do not issue `config a0 reset` while tuning.
+- **DALI `RESET` wipes Bank 2.** Do not issue `config s0 reset` while tuning.
 - **Allow ~1 s after writing before cutting bus power** — NVM commit is asynchronous.
 - **Only one device should be write-enabled at a time.** `WRITE MEMORY LOCATION` is
   a broadcast; if multiple devices were enabled (e.g. after a broadcast
@@ -256,18 +254,18 @@ devquery a0 55           # 0x37 = QUERY CONTENT DTR1
    Defines universal special commands (DTR0/1/2 SET, WRITE MEMORY LOCATION) that
    apply to both control gear and control devices.
 
-4. **IEC 62386-103:2014** — *Digital addressable lighting interface — Part 103:
+4. **IEC 62386-103:2022** — *Digital addressable lighting interface — Part 103:
    General requirements — Control devices*  
    Defines the 24-bit device command frame format, ENABLE WRITE MEMORY (opcode
    `0x15`), READ MEMORY LOCATION (opcode `0x3C`), and the memory bank write gate
    (send-twice requirement).
 
-5. **IEC 62386-303** — *Occupancy sensor* device type  
-   Defines the DT303 instance type, hold timer, deadtime, and the bit-replicated
+5. **IEC 62386-303** — occupancy-sensor input-device requirements
+   Defines instance type 3, its hold timer, deadtime, and the bit-replicated
    output encoding (0 / 85 / 170 / 255).
 
-6. **IEC 62386-304** — *Light sensor* device type  
-   Defines the DT304 instance type used by Steinel instance 0 (lux).
+6. **IEC 62386-304** — light-sensor input-device requirements
+   Defines instance type 4, used by Steinel instance 0 (lux).
 
 7. **python-dali** (github.com/sde1000/python-dali)  
    Open-source Python implementation of IEC 62386. Used to verify command

@@ -1,17 +1,21 @@
 #pragma once
 
 /*
- * dali_scheduler.h — DALI bus arbitration and transaction management
+ * dali_scheduler.h — DALI transaction timing and queue management
  *
  * Responsibilities:
  *   - Transaction queue (DALI_CMD_QUEUE_SIZE entries)
  *   - Fixed-size transaction sequences for DTR setup and dependent commands
- *   - Send-twice enforcement (DALI_SEND_TWICE_WINDOW_MS)
+ *   - Send-twice expansion into adjacent forward frames
+ *   - Minimum spacing between locally transmitted forward frames
+ *   - Send-twice 100 ms deadline validation
  *   - Reply timeout (DALI_REPLY_TIMEOUT_MS) and retry (retries_left)
  *   - TX/RX handoff with DaliPhy via injected ops
  *   - Optional task-context trace callbacks for diagnostics
  *
  * All functions run in task context — never called from ISR.
+ * DALI-2 priority/backoff, collision detection, and multi-master arbitration
+ * are not implemented here.
  *
  * Testability:
  *   PHY calls and time source are injected via DaliSchedOps so the scheduler
@@ -21,7 +25,7 @@
 #include "dali_frame.h"
 #include "dali_phy.h"   /* for DaliPhyRxCallback */
 
-#define DALI_SEQUENCE_MAX_STEPS      4u
+#define DALI_SEQUENCE_MAX_STEPS      7u
 #define DALI_SEQUENCE_NO_FAILED_STEP 0xFFu
 
 /* ---------------------------------------------------------------------------
@@ -42,6 +46,19 @@ typedef enum {
 typedef void (*DaliSchedCompletionCb)(DaliError result,
                                       const DaliFrame *reply,
                                       void *cb_ctx);
+
+/*
+ * Called by the scheduler owner task after a requested reset has cancelled all
+ * active and queued work. The callback is the reset barrier: no transaction
+ * accepted before the request can execute after it is called. Queue admission
+ * remains blocked for the duration of the callback, so it is also the safe
+ * place for the application to reset the PHY.
+ */
+typedef void (*DaliSchedResetCompletionCb)(void *cb_ctx);
+
+/* Results used for reset cancellation and an externally invalidated reply. */
+#define DALI_SCHED_RESET_ERROR      DALI_ERR_CANCELLED
+#define DALI_SCHED_INTERVENED_ERROR DALI_ERR_INTERVENED
 
 /*
  * Unsolicited RX event callback — invoked from task context for raw DALI-2
@@ -87,9 +104,25 @@ typedef struct {
     uint8_t   retries_left;
 } DaliSequenceStep;
 
-typedef void (*DaliSequenceCompletionCb)(DaliError result,
-                                         uint8_t failed_step,
-                                         const DaliFrame *last_reply,
+/*
+ * Outcome of one sequence, including a backward frame per reply-bearing step.
+ * `replies[i]` is meaningful only when bit i of `reply_mask` is set. Steps after
+ * a failure never run, so they are never present in the mask. failed_step is
+ * also DALI_SEQUENCE_NO_FAILED_STEP for reset cancellation, which is not
+ * attributable to a sequence step; steps_run still reports attempted steps.
+ *
+ * The pointer handed to the completion callback refers to scheduler-owned
+ * storage that is reused by the next sequence; copy anything needed later.
+ */
+typedef struct {
+    DaliError result;       /* DALI_OK, or the error that ended the sequence  */
+    uint8_t   failed_step;  /* DALI_SEQUENCE_NO_FAILED_STEP when result is OK */
+    uint8_t   steps_run;    /* steps attempted, including a failing one       */
+    uint8_t   reply_mask;   /* bit i set = replies[i] holds a backward frame  */
+    DaliFrame replies[DALI_SEQUENCE_MAX_STEPS];
+} DaliSequenceResult;
+
+typedef void (*DaliSequenceCompletionCb)(const DaliSequenceResult *result,
                                          void *cb_ctx);
 
 typedef struct {
@@ -100,6 +133,28 @@ typedef struct {
 } DaliSequence;
 
 /* ---------------------------------------------------------------------------
+ * Queue admission diagnostics.
+ *
+ * depth/capacity are instantaneous; the counters are cumulative since
+ * dali_sched_init() or the last dali_sched_reset_queue_stats(). high_water is
+ * the largest depth reached, so a value at capacity means admission was one
+ * submission away from failing even if rejected_full is still zero.
+ *
+ * rejected_full counts DALI_ERR_QUEUE_FULL and rejected_busy counts
+ * DALI_ERR_BUSY (submission during a pending reset barrier). Both are dropped
+ * work: the scheduler never retries a rejected submission, so a non-zero value
+ * means some caller's command did not reach the bus.
+ * --------------------------------------------------------------------------*/
+typedef struct {
+    uint8_t  depth;         /* entries currently queued                       */
+    uint8_t  capacity;      /* DALI_CMD_QUEUE_SIZE                            */
+    uint8_t  high_water;    /* largest depth observed                         */
+    uint32_t admitted;      /* submissions accepted                           */
+    uint32_t rejected_full; /* submissions refused with DALI_ERR_QUEUE_FULL   */
+    uint32_t rejected_busy; /* submissions refused with DALI_ERR_BUSY (reset) */
+} DaliSchedQueueStats;
+
+/* ---------------------------------------------------------------------------
  * Injected ops — PHY interface + time source.
  * Provide real implementations on device; provide mocks in host tests.
  * --------------------------------------------------------------------------*/
@@ -107,7 +162,7 @@ typedef struct {
     DaliError (*tx)(const DaliFrame *frame);
     void      (*set_rx_callback)(DaliPhyRxCallback cb, void *ctx);
     uint32_t  (*get_tick_ms)(void);
-    uint32_t  (*get_time_us)(void); /* optional; falls back to get_tick_ms */
+    uint32_t  (*get_time_us)(void); /* optional; device uses this for µs guards */
 } DaliSchedOps;
 
 /* ---------------------------------------------------------------------------
@@ -127,6 +182,18 @@ DaliError dali_sched_enqueue(const DaliTransaction *txn);
  * success, failed_step is DALI_SEQUENCE_NO_FAILED_STEP.
  */
 DaliError dali_sched_enqueue_sequence(const DaliSequence *seq);
+
+/*
+ * Copy the backward frame captured for `step`. Returns false when the step did
+ * not run or produced no reply.
+ */
+bool dali_sequence_result_reply(const DaliSequenceResult *result,
+                                uint8_t step,
+                                DaliFrame *out);
+
+/* Copy the reply from the highest-numbered step that produced one. */
+bool dali_sequence_result_last_reply(const DaliSequenceResult *result,
+                                     DaliFrame *out);
 
 /*
  * Advance the state machine.  Call periodically from the DALI task loop.
@@ -152,16 +219,58 @@ DaliError dali_sched_set_event_callback(DaliSchedEventCb cb, void *cb_ctx);
  */
 DaliError dali_sched_set_trace_callback(DaliSchedTraceCb cb, void *cb_ctx);
 
-/* Reset scheduler: clear queue and return to IDLE. */
+/*
+ * Request an owner-task reset.
+ *
+ * This call is safe from another task and does not synchronously mutate active
+ * scheduler state. The next dali_sched_run() cancels the active transaction
+ * and every queued transaction with DALI_SCHED_RESET_ERROR, then calls
+ * completion_cb from the scheduler owner task. Sequence results are filled
+ * before their callbacks run. While reset is pending, new queue submissions
+ * fail with DALI_ERR_BUSY.
+ *
+ * A successful return means the request was accepted, not that reset is
+ * complete. completion_cb is the completion barrier. A second request while
+ * one is pending returns DALI_ERR_BUSY.
+ */
+DaliError dali_sched_request_reset(DaliSchedResetCompletionCb completion_cb,
+                                   void *cb_ctx);
+
+/* True from reset request acceptance until its completion callback returns. */
+bool dali_sched_reset_pending(void);
+
+/*
+ * Compatibility wrapper for dali_sched_request_reset(NULL, NULL).
+ * Reset is deferred; callers needing a barrier must use
+ * dali_sched_request_reset().
+ */
 DaliError dali_sched_reset(void);
 
 /* Return current state (for diagnostics/tests). */
 DaliSchedState dali_sched_state(void);
 
+/*
+ * True only when no transaction is active or queued and no reset barrier is
+ * pending. Intended for an exclusive workflow to wait until previously
+ * admitted work has drained before it starts enqueueing.
+ */
+bool dali_sched_is_quiescent(void);
+
+/*
+ * Copy the current queue admission diagnostics. Safe from any task; the sample
+ * is taken under the scheduler's critical section, so depth and the counters
+ * are mutually consistent. Returns DALI_ERR_INVALID for a NULL argument or
+ * before dali_sched_init().
+ */
+DaliError dali_sched_queue_stats(DaliSchedQueueStats *out);
+
+/* Clear high_water and the cumulative counters; depth/capacity are unaffected. */
+void dali_sched_reset_queue_stats(void);
+
 #ifndef DALI_HOST_BUILD
 /*
  * Convenience initialiser for on-device use.
- * Wires dali_phy_tx, dali_phy_set_rx_callback, and esp_timer milliseconds.
+ * Wires the DALI PHY plus esp_timer millisecond and microsecond clocks.
  */
 DaliError dali_sched_init_device(void);
 #endif

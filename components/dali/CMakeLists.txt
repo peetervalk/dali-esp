@@ -4,6 +4,7 @@ idf_component_register(
         "dali_phy.c"
         "dali_scheduler.c"
         "dali_protocol.c"
+        "dali_transport.c"
         "dali_input_device.c"
         "dali_input_poll.c"
         "dali_event.c"
@@ -17,8 +18,10 @@ idf_component_register(
         "dali_gear_dt8.c"
         "dali_input_config.c"
         "dali_control.c"
+        "dali_dim_curve.c"
         "dali_dispatch.c"
         "dali_group_map.c"
+        "dali_cli.c"
 
     INCLUDE_DIRS "."
     REQUIRES

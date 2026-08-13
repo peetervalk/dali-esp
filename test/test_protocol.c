@@ -315,6 +315,45 @@ void test_command_lookup_dali2_input_value(void)
     TEST_ASSERT_TRUE(cmd->implemented);
 }
 
+void test_command_lookup_dali2_generic_instance_queries(void)
+{
+    typedef struct {
+        DaliCommandId id;
+        uint8_t       opcode;
+    } QueryMetadataVector;
+
+    static const QueryMetadataVector vectors[] = {
+        { DALI_CMD_QUERY_INSTANCE_ERROR,              0x82u },
+        { DALI_CMD_QUERY_EVENT_PRIORITY,              0x84u },
+        { DALI_CMD_QUERY_PRIMARY_INSTANCE_GROUP,      0x88u },
+        { DALI_CMD_QUERY_INSTANCE_GROUP_1,            0x89u },
+        { DALI_CMD_QUERY_INSTANCE_GROUP_2,            0x8Au },
+        { DALI_CMD_QUERY_EVENT_SCHEME,                0x8Bu },
+        { DALI_CMD_QUERY_EVENT_FILTER_0_7,            0x90u },
+        { DALI_CMD_QUERY_EVENT_FILTER_8_15,           0x91u },
+        { DALI_CMD_QUERY_EVENT_FILTER_16_23,          0x92u },
+        { DALI_CMD_QUERY_INSTANCE_CONFIGURATION,      0x93u },
+        { DALI_CMD_QUERY_AVAILABLE_INSTANCE_TYPES,    0x94u },
+    };
+
+    for (uint8_t i = 0u; i < (uint8_t)(sizeof(vectors) / sizeof(vectors[0])); i++) {
+        const DaliCommandInfo *by_id = dali_command_lookup(vectors[i].id);
+        const DaliCommandInfo *by_opcode =
+            dali_command_lookup_opcode(DALI_CMD_FRAME_24BIT_INST, vectors[i].opcode);
+
+        TEST_ASSERT_NOT_NULL(by_id);
+        TEST_ASSERT_EQUAL_UINT8(vectors[i].opcode, by_id->opcode_first);
+        TEST_ASSERT_EQUAL_UINT8(vectors[i].opcode, by_id->opcode_last);
+        TEST_ASSERT_EQUAL(DALI_CMD_FRAME_24BIT_INST, by_id->frame_kind);
+        TEST_ASSERT_EQUAL(DALI_RESP_UINT8, by_id->response_kind);
+        TEST_ASSERT_FALSE(by_id->send_twice);
+        TEST_ASSERT_TRUE(by_id->implemented);
+
+        TEST_ASSERT_NOT_NULL(by_opcode);
+        TEST_ASSERT_EQUAL(vectors[i].id, by_opcode->id);
+    }
+}
+
 void test_command_lookup_special_commands_are_builder_implemented(void)
 {
     const DaliCommandId special_commands[] = {
@@ -370,6 +409,22 @@ void test_command_lookup_invalid_returns_null(void)
 {
     TEST_ASSERT_NULL(dali_command_lookup((DaliCommandId)255u));
     TEST_ASSERT_NULL(dali_command_lookup_opcode(DALI_CMD_FRAME_24BIT_INST, 0xFFu));
+}
+
+void test_response_retry_safety_rejects_state_advancing_commands(void)
+{
+    TEST_ASSERT_TRUE(dali_command_response_retry_safe(DALI_CMD_QUERY_STATUS));
+    TEST_ASSERT_TRUE(dali_command_response_retry_safe(DALI_CMD_QUERY_DEVICE_TYPE));
+    TEST_ASSERT_FALSE(
+        dali_command_response_retry_safe(DALI_CMD_QUERY_NEXT_DEVICE_TYPE));
+    TEST_ASSERT_FALSE(
+        dali_command_response_retry_safe(DALI_CMD_READ_MEMORY_LOCATION));
+    TEST_ASSERT_FALSE(
+        dali_command_response_retry_safe(DALI_CMD_WRITE_MEMORY_LOCATION));
+    TEST_ASSERT_FALSE(
+        dali_command_response_retry_safe(DALI_CMD_QUERY_INPUT_VALUE_LATCH));
+    TEST_ASSERT_FALSE(dali_command_response_retry_safe(DALI_CMD_OFF));
+    TEST_ASSERT_FALSE(dali_command_response_retry_safe(DALI_CMD_COUNT));
 }
 
 void test_build_command_short_group_broadcast_dapc(void)
@@ -967,6 +1022,109 @@ void test_parse_rejects_invalid_args_and_none_response(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * IEC 62386-102:2022 CONTINUOUS UP / CONTINUOUS DOWN and arc power MASK
+ * --------------------------------------------------------------------------*/
+
+/* Opcodes 11 and 12, immediately after GO TO LAST ACTIVE LEVEL (10). */
+static void test_continuous_up_down_opcodes(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_command(DALI_ADDR_SHORT, 0u,
+                                         DALI_CMD_CONTINUOUS_UP, 0u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x010Bu, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(DALI_FORWARD_FRAME_BITS, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_command(DALI_ADDR_SHORT, 0u,
+                                         DALI_CMD_CONTINUOUS_DOWN, 0u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x010Cu, frame.data);
+
+    /* Group 3 and broadcast use the command selector, like every other level
+     * command in the block. */
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_command(DALI_ADDR_GROUP, 3u,
+                                         DALI_CMD_CONTINUOUS_UP, 0u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x870Bu, frame.data);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_command(DALI_ADDR_BROADCAST, 0u,
+                                         DALI_CMD_CONTINUOUS_DOWN, 0u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xFF0Cu, frame.data);
+}
+
+/* Level commands are transmitted once; only configuration commands repeat. */
+static void test_continuous_up_down_metadata(void)
+{
+    const DaliCommandInfo *up = dali_command_lookup(DALI_CMD_CONTINUOUS_UP);
+    const DaliCommandInfo *down = dali_command_lookup(DALI_CMD_CONTINUOUS_DOWN);
+
+    TEST_ASSERT_NOT_NULL(up);
+    TEST_ASSERT_NOT_NULL(down);
+    TEST_ASSERT_EQUAL(DALI_CMD_FRAME_16BIT, up->frame_kind);
+    TEST_ASSERT_EQUAL(DALI_RESP_NONE, up->response_kind);
+    TEST_ASSERT_FALSE(up->send_twice);
+    TEST_ASSERT_FALSE(down->send_twice);
+    TEST_ASSERT_EQUAL_UINT8(0x0Bu, up->opcode_first);
+    TEST_ASSERT_EQUAL_UINT8(0x0Bu, up->opcode_last);
+    TEST_ASSERT_EQUAL_UINT8(0x0Cu, down->opcode_first);
+
+    TEST_ASSERT_EQUAL_PTR(up, dali_command_lookup_opcode(DALI_CMD_FRAME_16BIT, 0x0Bu));
+    TEST_ASSERT_EQUAL_PTR(down, dali_command_lookup_opcode(DALI_CMD_FRAME_16BIT, 0x0Cu));
+
+    /* They take no parameter: a non-zero one must not walk into GO TO SCENE. */
+    DaliFrame frame;
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_command(DALI_ADDR_SHORT, 0u,
+                                         DALI_CMD_CONTINUOUS_UP, 1u, &frame));
+}
+
+/* MASK uses the arc power selector (S=0) like any DAPC frame, with data 255. */
+static void test_build_dapc_mask(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_dapc_mask(DALI_ADDR_SHORT, 0u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x00FFu, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(DALI_FORWARD_FRAME_BITS, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_dapc_mask(DALI_ADDR_SHORT, 5u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x0AFFu, frame.data);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_dapc_mask(DALI_ADDR_GROUP, 3u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x86FFu, frame.data);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_dapc_mask(DALI_ADDR_BROADCAST, 0u, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xFEFFu, frame.data);
+}
+
+/*
+ * The ordinary DAPC builder still refuses 255. MASK means "leave the level
+ * alone", so it must never be reachable by level arithmetic that happens to
+ * land on 255; dali_build_dapc_mask() is the only route to it.
+ */
+static void test_dapc_level_builder_still_rejects_mask(void)
+{
+    DaliFrame frame;
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_command(DALI_ADDR_SHORT, 0u, DALI_CMD_DAPC,
+                                         DALI_DAPC_MASK_LEVEL, &frame));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_command(DALI_ADDR_SHORT, 0u, DALI_CMD_DAPC,
+                                         DALI_DAPC_MAX_LEVEL, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x00FEu, frame.data);
+}
+
+static void test_build_dapc_mask_rejects_invalid_args(void)
+{
+    DaliFrame frame;
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID, dali_build_dapc_mask(DALI_ADDR_SHORT, 64u, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID, dali_build_dapc_mask(DALI_ADDR_GROUP, 16u, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID, dali_build_dapc_mask(DALI_ADDR_SHORT, 0u, NULL));
+}
+
+/* ---------------------------------------------------------------------------
  * Main
  * --------------------------------------------------------------------------*/
 int main(void)
@@ -992,13 +1150,20 @@ int main(void)
     RUN_TEST(test_command_lookup_addressed_queries_are_implemented);
     RUN_TEST(test_command_lookup_config_commands_are_implemented);
     RUN_TEST(test_command_lookup_dali2_input_value);
+    RUN_TEST(test_command_lookup_dali2_generic_instance_queries);
     RUN_TEST(test_command_lookup_special_commands_are_builder_implemented);
     RUN_TEST(test_command_metadata_table_covers_all_standard_ids);
     RUN_TEST(test_command_lookup_keeps_vendor_specific_opcodes_out_of_standard_table);
     RUN_TEST(test_command_lookup_invalid_returns_null);
+    RUN_TEST(test_response_retry_safety_rejects_state_advancing_commands);
     RUN_TEST(test_build_command_short_group_broadcast_dapc);
     RUN_TEST(test_build_command_fixed_opcode_and_range_opcode);
     RUN_TEST(test_build_command_rejects_invalid_args);
+    RUN_TEST(test_continuous_up_down_opcodes);
+    RUN_TEST(test_continuous_up_down_metadata);
+    RUN_TEST(test_build_dapc_mask);
+    RUN_TEST(test_dapc_level_builder_still_rejects_mask);
+    RUN_TEST(test_build_dapc_mask_rejects_invalid_args);
     RUN_TEST(test_build_special_commands);
     RUN_TEST(test_build_special_rejects_invalid_args);
     RUN_TEST(test_build_dtr_data_special_frames);

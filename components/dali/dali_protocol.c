@@ -96,14 +96,32 @@ static const DaliCommandInfo s_command_table[] = {
     CMD(DALI_CMD_WRITE_MEMORY_LOCATION_NO_REPLY, "WRITE MEMORY LOCATION NO REPLY", 0xC9u, 0xC9u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, true),
 
     CMD(DALI_CMD_QUERY_NUMBER_OF_INSTANCES, "QUERY NUMBER OF INSTANCES", 0x35u, 0x35u, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_UINT8, false, true),
+    CMD(DALI_CMD_QUERY_DEVICE_CONTENT_DTR0, "QUERY CONTENT DTR0 (device)", 0x36u, 0x36u, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_UINT8, false, true),
+    CMD(DALI_CMD_QUERY_DEVICE_CONTENT_DTR1, "QUERY CONTENT DTR1 (device)", 0x37u, 0x37u, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_UINT8, false, true),
+    CMD(DALI_CMD_QUERY_DEVICE_CONTENT_DTR2, "QUERY CONTENT DTR2 (device)", 0x38u, 0x38u, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_UINT8, false, true),
 
     CMD(DALI_CMD_QUERY_INSTANCE_TYPE, "QUERY INSTANCE TYPE", 0x80u, 0x80u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
     CMD(DALI_CMD_QUERY_RESOLUTION, "QUERY RESOLUTION", 0x81u, 0x81u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
-    CMD(DALI_CMD_QUERY_INSTANCE_ERROR, "QUERY INSTANCE ERROR", 0x82u, 0x82u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_YES_NO, false, true),
+    CMD(DALI_CMD_QUERY_INSTANCE_ERROR, "QUERY INSTANCE ERROR", 0x82u, 0x82u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
     CMD(DALI_CMD_QUERY_INSTANCE_STATUS, "QUERY INSTANCE STATUS", 0x83u, 0x83u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
     CMD(DALI_CMD_QUERY_INSTANCE_ENABLED, "QUERY INSTANCE ENABLED", 0x86u, 0x86u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_YES_NO, false, true),
     CMD(DALI_CMD_QUERY_INPUT_VALUE, "QUERY INPUT VALUE", 0x8Cu, 0x8Cu, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_INPUT_VALUE_MSB, false, true),
     CMD(DALI_CMD_QUERY_INPUT_VALUE_LATCH, "QUERY INPUT VALUE LATCH", 0x8Du, 0x8Du, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_INPUT_VALUE_LATCH, false, true),
+    CMD(DALI_CMD_QUERY_EVENT_PRIORITY, "QUERY EVENT PRIORITY", 0x84u, 0x84u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
+    CMD(DALI_CMD_QUERY_PRIMARY_INSTANCE_GROUP, "QUERY PRIMARY INSTANCE GROUP", 0x88u, 0x88u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
+    CMD(DALI_CMD_QUERY_INSTANCE_GROUP_1, "QUERY INSTANCE GROUP 1", 0x89u, 0x89u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
+    CMD(DALI_CMD_QUERY_INSTANCE_GROUP_2, "QUERY INSTANCE GROUP 2", 0x8Au, 0x8Au, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
+    CMD(DALI_CMD_QUERY_EVENT_SCHEME, "QUERY EVENT SCHEME", 0x8Bu, 0x8Bu, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
+    CMD(DALI_CMD_QUERY_EVENT_FILTER_0_7, "QUERY EVENT FILTER 0-7", 0x90u, 0x90u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
+    CMD(DALI_CMD_QUERY_EVENT_FILTER_8_15, "QUERY EVENT FILTER 8-15", 0x91u, 0x91u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
+    CMD(DALI_CMD_QUERY_EVENT_FILTER_16_23, "QUERY EVENT FILTER 16-23", 0x92u, 0x92u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
+    CMD(DALI_CMD_QUERY_INSTANCE_CONFIGURATION, "QUERY INSTANCE CONFIGURATION", 0x93u, 0x93u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
+    CMD(DALI_CMD_QUERY_AVAILABLE_INSTANCE_TYPES, "QUERY AVAILABLE INSTANCE TYPES", 0x94u, 0x94u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
+
+    /* IEC 62386-102:2022 level commands 11 and 12. Like the other arc power
+     * control commands they are sent once; only configuration commands repeat. */
+    CMD(DALI_CMD_CONTINUOUS_UP, "CONTINUOUS UP", 0x0Bu, 0x0Bu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, true),
+    CMD(DALI_CMD_CONTINUOUS_DOWN, "CONTINUOUS DOWN", 0x0Cu, 0x0Cu, DALI_CMD_FRAME_16BIT, DALI_RESP_NONE, false, true),
 };
 
 #define DALI_COMMAND_TABLE_COUNT ((uint8_t)(sizeof(s_command_table) / sizeof(s_command_table[0])))
@@ -129,6 +147,25 @@ const DaliCommandInfo *dali_command_lookup(DaliCommandId id)
         }
     }
     return NULL;
+}
+
+bool dali_command_response_retry_safe(DaliCommandId id)
+{
+    const DaliCommandInfo *cmd = dali_command_lookup(id);
+    if (cmd == NULL || cmd->response_kind == DALI_RESP_NONE) {
+        return false;
+    }
+
+    switch (id) {
+        case DALI_CMD_QUERY_NEXT_DEVICE_TYPE:
+        case DALI_CMD_READ_MEMORY_LOCATION:
+        case DALI_CMD_WRITE_MEMORY_LOCATION:
+        case DALI_CMD_QUERY_INPUT_VALUE_LATCH:
+            return false;
+
+        default:
+            return true;
+    }
 }
 
 const DaliCommandInfo *dali_command_lookup_opcode(DaliCommandFrameKind frame_kind,
@@ -284,6 +321,24 @@ DaliError dali_build_command(DaliAddressType type,
         return err;
     }
     *out = make_frame16(addr_byte, opcode);
+    return DALI_OK;
+}
+
+DaliError dali_build_dapc_mask(DaliAddressType type,
+                               uint8_t address,
+                               DaliFrame *out)
+{
+    if (out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    uint8_t addr_byte;
+    DaliError err = target_addr_byte(type, address, 0u, &addr_byte);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    *out = make_frame16(addr_byte, DALI_DAPC_MASK_LEVEL);
     return DALI_OK;
 }
 

@@ -17,10 +17,13 @@
 #define DALI_BIT_US                 833u    /* nominal bit period (µs)         */
 
 /* Confirmed from IEC 62386-101 */
-#define DALI_SETTLE_MS                2u    /* PHY bus-settle after TX (ms); reply window opens at 7 ms per spec */
+#define DALI_SETTLE_MS                2u    /* RX self-echo suppression after TX */
 #define DALI_REPLY_TIMEOUT_MS        25u    /* max wait for backward frame (ms) — 22 ms spec + 3 ms margin */
 #define DALI_MAX_RETRIES              3u    /* send attempts before offline    */
 #define DALI_SEND_TWICE_WINDOW_MS   100u    /* max gap between repeated sends  */
+/* DALI_HALF_BIT_US rounds nominal Te upward, making this 22 Te guard 9174 µs. */
+#define DALI_FORWARD_INTERFRAME_US (DALI_HALF_BIT_US * 22u)
+#define DALI_SEND_TWICE_WINDOW_US  (DALI_SEND_TWICE_WINDOW_MS * 1000u)
 #define DALI_BUS_IDLE_GUARD_US   (DALI_BIT_US * 2u) /* idle high before TX      */
 #define DALI_BUS_IDLE_TIMEOUT_US (DALI_BIT_US * 40u) /* ~33 ms; outlasts any 24-bit frame from input devices */
 
@@ -47,6 +50,10 @@
 #define DALI_ALL_INSTANCES              0xFFu /* 24-bit instance byte */
 #define DALI_YES_RESPONSE               0xFFu /* 8-bit backward frame */
 #define DALI_DAPC_MAX_LEVEL             254u
+/* Arc power level 255 is MASK: "leave the level unchanged", not a level.
+ * The ordinary DAPC builders reject it so a level cannot become MASK by
+ * arithmetic; dali_build_dapc_mask() is the only way to emit it. */
+#define DALI_DAPC_MASK_LEVEL            255u
 
 /* ---------------------------------------------------------------------------
  * Buffer sizes — power-of-2 required for ring buffer masking
@@ -79,6 +86,9 @@ typedef enum {
     DALI_ERR_OVERFLOW   = 5,    /* ring buffer full — event dropped in ISR    */
     DALI_ERR_BUSY       = 6,    /* PHY TX already in progress                 */
     DALI_ERR_INVALID    = 7,    /* bad argument (e.g. bit_length == 0)        */
+    DALI_ERR_TIMING     = 8,    /* required protocol timing window was missed */
+    DALI_ERR_CANCELLED  = 9,    /* queued/active work cancelled by reset      */
+    DALI_ERR_INTERVENED = 10,   /* another forward frame invalidated a reply  */
 } DaliError;
 
 /* ---------------------------------------------------------------------------
@@ -108,6 +118,11 @@ typedef struct {
     volatile uint32_t rx_self_echo_suppressed; /* RX ignored during TX echo    */
     volatile uint32_t rx_settle_suppressed; /* RX ignored after TX             */
     volatile uint32_t rx_glitch_drops;  /* RX task dropped duplicate/short edge*/
+    /* Frames the PHY clocked out in full. This is the recovery signal that
+     * pairs with bus_idle_failures: the fault counters only ever grow, so
+     * without a positive counter an integration cannot tell a bus that is
+     * currently stuck from one that failed once an hour ago and works now. */
+    volatile uint32_t tx_frames_ok;
 } dali_stats_t;
 
 /* Global stats instance — defined in dali_phy.c, read everywhere */

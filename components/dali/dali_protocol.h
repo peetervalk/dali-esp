@@ -140,6 +140,32 @@ typedef enum {
     DALI_CMD_QUERY_INPUT_VALUE,
     DALI_CMD_QUERY_INPUT_VALUE_LATCH,
 
+    /* Additional IEC 62386-103 generic instance queries. Appended to keep
+     * the numeric values of the existing public command IDs stable. */
+    DALI_CMD_QUERY_EVENT_PRIORITY,
+    DALI_CMD_QUERY_PRIMARY_INSTANCE_GROUP,
+    DALI_CMD_QUERY_INSTANCE_GROUP_1,
+    DALI_CMD_QUERY_INSTANCE_GROUP_2,
+    DALI_CMD_QUERY_EVENT_SCHEME,
+    DALI_CMD_QUERY_EVENT_FILTER_0_7,
+    DALI_CMD_QUERY_EVENT_FILTER_8_15,
+    DALI_CMD_QUERY_EVENT_FILTER_16_23,
+    DALI_CMD_QUERY_INSTANCE_CONFIGURATION,
+    DALI_CMD_QUERY_AVAILABLE_INSTANCE_TYPES,
+
+    /* Part 102 level commands added after the original table. Appended for the
+     * same reason as the queries above: existing public IDs keep their values. */
+    DALI_CMD_CONTINUOUS_UP,
+    DALI_CMD_CONTINUOUS_DOWN,
+
+    /* IEC 62386-103 control-device DTR readback. Distinct from the Part 102
+     * gear commands DALI_CMD_QUERY_CONTENT_DTR0/1/2: these are 24-bit device
+     * frames (address, 0xFE, opcode), so a control device and a control gear at
+     * the same short address answer different frames. */
+    DALI_CMD_QUERY_DEVICE_CONTENT_DTR0,
+    DALI_CMD_QUERY_DEVICE_CONTENT_DTR1,
+    DALI_CMD_QUERY_DEVICE_CONTENT_DTR2,
+
     DALI_CMD_COUNT,
 } DaliCommandId;
 
@@ -158,6 +184,13 @@ const DaliCommandInfo *dali_command_lookup(DaliCommandId id);
 const DaliCommandInfo *dali_command_lookup_opcode(DaliCommandFrameKind frame_kind,
                                                   uint8_t opcode);
 uint8_t dali_command_count(void);
+
+/*
+ * Return true when retrying this command after a missing reply cannot advance
+ * device-side read state. Stateful reads (for example memory and latch cursors)
+ * must be retried as a complete higher-level sequence, never as one frame.
+ */
+bool dali_command_response_retry_safe(DaliCommandId id);
 
 typedef enum {
     DALI_DTR0 = 0,
@@ -190,6 +223,18 @@ DaliError dali_build_instance_command(uint8_t addr,
 DaliError dali_build_device_command(uint8_t addr,
                                     DaliCommandId id,
                                     DaliFrame *out);
+
+/*
+ * Build an arc power frame carrying MASK (255).
+ *
+ * MASK is not a level: the gear leaves its arc power unchanged, which is how a
+ * DAPC sequence is terminated without disturbing the current output. It is a
+ * separate entry point precisely so no level arithmetic can reach 255 and
+ * silently stop meaning "set this level".
+ */
+DaliError dali_build_dapc_mask(DaliAddressType type,
+                               uint8_t address,
+                               DaliFrame *out);
 
 /* Build a special command frame. */
 DaliError dali_build_special(DaliCommandId id,

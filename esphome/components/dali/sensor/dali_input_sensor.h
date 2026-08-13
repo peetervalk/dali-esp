@@ -3,8 +3,8 @@
 #include "esphome/core/component.h"
 #include "esphome/components/sensor/sensor.h"
 #include "../dali_component.h"
+#include "dali_input_value_mailbox.h"
 
-#include <atomic>
 #include <cstdint>
 
 namespace esphome {
@@ -20,6 +20,7 @@ class DaliInputSensor : public sensor::Sensor, public Component, public DaliBusS
   void set_address(uint8_t a)        { address_        = a; }
   void set_instance(uint8_t i)       { instance_       = i; }
   void set_poll_interval_s(uint32_t s) { poll_interval_s_ = s; }
+  void set_poll_on_event(bool enabled) { poll_on_event_   = enabled; }
   void set_value_bytes(uint8_t b)    { value_bytes_    = b; }
   void set_scale(float s)            { scale_          = s; }
   void set_offset(float o)           { offset_         = o; }
@@ -27,21 +28,18 @@ class DaliInputSensor : public sensor::Sensor, public Component, public DaliBusS
   uint8_t  get_address()          const { return address_; }
   uint8_t  get_instance()         const { return instance_; }
   uint32_t get_poll_interval_s()  const { return poll_interval_s_; }
+  bool     get_poll_on_event()    const { return poll_on_event_; }
   uint8_t  get_value_bytes()      const { return value_bytes_; }
   uint32_t get_last_poll_ms()     const { return last_poll_ms_; }
   void     set_last_poll_ms(uint32_t ms) { last_poll_ms_ = ms; }
 
   /* Called from Core 1 (DALI task completion callback). */
-  void mark_raw_value(uint16_t raw) {
-    pending_raw_.store(raw, std::memory_order_release);
-    dirty_.store(true, std::memory_order_release);
-  }
+  void mark_raw_value(uint16_t raw) { value_mailbox_.publish(raw); }
 
-  /* Called from Core 0 (DaliComponent::loop). Publishes if dirty. */
+  /* Called from Core 0 (DaliComponent::loop). Publishes if a value is waiting. */
   void apply_value() {
-    if (!dirty_.load(std::memory_order_acquire)) return;
-    dirty_.store(false, std::memory_order_relaxed);
-    uint16_t raw = pending_raw_.load(std::memory_order_relaxed);
+    uint16_t raw;
+    if (!value_mailbox_.take(raw)) return;
     publish_state((float)raw * scale_ + offset_);
   }
 
@@ -51,14 +49,15 @@ class DaliInputSensor : public sensor::Sensor, public Component, public DaliBusS
   uint8_t  address_{0};
   uint8_t  instance_{0};
   uint32_t poll_interval_s_{30};
+  bool     poll_on_event_{true};
   uint8_t  value_bytes_{1};
   float    scale_{1.0f};
   float    offset_{0.0f};
 
   uint32_t last_poll_ms_{0};
 
-  std::atomic<uint16_t> pending_raw_{0};
-  std::atomic<bool>     dirty_{false};
+  /* Coherent latest reading — published on Core 1, drained on Core 0. */
+  DaliInputValueMailbox value_mailbox_;
 };
 
 }  // namespace dali

@@ -27,11 +27,18 @@ uint8_t dali_control_percent_to_dapc(uint8_t percent);
 
 /* Build frames without touching the scheduler.  Useful for tests/diagnostics. */
 DaliError dali_control_build_dapc(DaliTarget target, uint8_t level, DaliFrame *out);
+/* Arc power MASK (255): leave the level unchanged. Not reachable from
+ * dali_control_build_dapc(), which rejects anything above DALI_DAPC_MAX_LEVEL. */
+DaliError dali_control_build_dapc_mask(DaliTarget target, DaliFrame *out);
 DaliError dali_control_build_off(DaliTarget target, DaliFrame *out);
 DaliError dali_control_build_up(DaliTarget target, DaliFrame *out);
 DaliError dali_control_build_down(DaliTarget target, DaliFrame *out);
 DaliError dali_control_build_step_up(DaliTarget target, DaliFrame *out);
 DaliError dali_control_build_step_down(DaliTarget target, DaliFrame *out);
+/* IEC 62386-102:2022 CONTINUOUS UP/DOWN: fade toward max/min until a stop
+ * condition, rather than the single fade step UP/DOWN perform. */
+DaliError dali_control_build_continuous_up(DaliTarget target, DaliFrame *out);
+DaliError dali_control_build_continuous_down(DaliTarget target, DaliFrame *out);
 DaliError dali_control_build_recall_max(DaliTarget target, DaliFrame *out);
 DaliError dali_control_build_recall_min(DaliTarget target, DaliFrame *out);
 DaliError dali_control_build_step_down_and_off(DaliTarget target, DaliFrame *out);
@@ -63,6 +70,8 @@ DaliError dali_control_step_up(DaliTarget target);
 DaliError dali_control_step_down(DaliTarget target);
 DaliError dali_control_recall_max(DaliTarget target);
 DaliError dali_control_recall_min(DaliTarget target);
+DaliError dali_control_continuous_up(DaliTarget target);
+DaliError dali_control_continuous_down(DaliTarget target);
 DaliError dali_control_step_down_and_off(DaliTarget target);
 DaliError dali_control_on_and_step_up(DaliTarget target);
 DaliError dali_control_enable_dapc_sequence(DaliTarget target);
@@ -73,6 +82,24 @@ DaliError dali_control_config_with_dtr0(DaliTarget target,
                                         DaliCommandId id,
                                         uint8_t dtr0_value,
                                         uint8_t param);
+/*
+ * Level/off with a completion callback.
+ *
+ * The plain forms above are fire-and-forget: their DALI_OK means the frame was
+ * queued, which a caller must not read as "the gear is now at this level". Use
+ * these when the caller keeps state that only a confirmed transmission may
+ * update. cb is invoked from the scheduler owner task with DALI_OK once the
+ * frame has been transmitted, or with the PHY/scheduler error otherwise;
+ * passing NULL is equivalent to the fire-and-forget form.
+ */
+DaliError dali_control_set_level_cb(DaliTarget target,
+                                    uint8_t level,
+                                    DaliSchedCompletionCb cb,
+                                    void *cb_ctx);
+DaliError dali_control_off_cb(DaliTarget target,
+                              DaliSchedCompletionCb cb,
+                              void *cb_ctx);
+
 DaliError dali_control_query(DaliTarget target,
                              DaliCommandId id,
                              uint8_t param,

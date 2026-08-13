@@ -1,0 +1,194 @@
+name: ESPHome Build
+
+# Almost nothing outside test/ was built by CI before this workflow. The host
+# suites compile components/dali with a host compiler, and two of them reach
+# into esphome/components/dali/light/ for dali_light_state_mailbox.h and
+# dali_light_profile.h — but that is the whole of the ESPHome side. Nothing
+# validated the Python schema, the ESPHome C++ translation units, the YAML in
+# this repo, or the vendoring that carries the C stack into an ESPHome build
+# tree.
+#
+# Jobs, cheapest first:
+#
+#   sources           source/shim/CMakeLists manifests agree (seconds)
+#   config            Python schema + every tracked in-repo YAML (~1 min)
+#   compile           full C++ and vendored C, per YAML, in parallel (~5-20 min)
+#   pinned-tag-config the released tag dali_diag.yaml names still validates
+#
+# The clean-room packaging build — the one that proves a consumer can build
+# from a release tag with none of this repo around it — is release-packaging.yml.
+
+on:
+  push:
+    branches: ["main", "dev"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  sources:
+    name: Source manifests agree
+    runs-on: ubuntu-latest
+
+    # Three hand-maintained lists have to stay in lockstep with the C sources:
+    # components/dali/CMakeLists.txt SRCS (native build), the proto_dali_*.c
+    # shims (ESPHome build), and the sources themselves. Both build routes fail
+    # silently rather than loudly when one drifts — ESPHome vendors each .c as
+    # .c.inc specifically so its src/*.* glob cannot compile it, leaving the
+    # shim as the only entry point, and an unlisted source is simply absent
+    # from the link. This catches either omission in seconds instead of after a
+    # full toolchain download and a confusing undefined-reference dump.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check every C source has a shim and a CMakeLists entry
+        run: |
+          fail=0
+          for src in components/dali/dali_*.c; do
+            base=$(basename "$src")
+            if [ ! -f "esphome/components/dali/proto_${base}" ]; then
+              echo "::error file=${src}::no ESPHome shim; add esphome/components/dali/proto_${base}"
+              fail=1
+            fi
+            if ! grep -q "\"${base}\"" components/dali/CMakeLists.txt; then
+              echo "::error file=components/dali/CMakeLists.txt::${base} is missing from SRCS"
+              fail=1
+            fi
+          done
+          for shim in esphome/components/dali/proto_dali_*.c; do
+            base=$(basename "$shim")
+            base=${base#proto_}
+            if [ ! -f "components/dali/${base}" ]; then
+              echo "::error file=${shim}::shim has no source components/dali/${base}"
+              fail=1
+            fi
+          done
+          exit $fail
+
+  config:
+    name: esphome config (in-repo YAML)
+    runs-on: ubuntu-latest
+
+    # Exercises the Python schema in esphome/components/dali/__init__.py and
+    # each platform's __init__.py, including the GPIO capability validators,
+    # against the configs this repo actually ships. This is the job that would
+    # have caught poll_on_event breaking validation on 2026-08-12.
+    steps:
+      - uses: actions/checkout@v7
+
+      # No `cache: pip` here: it needs a requirements.txt or pyproject.toml to
+      # key on, and this repo has neither, so it fails the job outright rather
+      # than degrading to a miss.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install ESPHome
+        run: pip install esphome
+
+      - name: Write dummy secrets
+        run: |
+          cat > secrets.yaml <<'EOF'
+          # CI COMPILE-ONLY SECRETS — generated per run, never deployed.
+          wifi_ssid: "DUMMY_COMPILE_ONLY_NETWORK"
+          wifi_ssid2: "DUMMY_COMPILE_ONLY_NETWORK"
+          wifi_password: "DUMMY-COMPILE-ONLY"
+          ap_password: "DUMMY-COMPILE-ONLY"
+          api_encryption_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          ota_password: "DUMMY-COMPILE-ONLY"
+          EOF
+
+      - name: Validate
+        run: esphome config dali_1k.yaml dali_2k.yaml
+
+  compile:
+    name: esphome compile (${{ matrix.config }})
+    runs-on: ubuntu-latest
+    needs: [sources, config]
+
+    # The only thing in this repo that compiles the ESPHome C++ layer and the
+    # vendored C stack together. Both configs are built because they cover
+    # different platform modules: 1k has light/number/button/text, 2k adds the
+    # sensor platform and its polling paths, which nothing else here compiles.
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [dali_1k.yaml, dali_2k.yaml]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # No `cache: pip` here: it needs a requirements.txt or pyproject.toml to
+      # key on, and this repo has neither, so it fails the job outright rather
+      # than degrading to a miss.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Cache PlatformIO toolchains
+        uses: actions/cache@v6
+        with:
+          # The xtensa toolchain and ESP-IDF framework downloads dominate a
+          # cold run. The build tree itself is deliberately not cached: a stale
+          # .pioenvs is a worse failure than a slow build.
+          path: ~/.platformio
+          key: platformio-${{ runner.os }}-${{ matrix.config }}-${{ hashFiles(matrix.config) }}
+          restore-keys: |
+            platformio-${{ runner.os }}-${{ matrix.config }}-
+            platformio-${{ runner.os }}-
+
+      - name: Install ESPHome
+        run: pip install esphome
+
+      - name: Write dummy secrets
+        run: |
+          cat > secrets.yaml <<'EOF'
+          # CI COMPILE-ONLY SECRETS — generated per run, never deployed.
+          wifi_ssid: "DUMMY_COMPILE_ONLY_NETWORK"
+          wifi_ssid2: "DUMMY_COMPILE_ONLY_NETWORK"
+          wifi_password: "DUMMY-COMPILE-ONLY"
+          ap_password: "DUMMY-COMPILE-ONLY"
+          api_encryption_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          ota_password: "DUMMY-COMPILE-ONLY"
+          EOF
+
+      - name: Compile
+        run: esphome compile ${{ matrix.config }}
+
+  pinned-tag-config:
+    name: esphome config (dali_diag.yaml, pinned tag)
+    runs-on: ubuntu-latest
+
+    # dali_diag.yaml consumes the component the way a user does — type: git at
+    # a release tag — so this validates a *released* component against a
+    # *current* tracked config. A failure here does not mean the branch under
+    # test is broken; it means the tracked diagnostic config has drifted out of
+    # schema with the tag it pins, and either the pin or the config needs
+    # updating before release. Kept as its own job so that attribution is
+    # visible in the checks list rather than buried in a shared log.
+    steps:
+      - uses: actions/checkout@v7
+
+      # No `cache: pip` here: it needs a requirements.txt or pyproject.toml to
+      # key on, and this repo has neither, so it fails the job outright rather
+      # than degrading to a miss.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install ESPHome
+        run: pip install esphome
+
+      - name: Write dummy secrets
+        run: |
+          cat > secrets.yaml <<'EOF'
+          # CI COMPILE-ONLY SECRETS — generated per run, never deployed.
+          wifi_ssid: "DUMMY_COMPILE_ONLY_NETWORK"
+          wifi_ssid2: "DUMMY_COMPILE_ONLY_NETWORK"
+          wifi_password: "DUMMY-COMPILE-ONLY"
+          ap_password: "DUMMY-COMPILE-ONLY"
+          api_encryption_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          ota_password: "DUMMY-COMPILE-ONLY"
+          EOF
+
+      - name: Validate against the pinned release tag
+        run: esphome config dali_diag.yaml

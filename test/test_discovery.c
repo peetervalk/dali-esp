@@ -9,6 +9,9 @@ typedef struct {
     bool      malformed[DALI_SHORT_ADDRESS_COUNT];
     int       bus_error_addr;
     uint32_t  tx_count;
+    uint32_t  sequence_count;
+    uint32_t  query_next_device_type_count;
+    uint32_t  gear_memory_read_count;
     uint32_t  found_cb_count;
     uint8_t   found_cb_last_addr;
 } MockDiscoveryBus;
@@ -79,6 +82,14 @@ static DaliError mock_transact(const DaliFrame *frame,
     TEST_ASSERT_NOT_NULL(frame);
     TEST_ASSERT_FALSE(send_twice);
     bus->tx_count++;
+    if (frame->bit_length == DALI_FORWARD_FRAME_BITS &&
+        (uint8_t)(frame->data & 0xFFu) == 0xA7u) {
+        bus->query_next_device_type_count++;
+    }
+    if (frame->bit_length == DALI_FORWARD_FRAME_BITS &&
+        (uint8_t)(frame->data & 0xFFu) == 0xC5u) {
+        bus->gear_memory_read_count++;
+    }
 
     /* No-reply frames (e.g. DTR1/DTR0 memory setup) — just accept and return. */
     if (!needs_reply) {
@@ -127,6 +138,81 @@ static DaliError mock_transact(const DaliFrame *frame,
     return DALI_ERR_TIMEOUT;
 }
 
+static DaliError mock_transact_sequence(const DaliSequence *seq,
+                                        DaliSequenceResult *result_out,
+                                        void *ctx)
+{
+    if (seq == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    MockDiscoveryBus *bus = (MockDiscoveryBus *)ctx;
+    TEST_ASSERT_NOT_NULL(bus);
+    bus->sequence_count++;
+
+    DaliSequenceResult result = {
+        .result = DALI_OK,
+        .failed_step = DALI_SEQUENCE_NO_FAILED_STEP,
+    };
+    for (uint8_t i = 0u; i < seq->step_count; i++) {
+        const DaliSequenceStep *step = &seq->steps[i];
+        DaliFrame reply = {0u, 0u};
+        DaliError err = mock_transact(&step->frame,
+                                      step->needs_reply,
+                                      step->retries_left,
+                                      step->send_twice,
+                                      step->needs_reply ? &reply : NULL,
+                                      ctx);
+        result.steps_run = (uint8_t)(i + 1u);
+        if (err != DALI_OK) {
+            result.result = err;
+            result.failed_step = i;
+            if (result_out != NULL) {
+                *result_out = result;
+            }
+            return err;
+        }
+        if (step->needs_reply) {
+            result.replies[i] = reply;
+            result.reply_mask |= (uint8_t)(1u << i);
+        }
+    }
+
+    if (result_out != NULL) {
+        *result_out = result;
+    }
+    return DALI_OK;
+}
+
+/*
+ * Enrichment detects "multiple device types" with a standalone QUERY DEVICE
+ * TYPE, then runs the enumeration as one sequence that re-issues that query as
+ * its own first step. Both replies have to be scripted.
+ */
+static void add_multi_device_type_replies(void)
+{
+    add_reply(0x0B99u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0xFFu,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B99u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0xFFu,
+              DALI_BACKWARD_FRAME_BITS);
+}
+
+/*
+ * The sequence has a fixed step count, so every QUERY NEXT DEVICE TYPE step is
+ * transmitted regardless of where the list ended. Real gear keeps answering
+ * 0xFE once it is exhausted; pad the script so the mock does the same and the
+ * frame count stays independent of where parsing stopped.
+ */
+static void add_next_device_type_end_replies(uint8_t already_scripted)
+{
+    for (uint8_t i = already_scripted;
+         i < DALI_DISCOVERY_DEVICE_TYPES_NEXT_STEPS;
+         i++) {
+        add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0xFEu,
+                  DALI_BACKWARD_FRAME_BITS);
+    }
+}
+
 static void found_cb(uint8_t addr,
                      const DaliDiscoveryDeviceInfo *device,
                      void *ctx)
@@ -144,6 +230,7 @@ static DaliDiscoveryTransport transport(void)
 {
     return (DaliDiscoveryTransport){
         .transact = mock_transact,
+        .transact_sequence = mock_transact_sequence,
         .ctx = &s_bus,
     };
 }
@@ -176,12 +263,13 @@ void test_scan_records_responders_and_callback(void)
     TEST_ASSERT_EQUAL_UINT8(2u, found);
     TEST_ASSERT_EQUAL_UINT8(2u, inventory.found_count);
     /* 64 status + per found device (all queries timeout):
-     *  groups-0-7(1), device_type(1), version(1), actual_level(1), num_instances(1),
-     *  bank0: DTR1(1)+DTR0(1)+READ(1),
-     *  bank1: DTR1(1)+DTR0(1)+READ(1),
+     *  groups-0-7(1), device_type(1), version(1), actual_level(1),
+     *  profile MIN(1; MAX is skipped after the timeout), num_instances(1),
+     *  bank0 identity attempt: DTR1(1)+DTR0(1)+READ(1),
      *  scene-levels: QUERY_SCENE_LEVEL 0-15(16)
      * + 62 QUERY_NUMBER_OF_INSTANCES probes for the 62 absent addresses */
-    TEST_ASSERT_EQUAL_UINT32(2u * DALI_SHORT_ADDRESS_COUNT + 2u * 27u - 2u, s_bus.tx_count);
+    TEST_ASSERT_EQUAL_UINT32(2u * DALI_SHORT_ADDRESS_COUNT + 2u * 25u - 2u,
+                             s_bus.tx_count);
     TEST_ASSERT_EQUAL_UINT32(2u, s_bus.found_cb_count);
     TEST_ASSERT_EQUAL_UINT8(12u, s_bus.found_cb_last_addr);
 
@@ -395,6 +483,61 @@ void test_query_actual_level_returns_value(void)
     TEST_ASSERT_EQUAL_UINT8(254u, level);
 }
 
+void test_query_level_limits_validate_replies(void)
+{
+    add_reply(0x0BA2u, DALI_FORWARD_FRAME_BITS, DALI_OK, 85u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA1u, DALI_FORWARD_FRAME_BITS, DALI_OK, 200u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA2u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA1u, DALI_FORWARD_FRAME_BITS, DALI_OK,
+              DALI_DAPC_MASK_LEVEL, DALI_BACKWARD_FRAME_BITS);
+
+    DaliDiscoveryTransport t = transport();
+    uint8_t level = 0xAAu;
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_query_min_level(&t, 5u, &level));
+    TEST_ASSERT_EQUAL_UINT8(85u, level);
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_query_max_level(&t, 5u, &level));
+    TEST_ASSERT_EQUAL_UINT8(200u, level);
+
+    level = 0xAAu;
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_discovery_query_min_level(&t, 5u, &level));
+    TEST_ASSERT_EQUAL_UINT8(0xAAu, level);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_discovery_query_max_level(&t, 5u, &level));
+    TEST_ASSERT_EQUAL_UINT8(0xAAu, level);
+}
+
+void test_query_dt6_dimming_curve_is_atomic_and_typed(void)
+{
+    add_reply(0x0BEEu, DALI_FORWARD_FRAME_BITS, DALI_OK,
+              DALI_DIM_CURVE_LINEAR, DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BEEu, DALI_FORWARD_FRAME_BITS, DALI_OK,
+              DALI_DIM_CURVE_STANDARD, DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BEEu, DALI_FORWARD_FRAME_BITS, DALI_OK, 2u,
+              DALI_BACKWARD_FRAME_BITS);
+
+    DaliDiscoveryTransport t = transport();
+    DaliDimCurve curve = DALI_DIM_CURVE_STANDARD;
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_query_dt6_dimming_curve(&t, 5u, &curve));
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_LINEAR, curve);
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_query_dt6_dimming_curve(&t, 5u, &curve));
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_STANDARD, curve);
+
+    curve = DALI_DIM_CURVE_LINEAR;
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_discovery_query_dt6_dimming_curve(&t, 5u, &curve));
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_LINEAR, curve);
+    TEST_ASSERT_EQUAL_UINT32(3u, s_bus.sequence_count);
+    TEST_ASSERT_EQUAL_UINT32(6u, s_bus.tx_count);
+}
+
 void test_scan_stores_device_type_version_and_level(void)
 {
     DaliDiscoveryInventory inventory;
@@ -406,6 +549,8 @@ void test_scan_stores_device_type_version_and_level(void)
     add_reply(0x0B99u, DALI_FORWARD_FRAME_BITS, DALI_OK, 8u,   DALI_BACKWARD_FRAME_BITS);
     add_reply(0x0B97u, DALI_FORWARD_FRAME_BITS, DALI_OK, 4u,   DALI_BACKWARD_FRAME_BITS);
     add_reply(0x0BA0u, DALI_FORWARD_FRAME_BITS, DALI_OK, 254u, DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA2u, DALI_FORWARD_FRAME_BITS, DALI_OK, 85u,  DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA1u, DALI_FORWARD_FRAME_BITS, DALI_OK, 200u, DALI_BACKWARD_FRAME_BITS);
 
     DaliDiscoveryTransport t = transport();
     TEST_ASSERT_EQUAL(DALI_OK,
@@ -416,10 +561,19 @@ void test_scan_stores_device_type_version_and_level(void)
     TEST_ASSERT_NOT_NULL(device);
     TEST_ASSERT_TRUE(device->has_device_type);
     TEST_ASSERT_EQUAL_UINT8(8u, device->device_type);
+    TEST_ASSERT_EQUAL_UINT8(1u, device->device_type_count);
+    TEST_ASSERT_EQUAL_UINT8(8u, device->device_types[0]);
+    TEST_ASSERT_FALSE(device->device_types_truncated);
+    TEST_ASSERT_EQUAL_UINT32(0u, s_bus.query_next_device_type_count);
     TEST_ASSERT_TRUE(device->has_version);
     TEST_ASSERT_EQUAL_UINT8(4u, device->version);
     TEST_ASSERT_TRUE(device->has_actual_level);
     TEST_ASSERT_EQUAL_UINT8(254u, device->actual_level);
+    TEST_ASSERT_TRUE(device->has_level_limits);
+    TEST_ASSERT_EQUAL_UINT8(85u, device->min_level);
+    TEST_ASSERT_EQUAL_UINT8(200u, device->max_level);
+    TEST_ASSERT_TRUE(device->has_dimming_curve);
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_STANDARD, device->dimming_curve);
     TEST_ASSERT_FALSE(device->has_input_device);
 }
 
@@ -435,6 +589,582 @@ void test_query_groups_returns_bitmask(void)
     DaliDiscoveryTransport t = transport();
     TEST_ASSERT_EQUAL(DALI_OK, dali_discovery_query_groups(&t, 5u, &groups));
     TEST_ASSERT_EQUAL_HEX16(0x01A3u, groups);
+}
+
+/* ---------------------------------------------------------------------------
+ * Sequence builders and result readers
+ *
+ * Frame expectations are derived from IEC 62386-102 rather than from the
+ * builders: ENABLE DEVICE TYPE is special command 0xC1 carrying the type as its
+ * data byte; QUERY GROUPS 0-7 / 8-15 are opcodes 0xC0 / 0xC1 on the addressed
+ * frame; QUERY DEVICE TYPE / QUERY NEXT DEVICE TYPE are 0x99 / 0xA7.
+ * --------------------------------------------------------------------------*/
+
+void test_build_device_type_query_sequence_layout(void)
+{
+    /* DT6 QUERY FAILURE STATUS for addr 5 = address byte 0x0B, opcode 0xEC. */
+    DaliFrame query = { .data = 0x0BECu, .bit_length = DALI_FORWARD_FRAME_BITS };
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_build_device_type_query_sequence(6u, &query, &seq));
+
+    TEST_ASSERT_EQUAL_UINT8(DALI_DISCOVERY_DT_SEQUENCE_STEPS, seq.step_count);
+
+    const DaliSequenceStep *enable = &seq.steps[DALI_DISCOVERY_DT_STEP_ENABLE];
+    TEST_ASSERT_EQUAL_HEX32(0xC106u, enable->frame.data);
+    TEST_ASSERT_EQUAL_UINT8(DALI_FORWARD_FRAME_BITS, enable->frame.bit_length);
+    TEST_ASSERT_FALSE(enable->needs_reply);
+    TEST_ASSERT_FALSE(enable->send_twice);
+    TEST_ASSERT_EQUAL_UINT8(0u, enable->retries_left);
+
+    const DaliSequenceStep *step = &seq.steps[DALI_DISCOVERY_DT_STEP_QUERY];
+    TEST_ASSERT_EQUAL_HEX32(0x0BECu, step->frame.data);
+    TEST_ASSERT_TRUE(step->needs_reply);
+    TEST_ASSERT_FALSE(step->send_twice);
+    /* ENABLE DEVICE TYPE is consumed by the next command, so the query must not
+     * be retransmitted on its own. */
+    TEST_ASSERT_EQUAL_UINT8(0u, step->retries_left);
+}
+
+void test_build_device_type_query_sequence_carries_the_requested_type(void)
+{
+    DaliFrame query = { .data = 0x0BF9u, .bit_length = DALI_FORWARD_FRAME_BITS };
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_build_device_type_query_sequence(8u, &query, &seq));
+    TEST_ASSERT_EQUAL_HEX32(0xC108u,
+                            seq.steps[DALI_DISCOVERY_DT_STEP_ENABLE].frame.data);
+}
+
+void test_build_device_type_query_sequence_rejects_bad_arguments(void)
+{
+    DaliFrame query = { .data = 0x0BECu, .bit_length = DALI_FORWARD_FRAME_BITS };
+    DaliFrame backward = { .data = 0x12u, .bit_length = DALI_BACKWARD_FRAME_BITS };
+    DaliFrame empty = { .data = 0u, .bit_length = 0u };
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_build_device_type_query_sequence(6u, NULL, &seq));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_build_device_type_query_sequence(6u, &query, NULL));
+    /* Only a 16-bit forward frame can be answered under an enabled type. */
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_build_device_type_query_sequence(6u, &backward, &seq));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_build_device_type_query_sequence(6u, &empty, &seq));
+}
+
+void test_build_profile_sequence_layout(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_build_profile_sequence(5u, false, &seq));
+    TEST_ASSERT_EQUAL_UINT8(DALI_DISCOVERY_PROFILE_LIMIT_STEPS,
+                            seq.step_count);
+
+    const DaliSequenceStep *min_step =
+        &seq.steps[DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL];
+    TEST_ASSERT_EQUAL_HEX32(0x0BA2u, min_step->frame.data);
+    TEST_ASSERT_EQUAL_UINT8(DALI_FORWARD_FRAME_BITS,
+                            min_step->frame.bit_length);
+    TEST_ASSERT_TRUE(min_step->needs_reply);
+    TEST_ASSERT_GREATER_THAN_UINT8(0u, min_step->retries_left);
+
+    const DaliSequenceStep *max_step =
+        &seq.steps[DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL];
+    TEST_ASSERT_EQUAL_HEX32(0x0BA1u, max_step->frame.data);
+    TEST_ASSERT_TRUE(max_step->needs_reply);
+    TEST_ASSERT_GREATER_THAN_UINT8(0u, max_step->retries_left);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_build_profile_sequence(5u, true, &seq));
+    TEST_ASSERT_EQUAL_UINT8(DALI_DISCOVERY_PROFILE_DT6_STEPS,
+                            seq.step_count);
+
+    const DaliSequenceStep *enable =
+        &seq.steps[DALI_DISCOVERY_PROFILE_STEP_DT6_ENABLE];
+    TEST_ASSERT_EQUAL_HEX32(0xC106u, enable->frame.data);
+    TEST_ASSERT_EQUAL_UINT8(DALI_FORWARD_FRAME_BITS,
+                            enable->frame.bit_length);
+    TEST_ASSERT_FALSE(enable->needs_reply);
+    TEST_ASSERT_EQUAL_UINT8(0u, enable->retries_left);
+
+    const DaliSequenceStep *curve =
+        &seq.steps[DALI_DISCOVERY_PROFILE_STEP_CURVE];
+    TEST_ASSERT_EQUAL_HEX32(0x0BEEu, curve->frame.data);
+    TEST_ASSERT_EQUAL_UINT8(DALI_FORWARD_FRAME_BITS,
+                            curve->frame.bit_length);
+    TEST_ASSERT_TRUE(curve->needs_reply);
+    TEST_ASSERT_EQUAL_UINT8(0u, curve->retries_left);
+}
+
+void test_build_profile_sequence_rejects_bad_arguments(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_build_profile_sequence(0u, false, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_build_profile_sequence(
+                          DALI_SHORT_ADDRESS_COUNT, false, &seq));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_build_profile_sequence(
+                          DALI_SHORT_ADDRESS_COUNT - 1u, true, &seq));
+}
+
+void test_build_groups_sequence_layout(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_discovery_build_groups_sequence(5u, &seq));
+    TEST_ASSERT_EQUAL_UINT8(DALI_DISCOVERY_GROUPS_SEQUENCE_STEPS, seq.step_count);
+
+    const DaliSequenceStep *low = &seq.steps[DALI_DISCOVERY_GROUPS_STEP_0_7];
+    TEST_ASSERT_EQUAL_HEX32(0x0BC0u, low->frame.data);
+    TEST_ASSERT_EQUAL_UINT8(DALI_FORWARD_FRAME_BITS, low->frame.bit_length);
+    TEST_ASSERT_TRUE(low->needs_reply);
+
+    const DaliSequenceStep *high = &seq.steps[DALI_DISCOVERY_GROUPS_STEP_8_15];
+    TEST_ASSERT_EQUAL_HEX32(0x0BC1u, high->frame.data);
+    TEST_ASSERT_TRUE(high->needs_reply);
+
+    /* Both are read-only, so retrying a single step is safe here. */
+    TEST_ASSERT_GREATER_THAN_UINT8(0u, low->retries_left);
+    TEST_ASSERT_GREATER_THAN_UINT8(0u, high->retries_left);
+}
+
+void test_build_groups_sequence_rejects_bad_arguments(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID, dali_discovery_build_groups_sequence(0u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_build_groups_sequence(DALI_SHORT_ADDRESS_COUNT, &seq));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_build_groups_sequence(DALI_SHORT_ADDRESS_COUNT - 1u,
+                                                           &seq));
+}
+
+void test_build_device_types_sequence_layout(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_discovery_build_device_types_sequence(5u, &seq));
+    TEST_ASSERT_EQUAL_UINT8(DALI_DISCOVERY_DEVICE_TYPES_SEQUENCE_STEPS,
+                            seq.step_count);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT8(DALI_SEQUENCE_MAX_STEPS, seq.step_count);
+
+    /* Step 0 restarts the answer sequence inside the atomic block. */
+    const DaliSequenceStep *first =
+        &seq.steps[DALI_DISCOVERY_DEVICE_TYPES_STEP_FIRST];
+    TEST_ASSERT_EQUAL_HEX32(0x0B99u, first->frame.data);
+    TEST_ASSERT_TRUE(first->needs_reply);
+    TEST_ASSERT_EQUAL_UINT8(0u, first->retries_left);
+
+    for (uint8_t i = 0u; i < DALI_DISCOVERY_DEVICE_TYPES_NEXT_STEPS; i++) {
+        const DaliSequenceStep *step = &seq.steps[1u + i];
+        TEST_ASSERT_EQUAL_HEX32(0x0BA7u, step->frame.data);
+        TEST_ASSERT_EQUAL_UINT8(DALI_FORWARD_FRAME_BITS, step->frame.bit_length);
+        TEST_ASSERT_TRUE(step->needs_reply);
+        /* QUERY NEXT DEVICE TYPE advances the device's enumeration, so no step
+         * may retry on its own. */
+        TEST_ASSERT_EQUAL_UINT8(0u, step->retries_left);
+    }
+}
+
+void test_build_device_types_sequence_rejects_bad_arguments(void)
+{
+    DaliSequence seq;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_build_device_types_sequence(0u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_build_device_types_sequence(DALI_SHORT_ADDRESS_COUNT,
+                                                                  &seq));
+}
+
+/* Build a completed result by hand so the readers are tested without a bus. */
+static void seed_reply(DaliSequenceResult *result, uint8_t step, uint8_t value,
+                       uint8_t bit_length)
+{
+    result->replies[step] = (DaliFrame){ .data = value, .bit_length = bit_length };
+    result->reply_mask |= (uint8_t)(1u << step);
+    if (step >= result->steps_run) {
+        result->steps_run = (uint8_t)(step + 1u);
+    }
+}
+
+static void result_reset(DaliSequenceResult *result)
+{
+    memset(result, 0, sizeof(*result));
+    result->result = DALI_OK;
+    result->failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
+}
+
+void test_profile_from_sequence_distinguishes_standard_and_linear_curves(void)
+{
+    DaliSequenceResult result;
+    DaliDiscoveryGearProfile profile = {0};
+
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 85u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL, 200u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_CURVE,
+               DALI_DIM_CURVE_STANDARD, DALI_BACKWARD_FRAME_BITS);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_profile_from_sequence(&result, true,
+                                                           &profile));
+    TEST_ASSERT_TRUE(profile.has_level_limits);
+    TEST_ASSERT_EQUAL_UINT8(85u, profile.min_level);
+    TEST_ASSERT_EQUAL_UINT8(200u, profile.max_level);
+    TEST_ASSERT_TRUE(profile.has_dimming_curve);
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_STANDARD, profile.dimming_curve);
+
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 40u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL, 220u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_CURVE,
+               DALI_DIM_CURVE_LINEAR, DALI_BACKWARD_FRAME_BITS);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_profile_from_sequence(&result, true,
+                                                           &profile));
+    TEST_ASSERT_EQUAL_UINT8(40u, profile.min_level);
+    TEST_ASSERT_EQUAL_UINT8(220u, profile.max_level);
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_LINEAR, profile.dimming_curve);
+}
+
+void test_profile_from_sequence_keeps_limits_when_curve_is_unavailable(void)
+{
+    DaliSequenceResult result;
+    const DaliDiscoveryGearProfile last_good = {
+        .has_level_limits = true,
+        .min_level = 40u,
+        .max_level = 220u,
+        .has_dimming_curve = true,
+        .dimming_curve = DALI_DIM_CURVE_LINEAR,
+    };
+    DaliDiscoveryGearProfile profile = last_good;
+
+    /* An unanswered curve step must not cost the gear the MIN/MAX it did
+     * answer; the previously read curve carries over. */
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 85u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL, 200u,
+               DALI_BACKWARD_FRAME_BITS);
+    result.result = DALI_ERR_TIMEOUT;
+    result.failed_step = DALI_DISCOVERY_PROFILE_STEP_CURVE;
+    result.steps_run = DALI_DISCOVERY_PROFILE_DT6_STEPS;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_profile_from_sequence(&result, true,
+                                                           &profile));
+    TEST_ASSERT_TRUE(profile.has_level_limits);
+    TEST_ASSERT_EQUAL_UINT8(85u, profile.min_level);
+    TEST_ASSERT_EQUAL_UINT8(200u, profile.max_level);
+    TEST_ASSERT_TRUE(profile.has_dimming_curve);
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_LINEAR, profile.dimming_curve);
+
+    /* Same for a reserved curve code, which is no more readable than silence. */
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 20u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL, 180u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_CURVE, 2u,
+               DALI_BACKWARD_FRAME_BITS);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_profile_from_sequence(&result, true,
+                                                           &profile));
+    TEST_ASSERT_EQUAL_UINT8(20u, profile.min_level);
+    TEST_ASSERT_EQUAL_UINT8(180u, profile.max_level);
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_LINEAR, profile.dimming_curve);
+
+    /* With no curve ever read, the limits still commit and the caller is told
+     * the curve is unknown rather than being handed a guess as fact. */
+    DaliDiscoveryGearProfile fresh = {0};
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 30u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL, 150u,
+               DALI_BACKWARD_FRAME_BITS);
+    result.result = DALI_ERR_TIMEOUT;
+    result.failed_step = DALI_DISCOVERY_PROFILE_STEP_CURVE;
+    result.steps_run = DALI_DISCOVERY_PROFILE_DT6_STEPS;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_profile_from_sequence(&result, true,
+                                                           &fresh));
+    TEST_ASSERT_TRUE(fresh.has_level_limits);
+    TEST_ASSERT_EQUAL_UINT8(30u, fresh.min_level);
+    TEST_ASSERT_EQUAL_UINT8(150u, fresh.max_level);
+    TEST_ASSERT_FALSE(fresh.has_dimming_curve);
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_STANDARD, fresh.dimming_curve);
+
+    /* A missing MIN/MAX pair is still fatal: those are what the window is. */
+    profile = last_good;
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 85u,
+               DALI_BACKWARD_FRAME_BITS);
+    result.result = DALI_ERR_TIMEOUT;
+    result.failed_step = DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL;
+    result.steps_run = DALI_DISCOVERY_PROFILE_DT6_STEPS;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT,
+                      dali_discovery_profile_from_sequence(&result, true,
+                                                           &profile));
+    TEST_ASSERT_EQUAL_MEMORY(&last_good, &profile, sizeof(profile));
+
+    /* A non-DT6 profile has no curve query, so the required standard curve is
+     * committed along with its complete MIN/MAX pair. */
+    profile = last_good;
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 20u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL, 180u,
+               DALI_BACKWARD_FRAME_BITS);
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_profile_from_sequence(&result, false,
+                                                           &profile));
+    TEST_ASSERT_TRUE(profile.has_dimming_curve);
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_STANDARD, profile.dimming_curve);
+    TEST_ASSERT_EQUAL_UINT8(20u, profile.min_level);
+    TEST_ASSERT_EQUAL_UINT8(180u, profile.max_level);
+}
+
+void test_profile_from_sequence_preserves_output_on_invalid_or_incomplete_limits(void)
+{
+    DaliSequenceResult result;
+    const DaliDiscoveryGearProfile last_good = {
+        .has_level_limits = true,
+        .min_level = 40u,
+        .max_level = 220u,
+        .has_dimming_curve = true,
+        .dimming_curve = DALI_DIM_CURVE_LINEAR,
+    };
+    DaliDiscoveryGearProfile profile = last_good;
+
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 80u,
+               DALI_BACKWARD_FRAME_BITS);
+    result.result = DALI_ERR_TIMEOUT;
+    result.failed_step = DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL;
+    result.steps_run = DALI_DISCOVERY_PROFILE_LIMIT_STEPS;
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT,
+                      dali_discovery_profile_from_sequence(&result, false,
+                                                           &profile));
+    TEST_ASSERT_EQUAL_MEMORY(&last_good, &profile, sizeof(profile));
+
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 201u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL, 200u,
+               DALI_BACKWARD_FRAME_BITS);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_discovery_profile_from_sequence(&result, false,
+                                                           &profile));
+    TEST_ASSERT_EQUAL_MEMORY(&last_good, &profile, sizeof(profile));
+
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MIN_LEVEL, 0u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_PROFILE_STEP_MAX_LEVEL,
+               DALI_DAPC_MASK_LEVEL, DALI_BACKWARD_FRAME_BITS);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_discovery_profile_from_sequence(&result, false,
+                                                           &profile));
+    TEST_ASSERT_EQUAL_MEMORY(&last_good, &profile, sizeof(profile));
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_profile_from_sequence(NULL, false,
+                                                           &profile));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_profile_from_sequence(&result, false,
+                                                           NULL));
+}
+
+void test_groups_from_sequence_assembles_low_and_high_bytes(void)
+{
+    DaliSequenceResult result;
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_GROUPS_STEP_0_7, 0xA3u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_GROUPS_STEP_8_15, 0x01u,
+               DALI_BACKWARD_FRAME_BITS);
+
+    uint16_t groups = 0xFFFFu;
+    TEST_ASSERT_EQUAL(DALI_OK, dali_discovery_groups_from_sequence(&result, &groups));
+    TEST_ASSERT_EQUAL_HEX16(0x01A3u, groups);
+}
+
+void test_groups_from_sequence_reports_failure_and_missing_replies(void)
+{
+    DaliSequenceResult result;
+    uint16_t groups = 0xFFFFu;
+
+    /* A failed sequence surfaces its own error rather than a partial mask. */
+    result_reset(&result);
+    result.result = DALI_ERR_TIMEOUT;
+    result.failed_step = DALI_DISCOVERY_GROUPS_STEP_8_15;
+    seed_reply(&result, DALI_DISCOVERY_GROUPS_STEP_0_7, 0xA3u,
+               DALI_BACKWARD_FRAME_BITS);
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT,
+                      dali_discovery_groups_from_sequence(&result, &groups));
+
+    /* A nominally successful sequence missing the high byte is malformed. */
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_GROUPS_STEP_0_7, 0xA3u,
+               DALI_BACKWARD_FRAME_BITS);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_discovery_groups_from_sequence(&result, &groups));
+
+    /* So is a reply that came back the wrong width. */
+    result_reset(&result);
+    seed_reply(&result, DALI_DISCOVERY_GROUPS_STEP_0_7, 0xA3u,
+               DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, DALI_DISCOVERY_GROUPS_STEP_8_15, 0x01u,
+               DALI_FORWARD_FRAME_BITS);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_discovery_groups_from_sequence(&result, &groups));
+
+    TEST_ASSERT_EQUAL_HEX16(0xFFFFu, groups);
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_groups_from_sequence(&result, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_groups_from_sequence(NULL, &groups));
+}
+
+void test_device_types_from_sequence_collects_ascending_list(void)
+{
+    DaliSequenceResult result;
+    DaliDiscoveryDeviceInfo device;
+
+    result_reset(&result);
+    memset(&device, 0, sizeof(device));
+    seed_reply(&result, 0u, 0xFFu, DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, 1u, 6u, DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, 2u, 8u, DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, 3u, 0xFEu, DALI_BACKWARD_FRAME_BITS);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_device_types_from_sequence(&result, &device));
+    TEST_ASSERT_TRUE(device.has_device_type);
+    TEST_ASSERT_EQUAL_UINT8(6u, device.device_type);
+    TEST_ASSERT_EQUAL_UINT8(2u, device.device_type_count);
+    TEST_ASSERT_EQUAL_UINT8(6u, device.device_types[0]);
+    TEST_ASSERT_EQUAL_UINT8(8u, device.device_types[1]);
+    TEST_ASSERT_FALSE(device.device_types_truncated);
+}
+
+void test_device_types_from_sequence_keeps_types_gathered_before_a_failure(void)
+{
+    DaliSequenceResult result;
+    DaliDiscoveryDeviceInfo device;
+
+    /* The sequence aborted at step 3, but steps 0-2 already answered. Those
+     * types are still valid and must not be thrown away. */
+    result_reset(&result);
+    memset(&device, 0, sizeof(device));
+    result.result = DALI_ERR_TIMEOUT;
+    result.failed_step = 3u;
+    seed_reply(&result, 0u, 0xFFu, DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, 1u, 6u, DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, 2u, 8u, DALI_BACKWARD_FRAME_BITS);
+    result.steps_run = 4u;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_device_types_from_sequence(&result, &device));
+    TEST_ASSERT_EQUAL_UINT8(2u, device.device_type_count);
+    TEST_ASSERT_EQUAL_UINT8(6u, device.device_types[0]);
+    TEST_ASSERT_EQUAL_UINT8(8u, device.device_types[1]);
+}
+
+void test_device_types_from_sequence_handles_single_type_and_no_types(void)
+{
+    DaliSequenceResult result;
+    DaliDiscoveryDeviceInfo device;
+
+    /* The leading query answered a concrete type this time — take it and stop. */
+    result_reset(&result);
+    memset(&device, 0, sizeof(device));
+    seed_reply(&result, 0u, 6u, DALI_BACKWARD_FRAME_BITS);
+    seed_reply(&result, 1u, 8u, DALI_BACKWARD_FRAME_BITS);
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_device_types_from_sequence(&result, &device));
+    TEST_ASSERT_EQUAL_UINT8(1u, device.device_type_count);
+    TEST_ASSERT_EQUAL_UINT8(6u, device.device_types[0]);
+
+    /* 0xFE from the leading query means the device has no types at all. */
+    result_reset(&result);
+    memset(&device, 0, sizeof(device));
+    seed_reply(&result, 0u, 0xFEu, DALI_BACKWARD_FRAME_BITS);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_discovery_device_types_from_sequence(&result, &device));
+    TEST_ASSERT_EQUAL_UINT8(0u, device.device_type_count);
+
+    /* No reply at all is equally unusable. */
+    result_reset(&result);
+    memset(&device, 0, sizeof(device));
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_discovery_device_types_from_sequence(&result, &device));
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_device_types_from_sequence(NULL, &device));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_device_types_from_sequence(&result, NULL));
+}
+
+void test_device_types_from_sequence_marks_truncation_at_capacity(void)
+{
+    DaliSequenceResult result;
+    DaliDiscoveryDeviceInfo device;
+
+    result_reset(&result);
+    memset(&device, 0, sizeof(device));
+    seed_reply(&result, 0u, 0xFFu, DALI_BACKWARD_FRAME_BITS);
+    for (uint8_t i = 0u; i < DALI_DISCOVERY_DEVICE_TYPES_NEXT_STEPS; i++) {
+        seed_reply(&result, (uint8_t)(1u + i), i, DALI_BACKWARD_FRAME_BITS);
+    }
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_device_types_from_sequence(&result, &device));
+    TEST_ASSERT_EQUAL_UINT8(DALI_DISCOVERY_MAX_DEVICE_TYPES,
+                            device.device_type_count);
+    TEST_ASSERT_TRUE(device.device_types_truncated);
+}
+
+void test_u8_from_sequence_boundaries(void)
+{
+    DaliSequenceResult result;
+    uint8_t value = 0u;
+
+    result_reset(&result);
+    seed_reply(&result, 1u, 0x5Au, DALI_BACKWARD_FRAME_BITS);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_discovery_u8_from_sequence(&result, 1u, &value));
+    TEST_ASSERT_EQUAL_HEX8(0x5Au, value);
+
+    /* A step that produced no reply, and one past the end of the array. */
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_discovery_u8_from_sequence(&result, 0u, &value));
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_discovery_u8_from_sequence(&result,
+                                                      DALI_SEQUENCE_MAX_STEPS,
+                                                      &value));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_u8_from_sequence(&result, 1u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_u8_from_sequence(NULL, 1u, &value));
 }
 
 void test_scan_stores_group_membership(void)
@@ -458,6 +1188,8 @@ void test_scan_stores_group_membership(void)
     TEST_ASSERT_NOT_NULL(device);
     TEST_ASSERT_TRUE(device->has_groups);
     TEST_ASSERT_EQUAL_HEX16(0x0205u, device->groups);
+    TEST_ASSERT_TRUE(
+        dali_discovery_inventory_has_complete_group_data(&inventory));
 }
 
 void test_scan_detects_input_device_by_instance_count(void)
@@ -510,6 +1242,40 @@ void test_scan_detects_pure_input_device_without_gear_status(void)
     TEST_ASSERT_TRUE(device->has_input_device);
     TEST_ASSERT_TRUE(device->has_instance_count);
     TEST_ASSERT_EQUAL_UINT8(3u, device->instance_count);
+    TEST_ASSERT_EQUAL_UINT32(0u, s_bus.gear_memory_read_count);
+    TEST_ASSERT_TRUE(
+        dali_discovery_inventory_has_complete_group_data(&inventory));
+}
+
+void test_scan_classifies_gear_when_status_reply_is_missed(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+
+    /* QUERY STATUS times out, but the control-device and gear address spaces
+     * can both contain address 3. Positive replies from both roles must merge. */
+    add_reply(0x07FE35u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 2u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x07C0u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0x04u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x07C1u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0x00u,
+              DALI_BACKWARD_FRAME_BITS);
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    TEST_ASSERT_EQUAL_UINT8(1u, found);
+    const DaliDiscoveryDeviceInfo *device =
+        dali_discovery_inventory_get(&inventory, 3u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_FALSE(device->has_status);
+    TEST_ASSERT_TRUE(device->has_input_device);
+    TEST_ASSERT_TRUE(device->has_control_gear);
+    TEST_ASSERT_TRUE(device->has_groups);
+    TEST_ASSERT_EQUAL_HEX16(0x0004u, device->groups);
+    TEST_ASSERT_TRUE(
+        dali_discovery_inventory_has_complete_group_data(&inventory));
 }
 
 void test_scan_tolerates_group_query_timeout(void)
@@ -530,6 +1296,27 @@ void test_scan_tolerates_group_query_timeout(void)
     TEST_ASSERT_NOT_NULL(device);
     TEST_ASSERT_TRUE(device->present);
     TEST_ASSERT_FALSE(device->has_groups);
+    TEST_ASSERT_FALSE(
+        dali_discovery_inventory_has_complete_group_data(&inventory));
+}
+
+void test_scan_rejects_frame_only_transport_without_traffic(void)
+{
+    DaliDiscoveryTransport frame_only = {
+        .transact = mock_transact,
+        .ctx = &s_bus,
+    };
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0xA5u;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_scan(&inventory,
+                                          &frame_only,
+                                          NULL,
+                                          NULL,
+                                          &found));
+    TEST_ASSERT_EQUAL_UINT32(0u, s_bus.tx_count);
+    TEST_ASSERT_EQUAL_HEX8(0xA5u, found);
 }
 
 void test_invalid_arguments_are_rejected(void)
@@ -543,6 +1330,7 @@ void test_invalid_arguments_are_rejected(void)
     };
     uint8_t value = 0u;
     uint16_t groups = 0u;
+    DaliDimCurve curve = DALI_DIM_CURVE_STANDARD;
 
     TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
                       dali_discovery_inventory_reset(NULL));
@@ -553,6 +1341,8 @@ void test_invalid_arguments_are_rejected(void)
                       dali_discovery_inventory_store_status(NULL, 0u, 0u));
     TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
                       dali_discovery_inventory_store_groups(NULL, 0u, 0u));
+    TEST_ASSERT_FALSE(
+        dali_discovery_inventory_has_complete_group_data(NULL));
     TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
                       dali_discovery_query_u8(NULL, &frame, &value));
     TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
@@ -579,6 +1369,25 @@ void test_invalid_arguments_are_rejected(void)
                       dali_discovery_query_actual_level(NULL, 0u, &value));
     TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
                       dali_discovery_query_actual_level(&t, 0u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_query_min_level(NULL, 0u, &value));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_query_min_level(&t, 0u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_query_min_level(&t,
+                                                     DALI_SHORT_ADDRESS_COUNT,
+                                                     &value));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_query_max_level(NULL, 0u, &value));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_query_max_level(&t, 0u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_query_dt6_dimming_curve(NULL, 0u, &curve));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_query_dt6_dimming_curve(&t, 0u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_query_dt6_dimming_curve(
+                          &t, DALI_SHORT_ADDRESS_COUNT, &curve));
     TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
                       dali_discovery_scan(NULL, &t, NULL, NULL, NULL));
     TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
@@ -610,6 +1419,10 @@ void test_scan_enriches_dt6_device(void)
     add_reply(0x0B99u, DALI_FORWARD_FRAME_BITS, DALI_OK, 6u,    DALI_BACKWARD_FRAME_BITS);
     add_reply(0x0B97u, DALI_FORWARD_FRAME_BITS, DALI_OK, 2u,    DALI_BACKWARD_FRAME_BITS);
     add_reply(0x0BA0u, DALI_FORWARD_FRAME_BITS, DALI_OK, 200u,  DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA2u, DALI_FORWARD_FRAME_BITS, DALI_OK, 85u,   DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA1u, DALI_FORWARD_FRAME_BITS, DALI_OK, 220u,  DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BEEu, DALI_FORWARD_FRAME_BITS, DALI_OK,
+              DALI_DIM_CURVE_LINEAR, DALI_BACKWARD_FRAME_BITS);
     add_reply(0x0BF1u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0x03u, DALI_BACKWARD_FRAME_BITS);
     add_reply(0x0BF0u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0x05u, DALI_BACKWARD_FRAME_BITS);
 
@@ -622,6 +1435,11 @@ void test_scan_enriches_dt6_device(void)
     TEST_ASSERT_NOT_NULL(device);
     TEST_ASSERT_TRUE(device->has_device_type);
     TEST_ASSERT_EQUAL_UINT8(6u, device->device_type);
+    TEST_ASSERT_TRUE(device->has_level_limits);
+    TEST_ASSERT_EQUAL_UINT8(85u, device->min_level);
+    TEST_ASSERT_EQUAL_UINT8(220u, device->max_level);
+    TEST_ASSERT_TRUE(device->has_dimming_curve);
+    TEST_ASSERT_EQUAL(DALI_DIM_CURVE_LINEAR, device->dimming_curve);
     TEST_ASSERT_TRUE(device->has_dt6);
     TEST_ASSERT_EQUAL_HEX8(0x03u, device->dt6_failure_status);
     TEST_ASSERT_EQUAL_HEX8(0x05u, device->dt6_features);
@@ -669,16 +1487,17 @@ void test_has_device_type_helper(void)
 
 void test_scan_enriches_multi_device_type_gear(void)
 {
-    /* addr 5 reports primary type=6 and secondary type=8 via QUERY_NEXT_DEVICE_TYPE.
-     * QUERY_NEXT_DEVICE_TYPE opcode=0xA7, addr 5 address byte=0x0B → frame 0x0BA7 */
+    /* A QUERY DEVICE TYPE reply of MASK (0xFF) means multiple types. The gear
+     * then returns each type through QUERY NEXT DEVICE TYPE and 0xFE at end. */
     DaliDiscoveryInventory inventory;
     uint8_t found = 0u;
     s_bus.present[5] = true;
     s_bus.status[5] = 0x00u;
 
-    add_reply(0x0B99u, DALI_FORWARD_FRAME_BITS, DALI_OK, 6u,    DALI_BACKWARD_FRAME_BITS);
+    add_multi_device_type_replies();
+    add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 6u,    DALI_BACKWARD_FRAME_BITS);
     add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 8u,    DALI_BACKWARD_FRAME_BITS);
-    add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0xFFu, DALI_BACKWARD_FRAME_BITS);
+    add_next_device_type_end_replies(2u);
 
     DaliDiscoveryTransport t = transport();
     TEST_ASSERT_EQUAL(DALI_OK,
@@ -692,9 +1511,199 @@ void test_scan_enriches_multi_device_type_gear(void)
     TEST_ASSERT_EQUAL_UINT8(2u, device->device_type_count);
     TEST_ASSERT_EQUAL_UINT8(6u, device->device_types[0]);
     TEST_ASSERT_EQUAL_UINT8(8u, device->device_types[1]);
+    TEST_ASSERT_FALSE(device->device_types_truncated);
+    TEST_ASSERT_EQUAL_UINT32(DALI_DISCOVERY_DEVICE_TYPES_NEXT_STEPS,
+                             s_bus.query_next_device_type_count);
     TEST_ASSERT_TRUE(dali_discovery_has_device_type(device, 6u));
     TEST_ASSERT_TRUE(dali_discovery_has_device_type(device, 8u));
     TEST_ASSERT_FALSE(dali_discovery_has_device_type(device, 0u));
+}
+
+void test_scan_handles_gear_with_no_device_types(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+    s_bus.present[5] = true;
+
+    /* DALI-2 defines 0xFE from QUERY DEVICE TYPE as "no device types". */
+    add_reply(0x0B99u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0xFEu,
+              DALI_BACKWARD_FRAME_BITS);
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    const DaliDiscoveryDeviceInfo *device =
+        dali_discovery_inventory_get(&inventory, 5u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_FALSE(device->has_device_type);
+    TEST_ASSERT_EQUAL_UINT8(0u, device->device_type_count);
+    TEST_ASSERT_FALSE(device->device_types_truncated);
+    TEST_ASSERT_EQUAL_UINT32(0u, s_bus.query_next_device_type_count);
+}
+
+void test_scan_ignores_malformed_device_type_reply(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+    s_bus.present[5] = true;
+
+    add_reply(0x0B99u, DALI_FORWARD_FRAME_BITS, DALI_OK, 6u,
+              DALI_FORWARD_FRAME_BITS);
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    const DaliDiscoveryDeviceInfo *device =
+        dali_discovery_inventory_get(&inventory, 5u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_FALSE(device->has_device_type);
+    TEST_ASSERT_EQUAL_UINT8(0u, device->device_type_count);
+    TEST_ASSERT_EQUAL_UINT32(0u, s_bus.query_next_device_type_count);
+}
+
+void test_scan_stops_on_invalid_next_device_type_mask(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+    s_bus.present[5] = true;
+
+    add_multi_device_type_replies();
+    add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 1u,
+              DALI_BACKWARD_FRAME_BITS);
+    /* MASK is only valid as the initial "multiple types" result. */
+    add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0xFFu,
+              DALI_BACKWARD_FRAME_BITS);
+    /* Later steps still answer, proving MASK ends the list rather than the
+     * sequence simply running out of replies. */
+    add_next_device_type_end_replies(2u);
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    const DaliDiscoveryDeviceInfo *device =
+        dali_discovery_inventory_get(&inventory, 5u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_TRUE(device->has_device_type);
+    TEST_ASSERT_EQUAL_UINT8(1u, device->device_type_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, device->device_type);
+    TEST_ASSERT_FALSE(device->device_types_truncated);
+    TEST_ASSERT_EQUAL_UINT32(DALI_DISCOVERY_DEVICE_TYPES_NEXT_STEPS,
+                             s_bus.query_next_device_type_count);
+}
+
+void test_scan_stops_on_malformed_next_device_type_reply(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+    s_bus.present[5] = true;
+
+    add_multi_device_type_replies();
+    add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 1u,
+              DALI_FORWARD_FRAME_BITS);
+    /* A well-formed tail must not rescue a list that already went bad. */
+    add_next_device_type_end_replies(1u);
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    const DaliDiscoveryDeviceInfo *device =
+        dali_discovery_inventory_get(&inventory, 5u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_FALSE(device->has_device_type);
+    TEST_ASSERT_EQUAL_UINT8(0u, device->device_type_count);
+    TEST_ASSERT_FALSE(device->device_types_truncated);
+    TEST_ASSERT_EQUAL_UINT32(DALI_DISCOVERY_DEVICE_TYPES_NEXT_STEPS,
+                             s_bus.query_next_device_type_count);
+}
+
+void test_scan_stops_on_non_increasing_device_types(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+    s_bus.present[5] = true;
+
+    add_multi_device_type_replies();
+    add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 3u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 2u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_next_device_type_end_replies(2u);
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    const DaliDiscoveryDeviceInfo *device =
+        dali_discovery_inventory_get(&inventory, 5u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_TRUE(device->has_device_type);
+    TEST_ASSERT_EQUAL_UINT8(1u, device->device_type_count);
+    TEST_ASSERT_EQUAL_UINT8(3u, device->device_type);
+    TEST_ASSERT_FALSE(device->device_types_truncated);
+    TEST_ASSERT_EQUAL_UINT32(DALI_DISCOVERY_DEVICE_TYPES_NEXT_STEPS,
+                             s_bus.query_next_device_type_count);
+}
+
+void test_scan_marks_excess_device_types_truncated(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+    s_bus.present[5] = true;
+
+    add_multi_device_type_replies();
+    for (uint8_t type = 0u; type <= DALI_DISCOVERY_MAX_DEVICE_TYPES; type++) {
+        add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, type,
+                  DALI_BACKWARD_FRAME_BITS);
+    }
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    const DaliDiscoveryDeviceInfo *device =
+        dali_discovery_inventory_get(&inventory, 5u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_TRUE(device->has_device_type);
+    TEST_ASSERT_EQUAL_UINT8(DALI_DISCOVERY_MAX_DEVICE_TYPES,
+                            device->device_type_count);
+    for (uint8_t type = 0u; type < DALI_DISCOVERY_MAX_DEVICE_TYPES; type++) {
+        TEST_ASSERT_EQUAL_UINT8(type, device->device_types[type]);
+    }
+    TEST_ASSERT_TRUE(device->device_types_truncated);
+    TEST_ASSERT_EQUAL_UINT32(DALI_DISCOVERY_MAX_DEVICE_TYPES + 1u,
+                             s_bus.query_next_device_type_count);
+}
+
+void test_scan_does_not_mark_exact_device_type_capacity_truncated(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+    s_bus.present[5] = true;
+
+    add_multi_device_type_replies();
+    for (uint8_t type = 0u; type < DALI_DISCOVERY_MAX_DEVICE_TYPES; type++) {
+        add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, type,
+                  DALI_BACKWARD_FRAME_BITS);
+    }
+    add_reply(0x0BA7u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0xFEu,
+              DALI_BACKWARD_FRAME_BITS);
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    const DaliDiscoveryDeviceInfo *device =
+        dali_discovery_inventory_get(&inventory, 5u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_EQUAL_UINT8(DALI_DISCOVERY_MAX_DEVICE_TYPES,
+                            device->device_type_count);
+    TEST_ASSERT_FALSE(device->device_types_truncated);
+    TEST_ASSERT_EQUAL_UINT32(DALI_DISCOVERY_MAX_DEVICE_TYPES + 1u,
+                             s_bus.query_next_device_type_count);
 }
 
 void test_scan_records_scene_levels(void)
@@ -723,88 +1732,32 @@ void test_scan_records_scene_levels(void)
     TEST_ASSERT_EQUAL_UINT8(200u,  device->scene_levels[7]);
 }
 
-void test_scan_reads_bank1_identity(void)
-{
-    /* addr 5: bank0 and bank1 both present.
-     * Both reads use the same READ_MEMORY_LOCATION frame (0x0BC5) — the mock
-     * consumes entries in order so bank0 reads take the first 18, bank1 takes the next 20. */
-    DaliDiscoveryInventory inventory;
-    uint8_t found = 0u;
-    s_bus.present[5] = true;
-    s_bus.status[5] = 0x00u;
-
-    const uint8_t gtin[6]   = {0x04u, 0x00u, 0x78u, 0x1Au, 0x00u, 0x01u};
-    const uint8_t serial[8] = {0xAAu, 0xBBu, 0xCCu, 0xDDu,
-                                0x11u, 0x22u, 0x33u, 0x44u};
-    const uint32_t read_frame = 0x0BC5u;
-
-    /* Bank 0 — 18 bytes (offsets 0x00..0x11) */
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 0x11u, DALI_BACKWARD_FRAME_BITS);
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, DALI_MEMORY_BANK_IMPLEMENTED, DALI_BACKWARD_FRAME_BITS);
-    for (uint8_t i = 0u; i < 6u; i++) {
-        add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, gtin[i], DALI_BACKWARD_FRAME_BITS);
-    }
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 2u, DALI_BACKWARD_FRAME_BITS);  /* fw_major */
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 5u, DALI_BACKWARD_FRAME_BITS);  /* fw_minor */
-    for (uint8_t i = 0u; i < 8u; i++) {
-        add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, serial[i], DALI_BACKWARD_FRAME_BITS);
-    }
-
-    /* Bank 1 — 20 bytes (offsets 0x00..0x13), same identity + hw version */
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 0x13u, DALI_BACKWARD_FRAME_BITS);
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, DALI_MEMORY_BANK_IMPLEMENTED, DALI_BACKWARD_FRAME_BITS);
-    for (uint8_t i = 0u; i < 6u; i++) {
-        add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, gtin[i], DALI_BACKWARD_FRAME_BITS);
-    }
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 2u, DALI_BACKWARD_FRAME_BITS);  /* fw_major */
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 5u, DALI_BACKWARD_FRAME_BITS);  /* fw_minor */
-    for (uint8_t i = 0u; i < 8u; i++) {
-        add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, serial[i], DALI_BACKWARD_FRAME_BITS);
-    }
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 1u, DALI_BACKWARD_FRAME_BITS);  /* hw_major */
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 0u, DALI_BACKWARD_FRAME_BITS);  /* hw_minor */
-
-    DaliDiscoveryTransport t = transport();
-    TEST_ASSERT_EQUAL(DALI_OK,
-                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
-
-    const DaliDiscoveryDeviceInfo *device = dali_discovery_inventory_get(&inventory, 5u);
-    TEST_ASSERT_NOT_NULL(device);
-    TEST_ASSERT_TRUE(device->has_identity);
-    TEST_ASSERT_TRUE(device->has_bank1);
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(gtin,   device->bank1.gtin,   6u);
-    TEST_ASSERT_EQUAL_UINT8(2u, device->bank1.fw_major);
-    TEST_ASSERT_EQUAL_UINT8(5u, device->bank1.fw_minor);
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(serial, device->bank1.serial, 8u);
-    TEST_ASSERT_EQUAL_UINT8(1u, device->bank1.hw_major);
-    TEST_ASSERT_EQUAL_UINT8(0u, device->bank1.hw_minor);
-}
-
 void test_scan_reads_bank0_identity(void)
 {
-    /* addr 5 present. Bank 0 read: offset 0x00..0x11 via READ_MEMORY_LOCATION (0x0BC5).
+    /* addr 5 present. Bank 0 identity read: offsets 0x03..0x14 via 0x0BC5.
      * DTR1/DTR0 setup frames are no-reply and handled by the mock without scripting. */
     DaliDiscoveryInventory inventory;
     uint8_t found = 0u;
     s_bus.present[5] = true;
     s_bus.status[5] = 0x00u;
 
-    const uint8_t gtin[6]   = {0x04u, 0x00u, 0x78u, 0x1Au, 0x00u, 0x01u};
-    const uint8_t serial[8] = {0xAAu, 0xBBu, 0xCCu, 0xDDu,
-                                0x11u, 0x22u, 0x33u, 0x44u};
+    const uint8_t identity_bytes[18] = {
+        0x01u, 0x23u, 0x45u, 0x67u, 0x89u, 0xABu,
+        0x02u, 0x05u,
+        0x10u, 0x32u, 0x54u, 0x76u, 0x98u, 0xBAu, 0xDCu, 0xFEu,
+        0x03u, 0x07u,
+    };
+    const uint8_t expected_gtin[6] = {
+        0x01u, 0x23u, 0x45u, 0x67u, 0x89u, 0xABu,
+    };
+    const uint8_t expected_identification[8] = {
+        0x10u, 0x32u, 0x54u, 0x76u, 0x98u, 0xBAu, 0xDCu, 0xFEu,
+    };
 
     /* READ_MEMORY_LOCATION at addr 5: address byte = (5<<1)|1 = 0x0B, opcode = 0xC5 */
-    uint32_t read_frame = 0x0BC5u;
-    /* 18 bytes: last_addr, indicator=0xFF, GTIN(6), fw_major, fw_minor, serial(8) */
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 0x11u, DALI_BACKWARD_FRAME_BITS);
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, DALI_MEMORY_BANK_IMPLEMENTED, DALI_BACKWARD_FRAME_BITS);
-    for (uint8_t i = 0u; i < 6u; i++) {
-        add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, gtin[i], DALI_BACKWARD_FRAME_BITS);
-    }
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 2u, DALI_BACKWARD_FRAME_BITS);  /* fw_major */
-    add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 5u, DALI_BACKWARD_FRAME_BITS);  /* fw_minor */
-    for (uint8_t i = 0u; i < 8u; i++) {
-        add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, serial[i], DALI_BACKWARD_FRAME_BITS);
+    for (uint8_t i = 0u; i < (uint8_t)sizeof(identity_bytes); i++) {
+        add_reply(0x0BC5u, DALI_FORWARD_FRAME_BITS, DALI_OK, identity_bytes[i],
+                  DALI_BACKWARD_FRAME_BITS);
     }
 
     DaliDiscoveryTransport t = transport();
@@ -815,10 +1768,14 @@ void test_scan_reads_bank0_identity(void)
     const DaliDiscoveryDeviceInfo *device = dali_discovery_inventory_get(&inventory, 5u);
     TEST_ASSERT_NOT_NULL(device);
     TEST_ASSERT_TRUE(device->has_identity);
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(gtin,   device->identity.gtin,   6u);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected_gtin, device->identity.gtin, 6u);
     TEST_ASSERT_EQUAL_UINT8(2u, device->identity.fw_major);
     TEST_ASSERT_EQUAL_UINT8(5u, device->identity.fw_minor);
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(serial, device->identity.serial, 8u);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected_identification,
+                                  device->identity.serial, 8u);
+    TEST_ASSERT_EQUAL_UINT8(3u, device->identity.hw_major);
+    TEST_ASSERT_EQUAL_UINT8(7u, device->identity.hw_minor);
+    TEST_ASSERT_EQUAL_UINT32(18u, s_bus.gear_memory_read_count);
 }
 
 void test_scan_skips_identity_when_bank0_absent(void)
@@ -827,8 +1784,8 @@ void test_scan_skips_identity_when_bank0_absent(void)
     uint8_t found = 0u;
     s_bus.present[3] = true;
     s_bus.status[3] = 0x00u;
-    /* No READ_MEMORY_LOCATION replies scripted — all 18 reads will timeout.
-     * The first read timeout causes read_bank0_identity to return early,
+    /* No READ_MEMORY_LOCATION replies scripted. The first 0x03 read timeout
+     * causes read_bank0_identity to return early,
      * leaving has_identity false. */
 
     DaliDiscoveryTransport t = transport();
@@ -839,6 +1796,7 @@ void test_scan_skips_identity_when_bank0_absent(void)
     TEST_ASSERT_NOT_NULL(device);
     TEST_ASSERT_TRUE(device->present);
     TEST_ASSERT_FALSE(device->has_identity);
+    TEST_ASSERT_EQUAL_UINT32(1u, s_bus.gear_memory_read_count);
 }
 
 int main(void)
@@ -854,11 +1812,33 @@ int main(void)
     RUN_TEST(test_query_device_type_returns_value);
     RUN_TEST(test_query_version_returns_value);
     RUN_TEST(test_query_actual_level_returns_value);
+    RUN_TEST(test_query_level_limits_validate_replies);
+    RUN_TEST(test_query_dt6_dimming_curve_is_atomic_and_typed);
     RUN_TEST(test_scan_stores_device_type_version_and_level);
     RUN_TEST(test_query_groups_returns_bitmask);
+    RUN_TEST(test_build_device_type_query_sequence_layout);
+    RUN_TEST(test_build_device_type_query_sequence_carries_the_requested_type);
+    RUN_TEST(test_build_device_type_query_sequence_rejects_bad_arguments);
+    RUN_TEST(test_build_profile_sequence_layout);
+    RUN_TEST(test_build_profile_sequence_rejects_bad_arguments);
+    RUN_TEST(test_build_groups_sequence_layout);
+    RUN_TEST(test_build_groups_sequence_rejects_bad_arguments);
+    RUN_TEST(test_build_device_types_sequence_layout);
+    RUN_TEST(test_build_device_types_sequence_rejects_bad_arguments);
+    RUN_TEST(test_profile_from_sequence_distinguishes_standard_and_linear_curves);
+    RUN_TEST(test_profile_from_sequence_keeps_limits_when_curve_is_unavailable);
+    RUN_TEST(test_profile_from_sequence_preserves_output_on_invalid_or_incomplete_limits);
+    RUN_TEST(test_groups_from_sequence_assembles_low_and_high_bytes);
+    RUN_TEST(test_groups_from_sequence_reports_failure_and_missing_replies);
+    RUN_TEST(test_device_types_from_sequence_collects_ascending_list);
+    RUN_TEST(test_device_types_from_sequence_keeps_types_gathered_before_a_failure);
+    RUN_TEST(test_device_types_from_sequence_handles_single_type_and_no_types);
+    RUN_TEST(test_device_types_from_sequence_marks_truncation_at_capacity);
+    RUN_TEST(test_u8_from_sequence_boundaries);
     RUN_TEST(test_scan_stores_group_membership);
     RUN_TEST(test_scan_detects_input_device_by_instance_count);
     RUN_TEST(test_scan_detects_pure_input_device_without_gear_status);
+    RUN_TEST(test_scan_classifies_gear_when_status_reply_is_missed);
     RUN_TEST(test_scan_tolerates_group_query_timeout);
     RUN_TEST(test_scan_enriches_dt6_device);
     RUN_TEST(test_scan_skips_dt6_enrichment_for_non_dt6_devices);
@@ -866,8 +1846,15 @@ int main(void)
     RUN_TEST(test_scan_skips_identity_when_bank0_absent);
     RUN_TEST(test_has_device_type_helper);
     RUN_TEST(test_scan_enriches_multi_device_type_gear);
+    RUN_TEST(test_scan_handles_gear_with_no_device_types);
+    RUN_TEST(test_scan_ignores_malformed_device_type_reply);
+    RUN_TEST(test_scan_stops_on_invalid_next_device_type_mask);
+    RUN_TEST(test_scan_stops_on_malformed_next_device_type_reply);
+    RUN_TEST(test_scan_stops_on_non_increasing_device_types);
+    RUN_TEST(test_scan_marks_excess_device_types_truncated);
+    RUN_TEST(test_scan_does_not_mark_exact_device_type_capacity_truncated);
     RUN_TEST(test_scan_records_scene_levels);
-    RUN_TEST(test_scan_reads_bank1_identity);
+    RUN_TEST(test_scan_rejects_frame_only_transport_without_traffic);
     RUN_TEST(test_invalid_arguments_are_rejected);
     return UNITY_END();
 }
