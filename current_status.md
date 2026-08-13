@@ -877,35 +877,31 @@ its pure frame builders now also sees the scheduler and transport types.
 
 ## Installation State
 
-Each site now exists twice: a tracked reference copy at the repo root and the
-deploy copy under ignored `_local/`. Check the source column before reasoning
+Sites live only under ignored `_local/` now. What the repo root tracks is about
+the component rather than about a site. Check the source column before reasoning
 about what is running on a device — the pin, not the working tree, decides what
 gets built.
 
 | Configuration | Component source | Role |
 |---|---|---|
-| `dali_diag.yaml` | `ref: v1.0.1` | Tracked diagnostic/discovery firmware |
-| `dali_1k.yaml` | `type: local` | Tracked reference copy of the first-floor site |
-| `dali_2k.yaml` | `type: local` | Tracked reference copy of the second-floor site |
+| `dali_diag.yaml` | `ref: dev` | Tracked diagnostic/discovery firmware |
+| `dali_test.yaml` | `type: local` | Tracked CI coverage config; fictitious layout, never flashed |
 | `_local/dali-1k.yaml` | `ref: dev` | Deploy copy; 16 control gear and group entities for groups 0/2/3/4/5/6/7 |
 | `_local/dali-2k.yaml` | `ref: dev` | Deploy copy; group 0 lighting, HA console, and Steinel HF 360 II polling |
 
-The tracked copies use `type: local` with `path: esphome/components` so that a
-configuration and the component it configures always agree within a commit. The
-`_local` copies keep the git pin because they are what gets flashed and the
-operator chooses when to move.
+The tracked site copies `dali_1k.yaml` and `dali_2k.yaml` are gone. Tracking a
+real deployment to obtain CI coverage was the wrong trade: they carried an
+address layout nobody else could use, and they had to be edited whenever the
+site changed. `dali_test.yaml` replaces them and keeps the property that
+mattered — `type: local` with `path: esphome/components`, so a configuration and
+the component it configures always agree within a commit — while owing nothing
+to any hardware. The `_local` copies keep the git pin because they are what gets
+flashed and the operator chooses when to move.
 
-Two consequences of that split are live right now:
-
-- The 1k site was flashed on 2026-08-12 from a temporary `type: local` edit that
-  has since been reverted, so `_local/dali-1k.yaml` names `dev` while the
-  hardware runs the working tree. The file does not describe what is deployed.
-- `_local/dali-2k.yaml` sets `poll_on_event`, which `dev` does not yet contain,
-  so it fails validation until that branch is pushed or it is pointed at
-  `type: local`. It was deliberately not reflashed: the second floor is occupied
-  at night and the brightness change is visible.
-
-Both resolve when `dev` is pushed.
+One consequence of that split is live right now: the 1k site was flashed on
+2026-08-12 from a temporary `type: local` edit that has since been reverted, so
+`_local/dali-1k.yaml` names `dev` while the hardware runs the working tree. The
+file does not describe what is deployed.
 
 The entire `_local` directory is deliberately ignored by Git. This checkout also
 contains `_local/dali-diag-local.yaml`, a compile-test copy of the tracked
@@ -1153,7 +1149,7 @@ below for what changed for an operator.
 | `main/dali_diag.c/.h` | Device half of the serial CLI: task, transports, workflows |
 | `esphome/components/dali` | Active ESPHome external component |
 | `dali_diag.yaml` | Tracked diagnostic/discovery firmware |
-| `dali_1k.yaml` / `dali_2k.yaml` | Tracked reference copies of the two site configurations |
+| `dali_test.yaml` | Tracked CI coverage config; the widest configuration this repo can compile against its own tree |
 | `_local/dali-diag-local.yaml` | Ignored compile-test copy of the diagnostic firmware |
 | `_local/secrets.yaml` | Ignored, untracked, and holds live credentials — see Installation State |
 | `_local/dali-1k.yaml` | Ignored first-floor site firmware |
@@ -1168,23 +1164,26 @@ below for what changed for an operator.
 ESPHome configuration/build:
 
 ```powershell
-esphome config  dali_1k.yaml                 # tracked copies build the in-repo component
-esphome config  dali_2k.yaml
-esphome compile dali_diag.yaml
+esphome config  dali_test.yaml               # cheapest check; builds the in-repo component
+esphome compile dali_test.yaml               # the working tree, every platform
+esphome compile dali_diag.yaml               # whatever ref it pins, not the working tree
 esphome compile _local/dali-1k.yaml          # deploy copies; whatever they pin
 esphome compile _local/dali-2k.yaml
 ```
 
 `esphome config` is the cheap check and is what to reach for first: it validates
 the schema without touching a build directory, so it cannot collide with a
-compile already running in another terminal.
+compile already running in another terminal. It does not run `to_code()`, so a
+codegen error still needs a compile to surface.
 
-To prove uncommitted component changes actually build, compile a tracked copy —
-`dali_1k.yaml` and `dali_2k.yaml` resolve `type: local` against
-`esphome/components`, so they compile the working tree by construction. Give a
-throwaway copy a different `esphome: name:` if the real site's build directory
-must not be disturbed. `_local/dali-diag-local.yaml` remains the diagnostic
-equivalent, with `path: ../esphome/components` for its location.
+To prove uncommitted component changes actually build, compile `dali_test.yaml`
+— it resolves `type: local` against `esphome/components`, so it compiles the
+working tree by construction, and it declares every platform and every optional
+block on purpose. `_local/dali-diag-local.yaml` is the diagnostic equivalent,
+with `path: ../esphome/components` for its location.
+
+An option added to the schema without being added to `dali_test.yaml` is an
+option nothing compiles. Extend that file in the same change.
 
 Native ESP-IDF:
 
@@ -1212,23 +1211,38 @@ on 2026-08-12 and has not yet been observed passing on GitHub.
 | `host-tests.yml` | `test` | 26 host suites, cmake/ctest over `test/` | push main/dev, PR to main |
 | `idf-build.yml` | `build` | native firmware, `idf.py build` for esp32 on IDF 6.0.1 | push main/dev, PR to main |
 | `esphome-build.yml` | `sources` | sources ↔ `proto_dali_*.c` shims ↔ CMakeLists `SRCS` agree | push main/dev, PR to main |
-| | `config` | Python schema and pin validators against `dali_1k`/`dali_2k` | " |
-| | `compile` | ESPHome C++ and vendored C, both configs in parallel | " |
-| | `pinned-tag-config` | `dali_diag.yaml` still validates against the tag it pins | " |
+| | `discover` | finds the tracked `dali*.yaml` and sorts them by component source | " |
+| | `config` | Python schema and pin validators, one check per discovered config | " |
+| | `compile` | ESPHome C++ and vendored C, per locally-sourced config, in parallel | " |
 | `release-packaging.yml` | `clean-checkout` | `esphome compile` from a git tag in an empty directory | tag `v*`, manual |
 
 Notes an operator needs:
 
+- `esphome-build.yml` names no configuration. `discover` runs
+  `git ls-files 'dali*.yaml'`, so a config added to the repo is covered without
+  editing the workflow, and a removed one stops being referenced by a job that
+  would then fail looking for it.
+- `discover` sorts what it finds by whether `external_components` says
+  `type: local`. Those build the tree under test and are compiled;
+  `dali_test.yaml` is the only one today and exists for that purpose. A config
+  pinning `type: git` at a ref is validated only — ESPHome would fetch and
+  compile that ref instead of the branch, so a 20-minute build would report on
+  code the pull request never touched.
+- Validating a pinned config is still worth its minute, and a failure there does
+  not mean the branch is broken. It means the tracked config has drifted out of
+  schema with the ref it names, and either the pin or the config needs updating
+  before release. The per-config `config` matrix keeps that legible in the checks
+  list rather than buried in a shared log.
+- If no tracked config uses `type: local`, `compile` is skipped and the ESPHome
+  C++ layer gets no CI coverage at all. `discover` emits a `::warning::` for
+  that case, but a run can still go green — do not delete `dali_test.yaml`
+  without replacing what it covers.
 - `secrets.yaml` is gitignored, so every ESPHome job writes its own dummy one at
-  the values the tracked configs reference. The clean-room job needs none: the
+  the values the tracked configs reference. `dali_test.yaml` needs none of them:
+  its credentials are inline dummies, so it validates in a bare checkout,
+  including a fork's first CI run. The clean-room job needs none either — the
   component's only ESPHome dependency is `esp32`, so its consumer config carries
   no wifi, api, or ota.
-- The `compile` matrix builds both site configs because they cover different
-  platform modules — `dali_1k` has light/number/button/text, `dali_2k` adds the
-  sensor platform and its polling paths, which nothing else in CI compiles.
-- A `pinned-tag-config` failure does not mean the branch is broken. It means the
-  tracked diagnostic config has drifted out of schema with the release tag it
-  names, and either the pin or the config needs updating before release.
 - `release-packaging.yml` deliberately never runs `actions/checkout` and caches
   nothing. Run it inside a repo checkout and it passes for the wrong reason.
   `workflow_dispatch` takes a ref, so a branch can be packaging-tested before it

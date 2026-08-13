@@ -77,13 +77,37 @@ static bool            s_reset_applying;
 static DaliSchedResetCompletionCb s_reset_completion_cb;
 static void           *s_reset_completion_ctx;
 
-/* Unsolicited raw-event routing */
-static DaliSchedEventCb s_event_cb;
-static void            *s_event_cb_ctx;
+/*
+ * Unsolicited raw-event and diagnostic trace routing.
+ *
+ * Both are subscriber tables rather than single callbacks: the ESPHome
+ * integration's Part 103 dispatch and a diagnostic shell session's capture both
+ * want the raw event stream at the same time, and neither can be asked to
+ * yield it.
+ *
+ * Slot 0 of each table is reserved for dali_sched_set_*_callback(), so that
+ * older single-consumer callers keep replacing their own registration instead
+ * of accumulating one per call.
+ *
+ * A slot is published cb-last and retired cb-first. The fan-out reads cb once
+ * and only dereferences ctx when cb was non-NULL, so a subscriber added or
+ * removed while the owner task is running is seen either wholly or not at all,
+ * never with a mismatched ctx.
+ */
+#define SCHED_PRIMARY_SLOT 0u
 
-/* Diagnostic trace routing */
-static DaliSchedTraceCb s_trace_cb;
-static void            *s_trace_cb_ctx;
+typedef struct {
+    DaliSchedEventCb cb;
+    void            *ctx;
+} SchedEventSubscriber;
+
+typedef struct {
+    DaliSchedTraceCb cb;
+    void            *ctx;
+} SchedTraceSubscriber;
+
+static SchedEventSubscriber s_event_subs[DALI_SCHED_MAX_EVENT_SUBSCRIBERS];
+static SchedTraceSubscriber s_trace_subs[DALI_SCHED_MAX_TRACE_SUBSCRIBERS];
 static uint32_t         s_last_tx_us;
 static bool             s_have_last_tx_us;
 static uint32_t         s_tx_guard_started_us;
@@ -228,11 +252,21 @@ static bool sched_finish_active_step(DaliError result, const DaliFrame *reply)
     return true;
 }
 
+static bool sched_has_trace_subscriber(void)
+{
+    for (uint8_t i = 0u; i < DALI_SCHED_MAX_TRACE_SUBSCRIBERS; i++) {
+        if (s_trace_subs[i].cb != NULL) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void sched_trace(DaliSchedTraceDirection direction,
                         const DaliFrame *frame,
                         uint32_t timestamp_us)
 {
-    if (s_trace_cb == NULL || frame == NULL) {
+    if (frame == NULL || !sched_has_trace_subscriber()) {
         return;
     }
 
@@ -249,7 +283,14 @@ static void sched_trace(DaliSchedTraceDirection direction,
         event.has_since_tx = true;
     }
 
-    s_trace_cb(&event, s_trace_cb_ctx);
+    /* Every subscriber gets the same event value. Passing the same pointer is
+     * safe only because the contract forbids a subscriber from modifying it. */
+    for (uint8_t i = 0u; i < DALI_SCHED_MAX_TRACE_SUBSCRIBERS; i++) {
+        DaliSchedTraceCb cb = s_trace_subs[i].cb;
+        if (cb != NULL) {
+            cb(&event, s_trace_subs[i].ctx);
+        }
+    }
 }
 
 static bool sched_is_unsolicited_event_frame(const DaliFrame *frame)
@@ -263,13 +304,31 @@ static bool sched_can_route_unsolicited_event(void)
     return s_state == SCHED_IDLE || s_state == SCHED_WAIT_REPLY;
 }
 
+static bool sched_has_event_subscriber(void)
+{
+    for (uint8_t i = 0u; i < DALI_SCHED_MAX_EVENT_SUBSCRIBERS; i++) {
+        if (s_event_subs[i].cb != NULL) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void sched_route_unsolicited_or_ignore(const DaliFrame *frame)
 {
     if (sched_can_route_unsolicited_event() &&
         sched_is_unsolicited_event_frame(frame) &&
-        s_event_cb != NULL) {
+        sched_has_event_subscriber()) {
+        /* Counts frames routed, not deliveries: the counter answers "did this
+         * frame reach the application", which does not change with the number
+         * of subscribers listening to it. */
         g_dali_stats.unsolicited_events_routed++;
-        s_event_cb(frame, s_event_cb_ctx);
+        for (uint8_t i = 0u; i < DALI_SCHED_MAX_EVENT_SUBSCRIBERS; i++) {
+            DaliSchedEventCb cb = s_event_subs[i].cb;
+            if (cb != NULL) {
+                cb(frame, s_event_subs[i].ctx);
+            }
+        }
         return;
     }
     g_dali_stats.rx_ignored_outside_reply++;
@@ -502,10 +561,8 @@ DaliError dali_sched_init(const DaliSchedOps *ops)
     memset(&s_active_sequence, 0, sizeof(s_active_sequence));
     memset(&s_sequence_result, 0, sizeof(s_sequence_result));
     s_sequence_result.failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
-    s_event_cb        = NULL;
-    s_event_cb_ctx    = NULL;
-    s_trace_cb        = NULL;
-    s_trace_cb_ctx    = NULL;
+    memset(s_event_subs, 0, sizeof(s_event_subs));
+    memset(s_trace_subs, 0, sizeof(s_trace_subs));
     s_last_tx_us      = 0u;
     s_have_last_tx_us = false;
     s_tx_guard_started_us = 0u;
@@ -787,14 +844,148 @@ bool dali_sequence_result_last_reply(const DaliSequenceResult *result,
     return false;
 }
 
+/* ---------------------------------------------------------------------------
+ * Subscriber registration
+ *
+ * Registration mutates a table the owner task reads without locking, so each
+ * write orders itself: a slot is filled ctx-first then published by writing cb,
+ * and retired by clearing cb before ctx. The critical section makes concurrent
+ * registrations exclusive of each other; it does not and need not exclude the
+ * owner task's fan-out.
+ * --------------------------------------------------------------------------*/
+
+DaliError dali_sched_add_event_subscriber(DaliSchedEventCb cb, void *cb_ctx)
+{
+    if (!s_initialized || cb == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliError result = DALI_ERR_FULL;
+    SCHED_ENTER_CRITICAL();
+    /* Slot 0 belongs to dali_sched_set_event_callback(); a caller using both
+     * APIs for the same consumer wants two registrations, not a silent merge. */
+    for (uint8_t i = SCHED_PRIMARY_SLOT + 1u;
+         i < DALI_SCHED_MAX_EVENT_SUBSCRIBERS; i++) {
+        if (s_event_subs[i].cb == cb && s_event_subs[i].ctx == cb_ctx) {
+            result = DALI_OK;  /* already registered; do not duplicate */
+            break;
+        }
+    }
+    if (result != DALI_OK) {
+        for (uint8_t i = SCHED_PRIMARY_SLOT + 1u;
+             i < DALI_SCHED_MAX_EVENT_SUBSCRIBERS; i++) {
+            if (s_event_subs[i].cb == NULL) {
+                s_event_subs[i].ctx = cb_ctx;
+                s_event_subs[i].cb  = cb;  /* publishes the slot */
+                result = DALI_OK;
+                break;
+            }
+        }
+    }
+    SCHED_EXIT_CRITICAL();
+    return result;
+}
+
+DaliError dali_sched_remove_event_subscriber(DaliSchedEventCb cb, void *cb_ctx)
+{
+    if (!s_initialized) {
+        return DALI_ERR_INVALID;
+    }
+
+    SCHED_ENTER_CRITICAL();
+    for (uint8_t i = 0u; i < DALI_SCHED_MAX_EVENT_SUBSCRIBERS; i++) {
+        if (s_event_subs[i].cb == cb && s_event_subs[i].ctx == cb_ctx) {
+            s_event_subs[i].cb  = NULL;  /* retires the slot before its ctx */
+            s_event_subs[i].ctx = NULL;
+            break;
+        }
+    }
+    SCHED_EXIT_CRITICAL();
+    return DALI_OK;
+}
+
+uint8_t dali_sched_event_subscriber_count(void)
+{
+    uint8_t count = 0u;
+    for (uint8_t i = 0u; i < DALI_SCHED_MAX_EVENT_SUBSCRIBERS; i++) {
+        if (s_event_subs[i].cb != NULL) {
+            count++;
+        }
+    }
+    return count;
+}
+
 DaliError dali_sched_set_event_callback(DaliSchedEventCb cb, void *cb_ctx)
 {
     if (!s_initialized) {
         return DALI_ERR_INVALID;
     }
-    s_event_cb     = cb;
-    s_event_cb_ctx = cb != NULL ? cb_ctx : NULL;
+
+    SCHED_ENTER_CRITICAL();
+    s_event_subs[SCHED_PRIMARY_SLOT].cb  = NULL;  /* retire before rebinding */
+    s_event_subs[SCHED_PRIMARY_SLOT].ctx = cb != NULL ? cb_ctx : NULL;
+    s_event_subs[SCHED_PRIMARY_SLOT].cb  = cb;
+    SCHED_EXIT_CRITICAL();
     return DALI_OK;
+}
+
+DaliError dali_sched_add_trace_subscriber(DaliSchedTraceCb cb, void *cb_ctx)
+{
+    if (!s_initialized || cb == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliError result = DALI_ERR_FULL;
+    SCHED_ENTER_CRITICAL();
+    for (uint8_t i = SCHED_PRIMARY_SLOT + 1u;
+         i < DALI_SCHED_MAX_TRACE_SUBSCRIBERS; i++) {
+        if (s_trace_subs[i].cb == cb && s_trace_subs[i].ctx == cb_ctx) {
+            result = DALI_OK;
+            break;
+        }
+    }
+    if (result != DALI_OK) {
+        for (uint8_t i = SCHED_PRIMARY_SLOT + 1u;
+             i < DALI_SCHED_MAX_TRACE_SUBSCRIBERS; i++) {
+            if (s_trace_subs[i].cb == NULL) {
+                s_trace_subs[i].ctx = cb_ctx;
+                s_trace_subs[i].cb  = cb;
+                result = DALI_OK;
+                break;
+            }
+        }
+    }
+    SCHED_EXIT_CRITICAL();
+    return result;
+}
+
+DaliError dali_sched_remove_trace_subscriber(DaliSchedTraceCb cb, void *cb_ctx)
+{
+    if (!s_initialized) {
+        return DALI_ERR_INVALID;
+    }
+
+    SCHED_ENTER_CRITICAL();
+    for (uint8_t i = 0u; i < DALI_SCHED_MAX_TRACE_SUBSCRIBERS; i++) {
+        if (s_trace_subs[i].cb == cb && s_trace_subs[i].ctx == cb_ctx) {
+            s_trace_subs[i].cb  = NULL;
+            s_trace_subs[i].ctx = NULL;
+            break;
+        }
+    }
+    SCHED_EXIT_CRITICAL();
+    return DALI_OK;
+}
+
+uint8_t dali_sched_trace_subscriber_count(void)
+{
+    uint8_t count = 0u;
+    for (uint8_t i = 0u; i < DALI_SCHED_MAX_TRACE_SUBSCRIBERS; i++) {
+        if (s_trace_subs[i].cb != NULL) {
+            count++;
+        }
+    }
+    return count;
 }
 
 DaliError dali_sched_set_trace_callback(DaliSchedTraceCb cb, void *cb_ctx)
@@ -802,8 +993,12 @@ DaliError dali_sched_set_trace_callback(DaliSchedTraceCb cb, void *cb_ctx)
     if (!s_initialized) {
         return DALI_ERR_INVALID;
     }
-    s_trace_cb     = cb;
-    s_trace_cb_ctx = cb != NULL ? cb_ctx : NULL;
+
+    SCHED_ENTER_CRITICAL();
+    s_trace_subs[SCHED_PRIMARY_SLOT].cb  = NULL;
+    s_trace_subs[SCHED_PRIMARY_SLOT].ctx = cb != NULL ? cb_ctx : NULL;
+    s_trace_subs[SCHED_PRIMARY_SLOT].cb  = cb;
+    SCHED_EXIT_CRITICAL();
     return DALI_OK;
 }
 

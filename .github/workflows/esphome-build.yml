@@ -10,10 +10,25 @@ name: ESPHome Build
 #
 # Jobs, cheapest first:
 #
-#   sources           source/shim/CMakeLists manifests agree (seconds)
-#   config            Python schema + every tracked in-repo YAML (~1 min)
-#   compile           full C++ and vendored C, per YAML, in parallel (~5-20 min)
-#   pinned-tag-config the released tag dali_diag.yaml names still validates
+#   sources   source/shim/CMakeLists manifests agree (seconds)
+#   discover  find the tracked configs and sort them by component source
+#   config    Python schema + every discovered YAML, one check each (~1 min)
+#   compile   full C++ and vendored C, per buildable YAML, in parallel (~5-20 min)
+#
+# Which YAMLs: whatever `git ls-files dali*.yaml` finds. Nothing is named here,
+# so a config added to the repo is covered without editing this file, and a
+# config removed from it stops being referenced by a job that would then fail
+# looking for it.
+#
+# Why discover sorts them. A config that says `type: local` builds the tree
+# under test, so compiling it means something — dali_test.yaml exists for
+# exactly that and is deliberately the widest config here. A config that pins
+# `type: git` at a ref describes what a *user* builds; ESPHome would fetch that
+# ref and compile it instead of the branch, so a 20-minute build would report
+# on code the pull request never touched. Those are validated only, which is
+# still worth doing: it catches a tracked config drifting out of schema with
+# the ref it names, and either the pin or the config then needs updating before
+# release.
 #
 # The clean-room packaging build — the one that proves a consumer can build
 # from a release tag with none of this repo around it — is release-packaging.yml.
@@ -64,14 +79,79 @@ jobs:
           done
           exit $fail
 
-  config:
-    name: esphome config (in-repo YAML)
+  discover:
+    name: Discover in-repo configs
     runs-on: ubuntu-latest
+
+    outputs:
+      all: ${{ steps.find.outputs.all }}
+      buildable: ${{ steps.find.outputs.buildable }}
+      any_buildable: ${{ steps.find.outputs.any_buildable }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Find tracked dali*.yaml and sort by component source
+        id: find
+        run: |
+          # git ls-files rather than a shell glob: only tracked files count, so
+          # a scratch config left in a working tree cannot break a CI run, and
+          # an unmatched glob cannot degrade into the literal pattern.
+          mapfile -t configs < <(git ls-files 'dali*.yaml' 'dali*.yml')
+
+          if [ ${#configs[@]} -eq 0 ]; then
+            echo "::error::no tracked dali*.yaml found; nothing for this workflow to check"
+            exit 1
+          fi
+
+          buildable=()
+          for cfg in "${configs[@]}"; do
+            # `type: local` under external_components is what makes a config
+            # build this checkout. Anything else (a git ref) would fetch and
+            # compile someone else's tree — see the note at the top.
+            if grep -Eq '^[[:space:]]*type:[[:space:]]*local[[:space:]]*$' "$cfg"; then
+              buildable+=("$cfg")
+              echo "  $cfg -> validate + compile (local component source)"
+            else
+              echo "  $cfg -> validate only (external component source)"
+            fi
+          done
+
+          to_json() {
+            if [ "$#" -eq 0 ]; then printf '[]'; else printf '%s\n' "$@" | jq -R -s -c 'split("\n") | map(select(length > 0))'; fi
+          }
+
+          {
+            echo "all=$(to_json "${configs[@]}")"
+            echo "buildable=$(to_json "${buildable[@]}")"
+            echo "any_buildable=$([ ${#buildable[@]} -gt 0 ] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ ${#buildable[@]} -eq 0 ]; then
+            echo "::warning::no config builds from this checkout, so nothing will be compiled." \
+                 "A config with external_components source 'type: local' is what gives the" \
+                 "ESPHome C++ layer and the vendored C stack any CI coverage at all."
+          fi
+
+  config:
+    name: esphome config (${{ matrix.config }})
+    runs-on: ubuntu-latest
+    needs: [discover]
 
     # Exercises the Python schema in esphome/components/dali/__init__.py and
     # each platform's __init__.py, including the GPIO capability validators,
     # against the configs this repo actually ships. This is the job that would
     # have caught poll_on_event breaking validation on 2026-08-12.
+    #
+    # One check per config rather than one command over all of them: when a
+    # config that pins a release ref fails, that is a different finding from a
+    # broken schema, and it should be legible as such in the checks list
+    # instead of buried in a shared log.
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON(needs.discover.outputs.all) }}
+
     steps:
       - uses: actions/checkout@v7
 
@@ -98,21 +178,22 @@ jobs:
           EOF
 
       - name: Validate
-        run: esphome config dali_1k.yaml dali_2k.yaml
+        run: esphome config ${{ matrix.config }}
 
   compile:
     name: esphome compile (${{ matrix.config }})
     runs-on: ubuntu-latest
-    needs: [sources, config]
+    needs: [sources, discover, config]
+    if: needs.discover.outputs.any_buildable == 'true'
 
     # The only thing in this repo that compiles the ESPHome C++ layer and the
-    # vendored C stack together. Both configs are built because they cover
-    # different platform modules: 1k has light/number/button/text, 2k adds the
-    # sensor platform and its polling paths, which nothing else here compiles.
+    # vendored C stack together, which is why dali_test.yaml is written to be
+    # the widest config here — every platform, every optional block. An option
+    # no tracked config names is an option nothing compiles.
     strategy:
       fail-fast: false
       matrix:
-        config: [dali_1k.yaml, dali_2k.yaml]
+        config: ${{ fromJSON(needs.discover.outputs.buildable) }}
 
     steps:
       - uses: actions/checkout@v7
@@ -153,42 +234,3 @@ jobs:
 
       - name: Compile
         run: esphome compile ${{ matrix.config }}
-
-  pinned-tag-config:
-    name: esphome config (dali_diag.yaml, pinned tag)
-    runs-on: ubuntu-latest
-
-    # dali_diag.yaml consumes the component the way a user does — type: git at
-    # a release tag — so this validates a *released* component against a
-    # *current* tracked config. A failure here does not mean the branch under
-    # test is broken; it means the tracked diagnostic config has drifted out of
-    # schema with the tag it pins, and either the pin or the config needs
-    # updating before release. Kept as its own job so that attribution is
-    # visible in the checks list rather than buried in a shared log.
-    steps:
-      - uses: actions/checkout@v7
-
-      # No `cache: pip` here: it needs a requirements.txt or pyproject.toml to
-      # key on, and this repo has neither, so it fails the job outright rather
-      # than degrading to a miss.
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-
-      - name: Install ESPHome
-        run: pip install esphome
-
-      - name: Write dummy secrets
-        run: |
-          cat > secrets.yaml <<'EOF'
-          # CI COMPILE-ONLY SECRETS — generated per run, never deployed.
-          wifi_ssid: "DUMMY_COMPILE_ONLY_NETWORK"
-          wifi_ssid2: "DUMMY_COMPILE_ONLY_NETWORK"
-          wifi_password: "DUMMY-COMPILE-ONLY"
-          ap_password: "DUMMY-COMPILE-ONLY"
-          api_encryption_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-          ota_password: "DUMMY-COMPILE-ONLY"
-          EOF
-
-      - name: Validate against the pinned release tag
-        run: esphome config dali_diag.yaml

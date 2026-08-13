@@ -207,16 +207,63 @@ void dali_sched_run(void);
  */
 void dali_sched_notify_rx(const DaliFrame *frame);
 
-/*
- * Register a raw unsolicited-event callback.
- * Passing NULL disables event routing.
- */
-DaliError dali_sched_set_event_callback(DaliSchedEventCb cb, void *cb_ctx);
+/* ---------------------------------------------------------------------------
+ * Event and trace subscribers
+ *
+ * Both streams fan out to several subscribers, because more than one consumer
+ * legitimately wants them at once: the ESPHome integration routes unsolicited
+ * events into its Part 103 dispatch table while a diagnostic shell session is
+ * capturing the same frames, and neither can be asked to give the stream up so
+ * the other can have it.
+ *
+ * Ordering is registration order, and every subscriber sees every frame; a
+ * subscriber that consumes a frame does not hide it from the next one.
+ *
+ * A subscriber runs in the scheduler owner task, under the same contract the
+ * single callback always had: no blocking, no allocation, no re-entry into the
+ * scheduler.
+ *
+ * Lifetime: register before the DALI task starts and leave registered. A
+ * subscriber removed while that task is running can still be entered once more,
+ * because the fan-out may already have read the slot, so its ctx must stay
+ * valid for at least one scheduler pass after removal. Removal exists for host
+ * tests and for teardown paths that have already quiesced the task; a session
+ * that comes and goes should stay registered and gate on its own state instead.
+ * --------------------------------------------------------------------------*/
+
+#define DALI_SCHED_MAX_EVENT_SUBSCRIBERS 3u
+#define DALI_SCHED_MAX_TRACE_SUBSCRIBERS 3u
 
 /*
- * Register a task-context frame trace callback.
- * Passing NULL disables trace routing.
+ * Add a subscriber. The same (cb, ctx) pair registered twice is accepted once
+ * and reported as DALI_OK, so a front end that cannot cheaply tell whether it
+ * has already registered does not have to track it.
+ *
+ * Returns DALI_ERR_FULL when every slot is taken, DALI_ERR_INVALID for a NULL
+ * callback or before dali_sched_init().
  */
+DaliError dali_sched_add_event_subscriber(DaliSchedEventCb cb, void *cb_ctx);
+DaliError dali_sched_add_trace_subscriber(DaliSchedTraceCb cb, void *cb_ctx);
+
+/* Remove one subscriber. Removing one that is not registered is DALI_OK. */
+DaliError dali_sched_remove_event_subscriber(DaliSchedEventCb cb, void *cb_ctx);
+DaliError dali_sched_remove_trace_subscriber(DaliSchedTraceCb cb, void *cb_ctx);
+
+/* How many subscribers are currently registered, for diagnostics and tests. */
+uint8_t dali_sched_event_subscriber_count(void);
+uint8_t dali_sched_trace_subscriber_count(void);
+
+/*
+ * Register the single "primary" callback.
+ *
+ * These predate the fan-out and are kept because most callers genuinely have
+ * exactly one consumer and should not have to think about removal. Each owns
+ * one reserved subscriber slot: calling it again replaces what the previous
+ * call installed rather than adding a second subscriber, and passing NULL
+ * releases the slot. Subscribers added with the functions above are untouched
+ * either way.
+ */
+DaliError dali_sched_set_event_callback(DaliSchedEventCb cb, void *cb_ctx);
 DaliError dali_sched_set_trace_callback(DaliSchedTraceCb cb, void *cb_ctx);
 
 /*

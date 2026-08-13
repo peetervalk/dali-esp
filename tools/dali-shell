@@ -1,0 +1,389 @@
+#!/usr/bin/env python3
+"""
+dali-shell — terminal client for the DALI diagnostic shell.
+
+Drop this into the Home Assistant "Advanced SSH & Web Terminal" add-on (or any
+host that can reach the device) and run it:
+
+    ./dali-shell                          interactive session
+    ./dali-shell discover                 run one command and exit
+    ./dali-shell export inventory > /config/dali_inventory.json
+
+The device end is components/dali/dali_shell.c, reached over the TCP front end
+configured by the `shell:` block in the ESPHome YAML.
+
+WHAT THIS IS NOT
+    It holds no knowledge of DALI. Every verb, every argument rule, and every
+    reply format belongs to the firmware, which is what keeps this client and
+    the serial console showing the same shell. `nc <host> 2323` remains a
+    complete, if unfriendly, substitute for this program.
+
+WHAT IT ADDS
+    line editing and history, tab completion driven by the device's own command
+    tables (the `schema` verb), and a one-shot mode so output composes with
+    shell redirection — which is what turns a scan into a file in /config
+    instead of a log you have to post-process.
+
+DEPENDENCIES
+    The standard library only, and it degrades rather than fails if `readline`
+    is missing. Nothing here needs installing, so nothing here breaks when the
+    add-on updates.
+"""
+
+import argparse
+import json
+import os
+import socket
+import sys
+
+try:
+    import readline
+except ImportError:  # Windows, or a stripped build
+    readline = None
+
+DEFAULT_HOST = os.environ.get("DALI_SHELL_HOST", "dali-diag.local")
+DEFAULT_PORT = int(os.environ.get("DALI_SHELL_PORT", "2323"))
+HISTORY_FILE = os.path.expanduser("~/.dali_shell_history")
+HISTORY_LEN = 1000
+
+# The device writes this after every dispatched line and nothing else omits a
+# trailing newline, which is what makes it usable as an end-of-reply marker.
+PROMPT = "> "
+
+# `find switches 300` is the longest verb by design. The socket read timeout is
+# short and independent of this so Ctrl-C stays responsive.
+DEFAULT_COMMAND_TIMEOUT = 400.0
+SOCKET_POLL_TIMEOUT = 0.5
+
+
+class ShellError(Exception):
+    pass
+
+
+def _normalise_stdout():
+    """
+    Emit LF regardless of platform.
+
+    The device ends every line with CRLF, and Python's text-mode stdout adds a
+    second CR on Windows. Left alone, `dali-shell export inventory > file`
+    produces a file with CRLF endings, which matters when the destination is
+    YAML or JSON that something else has to parse.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(newline="\n", errors="replace")
+        except (AttributeError, ValueError):
+            pass  # older Python, or a stream that cannot be reconfigured
+
+
+class DaliShell:
+    """One connection to the device, and the read loop that frames replies."""
+
+    def __init__(self, host, port, timeout=DEFAULT_COMMAND_TIMEOUT):
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self.sock = None
+
+    # ── connection ──────────────────────────────────────────────────────────
+
+    def connect(self):
+        try:
+            self.sock = socket.create_connection((self.host, self.port), timeout=10)
+        except OSError as exc:
+            raise ShellError(f"cannot reach {self.host}:{self.port}: {exc}") from exc
+        self.sock.settimeout(SOCKET_POLL_TIMEOUT)
+
+        # The device greets with a banner and a prompt; consume both so the
+        # first command's reply starts at a known point in the stream.
+        banner = self._read_until_prompt(echo_to=None, deadline_s=10.0)
+        if "busy" in banner.lower():
+            raise ShellError(
+                "the device already has a shell session open.\n"
+                "Only one is allowed at a time; it is reclaimed by the idle "
+                "timeout set in the YAML."
+            )
+        return banner
+
+    def close(self):
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            finally:
+                self.sock = None
+
+    # ── command / reply ─────────────────────────────────────────────────────
+
+    def run(self, line, echo_to=sys.stdout):
+        """
+        Send one line and stream the reply.
+
+        Output is written as it arrives rather than collected and returned at
+        the end: a discover prints for tens of seconds and a find for minutes,
+        and watching it work is most of its value.
+        """
+        if self.sock is None:
+            raise ShellError("not connected")
+
+        # CRLF is what a network client should send; the device swallows the LF
+        # of the pair rather than reading it as a second, empty line.
+        self.sock.sendall((line + "\r\n").encode("utf-8", "replace"))
+        return self._read_until_prompt(echo_to=echo_to, suppress_echo_of=line)
+
+    def _read_until_prompt(self, echo_to, suppress_echo_of=None, deadline_s=None):
+        """
+        Read until the device writes its prompt.
+
+        The device echoes the line it was given before running it, which a
+        client with its own line editing has already shown the operator. That
+        first line is dropped rather than printed twice.
+        """
+        deadline = (deadline_s if deadline_s is not None else self.timeout)
+        collected = []
+        buf = ""
+        echo_line = f"{PROMPT}{suppress_echo_of}" if suppress_echo_of is not None else None
+        echo_dropped = echo_line is None
+        elapsed = 0.0
+
+        while True:
+            # Emit whole lines as they complete, holding back any partial tail.
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                clean = line.rstrip("\r")
+                if not echo_dropped and clean == echo_line:
+                    echo_dropped = True
+                    continue
+                collected.append(clean)
+                if echo_to is not None:
+                    print(clean, file=echo_to, flush=True)
+
+            # A tail with no newline is the prompt, and the reply is complete.
+            if buf == PROMPT or buf.endswith("\n" + PROMPT):
+                return "\n".join(collected)
+
+            try:
+                chunk = self.sock.recv(4096)
+            except socket.timeout:
+                elapsed += SOCKET_POLL_TIMEOUT
+                if elapsed >= deadline:
+                    raise ShellError(
+                        f"no prompt after {deadline:.0f}s; the device may still "
+                        f"be working. Reconnect to see its state."
+                    )
+                continue
+            except OSError as exc:
+                raise ShellError(f"connection lost: {exc}") from exc
+
+            if not chunk:
+                raise ShellError("device closed the connection")
+            buf += chunk.decode("utf-8", "replace")
+
+    # ── schema ──────────────────────────────────────────────────────────────
+
+    def fetch_schema(self):
+        """
+        Ask the device what it accepts.
+
+        Completion built from a table written here would be wrong the first
+        time a verb gained an argument, and wrong in the worst way: confidently
+        offering something the firmware refuses. Asking the device means this
+        client is stale only when the firmware is.
+        """
+        try:
+            raw = self.run("schema", echo_to=None)
+            return json.loads(raw)
+        except (ShellError, json.JSONDecodeError):
+            # An older firmware has no `schema` verb. History and editing still
+            # work; only completion is lost.
+            return None
+
+
+class Completer:
+    """Context-aware completion over the tables the device reported."""
+
+    def __init__(self, schema):
+        self.schema = schema
+        self.verbs = {v["name"]: v for v in schema.get("verbs", [])}
+        self.tables = {
+            name: [entry["name"] if isinstance(entry, dict) else entry
+                   for entry in schema.get(name, [])]
+            for name in ("query", "special", "config", "dt6", "dt8",
+                         "iquery", "iconfig")
+        }
+        # Which table completes at which argument position, per verb. Anything
+        # not listed falls back to no completion, which is better than offering
+        # the wrong table.
+        self.arg_tables = {
+            "query": {2: "query"},
+            "config": {2: "config"},
+            "config-dtr0": {2: "config"},
+            "special": {1: "special"},
+            "dt6": {2: "dt6"},
+            "dt8": {2: "dt8"},
+            "iquery": {3: "iquery"},
+            "iconfig": {3: "iconfig"},
+        }
+
+    def candidates(self, line, word):
+        tokens = line.split()
+        # Position of the token being completed: a trailing space means the
+        # cursor has moved on to the next one.
+        index = len(tokens) if line.endswith(" ") else max(len(tokens) - 1, 0)
+
+        if index == 0:
+            return sorted(self.verbs)
+
+        verb = tokens[0]
+        spec = self.verbs.get(verb)
+        if spec is None:
+            return []
+
+        # A verb whose first argument is a fixed keyword says so in its spec,
+        # so this needs no list of its own.
+        if index == 1 and spec.get("subcommands"):
+            return sorted(spec["subcommands"].split())
+
+        table = self.arg_tables.get(verb, {}).get(index)
+        if table:
+            return sorted(self.tables.get(table, []))
+
+        # Targets are generated rather than listed: 64 short addresses is too
+        # many to show unprompted, so they appear once a prefix narrows them.
+        if "<addr|sN|gN|b>" in spec.get("args", "") and index == 1:
+            if word.startswith("a"):
+                return [f"a{n}" for n in range(64) if f"a{n}".startswith(word)]
+            if word.startswith("g"):
+                return [f"g{n}" for n in range(16) if f"g{n}".startswith(word)]
+            return ["b"] + [f"a{n}" for n in range(10)]
+        return []
+
+    def complete(self, text, state):
+        if readline is None:
+            return None
+        try:
+            line = readline.get_line_buffer()[: readline.get_endidx()]
+            matches = [c for c in self.candidates(line, text) if c.startswith(text)]
+            return matches[state] if state < len(matches) else None
+        except Exception:
+            # A completer that raises inside readline corrupts the terminal;
+            # returning nothing merely means no suggestion.
+            return None
+
+
+def setup_readline(shell):
+    if readline is None:
+        print("note: readline unavailable: no history or completion",
+              file=sys.stderr)
+        return
+
+    try:
+        readline.read_history_file(HISTORY_FILE)
+    except OSError:
+        pass
+    readline.set_history_length(HISTORY_LEN)
+
+    schema = shell.fetch_schema()
+    if schema is None:
+        print("note: device did not answer `schema`: completion disabled",
+              file=sys.stderr)
+        return
+
+    completer = Completer(schema)
+    readline.set_completer(completer.complete)
+    readline.set_completer_delims(" \t\n")
+    readline.parse_and_bind("tab: complete")
+
+    policy = schema.get("policy", {})
+    if not policy.get("commission", False):
+        print("note: this session refuses commissioning verbs "
+              "(set allow_commissioning: true in the YAML to enable)",
+              file=sys.stderr)
+
+
+def repl(shell):
+    setup_readline(shell)
+    # A piped script wants the command output and nothing else; a prompt with
+    # no typed line after it just corrupts the transcript.
+    interactive = sys.stdin.isatty()
+    if interactive:
+        print("Connected. 'help' for commands, Ctrl-D to quit.")
+
+    while True:
+        try:
+            line = input(PROMPT) if interactive else input()
+        except EOFError:
+            print()
+            break
+        except KeyboardInterrupt:
+            print("^C")
+            continue
+
+        line = line.strip()
+        if not line:
+            continue
+        if line in ("quit", "exit"):
+            break
+
+        try:
+            shell.run(line)
+        except KeyboardInterrupt:
+            # The shell has no interrupt, but dropping the connection is one:
+            # the device polls for a departed peer between bus steps and stops
+            # the workflow rather than holding the bus for a reader that left.
+            print("\n^C - disconnecting to stop the command on the device")
+            shell.close()
+            try:
+                shell.connect()
+                print("reconnected")
+            except ShellError as exc:
+                print(f"reconnect failed: {exc}", file=sys.stderr)
+                break
+        except ShellError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            break
+
+    if readline is not None:
+        try:
+            readline.write_history_file(HISTORY_FILE)
+        except OSError:
+            pass
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Terminal client for the DALI diagnostic shell.",
+        epilog="With no command, opens an interactive session.",
+    )
+    parser.add_argument("--host", default=DEFAULT_HOST,
+                        help=f"device hostname or IP (default: {DEFAULT_HOST})")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT,
+                        help=f"shell port (default: {DEFAULT_PORT})")
+    parser.add_argument("--timeout", type=float, default=DEFAULT_COMMAND_TIMEOUT,
+                        help="seconds to wait for a command to finish")
+    parser.add_argument("command", nargs="*",
+                        help="run one command and exit, instead of the REPL")
+    args = parser.parse_args()
+    _normalise_stdout()
+
+    shell = DaliShell(args.host, args.port, timeout=args.timeout)
+    try:
+        banner = shell.connect()
+        if not args.command:
+            print(banner.strip())
+            repl(shell)
+        else:
+            # One-shot: only the command's own output reaches stdout, so
+            # redirection produces a clean file.
+            shell.run(" ".join(args.command))
+    except ShellError as exc:
+        print(f"dali-shell: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        shell.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -73,6 +73,14 @@ static DaliSchedTraceEvent g_trace_event;
 static int        g_trace_count;
 static void      *g_trace_ctx;
 static uint8_t    g_trace_marker;
+/* Second observer of each stream, for the subscriber fan-out tests. */
+static DaliFrame  g_event2_frame;
+static int        g_event2_count;
+static void      *g_event2_ctx;
+static uint8_t    g_event2_marker;
+static int        g_trace2_count;
+static void      *g_trace2_ctx;
+static uint8_t    g_trace2_marker;
 static DaliError  g_seq_result;
 static uint8_t    g_seq_failed_step;
 static DaliFrame  g_seq_reply;
@@ -141,6 +149,24 @@ static void on_trace(const DaliSchedTraceEvent *event, void *ctx)
     }
     g_trace_ctx = ctx;
     g_trace_count++;
+}
+
+static void on_event2(const DaliFrame *frame, void *ctx)
+{
+    if (frame != NULL) {
+        g_event2_frame = *frame;
+    } else {
+        memset(&g_event2_frame, 0, sizeof(g_event2_frame));
+    }
+    g_event2_ctx = ctx;
+    g_event2_count++;
+}
+
+static void on_trace2(const DaliSchedTraceEvent *event, void *ctx)
+{
+    (void)event;
+    g_trace2_ctx = ctx;
+    g_trace2_count++;
 }
 
 static void on_sequence_complete(const DaliSequenceResult *result, void *ctx)
@@ -273,6 +299,11 @@ void setUp(void)
     g_trace_count = 0;
     g_trace_ctx   = NULL;
     memset(&g_trace_event, 0, sizeof(g_trace_event));
+    g_event2_count = 0;
+    g_event2_ctx   = NULL;
+    memset(&g_event2_frame, 0, sizeof(g_event2_frame));
+    g_trace2_count = 0;
+    g_trace2_ctx   = NULL;
     g_seq_result = DALI_OK;
     g_seq_failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
     g_seq_has_reply = false;
@@ -586,6 +617,192 @@ void test_unsolicited_24bit_idle_routes_event(void)
     TEST_ASSERT_EQUAL_PTR(&g_event_marker, g_event_ctx);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.unsolicited_events_routed);
     TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_outside_reply);
+}
+
+/* ---------------------------------------------------------------------------
+ * Subscriber fan-out
+ *
+ * The integration's dispatch path and a diagnostic shell session both want the
+ * raw event stream at once. These assert that neither displaces the other, and
+ * that the counter still answers "did this frame reach the application" rather
+ * than counting one delivery per listener.
+ * --------------------------------------------------------------------------*/
+
+void test_init_starts_with_no_subscribers(void)
+{
+    TEST_ASSERT_EQUAL_UINT8(0u, dali_sched_event_subscriber_count());
+    TEST_ASSERT_EQUAL_UINT8(0u, dali_sched_trace_subscriber_count());
+}
+
+void test_event_reaches_primary_callback_and_added_subscriber(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_set_event_callback(on_event, &g_event_marker));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_add_event_subscriber(on_event2, &g_event2_marker));
+    TEST_ASSERT_EQUAL_UINT8(2u, dali_sched_event_subscriber_count());
+
+    inject_event(0x123456u);
+
+    TEST_ASSERT_EQUAL(1, g_event_count);
+    TEST_ASSERT_EQUAL(1, g_event2_count);
+    TEST_ASSERT_EQUAL_HEX32(0x123456u, g_event_frame.data);
+    TEST_ASSERT_EQUAL_HEX32(0x123456u, g_event2_frame.data);
+    TEST_ASSERT_EQUAL_PTR(&g_event_marker, g_event_ctx);
+    TEST_ASSERT_EQUAL_PTR(&g_event2_marker, g_event2_ctx);
+    /* One frame routed, not one per subscriber. */
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.unsolicited_events_routed);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_outside_reply);
+}
+
+void test_added_event_subscriber_receives_without_a_primary_callback(void)
+{
+    /* The shell must still see events on a build where nothing calls the
+     * single-callback setter. */
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_add_event_subscriber(on_event2, &g_event2_marker));
+
+    inject_event(0x123456u);
+
+    TEST_ASSERT_EQUAL(0, g_event_count);
+    TEST_ASSERT_EQUAL(1, g_event2_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.unsolicited_events_routed);
+}
+
+void test_set_event_callback_replaces_instead_of_accumulating(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_set_event_callback(on_event, &g_event_marker));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_set_event_callback(on_event, &g_event2_marker));
+    TEST_ASSERT_EQUAL_UINT8(1u, dali_sched_event_subscriber_count());
+
+    inject_event(0x123456u);
+
+    TEST_ASSERT_EQUAL(1, g_event_count);
+    TEST_ASSERT_EQUAL_PTR(&g_event2_marker, g_event_ctx);
+}
+
+void test_set_event_callback_null_releases_only_its_own_slot(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_set_event_callback(on_event, &g_event_marker));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_add_event_subscriber(on_event2, &g_event2_marker));
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_set_event_callback(NULL, NULL));
+    TEST_ASSERT_EQUAL_UINT8(1u, dali_sched_event_subscriber_count());
+
+    inject_event(0x123456u);
+
+    TEST_ASSERT_EQUAL(0, g_event_count);
+    TEST_ASSERT_EQUAL(1, g_event2_count);
+}
+
+void test_event_subscriber_add_is_idempotent(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_add_event_subscriber(on_event2, &g_event2_marker));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_add_event_subscriber(on_event2, &g_event2_marker));
+    TEST_ASSERT_EQUAL_UINT8(1u, dali_sched_event_subscriber_count());
+
+    inject_event(0x123456u);
+
+    TEST_ASSERT_EQUAL(1, g_event2_count);
+}
+
+void test_event_subscriber_same_callback_different_ctx_is_a_second_slot(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_add_event_subscriber(on_event2, &g_event2_marker));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_add_event_subscriber(on_event2, &g_event_marker));
+    TEST_ASSERT_EQUAL_UINT8(2u, dali_sched_event_subscriber_count());
+
+    inject_event(0x123456u);
+
+    TEST_ASSERT_EQUAL(2, g_event2_count);
+}
+
+void test_event_subscriber_table_full_is_reported(void)
+{
+    /* Distinct ctx values, so each add claims a slot instead of deduplicating. */
+    static uint8_t markers[DALI_SCHED_MAX_EVENT_SUBSCRIBERS];
+
+    /* Slot 0 is reserved for the primary setter, so the add path owns one
+     * fewer slot than the table holds. */
+    for (uint8_t i = 0u; i < DALI_SCHED_MAX_EVENT_SUBSCRIBERS - 1u; i++) {
+        TEST_ASSERT_EQUAL(DALI_OK,
+                          dali_sched_add_event_subscriber(on_event2, &markers[i]));
+    }
+    TEST_ASSERT_EQUAL(DALI_ERR_FULL,
+                      dali_sched_add_event_subscriber(on_event, &g_event_marker));
+    /* A full add table does not cost the primary setter its reserved slot. */
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_set_event_callback(on_event, &g_event_marker));
+
+    inject_event(0x123456u);
+    TEST_ASSERT_EQUAL(1, g_event_count);
+}
+
+void test_event_subscriber_removal_stops_delivery(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_add_event_subscriber(on_event2, &g_event2_marker));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_remove_event_subscriber(on_event2, &g_event2_marker));
+    TEST_ASSERT_EQUAL_UINT8(0u, dali_sched_event_subscriber_count());
+
+    inject_event(0x123456u);
+
+    TEST_ASSERT_EQUAL(0, g_event2_count);
+    /* With nothing listening the frame is ignored, not routed. */
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.unsolicited_events_routed);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+}
+
+void test_removing_an_unregistered_event_subscriber_is_ok(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_remove_event_subscriber(on_event2, &g_event2_marker));
+    TEST_ASSERT_EQUAL_UINT8(0u, dali_sched_event_subscriber_count());
+}
+
+void test_event_subscriber_rejects_null_callback(void)
+{
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_sched_add_event_subscriber(NULL, &g_event2_marker));
+    TEST_ASSERT_EQUAL_UINT8(0u, dali_sched_event_subscriber_count());
+}
+
+void test_trace_reaches_primary_callback_and_added_subscriber(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_set_trace_callback(on_trace, &g_trace_marker));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_add_trace_subscriber(on_trace2, &g_trace2_marker));
+    TEST_ASSERT_EQUAL_UINT8(2u, dali_sched_trace_subscriber_count());
+
+    inject_event(0x123456u);
+
+    TEST_ASSERT_EQUAL(1, g_trace_count);
+    TEST_ASSERT_EQUAL(1, g_trace2_count);
+    TEST_ASSERT_EQUAL_PTR(&g_trace_marker, g_trace_ctx);
+    TEST_ASSERT_EQUAL_PTR(&g_trace2_marker, g_trace2_ctx);
+    TEST_ASSERT_EQUAL(DALI_SCHED_TRACE_RX, g_trace_event.direction);
+}
+
+void test_trace_subscriber_removal_stops_delivery(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_add_trace_subscriber(on_trace2, &g_trace2_marker));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_remove_trace_subscriber(on_trace2, &g_trace2_marker));
+
+    inject_event(0x123456u);
+
+    TEST_ASSERT_EQUAL(0, g_trace2_count);
 }
 
 void test_unsolicited_16bit_idle_routes_event(void)
@@ -2028,6 +2245,19 @@ int main(void)
     RUN_TEST(test_reply_accepted_when_run_delayed_past_window);
     RUN_TEST(test_late_rx_after_reply_timeout_is_ignored);
     RUN_TEST(test_unsolicited_24bit_idle_routes_event);
+    RUN_TEST(test_init_starts_with_no_subscribers);
+    RUN_TEST(test_event_reaches_primary_callback_and_added_subscriber);
+    RUN_TEST(test_added_event_subscriber_receives_without_a_primary_callback);
+    RUN_TEST(test_set_event_callback_replaces_instead_of_accumulating);
+    RUN_TEST(test_set_event_callback_null_releases_only_its_own_slot);
+    RUN_TEST(test_event_subscriber_add_is_idempotent);
+    RUN_TEST(test_event_subscriber_same_callback_different_ctx_is_a_second_slot);
+    RUN_TEST(test_event_subscriber_table_full_is_reported);
+    RUN_TEST(test_event_subscriber_removal_stops_delivery);
+    RUN_TEST(test_removing_an_unregistered_event_subscriber_is_ok);
+    RUN_TEST(test_event_subscriber_rejects_null_callback);
+    RUN_TEST(test_trace_reaches_primary_callback_and_added_subscriber);
+    RUN_TEST(test_trace_subscriber_removal_stops_delivery);
     RUN_TEST(test_unsolicited_16bit_idle_routes_event);
     RUN_TEST(test_24bit_rx_during_settle_is_ignored_not_routed);
     RUN_TEST(test_unsolicited_24bit_during_reply_window_invalidates_query);
