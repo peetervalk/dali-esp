@@ -20,9 +20,11 @@ static const char *const TAG = "dali.shell";
 
 /* Stack for the session task. The shell's workflows keep their working set in
  * module statics rather than on the stack, but discovery and commissioning
- * still nest several frames of protocol code, so this matches what the scan
- * task already asks for. */
-static constexpr uint32_t SHELL_TASK_STACK = 8192u;
+ * still nest several frames of protocol code, so this starts from what the scan
+ * task already asks for. The extra over that 8192 is headroom: the scan task
+ * runs one walk and nothing else, while a session task carries its own command
+ * dispatch under everything a workflow nests. */
+static constexpr uint32_t SHELL_TASK_STACK = 12288u;
 /* Below the DALI task (10) and the scan task (9): a shell session is
  * interactive work and must never delay bus servicing. */
 static constexpr UBaseType_t SHELL_TASK_PRIORITY = 4u;
