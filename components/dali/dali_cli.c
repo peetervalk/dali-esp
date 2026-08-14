@@ -30,6 +30,17 @@ void dali_cli_printf(const DaliCliOut *out, const char *fmt, ...)
     if (written < 0) {
         return;
     }
+    /*
+     * Clipping takes the terminator off the end of the line, and the shell's
+     * network clients frame replies on the prompt being the only unterminated
+     * text on the wire. Put it back rather than emit a line that runs into
+     * whatever is written next. See shell_printf() in dali_shell.c.
+     */
+    if ((size_t)written >= sizeof(buf)) {
+        buf[sizeof(buf) - 3u] = '\r';
+        buf[sizeof(buf) - 2u] = '\n';
+        buf[sizeof(buf) - 1u] = '\0';
+    }
     out->write(out->ctx, buf);
 }
 

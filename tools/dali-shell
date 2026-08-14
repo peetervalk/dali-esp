@@ -459,8 +459,22 @@ class DaliShell:
                 if echo_to is not None:
                     print(clean, file=echo_to, flush=True)
 
-            # A tail with no newline is the prompt, and the reply is complete.
-            if buf == PROMPT or buf.endswith("\n" + PROMPT):
+            # A tail with no newline ends at the prompt, and the reply with it.
+            #
+            # Normally that tail is the prompt alone. It is matched at the end
+            # rather than whole because a device line that lost its own
+            # terminator — a format buffer clipped it, a queued trace line was
+            # truncated — arrives with the prompt written onto its end, and a
+            # client that insists on the prompt by itself then waits out the
+            # full timeout for one that has already gone past. The salvaged
+            # text is printed rather than dropped: a mangled line in the
+            # transcript says where to look, and a silent one does not.
+            if buf.endswith(PROMPT):
+                partial = buf[: -len(PROMPT)]
+                if partial:
+                    collected.append(partial)
+                    if echo_to is not None:
+                        print(partial, file=echo_to, flush=True)
                 return "\n".join(collected)
 
             try:

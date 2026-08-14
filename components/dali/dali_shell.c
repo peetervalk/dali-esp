@@ -117,12 +117,19 @@ static void shell_deferred_push(const char *text)
     }
     uint8_t slot = (uint8_t)((s_deferred_head + s_deferred_count) % SHELL_DEFERRED_LINES);
     /* Truncation here costs the tail of one trace line, which is preferable to
-     * either allocating or holding the critical section any longer. */
+     * either allocating or holding the critical section any longer. The
+     * terminator is restored for the same reason shell_printf() restores it: a
+     * queued line that loses its "\r\n" is flushed into the stream ahead of a
+     * prompt and desynchronises a client reading up to one. */
     size_t len = strlen(text);
     if (len >= SHELL_DEFERRED_LINE_MAX) {
-        len = SHELL_DEFERRED_LINE_MAX - 1u;
+        len = SHELL_DEFERRED_LINE_MAX - 3u;
+        memcpy(s_deferred[slot], text, len);
+        s_deferred[slot][len++] = '\r';
+        s_deferred[slot][len++] = '\n';
+    } else {
+        memcpy(s_deferred[slot], text, len);
     }
-    memcpy(s_deferred[slot], text, len);
     s_deferred[slot][len] = '\0';
     s_deferred_count++;
     SHELL_DEFERRED_EXIT();
@@ -172,8 +179,7 @@ static void shell_printf(const char *fmt, ...)
         return;
     }
 
-    /* Same fixed chunk dali_cli_printf() uses; longer output is emitted as
-     * several calls rather than truncated silently. */
+    /* Same fixed chunk dali_cli_printf() uses. */
     char    buf[DALI_CLI_FORMAT_MAX];
     va_list args;
     va_start(args, fmt);
@@ -181,6 +187,20 @@ static void shell_printf(const char *fmt, ...)
     va_end(args);
     if (written < 0) {
         return;
+    }
+    /*
+     * A line longer than the buffer is clipped, and what it loses first is its
+     * own "\r\n". That is not a cosmetic loss: the prompt is the only text this
+     * shell writes without a terminator before it, which is what lets a client
+     * read a reply up to the prompt and know it is complete. A clipped line
+     * leaves the prompt written onto its end, and every such client waits for a
+     * prompt that has already gone past. Restoring the terminator costs the
+     * last two characters of a line that was being cut anyway.
+     */
+    if ((size_t)written >= sizeof(buf)) {
+        buf[sizeof(buf) - 3u] = '\r';
+        buf[sizeof(buf) - 2u] = '\n';
+        buf[sizeof(buf) - 1u] = '\0';
     }
     shell_sink_write(NULL, buf);
 }
@@ -2623,12 +2643,19 @@ static uint8_t shell_discover_bus(bool detailed)
         /* Not a failure on its own: the retry hold-off exists to cover exactly
          * this, and a bus whose gear answers a shade late reports a steady count
          * on every scan. It earns a line because it is the one condition that
-         * can drop a present device from the list above without any other trace. */
+         * can drop a present device from the list above without any other trace.
+         *
+         * Two calls rather than one sentence: as a single line this ran past
+         * DALI_CLI_FORMAT_MAX and was clipped of its own terminator, which left
+         * the prompt written onto the end of it and hung every client that
+         * frames replies on the prompt. shell_printf() now restores a clipped
+         * terminator, but keeping each line inside the buffer is what stops the
+         * text being cut in the first place. */
         shell_printf("  note: %" PRIu32 " backward frame(s) answered after the "
-                     "%u ms reply window — marginal gear timing on this bus. "
-                     "Retries cover it; if a known device is missing above, "
-                     "re-run.\r\n",
+                     "%u ms reply window.\r\n",
                      late_replies, (unsigned)DALI_REPLY_TIMEOUT_MS);
+        shell_printf("  Marginal gear timing; retries cover it. If a known "
+                     "device is missing above, re-run.\r\n");
     }
     return found;
 }
