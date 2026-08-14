@@ -1,277 +1,228 @@
-# Steinel HF 360-2 DALI-2 IPD — Memory Bank 2 Sensitivity Reference
+# Steinel HF 360-2 — Sensitivity and Range Tuning
 
-Product: Steinel HF 360-2 DALI-2 IPD (art. 064280)  
-Firmware context: the second-floor site firmware (`_local/dali-2k.yaml`), sensor at short address 0  
-Last reviewed: 2026-06-27
+Product: Steinel HF 360-2 DALI-2 IPD (art. 064280)
+Reference installation, sensor at short address 0
 
----
+**Last reviewed:** 2026-08-14
 
-## Background
+The HF 360-2 DALI-2 IPD is a **control device** (IEC 62386-103), not control
+gear. Sensitivity and detection range cannot be set over Bluetooth — the app
+variants (Steinel Connect, SmartRemote) target the COM1/COM2/BT-IPD family and
+will not discover the 064280. Everything is done over the DALI bus.
 
-The HF 360-2 DALI-2 IPD is a **control device** (IEC 62386-103), not a control gear.
-Sensitivity and detection range are not set over Bluetooth — the app variants
-(Steinel Connect, SmartRemote) target the COM1/COM2/BT-IPD family; they will not
-discover or connect to the 064280.  All commissioning is done over the DALI bus.
+Bank 2 is the Steinel-proprietary NVM bank holding those parameters. A standard
+DALI `RESET` reverts all of it to factory defaults.
 
-Bank 2 is the Steinel-proprietary NVM bank holding sensitivity and range parameters.
-It must be unlocked before any write (see below); a standard DALI `RESET` reverts
-everything in Bank 2 to factory defaults.
-
----
+Commands below are shell verbs (`tools/dali-shell`, or the serial CLI). The
+Home Assistant command console spells them identically — anything declaring a
+`text:` platform and a `command_result:` sensor has the same verbs, including
+`dali-starter.yaml`. Verb syntax is in `dali_commands.md`.
 
 ## Bank 2 Offset Map
 
-Source: local copy of Steinel DALI-2 Interface Description V1.5 (see References).
+Source: Steinel DALI-2 Interface Description V1.5.
 
 | Offset | Parameter | Scale | Default | Notes |
-|--------|-----------|-------|---------|-------|
-| `0x02` | Lock byte | — | locked | Write `0x55` to unlock NVM writes before raw writes |
+|---|---|---|---|---|
+| `0x02` | Lock byte | — | locked | `0x55` unlocks NVM writes; `devmem write` does this for you |
 | `0x04` | Global sensitivity | `0x00`–`0xFF` | `0xFF` | Amplification of all motion signals, all directions |
-| `0x05` | Global detection range | `0x00`–`0xFF` | `0xFF` | Minimum signal strength to register as motion; applies to HF and US technology |
-| `0x06` | Detection range, direction 1 | `0x00`–`0x64` | — | Percent (0–100); per-direction override |
-| `0x07` | Detection range, direction 2 | `0x00`–`0x64` | — | |
-| `0x08` | Detection range, direction 3 | `0x00`–`0x64` | — | |
-| `0x09` | Detection range, direction 4 | `0x00`–`0x64` | — | |
-| `0x0A` | Sensitivity, direction 1 | `0x00`–`0x64` | — | Percent (0–100); per-direction override |
-| `0x0B` | Sensitivity, direction 2 | `0x00`–`0x64` | — | |
-| `0x0C` | Sensitivity, direction 3 | `0x00`–`0x64` | — | |
-| `0x0D` | Sensitivity, direction 4 | `0x00`–`0x64` | — | |
+| `0x05` | Global detection range | `0x00`–`0xFF` | `0xFF` | Minimum signal strength to register as motion; HF and US |
+| `0x06`–`0x09` | Detection range, directions 1–4 | `0x00`–`0x64` | — | Percent 0–100; per-direction override |
+| `0x0A`–`0x0D` | Sensitivity, directions 1–4 | `0x00`–`0x64` | — | Percent 0–100; per-direction override |
 
-**Global vs. per-direction:** Global offsets (`0x04`, `0x05`) use the full
-`0x00`–`0xFF` raw byte scale. Per-direction offsets (`0x06`–`0x0D`) use percent
-(`0x00`–`0x64` = 0–100 %). Mixing the scales is an easy mistake.
+**The two scales differ.** Global offsets use the full `0x00`–`0xFF` byte;
+per-direction offsets are percent (`0x00`–`0x64`). Mixing them is an easy
+mistake.
 
-**Sensitivity vs. detection range:** *Sensitivity* (`0x04`) amplifies how strongly
-the sensor responds to any motion signal. *Detection range* (`0x05`) sets the
-threshold a signal must clear before it is classified as motion. For an HF sensor
-that over-triggers through walls or into adjacent rooms, **lower the detection range
-first** (`0x05`) — it rejects weak far-field returns without suppressing genuine
+**Sensitivity is not detection range.** Sensitivity (`0x04`) amplifies how
+strongly the sensor responds to any motion signal. Detection range (`0x05`) sets
+the threshold a signal must clear to be classified as motion. For an HF sensor
+that triggers through walls or into adjacent rooms, **lower the detection range
+first** — it rejects weak far-field returns without suppressing genuine
 close-range events.
 
----
+## Reading and Writing Bank 2
 
-## Commands (DALI Command console)
-
-Commands are entered via the **DALI Command** text entity in Home Assistant.
-Results appear in **DALI Command Result**. Nothing below is specific to the
-second-floor firmware — any configuration declaring the `text:` platform and a
-`command_result:` text sensor has the same console, `dali-starter.yaml` included.
-The diagnostic shell spells the same verbs identically.
-
-### Raw read (recommended)
-
-Send the DTR setup lines before every `READ MEMORY LOCATION`. The read command
-uses the current DTR1 bank and DTR0 offset, then auto-increments DTR0; a repeated
-bare `raw 01FE3C len=24 wait` walks through later offsets.
-
-```
-raw C13102 len=24        # DTR1 = 0x02 (Bank 2)
-raw C13004 len=24        # DTR0 = 0x04 (global sensitivity)
-raw 01FE3C len=24 wait   # READ MEMORY LOCATION; 255 = 0xFF = factory max
-
-raw C13102 len=24        # DTR1 = 0x02 (Bank 2)
-raw C13005 len=24        # DTR0 = 0x05 (global detection range)
-raw 01FE3C len=24 wait   # READ MEMORY LOCATION
-
-raw C13102 len=24        # DTR1 = 0x02 (Bank 2)
-raw C13006 len=24        # DTR0 = 0x06 (direction 1 range)
-raw 01FE3C len=24 wait   # READ MEMORY LOCATION
-
-raw C13102 len=24        # DTR1 = 0x02 (Bank 2)
-raw C1300A len=24        # DTR0 = 0x0A (direction 1 sensitivity)
-raw 01FE3C len=24 wait   # READ MEMORY LOCATION
+```text
+devmem read 0 2 4              # read global sensitivity
+devmem read 0 2 4 10           # read offsets 0x04..0x0D in one sequence
+devmem write 0 2 4 128         # set global sensitivity to 0x80
+devmem read 0 2 4              # confirm
 ```
 
-### Raw write
+`devmem` is the Part 103 control-device form — the one that reaches the Steinel.
+`memread` is the Part 102 control-gear form and would address the lamp instead.
+Both devices can share short address 0; they answer different frame widths.
 
-Use `raw2` for ENABLE WRITE MEMORY because Home Assistant text entities can
-ignore repeated identical text commands.
+`devmem write` writes the `0x55` unlock to the lock byte and then the requested
+byte, as one queued sequence. It does not verify the commit, so the read back is
+not optional. `devmem read` returns every byte of a multi-byte read in hex, and
+holds the device's auto-incrementing cursor across the whole read.
 
-```
-raw  C13102 len=24     # DTR1 = 0x02 (Bank 2)
-raw  C13002 len=24     # DTR0 = 0x02 (lock byte)
-raw2 01FE15 len=24     # ENABLE WRITE MEMORY x2
-raw  C12155 len=24     # WRITE MEMORY LOCATION NO REPLY = 0x55 unlock
+## Tuning Workflow
 
-raw  C13004 len=24     # DTR0 = 0x04 (global sensitivity)
-raw2 01FE15 len=24     # ENABLE WRITE MEMORY x2
-raw  C12180 len=24     # WRITE MEMORY LOCATION NO REPLY = 0x80
-```
-
-For global detection range `0x80`, use the same sequence with `raw C13005 len=24`
-in the second half. For direction 1 range `50` (`0x32`), use `raw C13006 len=24`
-and `raw C12132 len=24`.
-
-### Helper verbs
-
-Firmware with the corrected helper verbs sends the same 24-bit Part 103 frames
-as the raw examples above:
-
-```
-devmem read 0 2 4         # C13102, C13004, 01FE3C wait
-dtrcheck 0 0 66           # C13042, 01FE36 wait
-dtrcheck 0 1 2            # C13102, 01FE37 wait
-devmem write 0 2 4 128    # unlock lock byte, then write Bank 2 offset 4 = 0x80
-```
-
-If an older firmware is still flashed, use the raw commands instead; the stale
-helpers used 16-bit DTR/memory special frames and will not address the Steinel
-control-device memory path correctly.
-
-### Tuning workflow
-
-1. Read current value before changing anything.
+1. Read the current value before changing anything.
 2. Write one parameter.
-3. Wait ~10 s for the occupancy sensor poll to reflect any behavioural change.
-4. Observe `Zone 2 Occupancy` over several minutes before tuning further.
-5. Read back the written value to confirm NVM commit.
+3. Wait ~10 s for the occupancy poll to reflect any behavioural change.
+4. Watch the occupancy entity over several minutes before tuning further.
+5. Read the value back to confirm the NVM commit.
 
-```
-raw C13102 len=24        # Bank 2
-raw C13005 len=24        # detection range offset
-raw 01FE3C len=24 wait   # note current range value
-
-# Write 0x80 using the raw write sequence above, then read back:
-raw C13102 len=24
-raw C13005 len=24
-raw 01FE3C len=24 wait   # confirm 128 (0x80) was stored
+```text
+devmem read 0 2 5              # current global detection range
+devmem write 0 2 5 128
+devmem read 0 2 5              # expect 128 (0x80)
 ```
 
-### Verify occupancy state on demand
+Per-direction range 1 to 50 %:
 
-```
-iquery 0 1 input-value    # 0=Unoccupied  85=Movement  170=Present  255=Present+Moving
-```
-
-### Verify Section 3 factory settings
-
-Steinel section 3 lists optimized occupancy defaults: hold timer `1`, report
-timer `5`, and event filter `7`. Corrected firmware maps the Part 303/type 3 `iquery`
-timer helpers to the same opcodes as these raw commands.
-
-```
-raw 01012D len=24 wait   # Part 303/type 3 query hold timer; expected 1 = 10 seconds
-raw 01012E len=24 wait   # Part 303/type 3 query report timer; expected 5 = 5 seconds
-raw 010190 len=24 wait   # Part 103 query event filter bits 0-7; expected 7
+```text
+devmem read 0 2 6
+devmem write 0 2 6 50
+devmem read 0 2 6
 ```
 
-Avoid `raw 010184 len=24 wait` for report timer: opcode `0x84` is Query Event
-Priority, so a reply like `4` is plausible but answers a different question.
+### Check occupancy state on demand
 
-To restore the Steinel report timer to 5 seconds:
-
-```
-raw  C13005 len=24       # DTR0 = 5
-raw2 010122 len=24       # Part 303/type 3 set report timer from DTR0; send twice
-raw  01012E len=24 wait  # verify report timer; expected 5
+```text
+iquery 0 1 input-value    # 0 unoccupied, 85 movement, 170 present, 255 both
 ```
 
----
+### Verify the Part 303 timers
 
-## Wire-level Frame Sequence (for reference)
+Steinel's optimized occupancy defaults are hold timer `1`, report timer `5`, and
+event filter `7`:
 
-The raw write sequence has two phases:
-
-**Sequence 1 — unlock Bank 2:**
-| Frame | Type | Notes |
-|-------|------|-------|
-| `DTR1 = bank` (`C1 31 bank`) | 24-bit control-device special | Sets bank in control-device DTR1 |
-| `DTR0 = 0x02` (`C1 30 02`) | 24-bit control-device special | Points at lock byte |
-| `ENABLE WRITE MEMORY` (×2) | 24-bit device cmd `01 FE 15` | Addressed to Steinel only; lamp ignores 24-bit device frames |
-| `WRITE MEMORY LOCATION NO REPLY = 0x55` (`C1 21 55`) | 24-bit control-device special | Only Steinel commits (it was enabled); DTR0 auto-increments |
-
-**Sequence 2 — write value:**
-| Frame | Type | Notes |
-|-------|------|-------|
-| `DTR0 = offset` (`C1 30 offset`) | 24-bit control-device special | Re-points at target offset |
-| `ENABLE WRITE MEMORY` (×2) | 24-bit device cmd `01 FE 15` | Re-enable; write-enable lapses after any non-data frame |
-| `WRITE MEMORY LOCATION NO REPLY = value` (`C1 21 value`) | 24-bit control-device special | Steinel writes value to NVM |
-
-**Raw reads use the 24-bit device READ MEMORY LOCATION (`01 FE 3C`).**
-Both the lamp and the Steinel share short address 0; the gear-addressed 16-bit
-form (`01 C5`) would read from the lamp, not the Steinel.
-
-The first 16 bits of the 24-bit frame (`01 FE`) look like gear address 0 +
-command 0xFE to the lamp. Gear command 0xFE is the DT6 "QUERY MIN FAST FADE
-TIME" which requires a prior ENABLE DEVICE TYPE 6 — the raw read sequence does
-not send that, so the lamp stays silent. All replies come from the Steinel.
-
----
-
-## Diagnosing DTR0/DTR1 problems
-
-The raw memory path sets DTR0/DTR1 with Part 103 control-device special
-commands (`C1 30 xx`, `C1 31 xx`) before the addressed 24-bit device READ or
-WRITE. If these SET commands are not landing in the Steinel's DTR registers,
-reads return data from wrong offsets and writes go to wrong locations.
-
-Use raw DTR queries to verify before trusting any memory-read results:
-
-```
-raw C13042 len=24        # set DTR0 = 0x42
-raw 01FE36 len=24 wait   # query DTR0; reply 66 (0x42) = SET works
-
-raw C13102 len=24        # set DTR1 = 0x02 (Bank 2)
-raw 01FE37 len=24 wait   # query DTR1; reply 2 = SET works
+```text
+iquery 0 1 occ-hold-timer      # expect 1 (10 seconds)
+iquery 0 1 occ-report-timer    # expect 5 (5 seconds)
+iquery 0 1 event-filter0       # expect 7
 ```
 
-Use `raw` for raw 24-bit device queries:
+Restore the report timer to 5 seconds:
+
+```text
+iconfig 0 1 occ-set-report-timer 5
+iquery 0 1 occ-report-timer
 ```
-raw 01FE30 len=24 wait   # 0x30 = QUERY DEVICE STATUS
-raw 01FE35 len=24 wait   # 0x35 = QUERY NUMBER OF INSTANCES (should return 4)
-raw 01FE36 len=24 wait   # 0x36 = QUERY CONTENT DTR0
-raw 01FE37 len=24 wait   # 0x37 = QUERY CONTENT DTR1
+
+### Convert a raw reading
+
+`vendor steinel` applies the sensor platform's own conversion to a value you
+already have, without touching the bus:
+
+```text
+vendor steinel 2 262     ->  temperature: 21.2 C
+vendor steinel 3 110     ->  humidity: 55.0 %
+```
+
+Instances are `0` lux (scale 0.01), `1` motion, `2` temperature, `3` humidity.
+
+## Diagnosing DTR Problems
+
+The memory path sets DTR0/DTR1 with Part 103 control-device specials before the
+addressed read or write. If those are not landing, reads return data from the
+wrong offsets and writes go to the wrong locations. Confirm the registers take a
+value before trusting any result:
+
+```text
+dtrcheck 0 0 66           # expect: read 66 (0x42)
+dtrcheck 0 1 2            # expect: read 2
+```
+
+`dtrcheck` loads and reads back in one sequence, which separates "the DTR never
+took the value" from "the command that consumes it was ignored".
+
+Bank 2 offset `0x00` is ROM and reports the last accessible address: `0x05` for
+base-model sensors (type < 100), `0x0D` for type 107 (HF 360 II DALI-2 IPD, which
+supports per-direction settings but not True Presence). **Any other value from
+offset `0x00` means a DTR problem**, not extended NVM:
+
+```text
+devmem read 0 2 0         # expect 13 (0x0D) on type 107
+```
+
+Other useful device-level reads:
+
+```text
+instances 0               # instance types this device offers (expect 4)
+iquery 0 1 status
+iquery 0 0 type           # instance 0 should report type 4 (light sensor)
 ```
 
 ## Caveats
 
 - **DALI `RESET` wipes Bank 2.** Do not issue `config s0 reset` while tuning.
-- **Allow ~1 s after writing before cutting bus power** — NVM commit is asynchronous.
-- **Only one device should be write-enabled at a time.** `WRITE MEMORY LOCATION` is
-  a broadcast; if multiple devices were enabled (e.g. after a broadcast
-  `ENABLE WRITE MEMORY`), all of them would commit the write.
-- **Bank 2, offset 0x00** is ROM. Its value is the last accessible address:
-  `0x05` for base-model sensors (type < 100), `0x0D` for type 107 (HF 360 II
-  DALI-2 IPD, which supports per-direction settings but not True Presence).
-  Any other value from Bank 2 offset `0x00` indicates a DTR problem.
-- **V1.5 Bank 2 map is definitive for type 107.** Offsets 0x13–0xFF are
-  reserved (answer NO). Values outside the expected range from raw reads are
-  a sign of wrong bank/offset due to DTR state issues, not extended NVM.
+- **Allow ~1 s after a write before cutting bus power** — the NVM commit is
+  asynchronous.
+- **Only one device should be write-enabled at a time.** WRITE MEMORY LOCATION is
+  a broadcast; every device that was write-enabled commits it. `devmem write`
+  addresses the enable to one device, but a broadcast ENABLE WRITE MEMORY issued
+  by another tool leaves that guarantee behind.
+- **Offsets `0x13`–`0xFF` are reserved** and answer NO. Values outside the
+  expected range are a sign of a wrong bank or offset, not of extended NVM.
+- No write is verified by the firmware. The read-back is the verification.
 
----
+## Appendix — Raw Frame Equivalents
+
+The helper verbs send exactly these frames. They are worth having for when a helper
+is suspect.
+
+Read: set DTR1 to the bank, DTR0 to the offset, then READ MEMORY LOCATION, which
+auto-increments DTR0 — a repeated bare read walks later offsets.
+
+```text
+raw C13102 len=24        # DTR1 = 0x02 (Bank 2)
+raw C13004 len=24        # DTR0 = 0x04 (global sensitivity)
+raw 01FE3C len=24 wait   # READ MEMORY LOCATION
+```
+
+Write: unlock, then write. `raw2` is required for ENABLE WRITE MEMORY — it must
+be sent twice inside the DALI window, which two typed lines cannot achieve, and
+Home Assistant text entities ignore a repeated identical state anyway.
+
+```text
+raw  C13102 len=24     # DTR1 = 0x02 (Bank 2)
+raw  C13002 len=24     # DTR0 = 0x02 (lock byte)
+raw2 01FE15 len=24     # ENABLE WRITE MEMORY, twice
+raw  C12155 len=24     # WRITE MEMORY LOCATION NO REPLY = 0x55 unlock
+
+raw  C13004 len=24     # DTR0 = 0x04 (global sensitivity)
+raw2 01FE15 len=24     # re-enable; write-enable lapses after any non-data frame
+raw  C12180 len=24     # WRITE MEMORY LOCATION NO REPLY = 0x80
+```
+
+Device-level queries:
+
+```text
+raw 01FE30 len=24 wait   # QUERY DEVICE STATUS
+raw 01FE35 len=24 wait   # QUERY NUMBER OF INSTANCES (expect 4)
+raw 01FE36 len=24 wait   # QUERY CONTENT DTR0
+raw 01FE37 len=24 wait   # QUERY CONTENT DTR1
+```
+
+A lamp with a same short address stays silent: the first 16 bits of `01 FE …`
+look like gear address 0 plus command `0xFE` to the lamp, which is the DT6 QUERY
+MIN FAST FADE TIME — and that requires a preceding ENABLE DEVICE TYPE 6 that the
+sequence never sends. Every reply comes from the Steinel. The gear-addressed
+16-bit read form (`01 C5`) would read the lamp instead.
 
 ## References
 
-1. **Steinel DALI-2 Interface Description V1.5**  
-   Local copy: `_local/94546_DALI-2 Interface Description_V1.5.pdf`.
-   This is the authoritative source for the Bank 2 offset map, lock byte
-   protocol, type number 107 capabilities, scaling for global and per-direction
-   sensitivity/range, and Bluetooth activation byte (Bank 3, address 0x03).
-
-2. **Steinel HF 360-2 DALI-2 IPD Installation Manual**  
-   Same source. Covers commissioning path (IEC 62386 Parts 101, 103, 303, 304)
-   and distinguishes the IPD variant from the BT-IPD, COM1, and COM2 variants.
-
-3. **IEC 62386-101:2014** — *Digital addressable lighting interface — Part 101:
-   General requirements — System components*  
-   Defines universal special commands (DTR0/1/2 SET, WRITE MEMORY LOCATION) that
-   apply to both control gear and control devices.
-
-4. **IEC 62386-103:2022** — *Digital addressable lighting interface — Part 103:
-   General requirements — Control devices*  
-   Defines the 24-bit device command frame format, ENABLE WRITE MEMORY (opcode
-   `0x15`), READ MEMORY LOCATION (opcode `0x3C`), and the memory bank write gate
-   (send-twice requirement).
-
-5. **IEC 62386-303** — occupancy-sensor input-device requirements
-   Defines instance type 3, its hold timer, deadtime, and the bit-replicated
-   output encoding (0 / 85 / 170 / 255).
-
-6. **IEC 62386-304** — light-sensor input-device requirements
-   Defines instance type 4, used by Steinel instance 0 (lux).
-
-7. **python-dali** (github.com/sde1000/python-dali)  
-   Open-source Python implementation of IEC 62386. Used to verify command
-   opcodes and frame encodings cited in this document, particularly
-   `EnableWriteMemory` (send_twice), `WriteMemoryLocation`, and
-   `ReadMemoryLocation` for the 103 control-device path.
+1. **Steinel DALI-2 Interface Description V1.5** — local copy at
+   `_local/94546_DALI-2 Interface Description_V1.5.pdf`. Authoritative for the
+   Bank 2 offset map, the lock-byte protocol, type 107 capabilities, the scaling
+   of global and per-direction values, and the Bluetooth activation byte
+   (Bank 3, offset `0x03`).
+2. **Steinel HF 360-2 DALI-2 IPD installation manual** — same source; covers the
+   commissioning path (IEC 62386 Parts 101, 103, 303, 304) and distinguishes the
+   IPD variant from BT-IPD, COM1, and COM2.
+3. **IEC 62386-101:2014** — universal special commands (DTR0/1/2 SET, WRITE
+   MEMORY LOCATION) for both control gear and control devices.
+4. **IEC 62386-103:2022** — 24-bit device command frames, ENABLE WRITE MEMORY
+   (`0x15`), READ MEMORY LOCATION (`0x3C`), and the send-twice write gate.
+5. **IEC 62386-303** — instance type 3, its hold timer and deadtime, and the
+   bit-replicated output encoding (0 / 85 / 170 / 255).
+6. **IEC 62386-304** — instance type 4, used by Steinel instance 0 (lux).
+7. **python-dali** (github.com/sde1000/python-dali) — used to verify the opcodes
+   and frame encodings cited here, particularly `EnableWriteMemory` (send_twice),
+   `WriteMemoryLocation`, and `ReadMemoryLocation` on the Part 103 path.

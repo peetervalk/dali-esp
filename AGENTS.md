@@ -1,8 +1,8 @@
 # DALI-ESP Agent Guide
 
 Read `current_status.md` first. It is the source of truth for active project
-state, verified hardware status, and remaining work. Use
-`dali_command_reference.md` only when you need command/protocol details.
+state, verified hardware status, and remaining work. Use `dali_commands.md` for
+verb and argument details, and `dali_protocol.md` for frames and opcodes.
 
 ## Project Aim
 

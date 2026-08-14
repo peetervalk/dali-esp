@@ -1,62 +1,8 @@
-# DALI starter firmware — flash this first, commission the bus, then write your
-# own config from what it finds.
+# DALI starter firmware. Flash this, commission the bus, then write your own
+# config from what it finds. This file is mostly a shim: it brings up the bus
+# and opens the diagnostic shell, which is the tool that does the work.
 #
-# This config is mainly a shim: it brings up the bus and opens the diagnostic
-# shell on a TCP port. The shell is the tool. The buttons, the number, and the
-# `text:` console further down are the fallback, kept deliberately — see the
-# section that introduces them.
-#
-# ── Start here ────────────────────────────────────────────────────────────────
-#   1. esphome run dali-starter.yaml
-#   2. From any host that can reach the device, run the client in this repo
-#      (tools/dali-shell — standard library only, nothing to install; it drops
-#      straight into the HA "Advanced SSH & Web Terminal" add-on). Copying over
-#      Samba or the file editor drops the execute bit, so run the interpreter:
-#
-#          python3 /config/dali-shell                 interactive session
-#          python3 /config/dali-shell discover        one command, then exit
-#          python3 /config/dali-shell export inventory > /config/dali_inventory.json
-#
-#      There is no default host. With no --host and no DALI_SHELL_HOST it
-#      browses mDNS for ESPHome nodes and offers the ones whose shell answers,
-#      asking only if more than one does — so this config's name is something
-#      you pick out of a list, not something you have to type. `--list` shows
-#      what is out there.
-#
-#      With no client to hand, `nc dali-starter.local 2323` is a complete if
-#      unfriendly substitute: the shell is a plain line protocol, and the
-#      client only adds history, tab completion, one-shot redirection, and
-#      finding the device. Note that the add-on's resolver has no mDNS, so
-#      `.local` names do not resolve there — that is the gap the client closes.
-#   3. `help` lists every verb. `list <table>` prints a named command table
-#      (query, special, config, dt6, dt8, iquery, iconfig).
-#
-#      This is the same shell, running the same code, as the serial console on
-#      a native ESP-IDF build — not a subset written for ESPHome.
-#
-# ── The commissioning walk, in shell verbs ────────────────────────────────────
-#   discover                 full scan: short addresses, device types, groups
-#   inventory                reprint the last discover without touching the bus
-#   export inventory         the same result as JSON — redirect it to a file
-#   export config            this device's dali: block as YAML, entities and all
-#   identify <addr>          blink one fixture to confirm which address it is
-#   find switches 300        listen for input-device events and map switches
-#   instances <addr>         what a control device actually offers
-#   sensor poll <addr>       read an input instance's current value
-#   commission unaddressed   assign short addresses — see allow_commissioning
-#   max b / off b / level s3 128     drive gear directly while you work
-#   trace on                 live per-frame trace
-#   capture start … export   rolling capture, dumped when something goes wrong
-#   bus check / stats        RX level, scheduler state, fault counters
-#
-#   A long verb prints as it goes and holds the bus for as long as it runs —
-#   `find switches 300` is five minutes by design. Ctrl-C in the client drops
-#   the connection, which the device notices between bus steps and stops.
-#
-# ── One session at a time ─────────────────────────────────────────────────────
-#   The bus is single-tenant, so the shell is too. A second connection is
-#   accepted only far enough to be told why it is closing. A terminal window
-#   closed without quitting is reclaimed by idle_timeout below.
+# Workflow, shell verbs, and the Home Assistant fallback: commissioning_readme.md
 
 esphome:
   name: dali-starter
@@ -94,32 +40,26 @@ ota:
 logger:
   level: INFO  # button-scan output is at INFO — set DEBUG for PHY-level tracing
 
-# ── DALI bus ──────────────────────────────────────────────────────────────────
 dali:
   id: dali_bus
   tx_pin: 18
   rx_pin: 19
 
-  # The diagnostic shell. Absent = not compiled in at all.
+  # The diagnostic shell. Omit this block and it is not compiled in at all.
   shell:
     port: 2323
-    # Reclaims the single session from a terminal that was closed without
-    # quitting. 0 disables it, at the cost of a lost session locking out the
-    # shell until reboot.
+    # Reclaims the single session from a terminal closed without quitting.
+    # 0 disables it, at the cost of a lost session locking out the shell
+    # until reboot.
     idle_timeout: 10min
-    # The port is unauthenticated — the same posture as OTA and the web server,
-    # but a lower bar than physical access to a UART. So `commission` and the
-    # nine commissioning primitives are refused unless this says otherwise.
-    #
-    # It is true here because commissioning is what this firmware is for. Set
-    # it to false on anything left flashed on a shared network: one typed line
-    # can readdress a whole bus, and RANDOMISE cannot be undone.
+    # The port is unauthenticated, so `commission` and the nine commissioning
+    # primitives are refused unless this opts in. True here because
+    # commissioning is what this firmware is for — set it false on anything
+    # left flashed on a shared network. RANDOMISE cannot be undone.
     allow_commissioning: true
 
-  # ── Text sensors ────────────────────────────────────────────────────────────
-  # These belong to the button/console path, not the shell — the shell prints
-  # to your terminal. They are the only place a result persists in HA, which is
-  # what makes them worth keeping alongside it.
+  # Text sensors belong to the button/console path, not the shell. They are the
+  # only place a result persists in HA.
   command_result:
     name: "DALI Command Result"
   scan_status:
@@ -135,42 +75,12 @@ dali:
   bus_fault:
     name: "Bus Fault"
 
-# ══ Fallback / comparison / alt mode ══════════════════════════════════════════
-#
-# Everything below predates the shell and does a fraction of what it does. It
-# stays for three reasons:
-#
-#   - A phone in Home Assistant is not a terminal. Pressing "Identify" while
-#     standing under a fixture beats SSHing from a ladder.
-#   - The shell allows one session. The buttons keep working while someone else
-#     holds it, and while nobody holds it at all.
-#   - The button scan and `discover` are separate implementations of the same
-#     walk. When a result looks wrong, running both is a real diagnostic — if
-#     they disagree, the disagreement is the finding.
-#
-# ── Button workflow ───────────────────────────────────────────────────────────
-#   1. "Find Couplers", then activate every physical switch within 30 s.
-#      Detected groups appear in "Couplers Result".        (shell: find switches)
-#   2. "Scan DALI Bus" — ~50 s for 16 devices.                 (shell: discover)
-#      "Group Map" holds a compact group→query summary, persisted in HA, and
-#      YAML lines stream to the log prefixed with "YAML|". To turn a log
-#      session saved as dali-starter-logs.txt in Downloads into a YAML file:
-#
-#        (Select-String "YAML| " "$env:USERPROFILE\Downloads\dali-starter-logs.txt") |
-#          ForEach-Object { $_.Line -replace '.*YAML\| ', '' } |
-#          Out-File -Encoding utf8 "$env:USERPROFILE\Downloads\dali_lights.yaml"
-#
-#      Then add  dali_id: <your_id>  and real names.
-#      The shell does this in one step, and without the log-line limits:
-#        python3 /config/dali-shell export config > dali_block.yaml
-#      That prints the whole dali: block — pins, sensors, shell settings, and
-#      every light entity — rebuilt from what the firmware is running, with
-#      anything discovered but unconfigured appended commented out.
-#   3. Set "Target Address" (0–63), press "Identify" to blink the fixture.
-#      Verify control with On / Off / Max / Min.        (shell: identify <addr>)
-#   4. "Bus Monitor" shows the last unsolicited frame.   (shell: trace on)
+# Everything below is the Home Assistant fallback: it predates the shell and
+# does less, but it works from a phone, it works while someone else holds the
+# shell's single session, and its scan is a second implementation of the same
+# walk — so a disagreement between the two is a finding. See
+# commissioning_readme.md.
 
-# ── Target address selector ───────────────────────────────────────────────────
 number:
   - platform: dali
     dali_id: dali_bus
@@ -178,7 +88,6 @@ number:
     icon: "mdi:numeric"
     mode: box
 
-# ── Buttons ───────────────────────────────────────────────────────────────────
 button:
   - platform: dali
     dali_id: dali_bus
@@ -228,23 +137,9 @@ button:
     icon: "mdi:brightness-2"
     type: min
 
-# ── DALI command console ──────────────────────────────────────────────────────
-# One typed line, one text state in "DALI Command Result". That framing is why
-# it is not the shell: it cannot stream, so it has no discover, no find, no
-# capture, no commission — the verbs whose value is in watching them work.
-#
-# What it does have, it spells identically, because both surfaces resolve
-# through the same tables: a mistyped line fails here exactly as it would there.
-# Verbs: queue/raw/raw2/dtr/level/mask/off/up/down/step-*/on-step/cont-*/
-#        dapc-seq/last/scene/max/min/status/query/special/config/config-dtr0/
-#        dt6/iquery/iconfig/vendor/memread/devmem/dtrcheck/group
-# Targets: s<N>=short, g<N>=group, b=broadcast
-# Examples:
-#   query s0 actual
-#   query b status
-#   raw FF05 len=16          (broadcast RECALL MAX)
-#   raw 0101 len=16 wait     (short addr 0, QUERY STATUS)
-# In the shell, `help` prints the real list rather than this one.
+# Command console: one typed line, one result in "DALI Command Result". It
+# cannot stream, so it has no discover/find/capture/commission — but what it
+# does have it spells exactly as the shell does. Verbs: dali_commands.md.
 text:
   - platform: dali
     dali_id: dali_bus

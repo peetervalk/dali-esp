@@ -2,23 +2,23 @@
 
 **Last reviewed:** 2026-08-14
 
-This file answers one question per row: for a given DALI capability, what
-exists in the reusable C stack, whether the native CLI exposes it, whether an
-independent host vector covers it, whether it has been exercised on a real bus,
-and whether ESPHome exposes it.
+One question per row: for a given DALI capability, what exists in the reusable C
+stack, whether the CLI exposes it, whether an independent host vector covers it,
+whether it has been exercised on a real bus, and whether ESPHome exposes it.
 
-It is a status record, not a conformance claim. "Host vector" means a test in
-`test/` asserts frame layout or behaviour against values written from the
-standard rather than read back from the implementation; where a suite mostly
-repeats implementation constants the cell says so. "Real bus" means the path has
-been run against physical gear and the result recorded, not that it is certified.
+This is a status record, not a conformance claim. What each verb does and how to
+call it is in `dali_commands.md`; frames and opcodes are in `dali_protocol.md`.
 
-## Legend
+**Host vector** means a test in `test/` asserts frame layout or behaviour against
+values written from the standard rather than read back from the implementation;
+where a suite mostly repeats implementation constants, the cell says so.
+**Real bus** means the path has been run against physical gear and the result
+recorded — not that it is certified.
 
 | Mark | Meaning |
 |---|---|
 | yes | implemented and covered |
-| partial | implemented, but with a stated limitation |
+| partial | implemented, with a stated limitation |
 | no | not implemented |
 | n/a | not applicable at this layer |
 
@@ -27,15 +27,15 @@ exception: `v1.1.1` was flashed to both sites and run on the installed buses on
 2026-08-14, which covers the shell rows below. The 2026-08-11 and 2026-08-12
 verb-parity work has still not been exercised verb by verb on a bus.
 
-The ESPHome column names the surface that exposes a capability: `console` is the
-`text:` command entity, `light`/`button`/`sensor` are entities, `scan` is the
-discovery workflow, and `shell` is the TCP diagnostic shell. Neither "console"
-nor "shell" ever implies real-bus verification.
+The ESPHome column names the surface: `console` is the `text:` command entity,
+`light`/`button`/`sensor` are entities, `scan` is the discovery workflow, and
+`shell` is the TCP diagnostic shell. Neither "console" nor "shell" implies
+real-bus verification.
 
-`shell` differs in kind from the others. The rest of the ESPHome column
-describes code written for that surface; `shell` means the surface runs the
-native CLI's own implementation of the verb, so parity there is structural
-rather than something to be re-checked verb by verb.
+`shell` differs in kind from the others. The rest of the column describes code
+written for that surface; `shell` means the surface runs the native CLI's own
+implementation, so parity there is structural rather than something to re-check
+verb by verb.
 
 ## Control gear — IEC 62386-102
 
@@ -62,23 +62,13 @@ rather than something to be re-checked verb by verb.
 | Arbitrary frame, send-twice | scheduler `send_twice` | `raw2` | yes (parse only) | no | yes (`raw2`) |
 
 Real-bus coverage for queries and DAPC comes from the two site deployments and
-recorded diagnostic sessions; the remaining "partial" cells mean some names in
-the group have been exercised and others have not.
+recorded diagnostic sessions; a "partial" cell means some names in the group have
+been exercised and others have not.
 
-The console's `special` is partial by design, not by omission. It refuses the
-nine names `dali_cli_special_is_commissioning()` marks — INITIALISE, RANDOMISE,
-the three SEARCH ADDRESS registers, PROGRAM SHORT ADDRESS, WITHDRAW, and both
-WRITE MEMORY LOCATION forms — because this integration exposes discovery rather
-than a guarded commissioning workflow, and those are the commands that can
-readdress a whole bus from one line typed into Home Assistant. TERMINATE stays
-available: it is what closes an initialise window another tool opened. The
-native CLI runs the full set, sequenced and checked, inside `commission`.
-
-A level-changing console verb transmits and returns; it does not update the
-light entity. Home Assistant catches up on the next refresh pass, the same way
-it does after a wall switch. The exception is `dt6 select-curve`, which
-invalidates the cached level profile and triggers a refresh — see the DT6
-section.
+The console's `special` is partial by design: it refuses the nine commissioning
+primitives. A level-changing console verb transmits and returns without updating
+the light entity; the exception is `dt6 select-curve`, which invalidates the
+cached level profile and triggers a refresh.
 
 ## Discovery, commissioning, and inventory
 
@@ -94,16 +84,13 @@ section.
 | Identify blink | n/a | `identify` | no | yes | yes (button, shell) |
 | Smoke check | n/a | `smoke` | no | yes | shell |
 
-Commissioning is dependable only with a single unaddressed device on the bus;
-the COMPARE collision inversion recorded in `current_status.md` is unfixed.
+Commissioning is dependable only with a single unaddressed device on the bus; the
+COMPARE collision inversion recorded in `current_status.md` is unfixed.
 
-The `shell` entries above are the same code the native CLI runs, reached through
-the TCP front end in `esphome/components/dali/dali_shell_tcp.cpp`: the verb, its
-argument checking, its blocking transport, and its output are one
-implementation, so the ESPHome column no longer means a separately written
-subset for these rows. `commission` and the nine primitives
-`dali_cli_special_is_commissioning()` marks are refused there unless the YAML
-sets `allow_commissioning: true`, because the port is unauthenticated.
+The shell rows are the same code the native CLI runs, reached through
+`esphome/components/dali/dali_shell_tcp.cpp`. `commission` and the nine
+commissioning primitives are refused there unless the YAML sets
+`allow_commissioning: true`, because the port is unauthenticated.
 
 The shell was flashed and run against a real bus on 2026-08-14 in `v1.1.1`:
 discover, identify, live trace, rolling capture, and JSON export were exercised
@@ -120,18 +107,6 @@ native CLI, which is the same implementation reached by a different transport.
 | Control-device byte write | `dali_memory_build_control_device_write_sequence` | `devmem write` | yes | no | yes (console) |
 | Write read-back verification | no | no | no | no | no |
 
-Both surfaces now spell these the same way: `memread` is the Part 102
-control-gear form and `devmem read`/`devmem write` are the Part 103
-control-device forms. They use different DTR and memory opcodes, and picking the
-wrong one addresses a different device class entirely — which is why they are
-named apart rather than overloaded.
-
-`meminfo` is the one memory verb the console does not have. Reading a Bank 0
-identity means walking the bank and deciding what to ask next from what came
-back, which needs the blocking transport the native CLI has and this surface
-does not: every console verb is one enqueue and one completion, because Core 0's
-loop may not block. The scan already reports Bank 0 identity per device.
-
 No write path reads its value back. Treat every memory write as unverified until
 a `devmem read` confirms it.
 
@@ -146,20 +121,9 @@ a `devmem read` confirms it.
 | Discovered dimming curve | `dali_discovery_*`, `dali_dim_curve` | via `discover` | yes | yes | yes (light) |
 | Per-entity curve override | `dali_level_profile_validate` | n/a | yes | no | yes (`dimming_curve:`) |
 
-All 24 DT6 names are reachable from the console under the native CLI's
-spellings, and every one goes out through `dali_dt6_build_command_sequence()`, so
-ENABLE DEVICE TYPE 6, any DTR0 load, and the command itself cannot be separated
-by other locally scheduled traffic.
-
-`dt6 select-curve` additionally drops the entity's cached level profile and
-starts a refresh, because the curve is what every brightness this component
-sends is computed from — leaving it cached would command and report the gear on
-a curve it no longer uses, in both directions. The `dimming_curve:` option on a
-light entity is the static counterpart, for gear whose curve query is not
-trustworthy.
-
-`failure-status` reaches the console as its raw bitset; the per-flag decode is
-printed only by the native CLI, where there is room for eight lines.
+All 24 DT6 names are reachable from the console, and every one goes out through
+`dali_dt6_build_command_sequence()`, so ENABLE DEVICE TYPE 6, any DTR0 load, and
+the command cannot be separated by other locally scheduled traffic.
 
 ## Device type 8 — IEC 62386-209
 
@@ -176,15 +140,15 @@ printed only by the native CLI, where there is room for eight lines.
 
 DT8 is held back from the ESPHome surface entirely — verbs as well as traits —
 until the native verbs have been run against real DT8 gear. There is none on
-either site to test against, so exposing it would be publishing an untested
-surface, not closing a gap.
+either site, so exposing it would be publishing an untested surface, not closing
+a gap.
 
 ## Control devices — IEC 62386-103 and Parts 301/303/304
 
 | Capability | Shared API | Native CLI verb | Host vector | Real bus | ESPHome |
 |---|---|---|---|---|---|
 | Instance discovery | `dali_discovery_query_input_device` | `instances` | yes | yes | yes |
-| Generic instance queries (15) | `dali_input_build_query_*` | `iquery` | yes | partial | yes (`iquery`) |
+| Generic instance queries | `dali_input_build_query_*` | `iquery` | yes | partial | yes (`iquery`) |
 | DTR0-selected instance query | `dali_input_build_config_sequence` | `iquery ... instance-config` | yes | no | yes (`iquery <a> <i> <n> <dtr0>`) |
 | Generic configuration (10) | `dali_input_build_set_*` | `iconfig` | yes | no | yes (`iconfig`) |
 | Part 301 push-button timers | `dali_input_pb_*` | `iquery pb-*`, `iconfig pb-set-*` | yes | no | yes (`pb-*`) |
@@ -194,9 +158,8 @@ surface, not closing a gap.
 | Event decode | `dali_event_*` | `events`, `capture`, `find switches` | yes | yes | yes |
 | Event dispatch rules | `dali_dispatch_*` | n/a | yes | yes | yes |
 
-Configuration writes are experimental everywhere. The native CLI says so on
-every `iconfig` success line: the result means transmitted, not applied. Read
-the value back with `iquery` before relying on it.
+Configuration writes are experimental everywhere. The native CLI says so on every
+`iconfig` success line: the result means transmitted, not applied.
 
 ## Vendor helpers
 
@@ -206,10 +169,6 @@ the value back with `iquery` before relying on it.
 | Steinel HF 360 II instance profile | `dali_steinel_hf360_instance_lookup` | `vendor steinel` | yes | yes | yes (YAML, console) |
 | Steinel value conversions | `dali_steinel_temperature_*`, `_humidity_*` | `vendor steinel` | yes | yes | yes |
 
-`vendor steinel` transmits nothing — it converts a raw reading the operator
-already has — so it is one of the three console verbs that stay answerable
-during a scan, alongside `queue` and `group`.
-
 ## CLI infrastructure
 
 | Capability | Shared API | Native CLI verb | Host vector | Real bus | ESPHome |
@@ -218,29 +177,27 @@ during a scan, alongside `queue` and `group`.
 | Verb table / help parity | `dali_cli_command_*`, `dali_cli_print_help` | `help` | yes | n/a | n/a |
 | Argument validation | `dali_cli_parse_*` | every verb | yes | no | yes |
 | Named table listing | `dali_cli_print_table` | `list`, `*-list` | yes | n/a | n/a |
+| Command tables as JSON | `dali_cli_print_schema` | `schema` | yes | n/a | n/a |
 | Response formatting | `dali_cli_print_response` | every query verb | yes | yes | yes (`dali_cli_format_response`) |
 | Single-line reply decode | `dali_cli_format_response`, `_format_status` | via `dali_cli_print_response` | yes | no | yes (every query verb) |
 | Scheduler queue diagnostics | `dali_sched_queue_stats` | `stats`, `queue` | yes | no | yes (`queue`) |
 | PHY/RX counters | `g_dali_stats` | `stats`, `bus check`, `rxdebug` | partial | yes | partial |
 | Frame capture | n/a | `capture` | no | yes | yes (bus monitor) |
 
-The ESPHome console uses `dali_cli` for tokenising, argument parsing, arity
-checking, the named command tables, and now reply decoding, so a verb, a command
-name, and a reply all mean the same thing on both surfaces, and trailing tokens
-are rejected. It supplies its own verb table to `dali_cli_resolve_in()`: the
-subset that suits a Home Assistant text entity. The renames this brought are
-listed in `dali_command_reference.md`. None of the migrated console paths has
-been exercised on a real bus.
+The console supplies its own verb table to `dali_cli_resolve_in()` — the subset
+that suits a Home Assistant text entity — but shares the tokeniser, argument
+parsers, arity checking, named tables, and reply decoding. None of the migrated
+console paths has been exercised on a real bus.
 
 ## Verb parity between the two surfaces
 
-The console now implements every native verb whose answer fits one Home
-Assistant text state and whose execution fits one enqueue and one completion.
-What remains native-only, and why:
+The console implements every native verb whose answer fits one Home Assistant
+text state and whose execution fits one enqueue and one completion. What remains
+native-only, and why:
 
 | Native verb | Why not on the console |
 |---|---|
-| `help`, `list`, `query-list`, `special-list`, `config-list` | The answer is a block of lines |
+| `help`, `list`, `schema`, `query-list`, `special-list`, `config-list` | The answer is a block of lines |
 | `stats`, `bus check`, `rxdebug`, `read`, `trace`, `reset` | Same, and the counters are already on diagnostic sensors |
 | `capture` | Rolling buffer with a terminal-shaped export; the bus monitor covers the live view |
 | `scan`, `discover`, `inventory`, `export inventory`, `identify` | Exposed as buttons and text sensors instead |
@@ -250,12 +207,13 @@ What remains native-only, and why:
 | `smoke` | Composed of `devmem` write/read; run the parts |
 | `dt8` | Held until real DT8 gear is available to test against |
 
+`group forget` runs the other way: it is console-only, because the cache it edits
+belongs to the ESPHome component rather than to the protocol stack.
+
 ## Known gaps this matrix is tracking
 
-- No verb has real-bus verification for DT6, DT8, memory writes, or input-device
-  configuration. Those rows are the reason the CLI exists; running them is the
-  next step, not more code. The DT6 console verbs added on 2026-08-12 inherit
-  that gap exactly: they are the same frames the native CLI has not yet sent.
+- Most verbs do not have real-bus verification for DT6, DT8, memory writes, or input-device
+  configuration. Those rows are the reason the CLI exists.
 - `identify`, `smoke`, `capture`, and the inventory JSON export have no host
   vectors. They are composed from covered primitives, but their own output
   formats are unasserted.
@@ -266,5 +224,4 @@ What remains native-only, and why:
   validation, and reply decoding are shared code with host vectors, but the
   dispatch in `dali_component.cpp` between them is ESPHome/FreeRTOS-bound and
   reachable only on the device.
-- Nothing here claims DALI Alliance certification or complete IEC 62386
-  coverage.
+- Nothing here claims DALI Alliance certification or complete IEC 62386 coverage.

@@ -173,8 +173,9 @@ text:
 ## Documentation
 
 - [tools/dali-shell](tools/dali-shell) — terminal client for the diagnostic shell; `help` on a connected device is the authoritative verb list
-- [esphome_verb_readme.md](esphome_verb_readme.md) — command console verbs and syntax
-- [dali_command_reference.md](dali_command_reference.md) — DALI command/protocol catalog
+- [commissioning_readme.md](commissioning_readme.md) — commissioning workflow: flash, walk the bus, export a config
+- [dali_commands.md](dali_commands.md) — every verb and named command table, for the shell and the HA console
+- [dali_protocol.md](dali_protocol.md) — frame layouts, opcode tables by IEC part, event decoding
 - [dali_capability_matrix.md](dali_capability_matrix.md) — per-capability status: shared API, native CLI verb, host vector, real-bus result, ESPHome surface
 - [current_status.md](current_status.md) — project state, known limitations, roadmap
 - [steinel_bank2_reference.md](steinel_bank2_reference.md) — Steinel HF 360 II memory bank tuning
