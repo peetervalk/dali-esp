@@ -459,22 +459,24 @@ class DaliShell:
                 if echo_to is not None:
                     print(clean, file=echo_to, flush=True)
 
-            # A tail with no newline ends at the prompt, and the reply with it.
+            # A tail that is exactly the prompt, and the reply is complete.
             #
-            # Normally that tail is the prompt alone. It is matched at the end
-            # rather than whole because a device line that lost its own
-            # terminator — a format buffer clipped it, a queued trace line was
-            # truncated — arrives with the prompt written onto its end, and a
-            # client that insists on the prompt by itself then waits out the
-            # full timeout for one that has already gone past. The salvaged
-            # text is printed rather than dropped: a mangled line in the
-            # transcript says where to look, and a silent one does not.
-            if buf.endswith(PROMPT):
-                partial = buf[: -len(PROMPT)]
-                if partial:
-                    collected.append(partial)
-                    if echo_to is not None:
-                        print(partial, file=echo_to, flush=True)
+            # Whole-tail, never endswith(). The device emits some replies a
+            # character at a time — `schema` writes each byte of every verb
+            # name, argument sketch, and summary as its own send — so a read
+            # can end anywhere, and "> " occurs inside that text wherever an
+            # argument sketch does (`<addr> <bank>`). Accepting a tail that
+            # merely ends in the prompt cuts the reply off at the first such
+            # boundary, and the leftovers desynchronise every command after it:
+            # `schema` fails to parse, completion goes quiet, and each reply
+            # printed thereafter belongs to the command before it.
+            #
+            # The cost of being strict is that a device line arriving without
+            # its terminator hangs this loop until the timeout. That is the
+            # firmware's invariant to keep — the prompt is the only text it
+            # writes with no newline before it — and a loud stall names the
+            # problem better than a quiet desync hides it.
+            if buf == PROMPT:
                 return "\n".join(collected)
 
             try:
