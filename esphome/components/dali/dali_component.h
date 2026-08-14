@@ -20,6 +20,50 @@ namespace esphome {
 namespace dali {
 
 /*
+ * The `shell:` sub-block, which DaliShellServer owns rather than
+ * DaliComponent. Passed in at export time so the component does not need a
+ * back-reference to a front end it otherwise knows nothing about.
+ */
+struct DaliShellConfigInfo {
+  uint16_t port;
+  uint32_t idle_timeout_s;
+  bool     allow_commissioning;
+};
+
+/*
+ * What a light entity was configured with, as `export config` needs to print
+ * it back. Every field is the value the YAML set, not the value in force: a
+ * scan may have supplied a query address the config did not, and printing the
+ * derived one would turn a discovered fact into a hand-written line the
+ * operator never wrote and cannot re-derive.
+ */
+struct DaliLightConfig {
+  const char *name;             // entity name; never null
+  uint8_t     target_type;      // DaliAddressType
+  uint8_t     target_address;
+  uint8_t     query_address;    // 0xFF when the YAML set none
+  uint16_t    member_groups;    // bit N = member of group N
+  bool        has_min_level;
+  uint8_t     min_level;
+  bool        has_max_level;
+  uint8_t     max_level;
+  bool        has_dimming_curve;
+  uint8_t     dimming_curve;    // DaliDimCurve
+};
+
+/* As above, for an input sensor entity. */
+struct DaliSensorConfig {
+  const char *name;             // entity name; never null
+  uint8_t     address;
+  uint8_t     instance;
+  uint32_t    poll_interval_s;
+  bool        poll_on_event;
+  uint8_t     value_bytes;
+  float       scale;
+  float       offset;
+};
+
+/*
  * Minimal interface used by DaliComponent to update light entity state from
  * the DALI bus (dispatch snooping and QUERY_ACTUAL_LEVEL replies).
  * DaliLightOutput implements this; dali_component.cpp never needs to include
@@ -28,6 +72,8 @@ namespace dali {
 class DaliBusLight {
  public:
   virtual ~DaliBusLight() = default;
+  // Report the configuration this entity was built from. Read-only, Core 0.
+  virtual void describe_config(DaliLightConfig *out) const = 0;
   virtual void    mark_state_from_bus(bool is_on, uint8_t level) = 0;
   virtual void    apply_bus_state() = 0;
   // Collect the scheduler completion for any in-flight command, then admit at
@@ -51,6 +97,8 @@ class DaliBusLight {
 class DaliBusSensor {
  public:
   virtual ~DaliBusSensor() = default;
+  // Report the configuration this entity was built from. Read-only, Core 0.
+  virtual void     describe_config(DaliSensorConfig *out) const = 0;
   virtual uint8_t  get_address()         const = 0;
   virtual uint8_t  get_instance()        const = 0;
   virtual uint32_t get_poll_interval_s() const = 0;
@@ -161,6 +209,26 @@ class DaliComponent : public Component {
                           uint16_t event_information, uint8_t instance,
                           uint8_t output_type, uint8_t output_address,
                           uint8_t action, uint8_t scene);
+
+  // ── Configuration export (dali_config_export.cpp) ───────────────────────
+  //
+  // Print the `dali:` block, and the light/sensor platform entries that name
+  // it, as the YAML that would rebuild this device. Everything comes from live
+  // state — the source YAML is a host-side artefact that never reaches the
+  // ESP32 — so what it prints is what the firmware is actually running, which
+  // is the more useful of the two when they disagree.
+  //
+  // `shell` describes the session's own front end, which is configured on
+  // DaliShellServer rather than here; null omits the `shell:` sub-block.
+  // `inventory` is the last scan, or null when none has run: gear the bus
+  // reported but no entity covers is emitted commented out, so a re-export
+  // proposes the additions without silently enabling them.
+  //
+  // Runs on the shell task, not the loop task. It only reads Core 0 entity
+  // configuration, which is written once during setup() and never after.
+  void export_config_yaml(const DaliCliOut *out,
+                          const DaliShellConfigInfo *shell,
+                          const DaliDiscoveryInventory *inventory);
 
  protected:
   uint8_t tx_pin_{18};

@@ -198,7 +198,8 @@ static const DaliCliCommandSpec s_commands[] = {
     { DALI_CLI_CMD_SMOKE, "smoke", "<addr>", "short read/write/read-back check", 1u, 1u, NULL },
     { DALI_CLI_CMD_EVENTS, "events", "", "drain queued Part 103 events", 0u, 0u, NULL },
     { DALI_CLI_CMD_FIND, "find", "switches [seconds]", "map switches by listening for events", 1u, 2u, "switches" },
-    { DALI_CLI_CMD_EXPORT, "export", "inventory", "print the inventory as JSON", 1u, 1u, "inventory" },
+    { DALI_CLI_CMD_EXPORT, "export", "inventory|config", "inventory as JSON, or the dali: YAML block for this device", 1u, 1u,
+      "inventory config" },
     { DALI_CLI_CMD_IDENTIFY, "identify", "<addr>", "blink one short-addressed lamp", 1u, 1u, NULL },
 };
 

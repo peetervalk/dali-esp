@@ -38,6 +38,7 @@
 #   discover                 full scan: short addresses, device types, groups
 #   inventory                reprint the last discover without touching the bus
 #   export inventory         the same result as JSON — redirect it to a file
+#   export config            this device's dali: block as YAML, entities and all
 #   identify <addr>          blink one fixture to confirm which address it is
 #   find switches 300        listen for input-device events and map switches
 #   instances <addr>         what a control device actually offers
@@ -160,8 +161,11 @@ dali:
 #          Out-File -Encoding utf8 "$env:USERPROFILE\Downloads\dali_lights.yaml"
 #
 #      Then add  dali_id: <your_id>  and real names.
-#      The shell does this in one step:
-#        python3 /config/dali-shell export inventory > file
+#      The shell does this in one step, and without the log-line limits:
+#        python3 /config/dali-shell export config > dali_block.yaml
+#      That prints the whole dali: block — pins, sensors, shell settings, and
+#      every light entity — rebuilt from what the firmware is running, with
+#      anything discovered but unconfigured appended commented out.
 #   3. Set "Target Address" (0–63), press "Identify" to blink the fixture.
 #      Verify control with On / Off / Max / Min.        (shell: identify <addr>)
 #   4. "Bus Monitor" shows the last unsolicited frame.   (shell: trace on)

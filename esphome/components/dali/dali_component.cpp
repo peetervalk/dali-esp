@@ -290,6 +290,35 @@ struct SensorEntry {
 static SensorEntry s_sensor_registry[MAX_INPUT_SENSORS];
 static uint8_t     s_sensor_count = 0u;
 
+/* ── Registry accessors for the configuration exporter ───────────────────────
+ *
+ * dali_config_export.cpp reconstructs the YAML from what these hold. Read-only
+ * and const, so the exporter can walk them from the shell task without being
+ * able to disturb registration order or the fields the DALI task touches; see
+ * dali_config_export.h for why the registries themselves stay file-static.
+ * ---------------------------------------------------------------------------*/
+
+uint8_t dali_registry_light_count() { return s_light_count; }
+
+const DaliBusLight *dali_registry_light_at(uint8_t index)
+{
+    return index < s_light_count ? s_light_registry[index].light : nullptr;
+}
+
+uint8_t dali_registry_sensor_count() { return s_sensor_count; }
+
+const DaliBusSensor *dali_registry_sensor_at(uint8_t index)
+{
+    return index < s_sensor_count ? s_sensor_registry[index].sensor : nullptr;
+}
+
+uint8_t dali_registry_dispatch_count() { return s_dispatch_count; }
+
+const DaliDispatchEntry *dali_registry_dispatch_at(uint8_t index)
+{
+    return index < s_dispatch_count ? &s_dispatch_table[index] : nullptr;
+}
+
 /* Async completion callback — runs on Core 1 (DALI task). */
 
 static void on_input_value_done(const DaliSequenceResult *result, void *ctx)

@@ -2872,18 +2872,35 @@ static void cmd_commission(const DaliCliTokens *t)
     }
 }
 
-static void cmd_export(const DaliCliTokens *t)
+/*
+ * `export config` — the integration's YAML, not the bus's state.
+ *
+ * Delegated to the front end (see DaliShellHooks.export_config): the answer is
+ * "what is this device configured as", which the shell does not know and the
+ * serial console's firmware does not have.
+ */
+static void cmd_export_config(void)
+{
+    DaliDiscoveryInventory *inventory = &s_inventory_scratch;
+
+    if (s_session.hooks.export_config == NULL) {
+        shell_printf("export config: this firmware is not configured by YAML; "
+                     "nothing to export\r\n");
+        return;
+    }
+
+    s_session.hooks.export_config(s_session.hooks.ctx,
+                                  &s_out,
+                                  shell_inventory_snapshot(inventory) ? inventory
+                                                                      : NULL);
+}
+
+static void cmd_export_inventory(void)
 {
     DaliDiscoveryInventory *inventory = &s_inventory_scratch;
     bool has_inventory;
     static DiagSwitchMapping mappings[SHELL_SWITCH_MAPPING_MAX];
     uint8_t mapping_count;
-
-    if (!dali_cli_has_subcommand(dali_cli_command_for_id(DALI_CLI_CMD_EXPORT),
-                                 t->tok[1])) {
-        dali_cli_print_usage(&s_out, dali_cli_command_for_id(DALI_CLI_CMD_EXPORT));
-        return;
-    }
 
     has_inventory = shell_inventory_snapshot(inventory);
     mapping_count = shell_switch_mappings_snapshot(mappings, SHELL_SWITCH_MAPPING_MAX);
@@ -3072,6 +3089,21 @@ static void cmd_export(const DaliCliTokens *t)
     shell_print_capture_json();
     shell_printf("\r\n");
     shell_printf("}\r\n");
+}
+
+static void cmd_export(const DaliCliTokens *t)
+{
+    if (!dali_cli_has_subcommand(dali_cli_command_for_id(DALI_CLI_CMD_EXPORT),
+                                 t->tok[1])) {
+        dali_cli_print_usage(&s_out, dali_cli_command_for_id(DALI_CLI_CMD_EXPORT));
+        return;
+    }
+
+    if (strcmp(t->tok[1], "config") == 0) {
+        cmd_export_config();
+    } else {
+        cmd_export_inventory();
+    }
 }
 
 static void cmd_bus(const DaliCliTokens *t)

@@ -89,6 +89,7 @@ section.
 | Group membership query | `dali_discovery_build_groups_sequence` | via `discover` | yes | yes | yes (scan, shell) |
 | Bank 0 identity read | `dali_memory_read_bank0_identity` | `meminfo` | yes | partial | via scan; `meminfo` via shell |
 | Inventory export | `dali_discovery_inventory_*` | `inventory`, `export inventory` | partial | yes | yes (YAML lines, shell) |
+| Configuration export | n/a — reads live entity state | `export config` | no | yes | shell only; the native build has no YAML to describe |
 | Commission unaddressed | `dali_commissioning_commission_unaddressed` | `commission unaddressed` | yes | partial | shell, opt-in |
 | Identify blink | n/a | `identify` | no | yes | yes (button, shell) |
 | Smoke check | n/a | `smoke` | no | yes | shell |
@@ -243,6 +244,7 @@ What remains native-only, and why:
 | `stats`, `bus check`, `rxdebug`, `read`, `trace`, `reset` | Same, and the counters are already on diagnostic sensors |
 | `capture` | Rolling buffer with a terminal-shaped export; the bus monitor covers the live view |
 | `scan`, `discover`, `inventory`, `export inventory`, `identify` | Exposed as buttons and text sensors instead |
+| `export config` | A whole config block; the scan's `yaml_result` sensor carries the group map the console can fit |
 | `commission unaddressed` | No guarded workflow here; `special` refuses its primitives for the same reason |
 | `meminfo`, `instances`, `sensor poll` | Each walks a device and decides the next query from the last reply, which needs a blocking transport. Covered by the scan and the sensor platform |
 | `smoke` | Composed of `devmem` write/read; run the parts |
@@ -257,6 +259,9 @@ What remains native-only, and why:
 - `identify`, `smoke`, `capture`, and the inventory JSON export have no host
   vectors. They are composed from covered primitives, but their own output
   formats are unasserted.
+- `export config` has none either, and is the one most worth having: its output
+  is only useful if it validates, which a host vector could assert against the
+  ESPHome schema rather than leaving to a paste-and-see.
 - The console's handlers themselves are unasserted. Their parsing, argument
   validation, and reply decoding are shared code with host vectors, but the
   dispatch in `dali_component.cpp` between them is ESPHome/FreeRTOS-bound and

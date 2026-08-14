@@ -33,6 +33,18 @@ class DaliInputSensor : public sensor::Sensor, public Component, public DaliBusS
   uint32_t get_last_poll_ms()     const { return last_poll_ms_; }
   void     set_last_poll_ms(uint32_t ms) { last_poll_ms_ = ms; }
 
+  void describe_config(DaliSensorConfig *out) const override {
+    if (out == nullptr) return;
+    out->name            = this->get_name().c_str();
+    out->address         = address_;
+    out->instance        = instance_;
+    out->poll_interval_s = poll_interval_s_;
+    out->poll_on_event   = poll_on_event_;
+    out->value_bytes     = value_bytes_;
+    out->scale           = scale_;
+    out->offset          = offset_;
+  }
+
   /* Called from Core 1 (DALI task completion callback). */
   void mark_raw_value(uint16_t raw) { value_mailbox_.publish(raw); }
 

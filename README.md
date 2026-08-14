@@ -44,6 +44,7 @@ Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The controller has
      python3 /config/dali-shell --list          # nodes answering on this network
      python3 /config/dali-shell discover        # one command, then exit
      python3 /config/dali-shell export inventory > /config/dali_inventory.json
+     python3 /config/dali-shell export config > /config/dali_block.yaml
      ```
 
      With no `--host` it finds the device over mDNS and connects, asking only if
@@ -51,6 +52,14 @@ Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The controller has
      groups; `identify <addr>` blinks one fixture; `export inventory` writes the
      result as JSON. `help` lists every verb. With no client to hand,
      `nc <address> 2323` is a complete if unfriendly substitute.
+
+     `export config` answers the other half: it prints the `dali:` block, and
+     the `light:` and `sensor:` entries naming it, as YAML you can paste back.
+     It is reconstructed from the running firmware — the source YAML never
+     reaches the ESP32 — so the pins, entities, and dispatch rules it prints
+     are the ones in force rather than the ones in a file that may have moved
+     on. Run `discover` first and gear the bus reported that no entity drives
+     is appended commented out, ready to uncomment.
    - **From Home Assistant.** **Scan DALI Bus**, **Find Couplers**, and
      **Identify** do the same walk from a phone. A scan publishes ready-to-paste
      light YAML only when group discovery is complete; otherwise it retains the

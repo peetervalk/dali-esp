@@ -10,6 +10,7 @@ editor drops the execute bit, so `chmod +x dali-shell` first, or run it as
     ./dali-shell                          interactive session
     ./dali-shell discover                 run one command and exit
     ./dali-shell export inventory > /config/dali_inventory.json
+    ./dali-shell export config > /config/dali_block.yaml
     ./dali-shell --list                   show the nodes on this network
 
 The device end is components/dali/dali_shell.c, reached over the TCP front end

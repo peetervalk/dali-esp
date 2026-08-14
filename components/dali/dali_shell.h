@@ -101,6 +101,23 @@ typedef struct {
     /* Called after a workflow that invalidates cached device state, so the
      * integration can re-read what it holds. NULL when nothing caches. */
     void (*inventory_changed)(void *ctx, const DaliDiscoveryInventory *inventory);
+    /*
+     * Print the integration's own configuration as the YAML block that would
+     * produce it — what `export config` emits.
+     *
+     * This is a hook rather than a shell verb implemented here because the
+     * facts it prints are the integration's, not the bus's: which GPIOs the
+     * PHY was handed, which entities exist and what each one targets. The
+     * shell holds none of that, and the native firmware has none of it to
+     * hold — it is not configured by YAML at all, so it leaves this NULL and
+     * the verb says so rather than inventing a block nobody could flash.
+     *
+     * `inventory` is the session's last scan, or NULL when nothing has been
+     * discovered yet; an integration merges what the bus reported into what it
+     * was configured with, and says which is which.
+     */
+    void (*export_config)(void *ctx, const DaliCliOut *out,
+                          const DaliDiscoveryInventory *inventory);
     void  *ctx;
 } DaliShellHooks;
 

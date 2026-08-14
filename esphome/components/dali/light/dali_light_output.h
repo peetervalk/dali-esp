@@ -75,6 +75,24 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
     has_curve_override_ = true;
   }
 
+  // Reports query_address_ raw rather than through get_query_address(): the
+  // latter answers "who do we ask", which for a short-address entity is itself
+  // and for a group entity may be a scan-derived pick. Neither was in the YAML.
+  void describe_config(DaliLightConfig *out) const override {
+    if (out == nullptr) return;
+    out->name              = state_ != nullptr ? state_->get_name().c_str() : "";
+    out->target_type       = static_cast<uint8_t>(target_.type);
+    out->target_address    = target_.address;
+    out->query_address     = query_address_;
+    out->member_groups     = member_groups_;
+    out->has_min_level     = has_min_level_override_;
+    out->min_level         = min_level_override_;
+    out->has_max_level     = has_max_level_override_;
+    out->max_level         = max_level_override_;
+    out->has_dimming_curve = has_curve_override_;
+    out->dimming_curve     = static_cast<uint8_t>(curve_override_);
+  }
+
  protected:
   DaliTarget      target_{};
   DaliComponent  *comp_{nullptr};

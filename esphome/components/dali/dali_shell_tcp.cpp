@@ -125,6 +125,27 @@ void DaliShellServer::bus_release_cb(void *ctx)
     }
 }
 
+/*
+ * `export config`. The `shell:` sub-block is this object's own configuration,
+ * so it is filled in here rather than looked up: DaliComponent has no
+ * back-reference to the front end driving it, and does not need one for this.
+ */
+void DaliShellServer::export_config_cb(void *ctx, const DaliCliOut *out,
+                                       const DaliDiscoveryInventory *inventory)
+{
+    auto *self = static_cast<DaliShellServer *>(ctx);
+    if (self == nullptr || self->parent_ == nullptr) {
+        return;
+    }
+
+    DaliShellConfigInfo shell = {};
+    shell.port                = self->port_;
+    shell.idle_timeout_s      = self->idle_timeout_s_;
+    shell.allow_commissioning = self->allow_commissioning_;
+
+    self->parent_->export_config_yaml(out, &shell, inventory);
+}
+
 /* ── Accept loop ─────────────────────────────────────────────────────────── */
 
 void DaliShellServer::task_entry(void *arg)
@@ -208,6 +229,7 @@ void DaliShellServer::serve(int client_fd)
     session.hooks.bus_claim = bus_claim_cb;
     session.hooks.bus_release = bus_release_cb;
     session.hooks.inventory_changed = nullptr;
+    session.hooks.export_config = export_config_cb;
     session.hooks.ctx = this;
     session.policy = allow_commissioning_ ? DALI_SHELL_ALLOW_ALL : DALI_SHELL_ALLOW_RESET;
     session.aborted = aborted_cb;

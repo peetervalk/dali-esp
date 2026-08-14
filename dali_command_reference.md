@@ -143,6 +143,7 @@ scan
 discover
 inventory
 export inventory
+export config
 identify <addr>
 find switches [seconds]
 events
