@@ -20,9 +20,11 @@ static const char *const TAG = "dali.shell";
 
 /* Stack for the session task. The shell's workflows keep their working set in
  * module statics rather than on the stack, but discovery and commissioning
- * still nest several frames of protocol code, so this matches what the scan
- * task already asks for. */
-static constexpr uint32_t SHELL_TASK_STACK = 8192u;
+ * still nest several frames of protocol code, so this starts from what the scan
+ * task already asks for. The extra over that 8192 is headroom: the scan task
+ * runs one walk and nothing else, while a session task carries its own command
+ * dispatch under everything a workflow nests. */
+static constexpr uint32_t SHELL_TASK_STACK = 12288u;
 /* Below the DALI task (10) and the scan task (9): a shell session is
  * interactive work and must never delay bus servicing. */
 static constexpr UBaseType_t SHELL_TASK_PRIORITY = 4u;
@@ -149,8 +151,22 @@ void DaliShellServer::run()
             addr.sin_addr.s_addr = htonl(INADDR_ANY);
             addr.sin_port = htons(port_);
 
+            /*
+             * One session is served at a time, so the backlog only decides what
+             * a second client meets while the first is busy: with a depth of 1
+             * the third connect onward is dropped in the SYN queue and times out
+             * with no diagnosis at all. Two lets one waiter sit queued and be
+             * served the moment the session ends, which is the common case of an
+             * operator opening a second terminal.
+             *
+             * It does NOT deliver the busy notice below to that waiter: nothing
+             * is accepted while serve() owns this loop, so a queued client sees
+             * an open socket and silence until the session ends or its idle
+             * timeout fires. Saying so promptly needs the accept to happen
+             * during a session, not a deeper queue.
+             */
             if (::bind(listen_fd_, (struct sockaddr *) &addr, sizeof(addr)) < 0 ||
-                ::listen(listen_fd_, 1) < 0) {
+                ::listen(listen_fd_, 2) < 0) {
                 ESP_LOGW(TAG, "bind/listen on port %u failed: %d", (unsigned) port_, errno);
                 ::close(listen_fd_);
                 listen_fd_ = -1;

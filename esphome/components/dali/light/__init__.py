@@ -31,8 +31,12 @@ DIMMING_CURVES = {
     "linear": 1,
 }
 
+# cv.enum() hands back the config KEY (an EnumValue, which is a str), not the
+# mapped C++ value — the mapping is applied later, at codegen. Compare against
+# the key here: comparing against TARGET_TYPES["group"] asks whether "group" == 1,
+# which is never true, and the check below silently never runs.
 def _validate_target_address(config):
-    if config.get(CONF_TARGET_TYPE) == TARGET_TYPES["group"]:
+    if config.get(CONF_TARGET_TYPE) == "group":
         addr = config.get(CONF_TARGET_ADDRESS, 0)
         if addr > 15:
             raise cv.Invalid(
@@ -84,7 +88,11 @@ async def to_code(config):
         cg.add(var.set_min_level_override(config[CONF_MIN_LEVEL]))
     if CONF_MAX_LEVEL in config:
         cg.add(var.set_max_level_override(config[CONF_MAX_LEVEL]))
-    if config[CONF_DIMMING_CURVE] != DIMMING_CURVES["auto"]:
+    # Key comparison, not DIMMING_CURVES["auto"] — see the note on cv.enum above.
+    # "auto" means "take whatever the bus reports", so it must emit no override at
+    # all: sending the 0xFF sentinel as a curve makes the profile fail validation,
+    # which logs a warning per light and discards any min/max override with it.
+    if config[CONF_DIMMING_CURVE] != "auto":
         cg.add(var.set_dimming_curve_override(config[CONF_DIMMING_CURVE]))
 
     # member_groups must be set before set_dali_component because

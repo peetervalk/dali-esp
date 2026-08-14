@@ -23,6 +23,19 @@
 #define DALI_SEND_TWICE_WINDOW_MS   100u    /* max gap between repeated sends  */
 /* DALI_HALF_BIT_US rounds nominal Te upward, making this 22 Te guard 9174 µs. */
 #define DALI_FORWARD_INTERFRAME_US (DALI_HALF_BIT_US * 22u)
+/*
+ * Hold-off before retransmitting a frame whose reply window expired.
+ *
+ * The ordinary forward-interframe guard is armed when the frame is sent, so it
+ * has long lapsed by the time a 25 ms reply window closes: without this, the
+ * retry goes out the instant the window shuts. Gear that answers a shade later
+ * than the timeout is then still driving the bus, and the retransmission lands
+ * on the tail of that backward frame — losing both, and making a present device
+ * look absent to a scan. One backward frame (11 Te) plus the settle period
+ * covers the straggler before the wire is used again.
+ */
+#define DALI_REPLY_TIMEOUT_BACKOFF_US \
+    ((DALI_BIT_US * 11u) + (DALI_SETTLE_MS * 1000u))
 #define DALI_SEND_TWICE_WINDOW_US  (DALI_SEND_TWICE_WINDOW_MS * 1000u)
 #define DALI_BUS_IDLE_GUARD_US   (DALI_BIT_US * 2u) /* idle high before TX      */
 #define DALI_BUS_IDLE_TIMEOUT_US (DALI_BIT_US * 40u) /* ~33 ms; outlasts any 24-bit frame from input devices */

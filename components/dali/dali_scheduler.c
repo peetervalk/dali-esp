@@ -759,6 +759,12 @@ next:
                 if (s_active.retries_left > 0u) {
                     s_active.retries_left--;
                     g_dali_stats.tx_retries++;
+                    /* A reply that missed the window by a little is still on the
+                     * wire. Re-arm the guard from now — the one armed at TX
+                     * expired a dozen ms ago — so the retry waits for the
+                     * straggler instead of transmitting over it. */
+                    sched_arm_tx_gap(sched_now_us(),
+                                     DALI_REPLY_TIMEOUT_BACKOFF_US);
                     s_send_count = 0u;
                     s_send_twice_first_started_us = 0u;
                     s_send_twice_first_started_ms = 0u;

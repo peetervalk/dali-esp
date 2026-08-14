@@ -257,6 +257,13 @@ static void advance_to_next_forward(void)
     g_mock_time_us += DALI_FORWARD_INTERFRAME_US;
 }
 
+/* Past the hold-off a reply timeout arms before the frame may be retransmitted. */
+static void advance_past_retry_backoff(void)
+{
+    g_mock_tick_ms += (DALI_REPLY_TIMEOUT_BACKOFF_US + 999u) / 1000u;
+    g_mock_time_us += DALI_REPLY_TIMEOUT_BACKOFF_US;
+}
+
 static void inject_reply(uint32_t data, uint8_t bits)
 {
     DaliFrame f = { .data = data, .bit_length = bits };
@@ -942,13 +949,21 @@ void test_reply_timeout_then_retry_succeeds(void)
     advance_past_settle();
     dali_sched_run();                           /* → WAIT_REPLY */
 
-    /* Timeout → retry → TX(2) → WAIT_SETTLE, all in one run() call */
+    /* Timeout books the retry but must NOT put it on the wire yet: gear that
+     * answered just past the window is still transmitting, and the retry would
+     * land on top of that backward frame. */
     advance_time_ms(DALI_REPLY_TIMEOUT_MS);
     dali_sched_run();
-    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
     TEST_ASSERT_EQUAL(0, g_cb_count);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.reply_timeouts);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.tx_retries);
+
+    /* Once the straggler has had its say, TX(2) goes out. */
+    advance_past_retry_backoff();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(0, g_cb_count);
 
     /* Second attempt: reply arrives */
     advance_past_settle();
@@ -1453,11 +1468,17 @@ void test_send_twice_retry_starts_a_fresh_window(void)
     TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
     TEST_ASSERT_EQUAL(2, g_mock_tx_count);
 
-    /* Delay well beyond the original pair's deadline before retrying. */
+    /* Delay well beyond the original pair's deadline before retrying. The
+     * timeout books the retry; the reply-timeout hold-off still applies before
+     * the fresh pair may start. */
     advance_time_ms(DALI_SEND_TWICE_WINDOW_MS + 1u);
     dali_sched_run();
-    TEST_ASSERT_EQUAL(3, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.tx_retries);
+
+    advance_past_retry_backoff();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(3, g_mock_tx_count);
 
     advance_to_next_forward();
     dali_sched_run();

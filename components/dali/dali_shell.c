@@ -341,6 +341,23 @@ static uint32_t  s_last_rx_since_tx_us;
 static bool      s_last_rx_has_since_tx;
 static bool      s_has_last_rx_frame;
 static DaliDiscoveryInventory s_inventory;
+/*
+ * Working copy for every verb that builds or edits an inventory before
+ * committing it to s_inventory.
+ *
+ * It must not be a stack local: the struct is nearly 5 KB against the shell
+ * task's 8 KB stack, and a walk nests the discovery and transport frames on top
+ * of it. As an automatic it overflowed the task and panicked the chip the
+ * instant `discover` was typed — the ESPHome scan task keeps the same struct off
+ * its own stack for the same reason.
+ *
+ * One buffer serves all of them because dali_shell_attach() admits a single
+ * session and the session task runs one verb at a time, so no two of these
+ * workflows are ever in flight together. Each user fills it completely before
+ * reading it — dali_discovery_scan() resets it, shell_inventory_snapshot()
+ * overwrites it — so nothing carries across commands.
+ */
+static DaliDiscoveryInventory s_inventory_scratch;
 static DaliInputEventQueue s_event_queue;
 static DiagSwitchMapping s_switch_mappings[SHELL_SWITCH_MAPPING_MAX];
 static uint8_t s_switch_mapping_count;
@@ -2190,10 +2207,10 @@ static void cmd_instances(const DaliCliTokens *t)
     }
     shell_input_cache_store(&input);
 
-    DaliDiscoveryInventory inventory;
-    if (shell_inventory_snapshot(&inventory)) {
-        if (dali_discovery_inventory_update_input_device(&inventory, &input) == DALI_OK) {
-            shell_inventory_replace(&inventory);
+    DaliDiscoveryInventory *inventory = &s_inventory_scratch;
+    if (shell_inventory_snapshot(inventory)) {
+        if (dali_discovery_inventory_update_input_device(inventory, &input) == DALI_OK) {
+            shell_inventory_replace(inventory);
         }
     }
 
@@ -2311,10 +2328,10 @@ static void cmd_sensor(const DaliCliTokens *t)
     }
     shell_input_cache_store(&input);
 
-    DaliDiscoveryInventory inventory;
-    if (shell_inventory_snapshot(&inventory)) {
-        if (dali_discovery_inventory_update_input_device(&inventory, &input) == DALI_OK) {
-            shell_inventory_replace(&inventory);
+    DaliDiscoveryInventory *inventory = &s_inventory_scratch;
+    if (shell_inventory_snapshot(inventory)) {
+        if (dali_discovery_inventory_update_input_device(inventory, &input) == DALI_OK) {
+            shell_inventory_replace(inventory);
         }
     }
 
@@ -2530,7 +2547,7 @@ static void shell_discovery_found_cb(uint8_t addr,
 static uint8_t shell_discover_bus(bool detailed)
 {
     uint8_t found = 0u;
-    DaliDiscoveryInventory inventory;
+    DaliDiscoveryInventory *inventory = &s_inventory_scratch;
     DaliDiscoveryTransport transport = shell_discovery_transport();
     DiagDiscoveryPrintCtx print_ctx = {
         .detailed = detailed,
@@ -2543,8 +2560,17 @@ static uint8_t shell_discover_bus(bool detailed)
         return 0u;
     }
 
+    /*
+     * A backward frame that arrives after its reply window has closed is the one
+     * bus fault a scan cannot see: the transaction reports a plain timeout, and
+     * an address that answered a shade too late is indistinguishable from an
+     * empty one. Report the count so under-reporting a populated bus reads as a
+     * timing problem rather than as missing hardware.
+     */
+    uint32_t late_replies_before = g_dali_stats.rx_ignored_outside_reply;
+
     shell_printf("Scanning short addresses 0-%u...\r\n", (unsigned)DALI_MAX_SHORT_ADDRESS);
-    DaliError err = dali_discovery_scan(&inventory,
+    DaliError err = dali_discovery_scan(inventory,
                                         &transport,
                                         shell_discovery_found_cb,
                                         &print_ctx,
@@ -2564,13 +2590,13 @@ static uint8_t shell_discover_bus(bool detailed)
     /* Enumerate instances for any detected input devices. */
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         const DaliDiscoveryDeviceInfo *entry =
-            dali_discovery_inventory_get(&inventory, addr);
+            dali_discovery_inventory_get(inventory, addr);
         if (entry == NULL || !entry->present || !entry->has_input_device) {
             continue;
         }
         DaliDiscoveryInputDevice input;
         if (dali_discovery_query_input_device(&transport, addr, &input) == DALI_OK) {
-            (void)dali_discovery_inventory_update_input_device(&inventory, &input);
+            (void)dali_discovery_inventory_update_input_device(inventory, &input);
             shell_input_cache_store(&input);
             if (detailed) {
                 uint8_t count = dali_discovery_input_visible_instance_count(&input);
@@ -2580,17 +2606,30 @@ static uint8_t shell_discover_bus(bool detailed)
         }
     }
 
-    shell_inventory_replace(&inventory);
+    shell_inventory_replace(inventory);
     shell_bus_release();
 
     /* Tell the integration its cached view of the bus is stale before saying
      * the scan is done, so an operator reading the next line is looking at a
      * surface that has already been told to catch up. */
     if (s_session.hooks.inventory_changed != NULL) {
-        s_session.hooks.inventory_changed(s_session.hooks.ctx, &inventory);
+        s_session.hooks.inventory_changed(s_session.hooks.ctx, inventory);
     }
 
+    uint32_t late_replies =
+        g_dali_stats.rx_ignored_outside_reply - late_replies_before;
     shell_printf("Scan complete: %u device(s) found.\r\n", (unsigned)found);
+    if (late_replies > 0u) {
+        /* Not a failure on its own: the retry hold-off exists to cover exactly
+         * this, and a bus whose gear answers a shade late reports a steady count
+         * on every scan. It earns a line because it is the one condition that
+         * can drop a present device from the list above without any other trace. */
+        shell_printf("  note: %" PRIu32 " backward frame(s) answered after the "
+                     "%u ms reply window — marginal gear timing on this bus. "
+                     "Retries cover it; if a known device is missing above, "
+                     "re-run.\r\n",
+                     late_replies, (unsigned)DALI_REPLY_TIMEOUT_MS);
+    }
     return found;
 }
 
@@ -2612,15 +2651,15 @@ static void cmd_inventory(void)
 {
 #ifndef DALI_HOST_BUILD
     uint8_t found = 0u;
-    static DaliDiscoveryInventory inventory;
+    DaliDiscoveryInventory *inventory = &s_inventory_scratch;
 
-    if (!shell_inventory_snapshot(&inventory)) {
+    if (!shell_inventory_snapshot(inventory)) {
         shell_printf("inventory: empty; run discover first\r\n");
         return;
     }
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         const DaliDiscoveryDeviceInfo *entry =
-            dali_discovery_inventory_get(&inventory, addr);
+            dali_discovery_inventory_get(inventory, addr);
         if (entry != NULL && entry->present &&
             (entry->has_status || entry->has_input_device)) {
             if (entry->has_status) {
@@ -2734,7 +2773,7 @@ static void cmd_commission(const DaliCliTokens *t)
     }
 
     DaliDiscoveryTransport transport = shell_discovery_transport();
-    DaliDiscoveryInventory inventory;
+    DaliDiscoveryInventory *inventory = &s_inventory_scratch;
     uint8_t found = 0u;
 
     /*
@@ -2748,7 +2787,7 @@ static void cmd_commission(const DaliCliTokens *t)
     }
 
     shell_printf("commission: pre-scan occupied short addresses\r\n");
-    DaliError err = dali_discovery_scan(&inventory,
+    DaliError err = dali_discovery_scan(inventory,
                                         &transport,
                                         NULL,
                                         NULL,
@@ -2759,14 +2798,14 @@ static void cmd_commission(const DaliCliTokens *t)
         shell_printf("commission: pre-scan ERR %d\r\n", (int)err);
         return;
     }
-    shell_inventory_replace(&inventory);
+    shell_inventory_replace(inventory);
     shell_printf("commission: occupied=%u\r\n", (unsigned)found);
 
     DaliCommissioningOptions options = {
         .first_short_address = first_address,
         .max_devices = max_devices,
         .used_address_mask =
-            dali_commissioning_used_mask_from_inventory(&inventory),
+            dali_commissioning_used_mask_from_inventory(inventory),
         .query_short_address = true,
     };
     DaliCommissioningResult result;
@@ -2782,7 +2821,7 @@ static void cmd_commission(const DaliCliTokens *t)
     /* Commissioning changes which short addresses exist, so the integration's
      * cached view is stale on both the success and the partial-failure path. */
     if (s_session.hooks.inventory_changed != NULL) {
-        s_session.hooks.inventory_changed(s_session.hooks.ctx, &inventory);
+        s_session.hooks.inventory_changed(s_session.hooks.ctx, inventory);
     }
 
     if (err != DALI_OK) {
@@ -2818,7 +2857,7 @@ static void cmd_commission(const DaliCliTokens *t)
     if (result.assigned_count > 0u) {
         shell_printf("commission: verifying with post-scan\r\n");
         found = 0u;
-        err = dali_discovery_scan(&inventory,
+        err = dali_discovery_scan(inventory,
                                   &transport,
                                   NULL,
                                   NULL,
@@ -2828,14 +2867,14 @@ static void cmd_commission(const DaliCliTokens *t)
             shell_printf("commission: post-scan ERR %d\r\n", (int)err);
             return;
         }
-        shell_inventory_replace(&inventory);
+        shell_inventory_replace(inventory);
         shell_printf("commission: post-scan found=%u\r\n", (unsigned)found);
     }
 }
 
 static void cmd_export(const DaliCliTokens *t)
 {
-    static DaliDiscoveryInventory inventory;
+    DaliDiscoveryInventory *inventory = &s_inventory_scratch;
     bool has_inventory;
     static DiagSwitchMapping mappings[SHELL_SWITCH_MAPPING_MAX];
     uint8_t mapping_count;
@@ -2846,7 +2885,7 @@ static void cmd_export(const DaliCliTokens *t)
         return;
     }
 
-    has_inventory = shell_inventory_snapshot(&inventory);
+    has_inventory = shell_inventory_snapshot(inventory);
     mapping_count = shell_switch_mappings_snapshot(mappings, SHELL_SWITCH_MAPPING_MAX);
 
     shell_printf("{\r\n");
@@ -2856,7 +2895,7 @@ static void cmd_export(const DaliCliTokens *t)
     if (has_inventory) {
         for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
             const DaliDiscoveryDeviceInfo *entry =
-                dali_discovery_inventory_get(&inventory, addr);
+                dali_discovery_inventory_get(inventory, addr);
             if (entry == NULL || !entry->present) {
                 continue;
             }
@@ -3104,13 +3143,13 @@ static void cmd_smoke(const DaliCliTokens *t)
         shell_printf("  status: PASS 0x%02X\r\n", (unsigned)status);
         pass++;
 
-        DaliDiscoveryInventory inventory;
-        if (!shell_inventory_snapshot(&inventory)) {
-            (void)dali_discovery_inventory_reset(&inventory);
-            inventory.valid = true;
+        DaliDiscoveryInventory *inventory = &s_inventory_scratch;
+        if (!shell_inventory_snapshot(inventory)) {
+            (void)dali_discovery_inventory_reset(inventory);
+            inventory->valid = true;
         }
-        if (dali_discovery_inventory_store_status(&inventory, addr, status) == DALI_OK) {
-            shell_inventory_replace(&inventory);
+        if (dali_discovery_inventory_store_status(inventory, addr, status) == DALI_OK) {
+            shell_inventory_replace(inventory);
         }
     } else {
         shell_printf("  status: ERR %d\r\n", (int)err);
@@ -3153,13 +3192,13 @@ static void cmd_smoke(const DaliCliTokens *t)
         pass++;
         shell_input_cache_store(&input);
 
-        DaliDiscoveryInventory inventory;
-        if (!shell_inventory_snapshot(&inventory)) {
-            (void)dali_discovery_inventory_reset(&inventory);
-            inventory.valid = true;
+        DaliDiscoveryInventory *inventory = &s_inventory_scratch;
+        if (!shell_inventory_snapshot(inventory)) {
+            (void)dali_discovery_inventory_reset(inventory);
+            inventory->valid = true;
         }
-        if (dali_discovery_inventory_update_input_device(&inventory, &input) == DALI_OK) {
-            shell_inventory_replace(&inventory);
+        if (dali_discovery_inventory_update_input_device(inventory, &input) == DALI_OK) {
+            shell_inventory_replace(inventory);
         }
 
         uint8_t count = dali_discovery_input_visible_instance_count(&input);
