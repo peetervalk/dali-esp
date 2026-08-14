@@ -2916,10 +2916,17 @@ static void cmd_export_config(void)
         return;
     }
 
+    /*
+     * The input cache goes across as a lookup rather than a copy: it is up to
+     * SHELL_INPUT_CACHE_MAX full instance records, the hook reads a handful of
+     * addresses out of it, and shell_input_cache_lookup() already takes the
+     * critical section that makes a read safe against the DALI task.
+     */
     s_session.hooks.export_config(s_session.hooks.ctx,
                                   &s_out,
                                   shell_inventory_snapshot(inventory) ? inventory
-                                                                      : NULL);
+                                                                      : NULL,
+                                  shell_input_cache_lookup);
 }
 
 static void cmd_export_inventory(void)

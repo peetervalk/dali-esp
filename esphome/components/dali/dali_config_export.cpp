@@ -19,6 +19,16 @@
  * force — see DaliLightConfig. A group entity that a scan handed a query
  * address prints without one, because that is what the YAML said, and the next
  * scan will supply it again.
+ *
+ * ── What this is not ────────────────────────────────────────────────────────
+ *
+ * It is a `dali:` block, not a device backup, and the emitted header says so.
+ * The registries below hold the values this component was handed and nothing
+ * else: not the ESPHome-owned half of an entity (unit, device class, state
+ * class, accuracy, id, internal, filters, automations), not the platforms with
+ * no registry here (button, number, text), and not the node's own blocks
+ * (esphome, wifi, api, ota). An operator who reads this as a file to flash
+ * loses all of it silently, which is worth one paragraph up front.
  */
 
 #include "dali_config_export.h"
@@ -30,6 +40,8 @@ extern "C" {
 #include "../../../components/dali/dali_dim_curve.h"
 #include "../../../components/dali/dali_discovery.h"
 #include "../../../components/dali/dali_frame.h"
+#include "../../../components/dali/dali_input_device.h"
+#include "../../../components/dali/dali_input_poll.h"
 }
 
 namespace esphome {
@@ -196,6 +208,12 @@ bool gear_has_entity(uint8_t addr, const DaliDiscoveryDeviceInfo *device)
     return false;
 }
 
+/*
+ * Whether any sensor entity reads this address at all. Only meaningful as a
+ * fallback: with no per-instance detail available there is nothing finer to
+ * compare against, and reporting a partly-covered address would be worse than
+ * staying quiet, since the operator cannot act on it either.
+ */
 bool input_has_entity(uint8_t addr)
 {
     for (uint8_t i = 0u; i < dali_registry_sensor_count(); i++) {
@@ -205,6 +223,75 @@ bool input_has_entity(uint8_t addr)
         DaliSensorConfig cfg{};
         sensor->describe_config(&cfg);
         if (cfg.address == addr) return true;
+    }
+    return false;
+}
+
+/*
+ * Whether a sensor entity reads this exact instance.
+ *
+ * Matched per instance rather than per address because a device mixes instance
+ * kinds: a sensor head whose lux and occupancy are wired up but whose
+ * temperature is not should have the temperature reported as missing, not go
+ * quiet because something else on the same address is covered.
+ */
+bool input_instance_has_entity(uint8_t addr, uint8_t instance)
+{
+    for (uint8_t i = 0u; i < dali_registry_sensor_count(); i++) {
+        const DaliBusSensor *sensor = dali_registry_sensor_at(i);
+        if (sensor == nullptr) continue;
+
+        DaliSensorConfig cfg{};
+        sensor->describe_config(&cfg);
+        if (cfg.address == addr && cfg.instance == instance) return true;
+    }
+    return false;
+}
+
+/*
+ * Whether a dispatch rule names this instance.
+ *
+ * Only a 24-bit input frame carries the address of the device that sent it, so
+ * an `input_24bit` rule with `address_kind: short` is the only kind that can
+ * be traced back to one. Everything else the dispatch table holds is real
+ * coverage that simply cannot be attributed — see legacy_dispatch_present().
+ */
+bool input_instance_has_dispatch(uint8_t addr, uint8_t instance)
+{
+    for (uint8_t i = 0u; i < dali_registry_dispatch_count(); i++) {
+        const DaliDispatchEntry *entry = dali_registry_dispatch_at(i);
+        if (entry == nullptr) continue;
+
+        if (entry->key.frame_kind != DALI_EVENT_FRAME_INPUT_24BIT) continue;
+        if (entry->key.address_kind != DALI_EVENT_ADDRESS_SHORT) continue;
+        if (entry->key.address != addr) continue;
+
+        if (entry->key.instance == DALI_DISPATCH_INSTANCE_ANY ||
+            entry->key.instance == instance) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Whether any rule matches legacy 16-bit frames.
+ *
+ * A legacy frame is a forward frame: the coupler sending it is addressing
+ * gear, not reporting itself, so there is no source address anywhere in it. A
+ * rule matching one may be the entire reason an input device listed below
+ * needs nothing further, and no observation of the bus can connect the two.
+ * Saying that outright is the honest answer; omitting it lets the export imply
+ * a device is unhandled when it is handled perfectly well.
+ */
+bool legacy_dispatch_present()
+{
+    for (uint8_t i = 0u; i < dali_registry_dispatch_count(); i++) {
+        const DaliDispatchEntry *entry = dali_registry_dispatch_at(i);
+        if (entry != nullptr &&
+            entry->key.frame_kind == DALI_EVENT_FRAME_LEGACY_16BIT) {
+            return true;
+        }
     }
     return false;
 }
@@ -414,16 +501,61 @@ void emit_discovered_lights(const DaliCliOut *out,
 }
 
 /*
- * Input devices the bus reported that no sensor entity reads.
+ * Input instances the bus reported that nothing reads, as commented-out
+ * sensor entities.
  *
- * Listed rather than drafted: a sensor entity needs an instance number and a
- * value width, and picking those from an instance count would be a guess that
- * reads as a recommendation. `instances <addr>` answers it properly.
+ * These were once listed as a bare instance count under an instruction to go
+ * and run `instances <addr>`. Drafting was avoided on the grounds that a
+ * sensor entity needs an instance number and a value width, and inventing
+ * those from a count would read as a recommendation while being a guess.
+ *
+ * It is not a guess any more. A scan reads each instance's type and reported
+ * resolution and caches both, so the width comes off the device — through
+ * dali_input_poll_bytes_for_resolution(), the conversion the poller itself
+ * uses — and the type settles whether a sensor entity is the right answer at
+ * all. That second part is what the count could never carry: a push button
+ * holds no value to poll, and drafting it a `sensor:` entry yields an entity
+ * that polls forever and publishes nothing.
+ *
+ * What genuinely cannot be read off a device stays out of the draft. Scale,
+ * offset, and unit are decisions about what the number should mean, and a
+ * plausible-looking guess at those is the failure this function is avoiding,
+ * not a smaller version of it.
  */
 void emit_discovered_inputs(const DaliCliOut *out,
-                            const DaliDiscoveryInventory *inventory)
+                            const DaliDiscoveryInventory *inventory,
+                            DaliShellInputLookupFn input_lookup,
+                            bool under_live_block)
 {
-    bool first = true;
+    bool header_done = false;
+    bool button_seen = false;
+
+    /* As in emit_discovered_lights: with no configured sensor entity there is
+     * no `sensor:` key to hang these off, so the block carries its own. */
+    const char *lead  = under_live_block ? "  # " : "#   ";
+    const char *prose = under_live_block ? "  # " : "# ";
+
+    auto emit_header = [&]() {
+        if (header_done) return;
+        header_done = true;
+        if (under_live_block) {
+            dali_cli_write(out,
+                           "\r\n  # ── Found on the bus, not read "
+                           "───────────────────────────────\r\n");
+        } else {
+            dali_cli_write(out,
+                           "\r\n# ── Found on the bus, not read "
+                           "─────────────────────────────────\r\n");
+        }
+        dali_cli_printf(out,
+                        "%sNothing reads these input instances. Where a scan "
+                        "has read an instance's\r\n", prose);
+        dali_cli_printf(out,
+                        "%stype and width, the draft below carries them; "
+                        "scale, offset, and unit\r\n", prose);
+        dali_cli_printf(out, "%sare yours to add.\r\n", prose);
+        if (!under_live_block) dali_cli_write(out, "# sensor:\r\n");
+    };
 
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         const DaliDiscoveryDeviceInfo *device =
@@ -431,21 +563,104 @@ void emit_discovered_inputs(const DaliCliOut *out,
         if (device == nullptr || !device->present || !device->has_input_device) {
             continue;
         }
-        if (input_has_entity(addr)) continue;
 
-        if (first) {
-            dali_cli_write(out,
-                           "\r\n# Input devices found with no sensor entity. "
-                           "Run `instances <addr>` for\r\n"
-                           "# the instance numbers and value widths a "
-                           "`sensor:` entry needs.\r\n");
-            first = false;
+        /*
+         * No cached detail means nothing has read this address's instances
+         * this session, which is a different answer from "it has none" and
+         * gets the older, coarser report.
+         */
+        DaliDiscoveryInputDevice input{};
+        if (input_lookup == nullptr || !input_lookup(addr, &input)) {
+            if (input_has_entity(addr)) continue;
+            emit_header();
+            dali_cli_printf(out,
+                            "%saddress %u: %u instance(s), types unread — run "
+                            "`instances %u`, then export again\r\n",
+                            prose, (unsigned) addr,
+                            (unsigned) (device->has_instance_count
+                                            ? device->instance_count
+                                            : 0u),
+                            (unsigned) addr);
+            continue;
         }
-        dali_cli_printf(out, "#   address %u: %u instance(s)\r\n",
-                        (unsigned) addr,
-                        (unsigned) (device->has_instance_count
-                                        ? device->instance_count
-                                        : 0u));
+
+        uint8_t count = dali_discovery_input_visible_instance_count(&input);
+        for (uint8_t inst = 0u; inst < count; inst++) {
+            const DaliInputInstanceInfo *info = &input.device.instances[inst];
+
+            if (input_instance_has_entity(addr, inst)) continue;
+            if (input_instance_has_dispatch(addr, inst)) continue;
+
+            emit_header();
+
+            if (!info->has_type) {
+                dali_cli_printf(out,
+                                "%saddress %u instance %u: type unread, so "
+                                "nothing can be drafted for it\r\n",
+                                prose, (unsigned) addr, (unsigned) inst);
+                continue;
+            }
+
+            if (info->role == DALI_INPUT_ROLE_PUSH_BUTTON) {
+                button_seen = true;
+                dali_cli_printf(out,
+                                "%saddress %u instance %u: push button — no "
+                                "value to poll, so no sensor\r\n",
+                                prose, (unsigned) addr, (unsigned) inst);
+                dali_cli_printf(out,
+                                "%sentity. Route it with a headless_dispatch "
+                                "rule on its event.\r\n", prose);
+                continue;
+            }
+
+            if (info->role != DALI_INPUT_ROLE_OCCUPANCY &&
+                info->role != DALI_INPUT_ROLE_LIGHT &&
+                info->role != DALI_INPUT_ROLE_ABSOLUTE) {
+                dali_cli_printf(out,
+                                "%saddress %u instance %u: %s instance, with "
+                                "no standard value to\r\n",
+                                prose, (unsigned) addr, (unsigned) inst,
+                                dali_input_role_name(info->role));
+                dali_cli_printf(out,
+                                "%spoll — check what the device documents for "
+                                "it.\r\n", prose);
+                continue;
+            }
+
+            dali_cli_printf(out, "%s- platform: dali\r\n", lead);
+            dali_cli_printf(out, "%s  name: \"DALI %u %s %u\"\r\n", lead,
+                            (unsigned) addr,
+                            dali_input_role_name(info->role),
+                            (unsigned) inst);
+            dali_cli_printf(out, "%s  address: %u\r\n", lead, (unsigned) addr);
+            dali_cli_printf(out, "%s  instance: %u\r\n", lead, (unsigned) inst);
+            if (info->has_resolution) {
+                dali_cli_printf(out, "%s  value_bytes: %u\r\n", lead,
+                                (unsigned) dali_input_poll_bytes_for_resolution(
+                                    info->resolution));
+            } else {
+                dali_cli_printf(out,
+                                "%s  # resolution unread; value_bytes would "
+                                "default to 1\r\n", lead);
+            }
+        }
+    }
+
+    /*
+     * Only worth saying once a button has actually been listed: that is the
+     * case where the operator is looking at a device the export calls
+     * uncovered and may well have wired up already.
+     */
+    if (button_seen && legacy_dispatch_present()) {
+        dali_cli_printf(out,
+                        "%sThis config has legacy_16bit dispatch rules. "
+                        "Those frames carry no\r\n", prose);
+        dali_cli_printf(out,
+                        "%ssource address, so one of them may already handle a "
+                        "button listed\r\n", prose);
+        dali_cli_printf(out,
+                        "%sabove — nothing on the bus can say which device "
+                        "sent it.\r\n", prose);
     }
 }
 
@@ -455,7 +670,8 @@ void emit_discovered_inputs(const DaliCliOut *out,
 
 void DaliComponent::export_config_yaml(const DaliCliOut *out,
                                        const DaliShellConfigInfo *shell,
-                                       const DaliDiscoveryInventory *inventory)
+                                       const DaliDiscoveryInventory *inventory,
+                                       DaliShellInputLookupFn input_lookup)
 {
     if (out == nullptr) return;
 
@@ -469,6 +685,18 @@ void DaliComponent::export_config_yaml(const DaliCliOut *out,
                    "what the device is\r\n"
                    "# configured as rather than what any file on disk "
                    "says.\r\n"
+                   "#\r\n"
+                   "# This is the `dali:` block and the entities naming it — "
+                   "a diff against your\r\n"
+                   "# source, not a file to flash. Nothing ESPHome owns is "
+                   "visible from here:\r\n"
+                   "# no esphome:/wifi:/api:/ota: blocks, no "
+                   "unit_of_measurement, device_class,\r\n"
+                   "# state_class, accuracy_decimals, id, internal, filters, "
+                   "or automations on\r\n"
+                   "# an entity, and no button:, number:, or text: entries. "
+                   "Restoring from this\r\n"
+                   "# alone would drop all of it.\r\n"
                    "#\r\n"
                    "# `id:` is omitted: ESPHome generates one, and the "
                    "entries below resolve to\r\n"
@@ -484,7 +712,19 @@ void DaliComponent::export_config_yaml(const DaliCliOut *out,
     dali_cli_write(out, "dali:\r\n");
     dali_cli_printf(out, "  tx_pin: GPIO%u\r\n", (unsigned) tx_pin_);
     dali_cli_printf(out, "  rx_pin: GPIO%u\r\n", (unsigned) rx_pin_);
-    dali_cli_printf(out, "  poll_interval: %u\r\n", (unsigned) poll_interval_s_);
+    /*
+     * 0 is the schema default and means no periodic gear polling at all, which
+     * `poll_interval: 0` states in a way that reads like a broken setting. The
+     * schema skips the setter for it too, so omitting the key round-trips to
+     * exactly this firmware.
+     */
+    if (poll_interval_s_ > 0u) {
+        dali_cli_printf(out, "  poll_interval: %u\r\n",
+                        (unsigned) poll_interval_s_);
+    } else {
+        dali_cli_write(out,
+                       "  # poll_interval unset: no periodic gear polling\r\n");
+    }
 
     emit_text_sensor(out, "scan_status",     scan_status_);
     emit_text_sensor(out, "scan_result",     scan_result_);
@@ -544,7 +784,7 @@ void DaliComponent::export_config_yaml(const DaliCliOut *out,
     }
 
     if (inventory != nullptr) {
-        emit_discovered_inputs(out, inventory);
+        emit_discovered_inputs(out, inventory, input_lookup, sensor_count > 0u);
     } else {
         dali_cli_write(out,
                        "\r\n# No scan in this session, so nothing is "

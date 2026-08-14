@@ -131,7 +131,8 @@ void DaliShellServer::bus_release_cb(void *ctx)
  * back-reference to the front end driving it, and does not need one for this.
  */
 void DaliShellServer::export_config_cb(void *ctx, const DaliCliOut *out,
-                                       const DaliDiscoveryInventory *inventory)
+                                       const DaliDiscoveryInventory *inventory,
+                                       DaliShellInputLookupFn input_lookup)
 {
     auto *self = static_cast<DaliShellServer *>(ctx);
     if (self == nullptr || self->parent_ == nullptr) {
@@ -143,7 +144,7 @@ void DaliShellServer::export_config_cb(void *ctx, const DaliCliOut *out,
     shell.idle_timeout_s      = self->idle_timeout_s_;
     shell.allow_commissioning = self->allow_commissioning_;
 
-    self->parent_->export_config_yaml(out, &shell, inventory);
+    self->parent_->export_config_yaml(out, &shell, inventory, input_lookup);
 }
 
 /* ── Accept loop ─────────────────────────────────────────────────────────── */

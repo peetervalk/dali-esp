@@ -93,6 +93,22 @@
  * racing it. Every successful claim is matched by exactly one release.
  * --------------------------------------------------------------------------*/
 
+/*
+ * Per-instance detail for one input device, out of the session's caches.
+ *
+ * Whatever last read an address's instances fills this in — a `discover`
+ * sweep or an explicit `instances <addr>`. Both store the instance type and
+ * the reported resolution, which together are the difference between knowing
+ * an address has three instances and knowing that instance 0 is a push button
+ * and instance 1 an occupancy sensor reporting one byte.
+ *
+ * Returns false when nothing has read that address this session. That is not
+ * the same answer as "no usable instances", and the two want different advice,
+ * so a caller must not treat a false return as an empty device.
+ */
+typedef bool (*DaliShellInputLookupFn)(uint8_t addr,
+                                       DaliDiscoveryInputDevice *out);
+
 typedef struct {
     /* `what` names the workflow ("scan", "commission") for the integration's
      * own logging; it is never NULL. */
@@ -115,9 +131,15 @@ typedef struct {
      * `inventory` is the session's last scan, or NULL when nothing has been
      * discovered yet; an integration merges what the bus reported into what it
      * was configured with, and says which is which.
+     *
+     * `input_lookup` reaches the same session's per-instance input detail, so
+     * the integration can name what an uncovered instance actually is instead
+     * of telling the operator to go and ask the device something it has
+     * already been asked. NULL when the caller keeps no such cache.
      */
     void (*export_config)(void *ctx, const DaliCliOut *out,
-                          const DaliDiscoveryInventory *inventory);
+                          const DaliDiscoveryInventory *inventory,
+                          DaliShellInputLookupFn input_lookup);
     void  *ctx;
 } DaliShellHooks;
 

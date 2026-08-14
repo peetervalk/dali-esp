@@ -59,7 +59,15 @@ Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The controller has
      reaches the ESP32 — so the pins, entities, and dispatch rules it prints
      are the ones in force rather than the ones in a file that may have moved
      on. Run `discover` first and gear the bus reported that no entity drives
-     is appended commented out, ready to uncomment.
+     is appended commented out, ready to uncomment; so is a draft `sensor:`
+     entry for every input instance nothing reads, carrying the address,
+     instance, and value width the scan read off the device.
+
+     It is a `dali:` block, not a backup. Everything ESPHome owns is invisible
+     to it — the node's own blocks, an entity's unit, device class, id,
+     `internal`, filters and automations, and the `button:`, `number:` and
+     `text:` platforms — so treat it as a diff against your source rather than
+     a file to restore from. The emitted header says the same.
    - **From Home Assistant.** **Scan DALI Bus**, **Find Couplers**, and
      **Identify** do the same walk from a phone. A scan publishes ready-to-paste
      light YAML only when group discovery is complete; otherwise it retains the

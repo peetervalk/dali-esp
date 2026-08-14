@@ -70,7 +70,8 @@ class DaliShellServer : public Component {
   static bool bus_claim_cb(void *ctx, const char *what);
   static void bus_release_cb(void *ctx);
   static void export_config_cb(void *ctx, const DaliCliOut *out,
-                               const DaliDiscoveryInventory *inventory);
+                               const DaliDiscoveryInventory *inventory,
+                               DaliShellInputLookupFn input_lookup);
 
   DaliComponent *parent_{nullptr};
   uint16_t       port_{2323};

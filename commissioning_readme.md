@@ -115,6 +115,23 @@ ESP32, so what it prints is what is actually in force. Run `discover` first and
 gear the bus reported that no entity drives is appended commented out, ready to
 uncomment and name.
 
+Input instances are appended the same way, drafted rather than merely counted: a
+scan reads each instance's type and resolution, so the export knows a value
+instance's width and knows a push button has no value to poll at all. A button
+gets a note pointing at `headless_dispatch` instead of a `sensor:` entry that
+would poll forever and publish nothing. What no scan can supply — scale, offset,
+unit — is left for you.
+
+If any `headless_dispatch` rule matches `legacy_16bit` frames, the export says so
+next to the buttons it lists. Those frames are forward frames and carry no source
+address, so a rule may already be handling a button the export has just called
+uncovered, and nothing on the bus can prove which device sent it.
+
+The output is a `dali:` block, not a device backup. Nothing ESPHome owns appears
+in it: not the node's own blocks, not an entity's unit, device class, id,
+`internal`, filters or automations, and not the `button:`, `number:` or `text:`
+platforms. Read it as a diff against your source.
+
 From there, work from the example configuration in the README: give the entities
 real names, set `query_address` for group lights, and add the sensors you found.
 

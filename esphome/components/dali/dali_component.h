@@ -31,6 +31,17 @@ struct DaliShellConfigInfo {
 };
 
 /*
+ * The shell's per-instance input-device lookup, as `export config` receives
+ * it. Declared here rather than pulled in from dali_shell.h for the same
+ * reason DaliShellConfigInfo is: that header is the diagnostic shell's whole
+ * interface, and this component needs two names out of it. The definition
+ * there is canonical; a drift between them is a compile error at the one
+ * place both headers are in scope, DaliShellServer::export_config_cb.
+ */
+using DaliShellInputLookupFn = bool (*)(uint8_t addr,
+                                        DaliDiscoveryInputDevice *out);
+
+/*
  * What a light entity was configured with, as `export config` needs to print
  * it back. Every field is the value the YAML set, not the value in force: a
  * scan may have supplied a query address the config did not, and printing the
@@ -223,12 +234,16 @@ class DaliComponent : public Component {
   // `inventory` is the last scan, or null when none has run: gear the bus
   // reported but no entity covers is emitted commented out, so a re-export
   // proposes the additions without silently enabling them.
+  // `input_lookup` reaches the caller's per-instance input-device detail, the
+  // type and resolution an uncovered instance needs to be drafted rather than
+  // merely counted; null falls back to reporting instance counts.
   //
   // Runs on the shell task, not the loop task. It only reads Core 0 entity
   // configuration, which is written once during setup() and never after.
   void export_config_yaml(const DaliCliOut *out,
                           const DaliShellConfigInfo *shell,
-                          const DaliDiscoveryInventory *inventory);
+                          const DaliDiscoveryInventory *inventory,
+                          DaliShellInputLookupFn input_lookup);
 
  protected:
   uint8_t tx_pin_{18};
