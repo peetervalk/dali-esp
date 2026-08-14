@@ -160,7 +160,8 @@ in **DALI Command Result**. It cannot stream, so it has no `discover`, `find`,
 `capture`, or `commission` — the verbs whose value is in watching them work. What
 it does have it spells identically to the shell, because both resolve through the
 same tables.
-Due to how HA works, if you need to send last command again, add a trailing space. 
+Due to how HA works, if you need to send last command again, add a trailing space.
+Queries are all lowercase and will fail when automatically capitalised.  
 
 ## When something looks wrong
 
