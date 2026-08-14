@@ -1,4 +1,5 @@
-# DALI diagnostic firmware — discovery and commissioning aid.
+# DALI starter firmware — flash this first, commission the bus, then write your
+# own config from what it finds.
 #
 # This config is mainly a shim: it brings up the bus and opens the diagnostic
 # shell on a TCP port. The shell is the tool. The buttons, the number, and the
@@ -6,21 +7,27 @@
 # section that introduces them.
 #
 # ── Start here ────────────────────────────────────────────────────────────────
-#   1. esphome run dali_diag.yaml
+#   1. esphome run dali-starter.yaml
 #   2. From any host that can reach the device, run the client in this repo
 #      (tools/dali-shell — standard library only, nothing to install; it drops
-#      straight into the HA "Advanced SSH & Web Terminal" add-on):
+#      straight into the HA "Advanced SSH & Web Terminal" add-on). Copying over
+#      Samba or the file editor drops the execute bit, so run the interpreter:
 #
-#          ./dali-shell                              interactive session
-#          ./dali-shell discover                     one command, then exit
-#          ./dali-shell export inventory > /config/dali_inventory.json
+#          python3 /config/dali-shell                 interactive session
+#          python3 /config/dali-shell discover        one command, then exit
+#          python3 /config/dali-shell export inventory > /config/dali_inventory.json
 #
-#      It defaults to dali-diag.local:2323, which is the name this config
-#      claims. Override with --host/--port or DALI_SHELL_HOST/DALI_SHELL_PORT.
+#      There is no default host. With no --host and no DALI_SHELL_HOST it
+#      browses mDNS for ESPHome nodes and offers the ones whose shell answers,
+#      asking only if more than one does — so this config's name is something
+#      you pick out of a list, not something you have to type. `--list` shows
+#      what is out there.
 #
-#      With no client to hand, `nc dali-diag.local 2323` is a complete if
+#      With no client to hand, `nc dali-starter.local 2323` is a complete if
 #      unfriendly substitute: the shell is a plain line protocol, and the
-#      client only adds history, tab completion, and one-shot redirection.
+#      client only adds history, tab completion, one-shot redirection, and
+#      finding the device. Note that the add-on's resolver has no mDNS, so
+#      `.local` names do not resolve there — that is the gap the client closes.
 #   3. `help` lists every verb. `list <table>` prints a named command table
 #      (query, special, config, dt6, dt8, iquery, iconfig).
 #
@@ -36,7 +43,7 @@
 #   instances <addr>         what a control device actually offers
 #   sensor poll <addr>       read an input instance's current value
 #   commission unaddressed   assign short addresses — see allow_commissioning
-#   max b / off b / level a3 128     drive gear directly while you work
+#   max b / off b / level s3 128     drive gear directly while you work
 #   trace on                 live per-frame trace
 #   capture start … export   rolling capture, dumped when something goes wrong
 #   bus check / stats        RX level, scheduler state, fault counters
@@ -51,8 +58,8 @@
 #   closed without quitting is reclaimed by idle_timeout below.
 
 esphome:
-  name: dali-diag
-  friendly_name: "DALI Diagnostic"
+  name: dali-starter
+  friendly_name: "DALI Starter"
 
 esp32:
   variant: esp32   # classic ESP32 (e.g. WROVER-E); board is auto-selected
@@ -63,7 +70,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/peetervalk/dali-esp.git
-      ref: dev
+      ref: v1.1.1
     components: [dali]
     refresh: 0s
 
@@ -71,7 +78,7 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   ap:
-    ssid: "dali-diag-ap"
+    ssid: "dali-starter-ap"
     password: !secret ap_password
 captive_portal:
 
@@ -146,14 +153,15 @@ dali:
 #   2. "Scan DALI Bus" — ~50 s for 16 devices.                 (shell: discover)
 #      "Group Map" holds a compact group→query summary, persisted in HA, and
 #      YAML lines stream to the log prefixed with "YAML|". To turn a log
-#      session saved as dali-diag-logs.txt in Downloads into a YAML file:
+#      session saved as dali-starter-logs.txt in Downloads into a YAML file:
 #
-#        (Select-String "YAML| " "$env:USERPROFILE\Downloads\dali-diag-logs.txt") |
+#        (Select-String "YAML| " "$env:USERPROFILE\Downloads\dali-starter-logs.txt") |
 #          ForEach-Object { $_.Line -replace '.*YAML\| ', '' } |
 #          Out-File -Encoding utf8 "$env:USERPROFILE\Downloads\dali_lights.yaml"
 #
 #      Then add  dali_id: <your_id>  and real names.
-#      The shell does this in one step: ./dali-shell export inventory > file
+#      The shell does this in one step:
+#        python3 /config/dali-shell export inventory > file
 #   3. Set "Target Address" (0–63), press "Identify" to blink the fixture.
 #      Verify control with On / Off / Max / Min.        (shell: identify <addr>)
 #   4. "Bus Monitor" shows the last unsolicited frame.   (shell: trace on)

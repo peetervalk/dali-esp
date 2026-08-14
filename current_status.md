@@ -1,14 +1,13 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-08-12
+**Last updated:** 2026-08-14
 
-**Known-working deployment/component baseline:** `v1.0.1` (`0302d70`), for
-the two recorded site configurations; this is not a conformance claim.
+**Known-working deployment/component baseline:** `v1.1.1` (`76cede1`), hardware
+tested; this is not a conformance claim.
 
-**Deployed now:** the 1k site runs the working tree, not the release. See
-Installation State for what each configuration currently resolves to — the tag
-above is the last release known good, which is no longer the same statement as
-"what is on the hardware".
+**Deployed now:** both sites run `v1.1.1`, so the last release known good and
+what is on the hardware are the same statement again. The `_local` deploy copies
+do not say so themselves; see Installation State.
 
 **Status:** The ESPHome controller is operational on the two known installations.
 The repository has a strong reusable C foundation, but CLI completeness, several
@@ -52,6 +51,28 @@ The next development phase should prioritize protocol and state correctness befo
 adding broad new device support.
 
 ## Verification Baseline
+
+### Verified on hardware 2026-08-14 (`v1.1.1`)
+
+`v1.1.1` was flashed to both sites and exercised on the installed buses. This is
+the first hardware result for the diagnostic shell and for the level-window work,
+and it clears four items recorded as unverified under 2026-08-12:
+
+- The diagnostic shell over TCP: discover, identify, live trace, rolling capture,
+  and JSON export, driven from a terminal over the network front end rather than
+  a serial cable.
+- The per-short-address MIN/MAX and dimming-curve profile: the query, the
+  physical-output interpolation for standard and linear curves, and the
+  `min_level`, `max_level`, and `dimming_curve` overrides.
+- The Home Assistant on-code floor at code 3: 1 % lands on MIN exactly, and
+  codes 1-2 clamp onto it.
+- `poll_on_event`: the 2k site has been reflashed, so the per-instance default
+  has a hardware result rather than a measurement of the old behavior plus a
+  compile of the new.
+
+Unchanged by this pass: the DT6 and DT8 command sets, memory writes, and
+input-device configuration writes still have host vectors and no real-bus
+result. `dali_capability_matrix.md` states which is which per capability.
 
 ### Verified locally on 2026-08-12 (console verb parity)
 
@@ -127,7 +148,8 @@ adding broad new device support.
 - The 2k site configuration compiles against the working tree as a local ESPHome
   2026.7.4 external component; the image is 938591 bytes.
 
-Not verified, and worth stating plainly:
+Not verified as of that date, and worth stating plainly (the first three are
+cleared by the 2026-08-14 entry above):
 
 - The 2k site has not been reflashed, so `poll_on_event` has no hardware result.
   Everything above about the poll rates is measurement of the old behavior plus
@@ -677,7 +699,7 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
 ### ESPHome component
 
 - Active component: `esphome/components/dali`.
-- `dali_diag.yaml` provides discovery and diagnostics, including scan, identify,
+- `dali-starter.yaml` provides discovery and diagnostics, including scan, identify,
   find-couplers, target controls, bus monitoring, group-map output, and generated
   YAML log lines.
 - Light entities currently expose brightness only. Shared DT8 support is not yet
@@ -884,10 +906,10 @@ gets built.
 
 | Configuration | Component source | Role |
 |---|---|---|
-| `dali_diag.yaml` | `ref: dev` | Tracked diagnostic/discovery firmware |
+| `dali-starter.yaml` | `ref: dev` | Tracked starter/commissioning firmware; node `dali-starter` |
 | `dali_test.yaml` | `type: local` | Tracked CI coverage config; fictitious layout, never flashed |
-| `_local/dali-1k.yaml` | `ref: dev` | Deploy copy; 16 control gear and group entities for groups 0/2/3/4/5/6/7 |
-| `_local/dali-2k.yaml` | `ref: dev` | Deploy copy; group 0 lighting, HA console, and Steinel HF 360 II polling |
+| `_local/dali-1k.yaml` | `ref: v1.0.5-dev` | Deploy copy; 16 control gear and group entities for groups 0/2/3/4/5/6/7 |
+| `_local/dali-2k.yaml` | `ref: v1.0.5-dev` | Deploy copy; group 0 lighting, HA console, and Steinel HF 360 II polling |
 
 The tracked site copies `dali_1k.yaml` and `dali_2k.yaml` are gone. Tracking a
 real deployment to obtain CI coverage was the wrong trade: they carried an
@@ -898,10 +920,12 @@ the component it configures always agree within a commit — while owing nothing
 to any hardware. The `_local` copies keep the git pin because they are what gets
 flashed and the operator chooses when to move.
 
-One consequence of that split is live right now: the 1k site was flashed on
-2026-08-12 from a temporary `type: local` edit that has since been reverted, so
-`_local/dali-1k.yaml` names `dev` while the hardware runs the working tree. The
-file does not describe what is deployed.
+One consequence of that split is live right now: both sites run `v1.1.1`, but
+`_local/dali-1k.yaml` and `_local/dali-2k.yaml` still pin `ref: v1.0.5-dev`.
+Neither file describes what is deployed, and re-resolving either one as written
+would roll a site backwards past the shell and the level-window work. The pins
+are the operator's to move; nothing in the repository can move them, because the
+directory is untracked by design.
 
 The entire `_local` directory is deliberately ignored by Git. This checkout also
 contains `_local/dali-diag-local.yaml`, a compile-test copy of the tracked
@@ -1148,7 +1172,7 @@ below for what changed for an operator.
 | `main/main.c` | Native ESP-IDF diagnostic application entry point |
 | `main/dali_diag.c/.h` | Device half of the serial CLI: task, transports, workflows |
 | `esphome/components/dali` | Active ESPHome external component |
-| `dali_diag.yaml` | Tracked diagnostic/discovery firmware |
+| `dali-starter.yaml` | Tracked starter/commissioning firmware |
 | `dali_test.yaml` | Tracked CI coverage config; the widest configuration this repo can compile against its own tree |
 | `_local/dali-diag-local.yaml` | Ignored compile-test copy of the diagnostic firmware |
 | `_local/secrets.yaml` | Ignored, untracked, and holds live credentials — see Installation State |
@@ -1166,7 +1190,7 @@ ESPHome configuration/build:
 ```powershell
 esphome config  dali_test.yaml               # cheapest check; builds the in-repo component
 esphome compile dali_test.yaml               # the working tree, every platform
-esphome compile dali_diag.yaml               # whatever ref it pins, not the working tree
+esphome compile dali-starter.yaml            # whatever ref it pins, not the working tree
 esphome compile _local/dali-1k.yaml          # deploy copies; whatever they pin
 esphome compile _local/dali-2k.yaml
 ```

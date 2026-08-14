@@ -12,7 +12,7 @@ A reusable C protocol stack (`components/dali`) drives the bus — PHY, schedule
 - Bus scan and discovery from Home Assistant; scan-verified group membership is persisted to flash and survives reboots; control-gear commissioning through the native CLI
 - DALI-2 input devices: occupancy, lux, temperature, humidity — authoritative polling, with matching Device/Instance events requesting an immediate poll (`poll_on_event`)
 - Passive observation of existing pushbutton couplers (`headless_dispatch`): couplers keep commanding the lamps, ESP32 keeps HA state in sync
-- Diagnostic shell over TCP (`shell:`): the full native CLI — discover, identify, commissioning, live trace, rolling capture, JSON export — from a terminal, with no serial cable. The same shell, running the same code, as the serial console on a native ESP-IDF build. Newer than `v1.0.4`; see the note under the example configuration
+- Diagnostic shell over TCP (`shell:`): the full native CLI — discover, identify, commissioning, live trace, rolling capture, JSON export — from a terminal, with no serial cable. The same shell, running the same code, as the serial console on a native ESP-IDF build
 - Free-text DALI command console in HA: queries, config, memory bank read/write, raw 16/24-bit frames
 - Protocol core is plain C with no ESPHome dependency; protocol and cross-task
   helpers are covered by 26 host test suites, and CI additionally builds the
@@ -31,17 +31,26 @@ Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The controller has
 
 ## Getting started
 
-1. Flash [dali_diag.yaml](dali_diag.yaml) (`esphome run dali_diag.yaml`).
+1. Flash [dali-starter.yaml](dali-starter.yaml) (`esphome run dali-starter.yaml`).
 2. Commission the bus, either way round:
    - **From a terminal.** Run [tools/dali-shell](tools/dali-shell) from any host
      that can reach the device — standard library only, nothing to install, and
-     it drops straight into the HA "Advanced SSH & Web Terminal" add-on. With no
-     `--host` it finds the device over mDNS and connects, asking only if more
-     than one answers; `--list` shows what is out there. `discover` maps short
-     addresses, device types and groups; `identify <addr>` blinks one fixture;
-     `export inventory > /config/dali_inventory.json` writes the result as JSON.
-     `help` lists every verb. With no client to hand, `nc <address> 2323` is a
-     complete if unfriendly substitute.
+     it drops straight into the HA "Advanced SSH & Web Terminal" add-on. Copy it
+     to `/config` there and run it with the interpreter, since copying over
+     Samba or the file editor drops the execute bit:
+
+     ```sh
+     python3 /config/dali-shell                 # interactive session
+     python3 /config/dali-shell --list          # nodes answering on this network
+     python3 /config/dali-shell discover        # one command, then exit
+     python3 /config/dali-shell export inventory > /config/dali_inventory.json
+     ```
+
+     With no `--host` it finds the device over mDNS and connects, asking only if
+     more than one answers. `discover` maps short addresses, device types and
+     groups; `identify <addr>` blinks one fixture; `export inventory` writes the
+     result as JSON. `help` lists every verb. With no client to hand,
+     `nc <address> 2323` is a complete if unfriendly substitute.
    - **From Home Assistant.** **Scan DALI Bus**, **Find Couplers**, and
      **Identify** do the same walk from a phone. A scan publishes ready-to-paste
      light YAML only when group discovery is complete; otherwise it retains the
@@ -55,27 +64,8 @@ Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The controller has
 
 A bus with two lamp groups, one individually addressed lamp, and a DALI-2 multi-sensor (e.g. Steinel HF 360 II) at short address 0:
 
-The example pins `v1.0.4`, the last tagged release. `dev` carries newer work;
+The example pins `v1.1.1`, the last tagged release. `dev` carries newer work;
 compile and test it separately before pointing an installation at it.
-
-The diagnostic shell is part of that newer work and is **not in `v1.0.4`**. To
-use it, point `ref:` at a branch rather than that tag, then add:
-
-```yaml
-dali:
-  # ...
-  shell:
-    port: 2323
-    idle_timeout: 10min
-    # The port is unauthenticated — the same posture as OTA and the web server,
-    # but a lower bar than physical access to a UART — so the commissioning
-    # verbs are refused unless this opts in. Leave it false on anything left
-    # flashed on a shared network: one typed line can readdress a whole bus,
-    # and RANDOMISE cannot be undone.
-    allow_commissioning: false
-```
-
-Omit the block entirely and the shell is not compiled in at all.
 
 ```yaml
 esp32:
@@ -87,7 +77,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/peetervalk/dali-esp.git
-      ref: v1.0.4
+      ref: v1.1.1
     components: [dali]
 
 dali:
@@ -102,6 +92,15 @@ dali:
     # Existing wall-switch coupler commands group 0 directly; observe it
     # so HA state stays in sync without retransmitting.
     - { frame_kind: legacy_16bit, address_kind: group, address: 0, action: observe, output_type: group, output_address: 0 }
+  shell:                   # diagnostic shell over TCP; omit the block entirely
+    port: 2323             # and the shell is not compiled in at all
+    idle_timeout: 10min    # reclaims the session from a terminal that dropped
+    # The port is unauthenticated — the same posture as OTA and the web server,
+    # but a lower bar than physical access to a UART — so the commissioning
+    # verbs are refused unless this opts in. Leave it false on anything left
+    # flashed on a shared network: one typed line can readdress a whole bus,
+    # and RANDOMISE cannot be undone.
+    allow_commissioning: false
 
 light:
   - platform: dali

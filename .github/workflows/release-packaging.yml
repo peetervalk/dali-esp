@@ -5,7 +5,7 @@ name: Release Packaging
 #
 # The tracked configs use `type: local, path: esphome/components`, which works
 # only because the whole repo surrounds them. A real user does what
-# dali_diag.yaml does: `type: git` at a tag. That route depends on
+# dali-starter.yaml does: `type: git` at a tag. That route depends on
 # _protocol_source_dir() resolving component_dir.parents[2]/components/dali
 # inside ESPHome's clone — that is, on the repo-root C sources being present in
 # the tag at that exact relative position. Nothing else here tests it.

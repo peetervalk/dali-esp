@@ -10,14 +10,13 @@
 # dali_2k) were real deployments, and tracking a real deployment to get CI
 # coverage is the wrong trade — they carried an address layout nobody else
 # could use, and they had to be edited whenever the site changed. The tracked
-# diagnostic config, dali_diag.yaml, cannot replace them either: it declares no
+# starter config, dali-starter.yaml, cannot replace them either: it declares no
 # light: and no sensor: platform, and it consumes the component the way a user
 # does (`type: git` at a ref), so building it would build that ref rather than
 # the branch under test.
 #
 # This one uses `type: local`, so it and the component beside it always agree
-# within a commit — which is the property that would have caught poll_on_event
-# breaking validation on 2026-08-12.
+# within a commit.
 #
 # ── What it is meant to cover ─────────────────────────────────────────────────
 #   dali:      every optional text sensor, group-state polling, the diagnostic

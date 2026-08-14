@@ -55,7 +55,7 @@ close-range events.
 Commands are entered via the **DALI Command** text entity in Home Assistant.
 Results appear in **DALI Command Result**. Nothing below is specific to the
 second-floor firmware — any configuration declaring the `text:` platform and a
-`command_result:` text sensor has the same console, `dali_diag.yaml` included.
+`command_result:` text sensor has the same console, `dali-starter.yaml` included.
 The diagnostic shell spells the same verbs identically.
 
 ### Raw read (recommended)

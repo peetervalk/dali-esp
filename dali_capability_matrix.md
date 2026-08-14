@@ -1,6 +1,6 @@
 # DALI Capability Matrix
 
-**Last reviewed:** 2026-08-12
+**Last reviewed:** 2026-08-14
 
 This file answers one question per row: for a given DALI capability, what
 exists in the reusable C stack, whether the native CLI exposes it, whether an
@@ -22,9 +22,10 @@ been run against physical gear and the result recorded, not that it is certified
 | no | not implemented |
 | n/a | not applicable at this layer |
 
-Real-bus results predate the 2026-08-10 static audit unless stated. Nothing in
-the 2026-08-11 or 2026-08-12 verb-parity work, and nothing in the 2026-08-13
-shell work, has been flashed to hardware.
+Real-bus results predate the 2026-08-10 static audit unless stated, with one
+exception: `v1.1.1` was flashed to both sites and run on the installed buses on
+2026-08-14, which covers the shell rows below. The 2026-08-11 and 2026-08-12
+verb-parity work has still not been exercised verb by verb on a bus.
 
 The ESPHome column names the surface that exposes a capability: `console` is the
 `text:` command entity, `light`/`button`/`sensor` are entities, `scan` is the
@@ -103,8 +104,10 @@ subset for these rows. `commission` and the nine primitives
 `dali_cli_special_is_commissioning()` marks are refused there unless the YAML
 sets `allow_commissioning: true`, because the port is unauthenticated.
 
-None of the shell work has been flashed or run against a real bus as of
-2026-08-13; the "Real bus" column above still refers to the native CLI only.
+The shell was flashed and run against a real bus on 2026-08-14 in `v1.1.1`:
+discover, identify, live trace, rolling capture, and JSON export were exercised
+over the TCP front end. The "Real bus" column above is still recorded from the
+native CLI, which is the same implementation reached by a different transport.
 
 ## Memory banks
 
