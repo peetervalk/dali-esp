@@ -81,7 +81,7 @@ Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The controller has
 
 A bus with two lamp groups, one individually addressed lamp, and a DALI-2 multi-sensor (e.g. Steinel HF 360 II) at short address 0:
 
-The example pins `v1.1.1`, the last tagged release. `dev` carries newer work;
+The example pins `v1.2.0`, the last tagged release. `dev` carries newer work;
 compile and test it separately before pointing an installation at it.
 
 ```yaml
@@ -94,7 +94,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/peetervalk/dali-esp.git
-      ref: v1.1.1
+      ref: v1.2.0
     components: [dali]
 
 dali:
