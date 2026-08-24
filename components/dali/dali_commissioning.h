@@ -15,6 +15,16 @@
 #define DALI_COMMISSIONING_MAX_ASSIGNMENTS   DALI_SHORT_ADDRESS_COUNT
 #define DALI_COMMISSIONING_QUERY_RETRIES_LEFT 1u
 
+/*
+ * Settle time after RANDOMIZE, before the first COMPARE. Gear needs this long to
+ * finish generating its 24-bit random address, and gear that has not finished
+ * does not answer COMPARE — which is indistinguishable from there being no gear
+ * left to find. Raised from 15 ms on 2026-08-24; the 100 ms figure is Espressif's
+ * `esp_dali` citing IEC 62386-102 §11.3, not a reading of the standard text
+ * here, and it has not been exercised on a bus since the change.
+ */
+#define DALI_COMMISSIONING_RANDOMISE_SETTLE_MS 100u
+
 typedef struct {
     uint32_t random_address;
     uint8_t  short_address;

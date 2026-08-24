@@ -555,8 +555,10 @@ static DaliError commissioning_start_unaddressed(
         return err;
     }
 
+    /* The sequence ends with RANDOMIZE; nothing may search until every gear has
+     * finished generating its random address. */
 #ifndef DALI_HOST_BUILD
-    vTaskDelay(pdMS_TO_TICKS(15u));
+    vTaskDelay(pdMS_TO_TICKS(DALI_COMMISSIONING_RANDOMISE_SETTLE_MS));
 #endif
     return DALI_OK;
 }

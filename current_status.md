@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-08-14
+**Last updated:** 2026-08-24
 
 **Known-working deployment/component baseline:** `v1.1.1` (`76cede1`), hardware
 tested; this is not a conformance claim.
@@ -971,9 +971,33 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   reply-window activity to count as YES, so this needs a new PHY signal for
   "activity detected but not decodable" that the scheduler can surface as a
   distinct result.
-- Strengthen commissioning RANDOMIZE timing, collision handling,
-  equal-random-address recovery, and the separation of gear and control-device
-  address spaces.
+- Confirm the post-RANDOMIZE settle time against the standard text, then verify a
+  commissioning run on a bus. `DALI_COMMISSIONING_RANDOMISE_SETTLE_MS` was raised
+  from 15 ms to 100 ms on 2026-08-24 on the strength of Espressif's `esp_dali`
+  citing IEC 62386-102 §11.3 for the time gear needs to generate a 24-bit random
+  address; the clause has not been read here, and no commissioning run has
+  happened since the change. If 15 ms was genuinely too short, gear could have
+  been unsearchable at the first COMPARE, which presents exactly like the COMPARE
+  inversion above — so a visible improvement here would look like a partial fix
+  for that and would not be one.
+- Add the Part 103 device-level quiescent-mode commands — `0x1D` START, `0x1E`
+  STOP, both send-twice, instance byte `0xFE` — to the command table, with
+  builders in `dali_input_device` and an `iconfig quiescent on|off [addr|all]`
+  verb. This needs a device-broadcast builder as well:
+  `dali_build_device_command()` rejects any address at or above 64, so nothing
+  can address all control devices at once today. The commands are worth having on
+  their own for any operation that wants a quiet bus, and they are a prerequisite
+  for the guard below.
+- Bracket gear commissioning with broadcast START QUIESCENT MODE, so that control
+  devices cannot put event frames into a COMPARE reply window and be counted as
+  gear. The settle delays cannot live inside a `DaliSequence` —
+  `DaliSequenceStep` has no delay field — so this belongs as its own sequence run
+  around `commissioning_start_unaddressed()` and `commissioning_finish()` rather
+  than as extra steps in the start sequence, whose atomicity exists to hold
+  dependent pairs together. It reduces how often the search is disturbed; it does
+  not make a collided reply readable, so the COMPARE inversion above stays open.
+- Strengthen commissioning collision handling, equal-random-address recovery, and
+  the separation of gear and control-device address spaces.
 
 ### P0 — Transaction and runtime reliability
 
@@ -1144,6 +1168,12 @@ below for what changed for an operator.
   collisions, queue pressure, bus faults, and power restoration.
 - Add DT1 and other device types only when an installation requires them, following
   the shared DT6/DT8 module pattern.
+- Add Part 103 special-command frames — `0xC1` first byte, opcode in the second —
+  as a command-table frame kind. Control-device commissioning needs it, and it
+  would let gear commissioning expel control devices with a Part 103 TERMINATE
+  rather than only quiescing them. `dali_protocol.md` records the opcode space
+  and the two encodings that differ from their Part 102 namesakes. Worth doing
+  when device commissioning is actually wanted, not before.
 
 ## Operational Constraints
 

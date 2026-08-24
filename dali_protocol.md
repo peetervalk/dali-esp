@@ -3,7 +3,7 @@
 Frame layouts, opcode tables, and standard behaviour, mapped to what this
 project implements. It is not a replacement for IEC 62386.
 
-**Last reviewed:** 2026-08-14
+**Last reviewed:** 2026-08-24
 
 For the verbs that send these frames, see `dali_commands.md`. For what has been
 run against real gear, see `dali_capability_matrix.md`.
@@ -180,6 +180,10 @@ sees them.
 device-type-specific command must therefore travel with its enable in one
 sequence — two separately issued lines are not adjacent on the bus.
 
+Opcode `0xC1` is reused across parts: here it is a Part 102 special opcode, and
+as the first byte of a 24-bit frame it is the Part 103 special-command address.
+See Cross-Part Interference.
+
 ## Control Devices — IEC 62386-103
 
 Input devices use instance types, not control-gear DT numbers: Part 301 defines
@@ -210,11 +214,11 @@ generic report-timer, hysteresis, or deadtime setters.
 
 ### Generic instance queries
 
-Single-send commands expecting an 8-bit backward frame.
+Single-send commands expecting an 8-bit backward frame. Queries addressed to the
+device rather than to one of its instances are under Device-level commands below.
 
 | Instance byte | Opcode | Query |
 |---:|---:|---|
-| `0xFE` | `0x35` | QUERY NUMBER OF INSTANCES |
 | instance | `0x80` | QUERY INSTANCE TYPE |
 | instance | `0x81` | QUERY RESOLUTION |
 | instance | `0x82` | QUERY INSTANCE ERROR |
@@ -240,6 +244,76 @@ Feature queries stay unexposed until the addressing layer can encode Part 103
 feature selectors. The `0x93` and `0x94` builders construct only the addressed
 query frame; a complete typed operation must keep the query and its dependent DTR
 reads atomic.
+
+### Device-level commands
+
+Instance byte `0xFE` addresses the control device itself rather than one of its
+instances. Configuration commands at this level are send-twice; queries are
+single-send.
+
+| Opcode | Command | Sends |
+|---:|---|---|
+| `0x10` | RESET — not implemented | twice |
+| `0x14` | SET SHORT ADDRESS DTR0 — not implemented | twice |
+| `0x15` | ENABLE WRITE MEMORY — not implemented | twice |
+| `0x1D` | START QUIESCENT MODE — not implemented | twice |
+| `0x1E` | STOP QUIESCENT MODE — not implemented | twice |
+| `0x30` | QUERY DEVICE STATUS — not implemented | reply |
+| `0x35` | QUERY NUMBER OF INSTANCES | reply |
+| `0x36`/`0x37`/`0x38` | QUERY CONTENT DTR0/DTR1/DTR2 | reply |
+
+Quiescent mode suppresses a control device's own bus activity — event frames
+above all — until `STOP QUIESCENT MODE` releases it. It matters beyond
+commissioning: any operation wanting a quiet bus, such as a scan, a memory block
+read, or DT8 bring-up, competes with sensor traffic otherwise. Espressif's
+`esp_dali` records that some Part 102 gear mis-decode 24-bit event frames as DAPC
+brightness commands, which would make an unquiesced sensor a visible fault rather
+than only noise. Unverified here.
+
+Device address byte `0xFF` addresses all control devices. There is no builder for
+it: `dali_build_device_command()` rejects any address at or above 64, so every
+device command this project can send is short-addressed.
+
+### Part 103 special commands
+
+Part 103 has its own special-command space, distinct from the Part 102 specials
+above. The frame is 24-bit with a fixed first byte, the opcode in the second, and
+the parameter in the third:
+
+```text
+data = (0xC1 << 16) | (special_opcode << 8) | parameter
+```
+
+| Opcode | Name | Notes |
+|---:|---|---|
+| `0x00` | TERMINATE | Closes a Part 103 initialise window |
+| `0x01` | INITIALISE | Send twice; parameter is a device address byte |
+| `0x02` | RANDOMISE | Send twice |
+| `0x03` | COMPARE | |
+| `0x04` | WITHDRAW | |
+| `0x05`/`0x06`/`0x07` | SEARCH ADDRH/M/L | |
+| `0x08` | PROGRAM SHORT ADDRESS | Raw 6-bit address |
+| `0x09` | VERIFY SHORT ADDRESS | |
+| `0x0A` | QUERY SHORT ADDRESS | |
+| `0x20` | WRITE MEMORY LOCATION | |
+| `0x30`/`0x31`/`0x32` | DTR0/DTR1/DTR2 DATA | |
+
+None of this is implemented. The command table has no 24-bit special frame kind,
+so control-device commissioning has no path here at all.
+
+Two encodings differ from their Part 102 namesakes and are worth stating plainly,
+because using the Part 102 form silently does the wrong thing:
+
+- `PROGRAM SHORT ADDRESS` takes the **raw 6-bit address** `0..63`. The Part 102
+  special of the same name takes `(short_addr << 1) | 1`. Sending the Part 102
+  encoding to a control device programs address `2n + 1`.
+- `INITIALISE`'s parameter is a device address byte, where `0xFF` selects all
+  control devices and `0x00` selects only those without a short address. This
+  reads inverted against Part 102, whose `INITIALISE` takes `0x00` for all gear
+  and `0xFF` for unaddressed gear.
+
+Opcode values are transcribed from Espressif's `esp_dali` and are not verified
+against the standard text or on a bus here.
 
 ### Part 301 push button — instance type 1
 
@@ -302,6 +376,29 @@ Occupancy output is bit-replicated: `0` unoccupied, `85` movement, `170` present
 Report and deadtime use 1 s and 50 ms units. Hysteresis is a percentage `0..25`;
 `hysteresisMin` is the absolute minimum band height in input-value units, not a
 generic deadband.
+
+## Cross-Part Interference
+
+Control gear and control devices share one bus, and each part's commissioning
+sequence can disturb the other's. None of this is handled here today. It is
+recorded because it is a plausible explanation for phantom devices in a
+mixed-installation binary search, and because it is separate from the COMPARE
+collision problem rather than another face of it.
+
+`0xC1` means two things depending on frame width. As a Part 102 special opcode it
+is `ENABLE DEVICE TYPE`; as the first byte of a 24-bit frame it is the Part 103
+special-command address. Gear sitting in an initialise window can therefore act
+on the Part 103 special frames that a control-device commissioning run emits.
+
+The reverse also holds. A control device that observes a Part 102 `INITIALISE`
+can enter its own addressing state, generate a random address, and answer Part
+102 `COMPARE` — appearing in the search as gear that is not there.
+
+Espressif's `esp_dali` brackets each part's commissioning with the other part's
+`TERMINATE`, repeats that `TERMINATE` after `INITIALISE` because a device can
+re-enter the state, and holds control devices in quiescent mode across the whole
+run. Its comments name a Steinel DLS-203-P as the device that forced this
+handling. Unverified here.
 
 ## Event Frames
 
@@ -383,6 +480,13 @@ Steinel HF 360 II memory-bank layout and its tuning workflow are in
 | Reply window opens | 7 ms |
 | Reply timeout | 25 ms |
 | Send-twice window | 100 ms |
+| Post-RANDOMIZE settle, before the first COMPARE | 100 ms |
+
+Every row above except the last is frame-level timing the PHY and scheduler
+enforce. The RANDOMIZE settle is a commissioning-sequence delay in
+`dali_commissioning`, raised from 15 ms on 2026-08-24 to match the figure
+Espressif's `esp_dali` attributes to IEC 62386-102 §11.3. Unconfirmed against the
+standard text and unexercised on a bus since the change.
 
 ## Sources
 
@@ -395,6 +499,9 @@ Steinel HF 360 II memory-bank layout and its tuning workflow are in
 - Microchip TB3200 — https://ww1.microchip.com/downloads/en/Appnotes/90003200A.pdf
 - Espressif DALI driver timing notes —
   https://docs.espressif.com/projects/esp-iot-solution/en/latest/electrical_lighting_solution/dali.html
+- Espressif `esp_dali` component (Apache-2.0), source of the Part 103 device and
+  special opcode values and the cross-part interference notes —
+  https://github.com/espressif/esp-iot-solution/tree/master/components/dali
 - Beckhoff DALI frame timing and send-twice —
   https://infosys.beckhoff.com/content/1033/tcplclib_tc3_dali/12346803211.html
 - Beckhoff DALI-2 Query Input Value —
