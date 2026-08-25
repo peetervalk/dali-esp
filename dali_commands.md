@@ -837,12 +837,24 @@ one count per attempt including retries, and the verb that asked reports
 `timeout` while a correctly decoded reply sits in the buffer.
 
 Gear replying *early* is the case to watch for, because the arithmetic hides it.
-The open edge is tested against the observation's **first** edge, so a reply is
-rejected once `since_tx_us` drops below about 13000 — which still looks
-comfortably inside a window whose numbers are quoted as 5.5 and 27. Subtract the
-7500 before comparing. A device that answers some runs and not others, with
-`since_tx_us` clustered just either side of 13000, is sitting on the window open
-rather than failing intermittently, and retries will not rescue it.
+The open edge is tested against the observation's **first** edge, so subtract the
+7500 before comparing against any window figure. Two edges apply, and which one
+depends on whether the observation decoded:
+
+| Observation | Open edge | Rejected below `since_tx_us` |
+|---|---:|---:|
+| Decoded 8-bit backward frame | `DALI_REPLY_WINDOW_OPEN_DECODED_US` (2 ms, the RX self-echo suppression) | ~9500 |
+| Undecodable activity | `DALI_REPLY_WINDOW_OPEN_US` (5.5 ms, the standard's minimum) | ~13000 |
+
+The split is deliberate. A decoded backward frame arriving while a query is
+outstanding is unambiguously the reply, so only the PHY's own suppression floor
+applies. Undecodable activity keeps the standard's edge, because that is the
+path COMPARE reads as YES and where a wrong call invents gear.
+
+A device that answers some runs and not others, with `since_tx_us` clustered
+either side of one of those thresholds, is sitting on the window open rather
+than failing intermittently, and retries will not rescue it — the gear is not
+random, it is on a threshold.
 
 ### `queue [reset]` — both surfaces
 

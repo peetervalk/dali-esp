@@ -31,24 +31,29 @@
 /*
  * The open edge for an observation that decoded as a complete backward frame.
  *
- * Deliberately below the standard's minimum, and only reachable by a clean
- * decode. The 5.5 ms edge above exists to keep undecodable activity from being
- * read as a reply — the case that matters, because COMPARE maps qualified
- * activity to YES and so invents gear that is not there. A fully decoded 8-bit
- * backward frame carries no such ambiguity: it is a real reply from real gear,
- * and the only question is whether that gear settled fast.
+ * Derived from DALI_SETTLE_MS rather than chosen, because for a decoded frame
+ * that is the only floor with a physical meaning. The 5.5 ms edge above exists
+ * to keep *undecodable* activity from being read as a reply — the case that
+ * matters, because COMPARE maps qualified activity to YES and so invents gear
+ * that is not there. A complete 8-bit backward frame, arriving while a query is
+ * outstanding, carries none of that ambiguity: our own 16-bit transmission
+ * cannot decode as one, ringing cannot, and another master's forward frame is
+ * caught by the intervening-frame branch. What remains is the PHY's own RX
+ * self-echo suppression, which is DALI_SETTLE_MS.
  *
- * Some do. Measured on the 1k installation, four LED-strip drivers settle in
- * 5.24-5.62 ms and straddle the 5.5 ms edge, so most of their replies were
- * discarded and the verb that asked reported a timeout while a correctly
- * decoded byte sat in the buffer. Retries cannot help gear sitting on a
- * threshold. IEC 62386-101 makes them marginally non-conformant; refusing to
- * read them makes the installation unusable, which is the worse answer.
+ * The alternative was a hand-picked margin, and the 1k installation showed why
+ * that loses. Four LED-strip drivers settle in 5.24-5.62 ms, straddling the
+ * standard's 5.5 ms minimum. One DT6 driver at a0 varies from 4.12 to 5.85 ms
+ * on the same device between consecutive queries — 25% faster than the minimum
+ * at its worst — which made it look like it answered some opcodes and not
+ * others until three captures showed the failures falling wherever the edge
+ * happened to be. Any fixed margin gets chased by the next such device.
  *
- * DALI_SETTLE_MS remains the defence against mistaking our own transmission for
- * a reply, and this still leaves 2.5 ms above it.
+ * IEC 62386-101 makes this gear non-conformant. Refusing to read it makes the
+ * installation unusable, which is the worse answer, and the verb that asked
+ * reported a timeout while a correctly decoded byte sat in the buffer.
  */
-#define DALI_REPLY_WINDOW_OPEN_DECODED_US 4500u
+#define DALI_REPLY_WINDOW_OPEN_DECODED_US ((uint32_t)DALI_SETTLE_MS * 1000u)
 /* The scheduler starts its 25 ms wait after the 2 ms TX/RX handoff. Keep that
  * existing effective deadline while attributing timestamped RX observations. */
 #define DALI_REPLY_WINDOW_CLOSE_US (((uint32_t)DALI_SETTLE_MS + (uint32_t)DALI_REPLY_TIMEOUT_MS) * 1000u)

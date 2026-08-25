@@ -1271,10 +1271,10 @@ split follows the fixture type rather than the address.
 | Group | Entity | Gear | Behaviour |
 |---|---|---|---|
 | 0, 2, 6 | `... siin` (ceiling) | a2-a12, a14 | Answer everything, every run: `LED`, v4, `groups=[N]` |
-| 3 | Elutuba ledriba | a13 | Missing from run 2; run 3 reported it complete, `groups=[3]` |
-| 7 | Köök ledriba | a15 | Present every run; group data only on run 3, `groups=[7]` |
-| 4 | Söögituba ledriba | a1 | Missing from runs 1 and 2; present on run 3 |
-| 5 | Väike koridor | a0 | Missing from run 1; present on runs 2 and 3, no group data |
+| 3 | Elutuba ledriba | a13 | Was intermittent; **fixed** by the decoded-frame window, polls via a13 |
+| 7 | Köök ledriba | a15 | Was intermittent; **fixed**, polls via a15 |
+| 4 | Söögituba ledriba | a1 | Was intermittent; **fixed**, polls via a1 |
+| 5 | Väike koridor | a0 | **Still failing.** Answers status, version and actual level; never answers device type or groups, in any run |
 
 Every unreliable address is a LED-strip driver or the corridor fixture; every
 solid one is a ceiling fixture on a v4 DT6 driver. **They are intermittent, not
@@ -1336,9 +1336,11 @@ Consequences worth holding:
   captures that settled this were six records long.
 
 **Remedy, applied 2026-08-25: a second open edge for decoded frames.**
-`DALI_REPLY_WINDOW_OPEN_DECODED_US` (4500 us) now applies to an observation that
-decoded as a complete 8-bit backward frame; `DALI_REPLY_WINDOW_OPEN_US` (5500 us,
-the standard's minimum) still applies to everything else.
+`DALI_REPLY_WINDOW_OPEN_DECODED_US` now applies to an observation that decoded as
+a complete 8-bit backward frame; `DALI_REPLY_WINDOW_OPEN_US` (5500 us, the
+standard's minimum) still applies to everything else. It is derived from
+`DALI_SETTLE_MS` (2000 us) rather than chosen — see below for why a hand-picked
+margin does not survive contact with this bus.
 `sched_observation_in_reply_window()` and
 `sched_observation_can_match_active_reply()` take the distinction as a parameter,
 and only the decoded-backward-frame branch of
@@ -1347,11 +1349,14 @@ and only the decoded-backward-frame branch of
 The asymmetry is where the safety lives. The strict edge exists to stop
 undecodable activity being read as a reply, because COMPARE maps qualified
 activity to YES and so invents gear that is not there — the one error a
-commissioning walk must not make. A fully decoded backward frame carries no such
-ambiguity: it is a real reply from real gear, and the only open question is
-whether that gear settled fast. `DALI_SETTLE_MS` (2 ms of RX self-echo
-suppression) remains the defence against reading our own transmission, and 4500
-us still clears it by 2.5 ms.
+commissioning walk must not make. A fully decoded backward frame arriving while
+a query is outstanding carries no such ambiguity: our own 16-bit transmission
+cannot decode as one, ringing cannot, and another master's forward frame is
+caught by the intervening-frame branch. What is left is the PHY's RX self-echo
+suppression, which is exactly `DALI_SETTLE_MS`.
+
+It was first set to a hand-picked 4500 us, and a0 overtook it within the hour —
+see below. Deriving it means there is no margin left to chase.
 
 Two host vectors in `test/test_scheduler.c` pin both halves: a decoded frame at
 the measured 5242 us is accepted with no `rx_ignored_outside_reply`, and
@@ -1360,12 +1365,48 @@ malformed activity at the same 5242 us is still rejected and still times out.
 the decoded edge, since that is the boundary that now applies to it. All 26
 suites pass; `dali_scheduler.c` compiles clean against the ESP-IDF flag set.
 
-Not yet run on the bus. What it should produce on the 1k installation: a13, a15,
-a0 and a1 readable, `discover` stable across runs, the group seed sweep seeding
-all seven groups, and the `rx_ignored_outside_reply` deltas dropping toward zero.
-If those four still read intermittently afterwards, the settling time is drifting
-further than the three captured samples showed and the constant needs revisiting
-rather than the approach.
+**Hardware result, same day: three of the four fixed.** The seed sweep's
+unseeded mask went from `0x00B8` to `0x0020` — group 5 alone — and the refresh
+now polls group 3 via a13, group 4 via a1 and group 7 via a15, all three of which
+had never had a bus-confirmed reading. Home Assistant published real states for
+them off that readback. The sweep summary read
+`walked 64 address(es), 15 answered, 49 silent`.
+
+**a0 is the one holdout, and it does not look like the same fault.** The bus has
+16 devices in 64 addresses, so 49 silent is 48 empty addresses plus exactly one
+device; the six group representatives plus nine other gear account for the 15
+that answered, which leaves a0. It is not intermittent in the way the strip
+drivers were: across three `discover` runs it has answered QUERY STATUS, QUERY
+VERSION and QUERY ACTUAL LEVEL every time it was present, and answered QUERY
+DEVICE TYPE and QUERY GROUPS never — including the run where a13 and a15 both
+reported their groups. A selective failure by opcode is a different shape from a
+settling time sitting on a threshold.
+
+**Resolved by a six-record capture, and it was neither candidate cleanly.** With
+`status a0` and `query a0 groups-0-7` in the same capture:
+
+```text
+tx 0x0190  rx 0x00  since_tx_us 11756   settling 4.26 ms   rejected
+tx 0x0190  rx 0x00  since_tx_us 11622   settling 4.12 ms   rejected -> "timeout"
+tx 0x01C0  rx 0x20  since_tx_us 13348   settling 5.85 ms   accepted -> "0x20"
+```
+
+`0x20` is bit 5: **a0 is in group 5**, the entity is correctly configured, and
+the group is not empty. The never-on history was a red herring. A later
+`query a0 device-type` returned `6`, so it is DT6 as expected, and that is the
+third opcode it had "never" answered.
+
+So the apparent selectivity by opcode was coincidence. a0's settling time varies
+from 4.12 to 5.85 ms on the same device between consecutive queries, straddling
+whatever edge is set — which is what made the failures look like they followed
+the command rather than the clock. At 4.12 ms it is 25% faster than the
+standard's minimum. This is what moved `DALI_REPLY_WINDOW_OPEN_DECODED_US` from
+a chosen 4500 us to the derived `DALI_SETTLE_MS`; any fixed margin is one sloppy
+driver away from being overtaken.
+
+Not yet re-run on the bus with the derived edge. What it should produce: a0
+readable, the seed sweep seeding all seven groups, and 16 answered rather than
+15.
 
 
 The entire `_local` directory is deliberately ignored by Git. This checkout also

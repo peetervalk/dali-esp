@@ -621,18 +621,21 @@ void test_decoded_backward_frame_is_accepted_before_the_standard_open(void)
     dali_sched_run();
     TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
 
-    TEST_ASSERT_EQUAL_UINT32(4500u, (uint32_t)DALI_REPLY_WINDOW_OPEN_DECODED_US);
+    /* The edge is the self-echo suppression itself, not a chosen margin above
+     * it: for a decoded frame there is no other floor with a physical meaning,
+     * and every fixed margin so far has been overtaken by the next device. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)DALI_SETTLE_MS * 1000u,
+                             (uint32_t)DALI_REPLY_WINDOW_OPEN_DECODED_US);
     TEST_ASSERT_TRUE(DALI_REPLY_WINDOW_OPEN_DECODED_US < DALI_REPLY_WINDOW_OPEN_US);
-    /* Still clear of the self-echo suppression that keeps our own TX out. */
-    TEST_ASSERT_TRUE(DALI_REPLY_WINDOW_OPEN_DECODED_US >
-                     (uint32_t)DALI_SETTLE_MS * 1000u);
 
-    /* 5.242 ms — the fastest reply actually observed on the 1k bus. */
+    /* 4.122 ms — the fastest reply actually observed on the 1k bus, from the
+     * a0 DT6 driver answering QUERY STATUS. 25% faster than the standard's
+     * minimum, and it decoded correctly. */
     DaliPhyRxObservation observation = {
         .result         = DALI_OK,
         .frame          = { .data = 0x08u, .bit_length = 8u },
-        .first_edge_us  = 5242u,
-        .last_edge_us   = 5242u + DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+        .first_edge_us  = 4122u,
+        .last_edge_us   = 4122u + DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
         .edge_count     = 16u,
         .has_timestamps = true,
     };
@@ -664,9 +667,9 @@ void test_malformed_activity_keeps_the_standard_open_edge(void)
     advance_past_settle();
     dali_sched_run();
 
-    /* Same 5.242 ms the decoded frame above is accepted at. */
-    inject_rx_activity(5242u,
-                       5242u + DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+    /* Same 4.122 ms the decoded frame above is accepted at. */
+    inject_rx_activity(4122u,
+                       4122u + DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
                        16u,
                        DALI_ERR_MALFORMED);
 
