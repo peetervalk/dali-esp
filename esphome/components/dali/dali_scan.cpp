@@ -472,6 +472,22 @@ static void scan_task(void *arg) {
     }
 
     ESP_LOGI(TAG, "---[ DALI Scan Complete: %u device(s) found ]---", (unsigned)found);
+    if (inventory.undecodable_count > 0u) {
+        /*
+         * Not a scan failure: the walk completed and these addresses are held
+         * back from the free pool. It is worth a warning because gear sharing a
+         * short address is invisible in the device list above.
+         */
+        ESP_LOGW(TAG, "%u address(es) answered undecodably; likely gear sharing "
+                      "a short address", (unsigned)inventory.undecodable_count);
+        for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+            const DaliDiscoveryDeviceInfo *d =
+                dali_discovery_inventory_get(&inventory, addr);
+            if (d != nullptr && d->has_undecodable_activity) {
+                ESP_LOGW(TAG, "  a%u: contested, reserved", (unsigned)addr);
+            }
+        }
+    }
     log_inventory_json(&inventory);
     component->set_scan_level_profile_snapshot(&inventory);
     bool group_data_complete = rebuild_group_membership(&inventory, component);

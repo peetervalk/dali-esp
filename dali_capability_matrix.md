@@ -87,7 +87,10 @@ cached level profile and triggers a refresh.
 The host suite now carries timestamped RX observations from the PHY into the
 scheduler. Frame-like undecodable activity in an active reply window becomes
 `DALI_ERR_RX_ACTIVITY`; COMPARE alone interprets it as YES, while ordinary
-queries retain the ambiguity as an error. The same host coverage asserts that a
+queries retain the ambiguity as an error. The short-address scan is the one
+caller that does neither: it records the address as `has_undecodable_activity`,
+counts it, keeps walking, and holds the address out of the commissioning free
+pool without listing it as a device. The same host coverage asserts that a
 cancelled commissioning workflow uses a safety transport to attempt TERMINATE
 despite the latched front-end abort, and reports a failed cleanup separately.
 

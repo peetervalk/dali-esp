@@ -777,6 +777,21 @@ static DaliError shell_discovery_cleanup_transact(const DaliFrame *frame,
                                  false);
 }
 
+/*
+ * Settle waits for shared protocol code. Sleeping the calling task is correct
+ * here: every shell workflow already holds the bus for its duration, so nothing
+ * else is waiting on this task to make progress.
+ */
+static void shell_discovery_delay_ms(uint32_t ms, void *ctx)
+{
+    (void)ctx;
+#ifndef DALI_HOST_BUILD
+    vTaskDelay(pdMS_TO_TICKS(ms));
+#else
+    (void)ms;
+#endif
+}
+
 /* Atomic-group half of the transport: shared protocol code that needs a DTR
  * setup and its consuming command to stay together gets that here too, not just
  * in the ESPHome scan task. */
@@ -806,6 +821,7 @@ const DaliTransport *dali_shell_device_transport(void)
         .transact_sequence = shell_discovery_sequence_transact,
         .ctx               = NULL,
         .transact_cleanup  = shell_discovery_cleanup_transact,
+        .delay_ms          = shell_discovery_delay_ms,
     };
     return &transport;
 }
@@ -2673,6 +2689,20 @@ static uint8_t shell_discover_bus(bool detailed)
     uint32_t ignored_rx =
         g_dali_stats.rx_ignored_outside_reply - ignored_rx_before;
     shell_printf("Scan complete: %u device(s) found.\r\n", (unsigned)found);
+    if (inventory->undecodable_count > 0u) {
+        /* Short lines on purpose; see the 128-byte TCP buffer note below. */
+        shell_printf("  note: %u address(es) answered undecodably.\r\n",
+                     (unsigned)inventory->undecodable_count);
+        shell_printf("  Likely gear sharing a short address; reserved, not "
+                     "listed, not free.\r\n");
+        for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+            const DaliDiscoveryDeviceInfo *entry =
+                dali_discovery_inventory_get(inventory, addr);
+            if (entry != NULL && entry->has_undecodable_activity) {
+                shell_printf("    a%u: contested\r\n", (unsigned)addr);
+            }
+        }
+    }
     if (ignored_rx > 0u) {
         /* Keep this copy deliberately short. The TCP shell owns a 128-byte
          * output buffer (including NUL) and sends one buffer per callback. */
@@ -2711,6 +2741,13 @@ static void cmd_inventory(void)
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         const DaliDiscoveryDeviceInfo *entry =
             dali_discovery_inventory_get(inventory, addr);
+        if (entry != NULL && entry->has_undecodable_activity) {
+            /* Not counted as a device: the scan proved something is here but
+             * could not read what. Listed so the address is not read as free. */
+            shell_printf("%02u: contested (undecodable reply)\r\n",
+                         (unsigned)addr);
+            continue;
+        }
         if (entry != NULL && entry->present &&
             (entry->has_status || entry->has_input_device)) {
             if (entry->has_status) {
@@ -2749,7 +2786,11 @@ static void cmd_inventory(void)
         }
     }
 
-    shell_printf("Inventory: %u device(s)\r\n", (unsigned)found);
+    shell_printf("Inventory: %u device(s)", (unsigned)found);
+    if (inventory->undecodable_count > 0u) {
+        shell_printf(", %u contested", (unsigned)inventory->undecodable_count);
+    }
+    shell_printf("\r\n");
 #endif
 }
 

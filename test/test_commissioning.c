@@ -36,6 +36,10 @@ typedef struct {
     uint8_t    cleanup_count;
     DaliError  cleanup_error;
     bool       sequence_timeout_with_unknown_progress;
+    uint8_t    delay_count;
+    uint32_t   delay_total_ms;
+    /* Frame most recently on the bus when a settle wait was requested. */
+    uint32_t   delay_last_frame_data;
 } MockCommissioningBus;
 
 static MockCommissioningBus s_bus;
@@ -324,6 +328,15 @@ static DaliError mock_transact_sequence(const DaliSequence *seq,
     return DALI_OK;
 }
 
+static void mock_delay_ms(uint32_t ms, void *ctx)
+{
+    (void)ctx;
+    s_bus.delay_count++;
+    s_bus.delay_total_ms += ms;
+    s_bus.delay_last_frame_data =
+        s_bus.log_count > 0u ? s_bus.log[s_bus.log_count - 1u].data : 0u;
+}
+
 static DaliDiscoveryTransport transport(void)
 {
     return (DaliDiscoveryTransport){
@@ -331,6 +344,7 @@ static DaliDiscoveryTransport transport(void)
         .transact_sequence = mock_transact_sequence,
         .ctx = NULL,
         .transact_cleanup = mock_cleanup_transact,
+        .delay_ms = mock_delay_ms,
     };
 }
 
@@ -629,6 +643,118 @@ void test_inventory_used_mask_marks_control_gear_only(void)
     TEST_ASSERT_NOT_EQUAL(0u, (mask & ((uint64_t)1u << 4u)));
     TEST_ASSERT_NOT_EQUAL(0u, (mask & ((uint64_t)1u << 63u)));
     TEST_ASSERT_EQUAL(0u, (mask & ((uint64_t)1u << 5u)));
+}
+
+void test_inventory_used_mask_reserves_undecodable_addresses(void)
+{
+    DaliDiscoveryInventory inventory;
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_discovery_inventory_reset(&inventory));
+
+    /*
+     * An address that answered a gear QUERY STATUS with undecodable activity is
+     * occupied even though nothing could be read from it. Handing it back as
+     * free would let a run assign a further device onto a contested address.
+     */
+    inventory.devices[9u].has_undecodable_activity = true;
+    inventory.undecodable_count = 1u;
+
+    uint64_t mask = dali_commissioning_used_mask_from_inventory(&inventory);
+    TEST_ASSERT_NOT_EQUAL(0u, (mask & ((uint64_t)1u << 9u)));
+    TEST_ASSERT_EQUAL(0u, (mask & ((uint64_t)1u << 10u)));
+}
+
+void test_commission_skips_undecodable_addresses(void)
+{
+    DaliDiscoveryInventory inventory;
+    TEST_ASSERT_EQUAL(DALI_OK, dali_discovery_inventory_reset(&inventory));
+    inventory.devices[0u].has_undecodable_activity = true;
+
+    DaliDiscoveryTransport t = transport();
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 1u,
+        .used_address_mask = dali_commissioning_used_mask_from_inventory(&inventory),
+        .query_short_address = false,
+    };
+    DaliCommissioningResult result;
+
+    mock_add_device(0u, 0x000123u);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_commission_unaddressed(&t,
+                                                                &options,
+                                                                &result,
+                                                                NULL,
+                                                                NULL));
+
+    /* Address 0 is contested, so the first assignment lands on 1. */
+    TEST_ASSERT_EQUAL_UINT8(1u, result.assigned_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, result.assignments[0].short_address);
+}
+
+void test_opening_settles_after_randomize_before_first_compare(void)
+{
+    DaliDiscoveryTransport t = transport();
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 1u,
+        .used_address_mask = 0u,
+        .query_short_address = false,
+    };
+    DaliCommissioningResult result;
+
+    mock_add_device(0u, 0x000123u);
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_commission_unaddressed(&t,
+                                                                &options,
+                                                                &result,
+                                                                NULL,
+                                                                NULL));
+
+    /*
+     * Exactly one settle, of the documented duration, and taken while RANDOMIZE
+     * was the last frame on the bus. Gear that has not finished generating its
+     * random address answers no COMPARE, which reads as an empty bus rather than
+     * as an error — so the wait existing is not enough, it has to land here.
+     */
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.delay_count);
+    TEST_ASSERT_EQUAL_UINT32(DALI_COMMISSIONING_RANDOMISE_SETTLE_MS,
+                             s_bus.delay_total_ms);
+    TEST_ASSERT_EQUAL_HEX32(0xA700u, s_bus.delay_last_frame_data);
+}
+
+void test_commission_rejects_transport_without_settle_wait_and_sends_nothing(void)
+{
+    /* Atomic sequences, cleanup, everything but the settle wait. */
+    DaliDiscoveryTransport no_delay = {
+        .transact = mock_transact,
+        .transact_sequence = mock_transact_sequence,
+        .ctx = NULL,
+        .transact_cleanup = mock_cleanup_transact,
+    };
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 1u,
+        .used_address_mask = 0u,
+        .query_short_address = false,
+    };
+    DaliCommissioningResult result;
+
+    mock_add_device(0u, 0x000123u);
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_commissioning_commission_unaddressed(&no_delay,
+                                                                &options,
+                                                                &result,
+                                                                NULL,
+                                                                NULL));
+
+    /* Refused before INITIALISE, so no gear is left in initialisation state. */
+    TEST_ASSERT_EQUAL_UINT16(0u, s_bus.log_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_bus.initialise_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_bus.cleanup_count);
+    TEST_ASSERT_FALSE(result.termination_required);
+    TEST_ASSERT_FALSE(result.initialisation_state_unknown);
 }
 
 void test_invalid_arguments_are_rejected(void)
@@ -1308,6 +1434,10 @@ int main(void)
     RUN_TEST(test_commission_unaddressed_returns_without_tx_when_address_space_full);
     RUN_TEST(test_commission_unaddressed_rejects_frame_only_transport_without_traffic);
     RUN_TEST(test_inventory_used_mask_marks_control_gear_only);
+    RUN_TEST(test_inventory_used_mask_reserves_undecodable_addresses);
+    RUN_TEST(test_commission_skips_undecodable_addresses);
+    RUN_TEST(test_opening_settles_after_randomize_before_first_compare);
+    RUN_TEST(test_commission_rejects_transport_without_settle_wait_and_sends_nothing);
     RUN_TEST(test_invalid_arguments_are_rejected);
     return UNITY_END();
 }

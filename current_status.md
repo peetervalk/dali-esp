@@ -79,13 +79,24 @@ result. `dali_capability_matrix.md` states which is which per capability.
 - The PHY now exports task-context RX observations for decoded frames, malformed
   waveforms, and ring overflow, including wrapping first/last-edge timestamps and
   an edge count. The scheduler anchors the reply window to the ISR-captured TX bus
-  release and attributes observations from 7 through 27 ms after that point,
+  release and attributes observations from 5.5 through 27 ms after that point,
   including replies decoded while the owner task still says `WAIT_SETTLE`.
 - Commissioning COMPARE now has three outcomes instead of treating every missing
   byte as NO. Silence is NO; a decoded `0xFF` or qualified undecodable backward
   activity is YES; short/ambiguous malformed activity and overflow abort with an
   error. A decoded backward byte other than `0xFF` is malformed. Only COMPARE maps
-  `DALI_ERR_RX_ACTIVITY` to YES; VERIFY and ordinary discovery propagate it.
+  `DALI_ERR_RX_ACTIVITY` to YES; VERIFY and single queries propagate it.
+- The short-address scan no longer aborts on `DALI_ERR_RX_ACTIVITY`. Propagating
+  it out of a single query is right; propagating it out of the 0-63 walk meant one
+  contested address failed the whole scan, which took the ESPHome boot scan (0
+  devices, no group-membership rebuild) and `commission`'s own mandatory pre-scan
+  down with it. Such an address is now recorded as `has_undecodable_activity`,
+  counted in the new `undecodable_count`, and left `present = false`: not listed
+  as a device, not offered to commissioning as free, and not fatal to the walk.
+  Marking it absent instead would have been worse than aborting — the free-address
+  mask would have handed a contested address to the next assignment. Real bus
+  errors still abort. Host-tested only; the underlying classification still needs
+  a physical collision capture.
 - Every admitted commissioning opening now unwinds through one cleanup path. It
   attempts TERMINATE even if cancellation or a lost TCP peer prevents the normal
   waiter from knowing how far the opening sequence progressed. The device shell's
@@ -93,8 +104,40 @@ result. `dali_capability_matrix.md` states which is which per capability.
   scheduler/bus failure; transports without that optional channel still record a
   failed attempt. The result keeps the primary operation error when both fail and
   records whether TERMINATE was transmitted or initialisation remains unknown.
-- All 26 host suites pass. Focused totals are PHY 28, scheduler 74, transport 14,
-  discovery 55, and commissioning 28. Native ESP-IDF 6.0.1 and ESPHome 2026.7.4
+- The reply window now opens at 5.5 ms rather than 7 ms. 7 ms is the nominal
+  forward-to-backward settling time; attributing from the nominal timed out any
+  compliant gear answering at the fast end of the range, which is a fault the
+  pre-timestamp code did not have because it accepted any decoded backward frame
+  in `WAIT_REPLY` regardless of arrival. A regression test pins a decoded reply at
+  6 ms — inside the range, below the nominal — as accepted. The citation is still
+  owed; see the P0 item.
+- `dali_commissioning.c` no longer depends on FreeRTOS. The post-RANDOMIZE settle
+  comes from a new optional `DaliTransport::delay_ms`, and commissioning refuses a
+  transport that supplies none before it transmits anything — a skipped settle
+  otherwise presents as an empty bus rather than as an error. The module's header
+  claim of no task dependency is true again, and the 100 ms settle now has a host
+  vector asserting it happens exactly once with RANDOMIZE as the last frame sent.
+  The ESPHome scan transport deliberately supplies no wait: it never commissions,
+  and the explicit rejection is preferable to a path that silently works.
+- `dali_dispatch` no longer asserts levels it cannot know. RECALL MAX (both the
+  action and the legacy-observe path) and TOGGLE's on branch report on-with-level-
+  unknown instead of claiming 254, which was wrong for any gear with a reduced MAX
+  LEVEL; STEP DOWN AND OFF reports unknown and leaves the toggle alone instead of
+  claiming off, which only held if the gear was already at its minimum. OFF still
+  reports level 0, which is exact on any gear. Operator-visible consequence: a
+  wall switch driving RECALL MAX or STEP DOWN AND OFF through a coupler now
+  updates its Home Assistant entity when the deferred query lands, roughly 600 ms
+  later, instead of instantly at a value that could be wrong. RECALL MIN and the
+  dim/step actions have always behaved this way, so this makes the set
+  consistent rather than introducing a new lag. If the delay proves annoying in
+  use, the fix is a "known on, level unknown" state in `DaliDispatchResult`
+  rather than a return to asserting 254.
+- `notify_lights()` propagates a broadcast result to every light entity. It
+  previously required the entity's target type to equal the result's, so a
+  broadcast matched only broadcast entities and ordinary short-address lights
+  never saw it.
+- All 26 host suites pass. Focused totals are PHY 28, scheduler 75, transport 14,
+  discovery 56, commissioning 32, and dispatch 31. Native ESP-IDF 6.0.1 and ESPHome 2026.7.4
   builds pass. These are host and compile results only: no COM6, flash, captured
   collision waveform, or commissioning run was used in this pass.
 - Multi-device commissioning therefore remains restricted to the documented
@@ -999,7 +1042,7 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 
 - Complete and prove bus timing beyond the local own-forward-frame guard. Precise
   TX-end and backward/malformed observation timestamps are now exported and
-  host-tested; HIL must validate their 7--27 ms attribution, physical collision
+  host-tested; HIL must validate their 5.5--27 ms attribution, physical collision
   behavior, and external-frame cases. DALI-2 priority/backoff remains open, as
   does a deadline-aware PHY call when a repeat would cross the 100 ms limit.
 - Validate the COMPARE collision fix on hardware. Qualified undecodable activity
@@ -1008,6 +1051,17 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   silence. Host vectors cover the plumbing and prevent a phantom NO, but no
   overlapping backward-frame capture proves the heuristic yet. Keep the
   single-unaddressed-device warning until HIL exercises real collisions.
+- Cite `DALI_REPLY_WINDOW_OPEN_US` from the standard text. It was lowered from
+  7,000 to 5,500 us on 2026-08-25: 7 ms is the nominal forward-to-backward
+  settling time, and attributing from the nominal rather than from the range
+  minimum would have timed out any compliant gear answering at the fast end. The
+  5.5 ms figure has the same provenance problem the 7 ms figure had — it is a
+  recollection of the IEC 62386-101 range, not a reading of the clause here — so
+  the citation is still owed even though the direction of the change is the safe
+  one. Attributing early is recoverable; attributing late discards real replies.
+  Guard against the regression this closed: before timestamped attribution, any
+  decoded backward frame in `WAIT_REPLY` was accepted regardless of arrival time,
+  so too high a value presents as gear that used to answer going quiet.
 - Confirm the post-RANDOMIZE settle time against the standard text, then verify a
   commissioning run on a bus. `DALI_COMMISSIONING_RANDOMISE_SETTLE_MS` was raised
   from 15 ms to 100 ms on 2026-08-24 on the strength of Espressif's `esp_dali`
@@ -1046,16 +1100,24 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   confirmed-transmission treatment the light entities now have. Console `OK`,
   the refresh pump, and headless dispatch still report or act on admission
   rather than transmission; only light writes distinguish the two.
-- Correct observed-state semantics for RECALL MAX, STEP DOWN AND OFF, and
-  broadcast propagation to ordinary light entities. `dali_dispatch` asserts a
-  state for two commands whose result it cannot know: RECALL MAX (and TOGGLE's
-  on branch) claims level 254, which is wrong for any gear whose MAX LEVEL is
-  reduced, and the legacy-observe path for STEP DOWN AND OFF claims off, which
-  only holds if the gear was already at its minimum. Both should report unknown
-  and let the deferred actual-level query answer, as RECALL MIN, the dim/step
-  actions, and the console's level-changing verbs already do. Separately,
-  `notify_lights()` matches a broadcast result only against broadcast entities,
-  so ordinary short-address lights never see it.
+- Decide whether the reply-error path should honour the retry budget. COMPARE and
+  VERIFY both set `retries_left = 1`, but the `s_reply_error` branch in
+  `dali_scheduler.c` finishes the step immediately, unlike the timeout branch
+  below it which decrements and re-arms the TX gap. That is correct for
+  `DALI_ERR_RX_ACTIVITY`, which already carries meaning, but it means a single
+  `MALFORMED` or `OVERFLOW` burst aborts a run the configured retry existed to
+  survive. Either consume a retry for the ambiguous results or state that failing
+  closed without one is deliberate.
+- Decide precedence between a decoded reply and later in-window noise.
+  `sched_latch_reply_error()` clears `s_reply_received` unconditionally, and
+  `SCHED_WAIT_REPLY` tests `s_reply_error` before `s_reply_received`, so a clean
+  backward frame latched early in the window is discarded by a malformed blip
+  later in the same window. The decoded-frame path guards with `!s_reply_received`;
+  the error path does not. Harmless for COMPARE, where both outcomes mean YES;
+  for an ordinary query it throws away a good answer. The counter-argument is that
+  an address where one device answers cleanly and another adds noise is genuinely
+  ambiguous and should not read as a single clean device — which is the argument
+  for leaving it as is, deliberately.
 
 ### P1 — CLI verification on real hardware
 
@@ -1112,28 +1174,20 @@ below for what changed for an operator.
 
 ### P1 — Release and verification quality
 
-- Observe the new CI workflows pass. `idf-build.yml`, `esphome-build.yml`, and
-  `release-packaging.yml` were added on 2026-08-12 to cover the native ESP-IDF
-  build, the ESPHome Python/C++/YAML layers, and clean-room release packaging —
-  everything outside `test/` that no machine but a workstation had ever built.
-  See "Continuous integration" under Build and Test Commands for what each job
-  covers. First run on `dev` (42a7ebd):
-  - `idf-build` passed. The native firmware builds clean on IDF 6.0.1 from
-    `sdkconfig.defaults` alone, so `dali_cli.{c,h}` moving to `components/dali/`
-    did not strand `main/`.
-  - `esphome-build`'s `sources` job passed; the rest was a workflow defect, not a
-    code one — `actions/setup-python`'s `cache: pip` needs a `requirements.txt`
-    or `pyproject.toml` to key on and fails the job when it finds neither. Fixed
-    by dropping the cache; the ESPHome layers are therefore still unbuilt by CI.
-  - `host-tests` on `dev` failed on its first run, which is the whole point of
-    running CI on a non-Windows toolchain: `dali_input_config.c` used `NULL`
-    while including nothing that defines it. mingw/ucrt headers supply it
-    transitively and glibc does not, so 26 green suites on Windows hid a real
-    portability defect. Fixed with an explicit `<stddef.h>`. An include-closure
-    audit over all 22 host-compiled modules found no second instance.
-  - `release-packaging` has still never run; it triggers on a tag. It remains
-    the item most likely to fail, and it decides the `_protocol_source_dir()`
-    question in the next item.
+- Give `DaliError` names on the operator surfaces. There is no error-to-string
+  helper anywhere in the repo: `dali_cli_print_error()` special-cases only
+  `TIMEOUT` and `QUEUE_FULL`, and `dali_component.cpp` maps only `TIMEOUT` to
+  "no reply". Every other result reaches an operator as a bare number, so the
+  newly reachable `DALI_ERR_RX_ACTIVITY` reads as `ERR 12` in the shell and as
+  `err` in a Home Assistant text state.
+- Correct the stale documentation filenames in this file. `dali_command_reference.md`
+  is referenced four times — in the P1 item below, the release-notes item, the
+  Source Layout table, and the Documentation Policy — and does not exist; that
+  content is now split across `dali_commands.md` and `dali_protocol.md`. The
+  Source Layout table also lists `esphome_verb_readme.md`, which does not exist,
+  and omits `commissioning_readme.md`, `dali_protocol.md`, `test/`, and `tools/`.
+  The release-notes item additionally points at a "Verbs renamed when the console
+  adopted the shared tables" heading that no longer exists under that name.
 - Keep one intentional ESPHome source-inclusion path. The unused component
   `CMakeLists.txt` is gone and the Python-copy/wrapper route is authoritative;
   what is left is the second candidate in `_protocol_source_dir()`,
@@ -1159,7 +1213,17 @@ below for what changed for an operator.
   `DaliCommandId` gained three enumerators before `DALI_CMD_COUNT`
   (`DALI_CMD_QUERY_DEVICE_CONTENT_DTR0/1/2`), so any persisted or wire-shared
   numeric command id is unaffected but `DALI_CMD_COUNT` itself moved;
-  `dali_stats_t` gained `tx_frames_ok` at the end; `DaliCliCommandSpec` and
+  `dali_stats_t` gained `tx_frames_ok` and `reply_rx_activity` at the end;
+  `DaliPhyRxCallback` changed signature — it now takes a `DaliPhyRxObservation *`
+  rather than a `DaliFrame *`, which breaks any out-of-tree PHY consumer at
+  compile time; `DaliSchedOps` gained the optional `get_last_tx_end_us`;
+  `DaliTransport` gained the optional `transact_cleanup` and `delay_ms` — and
+  `dali_commissioning_commission_unaddressed()` now *requires* `delay_ms`,
+  returning `DALI_ERR_INVALID` without transmitting when it is absent, so an
+  out-of-tree transport that commissions must supply one; `DaliError` gained
+  `DALI_ERR_RX_ACTIVITY = 12`, so any switch over it outside this repo needs a
+  new arm; `DaliDiscoveryDeviceInfo` gained `has_undecodable_activity` and
+  `DaliDiscoveryInventory` gained `undecodable_count`, changing both layouts; `DaliCliCommandSpec` and
   `DaliCliInstanceConfig` gained fields, so brace-initialised tables outside
   this repo need updating. Additive since: `dali_control_continuous_up/down()`,
   `dali_cli_format_response()`, `dali_cli_format_status()`, and

@@ -557,6 +557,47 @@ void test_frame_like_rx_activity_completes_reply_with_distinct_error(void)
     TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.tx_retries);
 }
 
+/*
+ * The reply window opens at the minimum forward-to-backward settling time, not
+ * the 7 ms nominal. Gear answering at the fast end of the range must be
+ * attributed to its own transaction; raising the opening back towards the
+ * nominal would silently time these replies out.
+ */
+void test_reply_between_minimum_and_nominal_settling_is_accepted(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+
+    TEST_ASSERT_EQUAL_UINT32(5500u, (uint32_t)DALI_REPLY_WINDOW_OPEN_US);
+
+    /* 6 ms: inside the settling range, below the 7 ms nominal. */
+    DaliPhyRxObservation observation = {
+        .result         = DALI_OK,
+        .frame          = { .data = 0xAFu, .bit_length = 8u },
+        .first_edge_us  = 6000u,
+        .last_edge_us   = 6000u + DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+        .edge_count     = 16u,
+        .has_timestamps = true,
+    };
+    dali_sched_notify_rx_observation(&observation);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+    TEST_ASSERT_EQUAL_HEX32(0xAFu, g_cb_reply.data);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_outside_reply);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_timeouts);
+}
+
 void test_early_and_late_malformed_activity_do_not_become_replies(void)
 {
     DaliTransaction txn = {
@@ -2608,6 +2649,7 @@ int main(void)
     RUN_TEST(test_coarse_clock_rejects_ambiguous_100ms_repeat);
     RUN_TEST(test_reply_received);
     RUN_TEST(test_frame_like_rx_activity_completes_reply_with_distinct_error);
+    RUN_TEST(test_reply_between_minimum_and_nominal_settling_is_accepted);
     RUN_TEST(test_early_and_late_malformed_activity_do_not_become_replies);
     RUN_TEST(test_in_window_short_malformed_activity_aborts_instead_of_becoming_no);
     RUN_TEST(test_in_window_ring_overflow_is_preserved_as_overflow);

@@ -79,7 +79,7 @@ builders are in `dali_input_config`; common Part 103 queries are in
 - GPTIMER tick: 104 us.
 - DALI bit period: about 833.3 us.
 - DALI half-bit period: about 416.7 us.
-- TX-to-RX settle suppression: 2 ms; DALI reply window opens at 7 ms.
+- TX-to-RX settle suppression: 2 ms; DALI reply window opens at 5.5 ms.
 - Reply timeout: 25 ms.
 - Send-twice window: 100 ms.
 - GPIO16 and GPIO17 are connected to WROVER-E PSRAM and must not be used.

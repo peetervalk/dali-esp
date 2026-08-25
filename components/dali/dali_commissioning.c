@@ -2,11 +2,6 @@
 
 #include <string.h>
 
-#ifndef DALI_HOST_BUILD
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#endif
-
 #define DALI_RANDOM_ADDRESS_LIMIT (DALI_RANDOM_ADDRESS_MAX + 1u)
 
 static bool comm_transport_valid(const DaliDiscoveryTransport *transport)
@@ -525,13 +520,23 @@ uint64_t dali_commissioning_used_mask_from_inventory(
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         const DaliDiscoveryDeviceInfo *device =
             dali_discovery_inventory_get(inventory, addr);
+        if (device == NULL) {
+            continue;
+        }
         /*
          * Control gear and control devices have independent 0..63 short-
          * address spaces.  This mask feeds control-gear commissioning, so a
          * pure input device at the same numeric address must not reserve it.
          * Hybrid inventory entries still count because they contain gear.
+         *
+         * Undecodable activity also reserves the address: it answered a gear
+         * QUERY STATUS, so the address is occupied in the gear space even
+         * though nothing there could be read. Reserving it is the safe
+         * direction — assigning a further device onto a contested address is
+         * exactly the fault a commissioning run must not create.
          */
-        if (device != NULL && device->present && device->has_control_gear) {
+        if (device->has_undecodable_activity ||
+            (device->present && device->has_control_gear)) {
             mask |= ((uint64_t)1u << addr);
         }
     }
@@ -594,8 +599,16 @@ static DaliError commissioning_start_unaddressed(
 
     /* A transport with no atomic-sequence entry point is known not to have
      * admitted any opening frame. Preserve the no-traffic rejection contract;
-     * only an actual callback hand-off makes progress uncertain. */
-    if (!dali_transport_supports_atomic_sequence(transport)) {
+     * only an actual callback hand-off makes progress uncertain.
+     *
+     * The settle wait is checked in the same breath and for the same reason.
+     * Without it the first COMPARE can outrun the gear's random-address
+     * generation, and every device answers NO — a silent wrong answer that
+     * looks exactly like an empty bus. Refusing here costs nothing; skipping
+     * the wait costs a commissioning run that appears to succeed at finding
+     * nothing. */
+    if (!dali_transport_supports_atomic_sequence(transport) ||
+        !dali_transport_supports_delay(transport)) {
         return DALI_ERR_INVALID;
     }
 
@@ -614,11 +627,10 @@ static DaliError commissioning_start_unaddressed(
     }
 
     /* The sequence ends with RANDOMIZE; nothing may search until every gear has
-     * finished generating its random address. */
-#ifndef DALI_HOST_BUILD
-    vTaskDelay(pdMS_TO_TICKS(DALI_COMMISSIONING_RANDOMISE_SETTLE_MS));
-#endif
-    return DALI_OK;
+     * finished generating its random address. The environment supplies the wait
+     * so this module keeps no task dependency of its own. */
+    return dali_transport_delay_ms(transport,
+                                   DALI_COMMISSIONING_RANDOMISE_SETTLE_MS);
 }
 
 static DaliError commissioning_finish(const DaliDiscoveryTransport *transport)

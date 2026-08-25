@@ -670,7 +670,7 @@ commission unaddressed [first] [max]    # assign short addresses
 
 Commissioning remains hardware-dependable only with a single unaddressed device
 on the bus. The receive path now attributes observations to the precise
-TX-end-relative 7–27 ms reply window and distinguishes three cases during
+TX-end-relative 5.5–27 ms reply window and distinguishes three cases during
 `COMPARE`:
 
 - silence is NO;

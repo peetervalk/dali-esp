@@ -514,7 +514,7 @@ static bool IRAM_ATTR dali_phy_tx_isr(gptimer_handle_t timer,
 
         /* Arm the settle-suppression window from the ISR so the deadline is
          * precise (no FreeRTOS scheduling jitter).  The window must expire
-         * well before the 7 ms DALI minimum answer time. */
+         * well before the 5.5 ms DALI minimum answer time. */
         uint32_t ts_us = (uint32_t)esp_timer_get_time() & RX_TS_VALUE_MASK;
         s_last_tx_end_us = ts_us;
         s_rx_suppress_until_us = ts_us + (uint32_t)DALI_SETTLE_MS * 1000u;

@@ -13,6 +13,24 @@ bool dali_transport_supports_atomic_sequence(const DaliTransport *transport)
            transport->transact_sequence != NULL;
 }
 
+bool dali_transport_supports_delay(const DaliTransport *transport)
+{
+    return transport != NULL && transport->delay_ms != NULL;
+}
+
+DaliError dali_transport_delay_ms(const DaliTransport *transport, uint32_t ms)
+{
+    if (!dali_transport_supports_delay(transport)) {
+        return DALI_ERR_INVALID;
+    }
+    if (ms == 0u) {
+        return DALI_OK;
+    }
+
+    transport->delay_ms(ms, transport->ctx);
+    return DALI_OK;
+}
+
 DaliError dali_transport_transact_cleanup(const DaliTransport *transport,
                                           const DaliFrame *frame,
                                           bool needs_reply,

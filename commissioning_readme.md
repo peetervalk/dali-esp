@@ -96,6 +96,24 @@ reply-activity and cleanup changes described here are not a multi-gear HIL resul
 Commission new gear one piece at a time until the equal-random-address and
 mixed-device cases below have been implemented and exercised on a real bus.
 
+Before the walk starts, `commission` pre-scans the bus to learn which short
+addresses are already taken. An address that answers that pre-scan with
+undecodable activity — two pieces of gear sharing one short address is the
+expected cause — is reported as `contested` and held out of the free pool. It
+does not stop the pre-scan or the run: the addresses it can prove are free are
+still free. Assigning a third device onto a contested address is the fault this
+prevents.
+
+```text
+Scan complete: 3 device(s) found.
+  note: 1 address(es) answered undecodably.
+  Likely gear sharing a short address; reserved, not listed, not free.
+    a7: contested
+```
+
+Resolving a contested address needs a hardware pass — pull one fixture, or
+re-address the pair one at a time. Nothing on the bus can separate them remotely.
+
 COMPARE now distinguishes silence from observed but undecodable traffic:
 
 - Silence through the reply window is the only valid NO.

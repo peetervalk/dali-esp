@@ -390,11 +390,19 @@ static void notify_lights(const DaliDispatchResult *res)
         if (res->matched) arm_deferred_level_query();
         return;
     }
+    /*
+     * A broadcast result applies to every control gear on the bus, so it must
+     * reach every light entity regardless of how that entity is addressed. The
+     * previous form required the entity's own target type to equal the result's,
+     * which meant a broadcast only ever matched broadcast entities and ordinary
+     * short-address lights never saw it.
+     */
+    const bool broadcast = (res->target.type == DALI_ADDR_BROADCAST);
     for (uint8_t i = 0u; i < s_light_count; i++) {
         LightEntry &e = s_light_registry[i];
-        bool direct = (e.target_type == (uint8_t)res->target.type) &&
-                      (e.target_address == res->target.address ||
-                       res->target.type == DALI_ADDR_BROADCAST);
+        bool direct = broadcast ||
+                      ((e.target_type == (uint8_t)res->target.type) &&
+                       (e.target_address == res->target.address));
         bool via_group = (res->target.type == DALI_ADDR_GROUP) &&
                          (e.target_type == (uint8_t)DALI_ADDR_SHORT) &&
                          ((e.member_groups >> res->target.address) & 1u);

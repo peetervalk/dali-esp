@@ -19,7 +19,14 @@
 /* Confirmed from IEC 62386-101 */
 #define DALI_SETTLE_MS                2u    /* RX self-echo suppression after TX */
 #define DALI_REPLY_TIMEOUT_MS        25u    /* max wait for backward frame (ms) — 22 ms spec + 3 ms margin */
-#define DALI_REPLY_WINDOW_OPEN_US   7000u   /* earliest accepted reply activity */
+/*
+ * Earliest accepted reply activity, measured from the precise local TX end.
+ * IEC 62386-101 gives the forward-to-backward settling time as a range; this is
+ * its minimum, so gear answering at the fast end of the range is attributed to
+ * its own reply window rather than discarded as stray activity. Do not raise it
+ * towards the nominal 7 ms: everything between would then time out.
+ */
+#define DALI_REPLY_WINDOW_OPEN_US   5500u
 /* The scheduler starts its 25 ms wait after the 2 ms TX/RX handoff. Keep that
  * existing effective deadline while attributing timestamped RX observations. */
 #define DALI_REPLY_WINDOW_CLOSE_US (((uint32_t)DALI_SETTLE_MS + (uint32_t)DALI_REPLY_TIMEOUT_MS) * 1000u)

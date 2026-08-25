@@ -22,6 +22,10 @@
  * left to find. Raised from 15 ms on 2026-08-24; the 100 ms figure is Espressif's
  * `esp_dali` citing IEC 62386-102 §11.3, not a reading of the standard text
  * here, and it has not been exercised on a bus since the change.
+ *
+ * The wait itself comes from DaliTransport::delay_ms. A transport that supplies
+ * none is refused before any frame is sent, because a skipped settle presents as
+ * a bus with nothing on it rather than as an error.
  */
 #define DALI_COMMISSIONING_RANDOMISE_SETTLE_MS 100u
 

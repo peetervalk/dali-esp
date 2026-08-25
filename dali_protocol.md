@@ -77,7 +77,7 @@ Unsigned deltas make attribution wrap-safe; task scheduling latency does not mov
 an observation into or out of a reply window.
 
 For a transaction that expects a backward reply, the whole observation must be
-attributable to the interval from 7,000 us through 27,000 us after that precise
+attributable to the interval from 5,500 us through 27,000 us after that precise
 TX end: its first edge cannot precede the opening and its last edge cannot exceed
 the closing. The outcomes are deliberately three-way rather than treating every
 decode failure as either a reply or silence:
@@ -93,7 +93,27 @@ decode failure as either a reply or silence:
 `DALI_ERR_RX_ACTIVITY` is not a general yes response. Only the Part 102 `COMPARE`
 operation maps it to YES, because overlapping affirmative backward replies may be
 undecodable; silence maps to NO. `VERIFY SHORT ADDRESS`, ordinary queries, and all
-other callers preserve it as an error. The classification has host coverage, but
+other callers preserve it as an error.
+
+The short-address scan is the one caller that neither maps it to an answer nor
+aborts. IEC 62386 defines no scan of short addresses 0-63 — the standard's own
+device-finding procedure is the random-address binary search, which is
+collision-tolerant by construction — so the walk is this project's convention and
+its handling of an undecodable address is a local design decision. It follows the
+rule the standard applies to answers elsewhere: an invalid answer is neither a
+value nor a "no". Such an address is recorded as `has_undecodable_activity`,
+counted in `undecodable_count`, and left `present = false`:
+
+- It is **not** reported as a discovered device, because nothing is known about it.
+- It is **not** reported free. `dali_commissioning_used_mask_from_inventory()`
+  reserves it, so a commissioning run cannot assign a further device onto a
+  contested address.
+- It does **not** abort the walk. One contested address must not cost the other
+  sixty-three, and aborting would take the ESPHome boot scan and the `commission`
+  pre-scan down with it.
+
+Gear sharing a short address is the expected cause. The classification itself is
+still awaiting the physical collision captures noted below. The classification has host coverage, but
 the response-like thresholds and overlapping-reply behaviour have not yet been
 validated with physical collision captures or hardware-in-the-loop tests.
 
@@ -513,7 +533,7 @@ Steinel HF 360 II memory-bank layout and its tuning workflow are in
 | Bit period | ~833.3 us |
 | Half-bit period | ~416.7 us |
 | TX-to-RX settle suppression | 2 ms |
-| Timestamped reply attribution opens | 7 ms after precise local TX end |
+| Timestamped reply attribution opens | 5.5 ms after precise local TX end |
 | Timestamped reply attribution closes | 27 ms after precise local TX end |
 | Scheduler reply wait after TX handoff | 25 ms |
 | Send-twice window | 100 ms |
