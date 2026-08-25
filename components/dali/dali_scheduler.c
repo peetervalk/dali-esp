@@ -135,8 +135,15 @@ static uint32_t sched_now_us(void)
     return s_ops.get_tick_ms() * 1000u;
 }
 
+/*
+ * `decoded_backward` says the observation is a complete, decoded 8-bit backward
+ * frame rather than activity of unknown shape. Only that case gets the earlier
+ * open edge; see DALI_REPLY_WINDOW_OPEN_DECODED_US for why the distinction is
+ * where the safety lives.
+ */
 static bool sched_observation_in_reply_window(
-    const DaliPhyRxObservation *observation)
+    const DaliPhyRxObservation *observation,
+    bool decoded_backward)
 {
     if (!observation->has_timestamps) {
         return true;
@@ -145,9 +152,11 @@ static bool sched_observation_in_reply_window(
         return false;
     }
 
+    uint32_t open_us = decoded_backward ? DALI_REPLY_WINDOW_OPEN_DECODED_US
+                                        : DALI_REPLY_WINDOW_OPEN_US;
     uint32_t start_since_tx = observation->first_edge_us - s_last_tx_us;
     uint32_t end_since_tx = observation->last_edge_us - s_last_tx_us;
-    return start_since_tx >= DALI_REPLY_WINDOW_OPEN_US &&
+    return start_since_tx >= open_us &&
            end_since_tx >= start_since_tx &&
            end_since_tx <= DALI_REPLY_WINDOW_CLOSE_US;
 }
@@ -167,7 +176,8 @@ static bool sched_observation_is_qualified_activity(
 }
 
 static bool sched_observation_can_match_active_reply(
-    const DaliPhyRxObservation *observation)
+    const DaliPhyRxObservation *observation,
+    bool decoded_backward)
 {
     if (!s_active.needs_reply ||
         (s_active.send_twice && s_send_count < 2u)) {
@@ -175,7 +185,7 @@ static bool sched_observation_can_match_active_reply(
     }
 
     if (s_state == SCHED_WAIT_REPLY) {
-        return sched_observation_in_reply_window(observation);
+        return sched_observation_in_reply_window(observation, decoded_backward);
     }
 
     /*
@@ -185,7 +195,7 @@ static bool sched_observation_can_match_active_reply(
      */
     return s_state == SCHED_WAIT_SETTLE &&
            observation->has_timestamps &&
-           sched_observation_in_reply_window(observation);
+           sched_observation_in_reply_window(observation, decoded_backward);
 }
 
 /*
@@ -969,8 +979,10 @@ void dali_sched_notify_rx_observation(
     }
 
     if (observation->result != DALI_OK) {
+        /* Undecodable activity keeps the standard's open edge: this is the
+         * path where a wrong call becomes COMPARE=YES and invents gear. */
         if (!s_reply_intervened &&
-            sched_observation_can_match_active_reply(observation)) {
+            sched_observation_can_match_active_reply(observation, false)) {
             DaliError reply_error = observation->result;
             if (sched_observation_is_qualified_activity(observation)) {
                 reply_error = DALI_ERR_RX_ACTIVITY;
@@ -994,7 +1006,7 @@ void dali_sched_notify_rx_observation(
                            : sched_now_us();
     sched_trace(DALI_SCHED_TRACE_RX, frame, trace_time_us);
 
-    if (sched_observation_can_match_active_reply(observation) &&
+    if (sched_observation_can_match_active_reply(observation, false) &&
         (frame->bit_length == DALI_FORWARD_FRAME_BITS ||
          frame->bit_length == DALI_EXTENDED_FRAME_BITS)) {
         /*
@@ -1009,12 +1021,16 @@ void dali_sched_notify_rx_observation(
         return;
     }
 
-    if (sched_observation_can_match_active_reply(observation) &&
+    /* A complete decoded backward frame is the one unambiguous case, so it
+     * gets the earlier open edge — gear that settles fast is still gear. */
+    const bool decoded_backward =
+        (frame->bit_length == DALI_BACKWARD_FRAME_BITS);
+    if (sched_observation_can_match_active_reply(observation, decoded_backward) &&
         !s_reply_intervened &&
         s_reply_error == DALI_OK &&
         !s_reply_received &&
-        frame->bit_length == DALI_BACKWARD_FRAME_BITS &&
-        sched_observation_in_reply_window(observation)) {
+        decoded_backward &&
+        sched_observation_in_reply_window(observation, decoded_backward)) {
         s_reply_frame    = *frame;
         s_reply_received = true;
         return;

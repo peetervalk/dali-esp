@@ -598,6 +598,87 @@ void test_reply_between_minimum_and_nominal_settling_is_accepted(void)
     TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_timeouts);
 }
 
+/*
+ * Gear that settles faster than the standard's 5.5 ms minimum still gets read,
+ * as long as what arrived decoded as a complete backward frame.
+ *
+ * Measured on a real installation: four LED-strip drivers reply at 5.24-5.62 ms
+ * and straddle the edge, so most of their replies were discarded and the caller
+ * saw a timeout while a correctly decoded byte sat in the buffer. Retries do
+ * not help gear sitting on a threshold, so the window has to give.
+ */
+void test_decoded_backward_frame_is_accepted_before_the_standard_open(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x1BC0u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+
+    TEST_ASSERT_EQUAL_UINT32(4500u, (uint32_t)DALI_REPLY_WINDOW_OPEN_DECODED_US);
+    TEST_ASSERT_TRUE(DALI_REPLY_WINDOW_OPEN_DECODED_US < DALI_REPLY_WINDOW_OPEN_US);
+    /* Still clear of the self-echo suppression that keeps our own TX out. */
+    TEST_ASSERT_TRUE(DALI_REPLY_WINDOW_OPEN_DECODED_US >
+                     (uint32_t)DALI_SETTLE_MS * 1000u);
+
+    /* 5.242 ms — the fastest reply actually observed on the 1k bus. */
+    DaliPhyRxObservation observation = {
+        .result         = DALI_OK,
+        .frame          = { .data = 0x08u, .bit_length = 8u },
+        .first_edge_us  = 5242u,
+        .last_edge_us   = 5242u + DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+        .edge_count     = 16u,
+        .has_timestamps = true,
+    };
+    dali_sched_notify_rx_observation(&observation);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+    TEST_ASSERT_EQUAL_HEX32(0x08u, g_cb_reply.data);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_outside_reply);
+}
+
+/*
+ * The relaxation is for decoded frames only. Undecodable activity keeps the
+ * standard's edge, because that is the path COMPARE reads as YES: accepting it
+ * early would invent gear that is not there, which is the one error a
+ * commissioning walk must not make.
+ */
+void test_malformed_activity_keeps_the_standard_open_edge(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+
+    /* Same 5.242 ms the decoded frame above is accepted at. */
+    inject_rx_activity(5242u,
+                       5242u + DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+                       16u,
+                       DALI_ERR_MALFORMED);
+
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_rx_activity);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+
+    advance_time_ms(DALI_REPLY_TIMEOUT_MS);
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT, g_cb_result);
+}
+
 void test_early_and_late_malformed_activity_do_not_become_replies(void)
 {
     DaliTransaction txn = {
@@ -924,6 +1005,13 @@ void test_timestamped_phy_callback_delivers_normal_backward_reply(void)
     TEST_ASSERT_EQUAL_HEX8(0x5Au, g_cb_reply.data);
 }
 
+/*
+ * The open edge a decoded backward frame is held to is
+ * DALI_REPLY_WINDOW_OPEN_DECODED_US, not the standard's
+ * DALI_REPLY_WINDOW_OPEN_US — see the constant for why the two differ. This
+ * test is about frames outside the window at all, so it uses the edge that
+ * actually applies to a decoded frame.
+ */
 void test_timestamped_phy_callback_rejects_early_and_late_backward_frames(void)
 {
     DaliTransaction txn = {
@@ -939,8 +1027,8 @@ void test_timestamped_phy_callback_rejects_early_and_late_backward_frames(void)
     DaliPhyRxObservation observation = {
         .result = DALI_OK,
         .frame = { .data = 0x5Au, .bit_length = DALI_BACKWARD_FRAME_BITS },
-        .first_edge_us = DALI_REPLY_WINDOW_OPEN_US - 2u,
-        .last_edge_us = DALI_REPLY_WINDOW_OPEN_US + DALI_BIT_US * 9u,
+        .first_edge_us = DALI_REPLY_WINDOW_OPEN_DECODED_US - 2u,
+        .last_edge_us = DALI_REPLY_WINDOW_OPEN_DECODED_US + DALI_BIT_US * 9u,
         .edge_count = 16u,
         .has_timestamps = true,
     };
@@ -2783,6 +2871,8 @@ int main(void)
     RUN_TEST(test_reply_received);
     RUN_TEST(test_frame_like_rx_activity_completes_reply_with_distinct_error);
     RUN_TEST(test_reply_between_minimum_and_nominal_settling_is_accepted);
+    RUN_TEST(test_decoded_backward_frame_is_accepted_before_the_standard_open);
+    RUN_TEST(test_malformed_activity_keeps_the_standard_open_edge);
     RUN_TEST(test_early_and_late_malformed_activity_do_not_become_replies);
     RUN_TEST(test_in_window_short_malformed_activity_aborts_instead_of_becoming_no);
     RUN_TEST(test_in_window_ring_overflow_is_preserved_as_overflow);

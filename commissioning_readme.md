@@ -613,7 +613,15 @@ Queries are all lowercase and will fail when automatically capitalised.
 - `queue` if commands are being dropped: a non-zero `full` or `busy` is dropped
   work, not deferred work.
 - `trace on` for a live per-frame view; `capture start` … `capture export` when
-  the interesting event is too fast to watch.
+  the interesting event is too fast to watch. Capture around **one command**,
+  not a whole `discover`: the ring holds 128 records and a scan generates about
+  1900, so all a scan leaves you is its tail. `dali_commands.md` explains how to
+  read the export — in particular that `since_tx_us` runs from the end of the
+  forward frame to the end of the reply, so the settling time the standard
+  talks about is that number minus about 7.5 ms.
+- A device that answers one scan and not the next is intermittent, not absent.
+  Run `discover` more than once before concluding gear is missing or a group is
+  empty — two runs disagreeing is itself the finding.
 - Gear that has been physically removed stays in the group cache on purpose, so
   that a merely offline device is not dropped. `group forget <addr>` in the
   command console is the explicit way to retire it.

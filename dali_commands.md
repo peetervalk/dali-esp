@@ -802,6 +802,48 @@ reset                      # reset PHY, scheduler, and diagnostic state
 `help`, `list`, and `schema` are generated from the table the parser dispatches
 on, so they cannot drift from what the CLI accepts.
 
+### Reading a `capture export`
+
+The ring holds 128 records. A `discover` generates roughly 1900, so a full scan
+can never be captured — only its tail, with `dropped` naming what was lost.
+**Capture narrowly**: `capture start`, one command, `capture export`. Six
+records that answer the question beat 128 that happen to be the end of
+something else.
+
+| Field | Meaning |
+|---|---|
+| `kind` | `tx` or `rx` |
+| `timestamp_us` | Free-running microsecond clock; only differences are meaningful |
+| `raw`, `raw_bits` | The frame and its width — 16 or 24 forward, 8 backward |
+| `since_tx_us` | On an `rx` record: the backward frame's **last edge**, measured from the preceding TX **bus release** |
+
+`since_tx_us` is the field worth being careful with, because neither end of it
+is what a first reading assumes. It is anchored to the end of the forward
+frame, not its start, and it runs to the end of the reply, not its beginning.
+A backward frame is nine bit periods — about 7.5 ms — so the settling time the
+standard talks about is `since_tx_us` minus 7500.
+
+IEC 62386-101 gives that settling time as 5.5 to 10.5 ms, nominal 7 ms, so
+healthy gear lands at `since_tx_us` of roughly 13000-18000. The scheduler
+attributes anything from `DALI_REPLY_WINDOW_OPEN_US` (5.5 ms) through
+`DALI_REPLY_WINDOW_CLOSE_US` (27 ms) after release; a reply outside that is
+counted in `rx_ignored_outside_reply` and reported by `discover` as an
+observation that fell outside active reply attribution.
+
+Empty addresses produce no observations at all — a capture across a stretch of
+unpopulated addresses shows TX with no RX — so a non-zero count on an otherwise
+quiet bus is not noise. It is gear whose replies are landing outside the window,
+one count per attempt including retries, and the verb that asked reports
+`timeout` while a correctly decoded reply sits in the buffer.
+
+Gear replying *early* is the case to watch for, because the arithmetic hides it.
+The open edge is tested against the observation's **first** edge, so a reply is
+rejected once `since_tx_us` drops below about 13000 — which still looks
+comfortably inside a window whose numbers are quoted as 5.5 and 27. Subtract the
+7500 before comparing. A device that answers some runs and not others, with
+`since_tx_us` clustered just either side of 13000, is sitting on the window open
+rather than failing intermittently, and retries will not rescue it.
+
 ### `queue [reset]` — both surfaces
 
 | Field | Meaning |

@@ -28,6 +28,27 @@
  * towards the nominal 7 ms: everything between would then time out.
  */
 #define DALI_REPLY_WINDOW_OPEN_US   5500u
+/*
+ * The open edge for an observation that decoded as a complete backward frame.
+ *
+ * Deliberately below the standard's minimum, and only reachable by a clean
+ * decode. The 5.5 ms edge above exists to keep undecodable activity from being
+ * read as a reply — the case that matters, because COMPARE maps qualified
+ * activity to YES and so invents gear that is not there. A fully decoded 8-bit
+ * backward frame carries no such ambiguity: it is a real reply from real gear,
+ * and the only question is whether that gear settled fast.
+ *
+ * Some do. Measured on the 1k installation, four LED-strip drivers settle in
+ * 5.24-5.62 ms and straddle the 5.5 ms edge, so most of their replies were
+ * discarded and the verb that asked reported a timeout while a correctly
+ * decoded byte sat in the buffer. Retries cannot help gear sitting on a
+ * threshold. IEC 62386-101 makes them marginally non-conformant; refusing to
+ * read them makes the installation unusable, which is the worse answer.
+ *
+ * DALI_SETTLE_MS remains the defence against mistaking our own transmission for
+ * a reply, and this still leaves 2.5 ms above it.
+ */
+#define DALI_REPLY_WINDOW_OPEN_DECODED_US 4500u
 /* The scheduler starts its 25 ms wait after the 2 ms TX/RX handoff. Keep that
  * existing effective deadline while attributing timestamped RX observations. */
 #define DALI_REPLY_WINDOW_CLOSE_US (((uint32_t)DALI_SETTLE_MS + (uint32_t)DALI_REPLY_TIMEOUT_MS) * 1000u)

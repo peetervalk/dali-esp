@@ -326,7 +326,7 @@ fault.
   need a hardware pass. `Configuration commands (19 names)` still reads `partial`
   on the real-bus column and `DTR0-consuming configuration` still reads `no`.
 
-### Verified locally on 2026-08-25 (group representative discovery)
+### Verified on hardware 2026-08-25 (group representative discovery)
 
 A group light needs one member's short address to poll, because QUERY ACTUAL
 LEVEL addressed to a group collides the moment the group has two members. That
@@ -366,12 +366,43 @@ the fixture is replaced. The bus can answer the question itself.
 - `export config` no longer drafts a `query_address` into the group entities it
   proposes. It names one member in a comment instead, so the export cannot
   reintroduce the hardcode it was just used to remove.
-- Compile-verified only, and not yet run on a bus. The cost model in particular
-  is unmeasured: each address is a two-step sequence, and an address nothing
-  answers for costs a reply timeout per step, so the worst case — a configured
-  group with no gear in it, forcing the full 0-63 walk — has not been timed.
-  The early stop is what keeps the normal case short, and that has not been
-  observed either.
+- **Run on the 1k bus with every `query_address` removed from the YAML, and it
+  did the job.** With no seed and no snapshot in flash it seeded groups 0, 2
+  and 6 from the bus; the refresh then polled them via a5, a4 and a2, which are
+  the lowest member of each group and so exactly what `dali_group_map_pick()`
+  should return. It reported `group mask 0x00B8` — groups 3, 4, 5, 7 — as
+  unseedable, which two `discover` runs appeared to confirm: a1 did not answer
+  at all, and a0, a13, a15 answered QUERY STATUS but returned no group data.
+  A third run then read all sixteen devices including `a13 groups=[3]` and
+  `a15 groups=[7]`, so the correct reading is that this gear is intermittent
+  and the sweep caught it on a bad run — not that those groups are empty. See
+  Installation State.
+- That is an installation finding, not a firmware one, and it is still the case
+  for the feature: those four groups had `query_address` pointing at gear that
+  answers unreliably, so their state readback was unreliable too, and nothing
+  said so. The hardcode was not providing a dependable reading, only hiding
+  that the reading was in doubt. How much of seven days of Home Assistant
+  history for those entities is bus-confirmed and how much is optimistic
+  command state cannot be separated after the fact.
+- One real defect, in observability rather than behaviour: the per-address
+  `ESP_LOGD` lines and the arming `ESP_LOGI` are emitted within the first
+  fractions of a second of `loop()`, before a network log viewer attaches, so
+  on a device watched over the API the entire walk is invisible and only the
+  closing line survives. That was enough to make a working sweep look like a
+  total failure for two rounds of diagnosis. The close now always prints
+  `walked N, M answered, K silent` plus the last failing address, error and
+  step, so the summary alone distinguishes an empty bus from a broken query
+  path. Per-address detail still needs a serial capture.
+- The cost model is still unmeasured. The visible window did not contain the
+  start of the walk, so no timing can be read off it; the worst case — a
+  configured group with no gear, forcing the full 0-63 walk with a reply
+  timeout per step — has not been timed. On this bus the walk does run to 63,
+  because four groups went unseeded, and boot was not visibly delayed.
+- Open design question the hardware raised: a single pass asks each address
+  once, and the query sequence's own retries were not enough to catch
+  intermittent gear. Re-asking non-answering addresses while groups are still
+  wanted would fix it at the cost of boot traffic. Not implemented — it needs
+  a count of how often a pass actually misses, which one boot cannot give.
 
 ### Verified locally on 2026-08-12 (console verb parity)
 
@@ -1230,6 +1261,112 @@ mattered — `type: local` with `path: esphome/components`, so a configuration a
 the component it configures always agree within a commit — while owing nothing
 to any hardware. The `_local` copies keep the git pin because they are what gets
 flashed and the operator chooses when to move.
+
+### 1k bus: gear that replies just before the attribution window opens
+
+Recorded 2026-08-25 from three `discover` runs, a `capture export`, and the
+group seed sweep. Sixteen control gear; four of them answer unreliably, and the
+split follows the fixture type rather than the address.
+
+| Group | Entity | Gear | Behaviour |
+|---|---|---|---|
+| 0, 2, 6 | `... siin` (ceiling) | a2-a12, a14 | Answer everything, every run: `LED`, v4, `groups=[N]` |
+| 3 | Elutuba ledriba | a13 | Missing from run 2; run 3 reported it complete, `groups=[3]` |
+| 7 | Köök ledriba | a15 | Present every run; group data only on run 3, `groups=[7]` |
+| 4 | Söögituba ledriba | a1 | Missing from runs 1 and 2; present on run 3 |
+| 5 | Väike koridor | a0 | Missing from run 1; present on runs 2 and 3, no group data |
+
+Every unreliable address is a LED-strip driver or the corridor fixture; every
+solid one is a ceiling fixture on a v4 DT6 driver. **They are intermittent, not
+mute**: run 3 read all sixteen, including the group membership of a13 and a15
+that the first two runs missed entirely. An earlier reading of this table as
+"answers commands but not queries" was wrong, and so was the conclusion drawn
+from it that those groups were empty.
+
+**Root cause, from two narrow captures of `query a13 groups-0-7`.** The device
+is not intermittent in any useful sense: it replies correctly every time, and the
+controller discards most of those replies.
+
+```text
+tx 0x1BC0           rx 0x08  since_tx_us 12742   rejected
+tx 0x1BC0 (retry)   rx 0x08  since_tx_us 12936   rejected  -> "timeout"
+tx 0x1BC0           rx 0x08  since_tx_us 13120   accepted  -> "0x08"
+```
+
+`sched_observation_in_reply_window()` tests the observation's **first** edge
+against `DALI_REPLY_WINDOW_OPEN_US` (5500 us), while the `since_tx_us` in a
+trace or capture record is its **last** edge. A backward frame spans nine bit
+periods, 7500 us, which the data confirms independently: the accept/reject
+boundary lies between 12936 and 13120, so the span is 12936..13120 minus 5500,
+i.e. 7436-7620. Converting each observation to its first edge gives 5242 us and
+5436 us for the two rejected replies against 5620 us for the accepted one.
+
+**a13 settles in roughly 5.24-5.62 ms, straddling the 5.5 ms window open.**
+The ceiling drivers settle at 6.4-7.0 ms and clear it every time, which is why
+the failure follows fixture type rather than address. IEC 62386-101 gives 5.5 ms
+as the *minimum* settling time, so this gear is marginally out of spec — fast by
+up to 5% — and the controller enforces that minimum strictly enough to make four
+of sixteen fixtures unreadable.
+
+This also explains the `rx_ignored_outside_reply` deltas the scan reports (58,
+77, then 113 across three runs). They are these early replies being discarded,
+counted once per attempt including retries. Not noise, and not a trailing
+artefact of the backward frame; an earlier note in this file said both and was
+wrong.
+
+**The bus is otherwise healthy and electrically quiet.** Replies that do land
+arrive 6.4-7.4 ms after TX bus release, dead centre of the 5.5-10.5 ms range with
+its 7 ms nominal, and the 27 ms close is nowhere near being approached. A capture
+holding the tail of a scan across addresses 38 through 63 — twenty-six
+consecutive empty addresses, each probed as both control gear and Part 103
+control device — contains zero RX records. No noise, no ringing on an idle line.
+
+Consequences worth holding:
+
+- Retries do not help, and cannot: the gear is not randomly failing, it is
+  sitting on a threshold with roughly 200 us of jitter, so most attempts fall the
+  same side of it. This is why the group seed sweep's per-sequence retries did
+  not rescue it, and why two `discover` runs disagreed.
+- Those four group entities have unreliable state readback. How much of their
+  Home Assistant history is bus-confirmed and how much is optimistic command
+  state cannot be separated after the fact.
+- `capture` holds `SHELL_CAPTURE_MAX` = 128 records against a `discover` that
+  generates roughly 1900, so a full scan can never be captured — only its tail.
+  Characterising one device needs a narrow capture around a single query. Both
+  captures that settled this were six records long.
+
+**Remedy, applied 2026-08-25: a second open edge for decoded frames.**
+`DALI_REPLY_WINDOW_OPEN_DECODED_US` (4500 us) now applies to an observation that
+decoded as a complete 8-bit backward frame; `DALI_REPLY_WINDOW_OPEN_US` (5500 us,
+the standard's minimum) still applies to everything else.
+`sched_observation_in_reply_window()` and
+`sched_observation_can_match_active_reply()` take the distinction as a parameter,
+and only the decoded-backward-frame branch of
+`dali_sched_notify_rx_observation()` passes it.
+
+The asymmetry is where the safety lives. The strict edge exists to stop
+undecodable activity being read as a reply, because COMPARE maps qualified
+activity to YES and so invents gear that is not there — the one error a
+commissioning walk must not make. A fully decoded backward frame carries no such
+ambiguity: it is a real reply from real gear, and the only open question is
+whether that gear settled fast. `DALI_SETTLE_MS` (2 ms of RX self-echo
+suppression) remains the defence against reading our own transmission, and 4500
+us still clears it by 2.5 ms.
+
+Two host vectors in `test/test_scheduler.c` pin both halves: a decoded frame at
+the measured 5242 us is accepted with no `rx_ignored_outside_reply`, and
+malformed activity at the same 5242 us is still rejected and still times out.
+`test_timestamped_phy_callback_rejects_early_and_late_backward_frames` moved to
+the decoded edge, since that is the boundary that now applies to it. All 26
+suites pass; `dali_scheduler.c` compiles clean against the ESP-IDF flag set.
+
+Not yet run on the bus. What it should produce on the 1k installation: a13, a15,
+a0 and a1 readable, `discover` stable across runs, the group seed sweep seeding
+all seven groups, and the `rx_ignored_outside_reply` deltas dropping toward zero.
+If those four still read intermittently afterwards, the settling time is drifting
+further than the three captured samples showed and the constant needs revisiting
+rather than the approach.
+
 
 The entire `_local` directory is deliberately ignored by Git. This checkout also
 contains `_local/dali-diag-local.yaml`, a compile-test copy of the tracked

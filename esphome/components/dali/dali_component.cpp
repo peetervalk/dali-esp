@@ -126,6 +126,24 @@ struct GroupSeedSweep {
     bool               in_flight;
     uint8_t            address;       /* the address the in-flight query asks about */
     uint16_t           wanted;        /* groups still without a representative */
+    /*
+     * Counters and the last failure, carried to the closing summary.
+     *
+     * The per-address lines below are DEBUG and are emitted in the first
+     * fractions of a second of loop(), which on this device is before a network
+     * log viewer has attached — so they are invisible unless someone is on the
+     * serial cable. The summary is the line that always survives, and it has to
+     * carry enough to act on without them.
+     *
+     * A silent address is the normal case on a sparse bus, not a fault: only
+     * `answered` against the gear you know is out there says whether a query
+     * path is working.
+     */
+    uint8_t            answered;      /* addresses that returned a group mask   */
+    uint8_t            silent;        /* addresses whose query did not decode   */
+    DaliError          last_error;
+    uint8_t            last_error_step;
+    uint8_t            last_error_address;
     DaliSequenceResult result;
     std::atomic<bool>  result_ready;
 };
@@ -2846,6 +2864,11 @@ void DaliComponent::arm_group_seed_sweep()
     s_group_seed_sweep.in_flight = false;
     s_group_seed_sweep.address = 0u;
     s_group_seed_sweep.wanted = wanted;
+    s_group_seed_sweep.answered = 0u;
+    s_group_seed_sweep.silent = 0u;
+    s_group_seed_sweep.last_error = DALI_OK;
+    s_group_seed_sweep.last_error_step = 0u;
+    s_group_seed_sweep.last_error_address = 0u;
     s_group_seed_sweep.result_ready.store(false, std::memory_order_relaxed);
     s_group_seed_sweep.active = true;
     ESP_LOGI(TAG, "group seed: no membership in flash; asking the bus for a "
@@ -2873,10 +2896,28 @@ void DaliComponent::pump_group_seed_sweep()
         const uint8_t address = s_group_seed_sweep.address;
         uint16_t groups = 0u;
         /* An address nothing answers for is the common case on a sparse bus and
-         * is not a fault: the sequence times out and the walk moves on. */
-        if (dali_discovery_groups_from_sequence(&s_group_seed_sweep.result,
-                                                &groups) == DALI_OK &&
-            groups != 0u) {
+         * is not a fault: the sequence times out and the walk moves on. Which
+         * error it was is still worth keeping — gear that is demonstrably on the
+         * bus but never answers a query is a different problem from an empty
+         * address, and the two are indistinguishable from the counts alone. */
+        DaliError decoded =
+            dali_discovery_groups_from_sequence(&s_group_seed_sweep.result, &groups);
+
+        if (decoded != DALI_OK) {
+            s_group_seed_sweep.silent++;
+            s_group_seed_sweep.last_error = decoded;
+            s_group_seed_sweep.last_error_step = s_group_seed_sweep.result.failed_step;
+            s_group_seed_sweep.last_error_address = address;
+            ESP_LOGD(TAG, "group seed: a%u no group data (err=%d step=%u)",
+                     (unsigned) address, (int) decoded,
+                     (unsigned) s_group_seed_sweep.result.failed_step);
+        } else if (groups == 0u) {
+            /* Answered, and is in no group. Nothing to seed, but the query path
+             * to this address demonstrably works. */
+            s_group_seed_sweep.answered++;
+            ESP_LOGD(TAG, "group seed: a%u is in no group", (unsigned) address);
+        } else {
+            s_group_seed_sweep.answered++;
             portENTER_CRITICAL(&s_group_map_mux);
             for (uint8_t g = 0u; g < DALI_GROUP_COUNT; g++) {
                 if (((groups >> g) & 1u) != 0u) {
@@ -2905,14 +2946,36 @@ void DaliComponent::pump_group_seed_sweep()
     if (s_group_seed_sweep.wanted == 0u ||
         s_group_seed_sweep.address >= DALI_SHORT_ADDRESS_COUNT) {
         s_group_seed_sweep.active = false;
+
+        /*
+         * Always printed, and printed first: the per-address lines above are
+         * DEBUG and land before a network log viewer attaches, so this is the
+         * only part of the walk most operators will ever see. `answered` is the
+         * number to read against the gear you know is on the bus — if it is far
+         * short, the query path failed rather than the groups being empty.
+         */
+        ESP_LOGI(TAG,
+                 "group seed: walked %u address(es), %u answered, %u silent"
+                 "%s",
+                 (unsigned) s_group_seed_sweep.address,
+                 (unsigned) s_group_seed_sweep.answered,
+                 (unsigned) s_group_seed_sweep.silent,
+                 s_group_seed_sweep.silent > 0u ? ";" : "");
+        if (s_group_seed_sweep.silent > 0u) {
+            ESP_LOGI(TAG, "group seed: last silent a%u err=%d step=%u",
+                     (unsigned) s_group_seed_sweep.last_error_address,
+                     (int) s_group_seed_sweep.last_error,
+                     (unsigned) s_group_seed_sweep.last_error_step);
+        }
+
         if (s_group_seed_sweep.wanted == 0u) {
-            ESP_LOGI(TAG, "group seed: every group light has a representative "
-                          "after %u address(es)",
-                     (unsigned) s_group_seed_sweep.address);
+            ESP_LOGI(TAG, "group seed: every group light has a representative");
         } else {
             /* Not an error: a group with no gear in it has no representative to
              * find, and the entity still controls the group perfectly well. It
-             * just cannot read a level back. */
+             * just cannot read a level back. Gear that is present but never
+             * answers a query looks identical from here — the `answered` count
+             * above is what separates the two. */
             ESP_LOGW(TAG, "group seed: no member found for group mask 0x%04X; "
                           "those lights will not poll until a scan",
                      (unsigned) s_group_seed_sweep.wanted);
