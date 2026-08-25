@@ -99,8 +99,14 @@ limited operationally to one unaddressed control gear at a time until the
 multi-device path is exercised on hardware. A run now brackets itself with
 broadcast START/STOP QUIESCENT MODE — host-tested for ordering, settle,
 release-on-every-exit, and the two failure modes, but never run on a bus, and it
-cannot reach a device that does not receive the broadcast. Equal-random-address
-recovery and arbitration against another bus master remain open.
+cannot reach a device that does not receive the broadcast.
+
+Equal random addresses are handled as of 2026-08-26: VERIFY reply-window activity
+is read as co-selection, the pair is de-addressed with PROGRAM SHORT ADDRESS 0xFF
+and dropped from the search, the short address is left unconsumed, and the run
+continues -- a second run places them. Host vectors only, and it rests on the same
+undecodable-activity classification that has no physical collision capture behind
+it. Arbitration against another bus master remains open.
 
 The shell rows are the same code the native CLI runs, reached through
 `esphome/components/dali/dali_shell_tcp.cpp`. Its commissioning entry point is

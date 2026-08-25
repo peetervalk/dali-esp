@@ -208,8 +208,10 @@ text:
   unaddressed gear at a time. A run brackets itself with broadcast Part 103
   START/STOP QUIESCENT MODE so control devices cannot transmit into a COMPARE
   reply window, but that too is host-tested only and cannot reach a device that
-  missed the broadcast. Equal-random-address recovery, cross-part addressing
-  interference, and multi-master arbitration are not implemented.
+  missed the broadcast. Two gear that draw the same random address are detected
+  at VERIFY, de-addressed, and left for a second run to place -- host-tested,
+  same caveat. Cross-part addressing interference and multi-master arbitration
+  are not implemented.
 - Implemented does not mean verified on hardware. Several paths — the DT6/DT8
   command sets, memory writes, input-device configuration — have host vectors but
   no recorded real-bus result; [dali_capability_matrix.md](dali_capability_matrix.md)

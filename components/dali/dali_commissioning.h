@@ -16,6 +16,21 @@
 #define DALI_COMMISSIONING_QUERY_RETRIES_LEFT 1u
 
 /*
+ * How many colliding random addresses one run remembers. Two gear generating
+ * the same 24-bit value is roughly a 1e-5 event on a twenty-device bus, so four
+ * slots is generous; duplicate_count keeps counting past the array so a
+ * truncated list still reports the true total.
+ */
+#define DALI_COMMISSIONING_MAX_DUPLICATES     4u
+
+/*
+ * PROGRAM SHORT ADDRESS parameter meaning "no short address". Same sentinel
+ * INITIALISE uses for "unaddressed gear", and the one value
+ * dali_commissioning_encode_short_address() can never produce.
+ */
+#define DALI_COMMISSIONING_NO_SHORT_ADDRESS   0xFFu
+
+/*
  * Settle time after RANDOMISE, before the first COMPARE. Gear needs this long to
  * finish generating its 24-bit random address, and gear that has not finished
  * does not answer COMPARE — which is indistinguishable from there being no gear
@@ -46,6 +61,35 @@
  * is checkable without the standard.
  */
 #define DALI_COMMISSIONING_QUIESCENT_SETTLE_MS     ((2u * DALI_EXTENDED_FRAME_BITS * DALI_BIT_US) / 1000u)
+
+/*
+ * The three things a VERIFY SHORT ADDRESS reply window can mean.
+ *
+ * VERIFY is answered only by selected devices, and the PROGRAM in the same
+ * atomic sequence does not change which devices are selected. Exactly one
+ * responder decodes; two overlap and do not. That makes this the only point in
+ * the walk where co-selection is provable, which is what MULTIPLE is for:
+ * two gear that generated the same 24-bit random address are selected,
+ * programmed, and withdrawn as one, and nothing before this step can tell them
+ * apart.
+ *
+ * MULTIPLE is a qualified inference, not a measurement, and it is deliberately
+ * safe in both directions. A false positive (one device with a marginal
+ * backward waveform) costs an extra search round and a different short address
+ * than expected -- no damage. A false negative (twins whose replies happen to
+ * decode cleanly) leaves a duplicate for the post-scan to catch. It inherits
+ * the quiescence caveat: a control device that never received the broadcast can
+ * still put frame-like activity into this window.
+ */
+typedef enum {
+    /* A decoded 0xFF: exactly one device holds the address just written. */
+    DALI_COMMISSIONING_VERIFY_CONFIRMED = 0,
+    /* Silence through the reply window: nothing confirmed the write. */
+    DALI_COMMISSIONING_VERIFY_SILENT,
+    /* Qualified, response-like activity that did not decode: more than one
+     * device is selected, so more than one answered. */
+    DALI_COMMISSIONING_VERIFY_MULTIPLE,
+} DaliCommissioningVerifyOutcome;
 
 typedef struct {
     uint32_t random_address;
@@ -104,6 +148,30 @@ typedef struct {
      * an installation whose sensors stay quiet looks broken. */
     bool    quiescent_state_unknown;
     DaliError quiescence_error;
+    /*
+     * Random addresses that turned out to be held by more than one gear.
+     *
+     * The run does not abort on one. It de-addresses the pair with PROGRAM
+     * SHORT ADDRESS 0xFF, withdraws them from the search, leaves the short
+     * address unconsumed, and keeps going -- the same shape as the short-address
+     * scan refusing to let one contested address cost the other sixty-three.
+     * The pair ends unaddressed rather than sharing an address, which is the
+     * state a later run handles; re-running re-randomises them, with a 2^-24
+     * chance of colliding again.
+     *
+     * duplicate_count can exceed DALI_COMMISSIONING_MAX_DUPLICATES; the array
+     * holds the first few.
+     */
+    uint8_t  duplicate_count;
+    uint32_t duplicate_random_addresses[DALI_COMMISSIONING_MAX_DUPLICATES];
+    /*
+     * True when the de-address or the withdraw could not be transmitted for at
+     * least one duplicate, so a pair may still be sharing a short address.
+     * Transmission is all this can report: two devices answering QUERY SHORT
+     * ADDRESS with the same 0xFF collide exactly as they did before, so there
+     * is no clean readback to confirm against.
+     */
+    bool     duplicate_recovery_failed;
     DaliCommissioningAssignment assignments[DALI_COMMISSIONING_MAX_ASSIGNMENTS];
 } DaliCommissioningResult;
 
@@ -114,6 +182,10 @@ typedef enum {
     DALI_COMMISSIONING_EVENT_ASSIGNED,
     DALI_COMMISSIONING_EVENT_NO_MORE_DEVICES,
     DALI_COMMISSIONING_EVENT_ADDRESS_SPACE_FULL,
+    /* A random address answered VERIFY from more than one device. The
+     * event carries that random address; short_address is the one that
+     * was written and then taken back. */
+    DALI_COMMISSIONING_EVENT_DUPLICATE_RANDOM_ADDRESS,
     DALI_COMMISSIONING_EVENT_TERMINATED,
 } DaliCommissioningEventKind;
 
@@ -210,12 +282,23 @@ DaliError dali_commissioning_compare_from_sequence(const DaliSequenceResult *res
                                                    bool *yes_out);
 
 /*
- * Read the VERIFY answer out of a completed program-verify sequence. A timeout
- * on the VERIFY step means the device did not confirm, reported as
- * verified = false with DALI_OK; an earlier failure is returned as an error.
+ * Read the VERIFY answer out of a completed program-verify sequence.
+ *
+ * Three outcomes, not two. A timeout on the VERIFY step is SILENT with DALI_OK,
+ * because that is how VERIFY says no. Qualified reply-window activity that did
+ * not decode is MULTIPLE, also with DALI_OK: on this step it is not an ambiguous
+ * observation but a positive statement that more than one device is selected.
+ * A failure on the PROGRAM step, or any other error, is returned as an error --
+ * without that distinction a PROGRAM that never went out would read as a device
+ * that declined to confirm.
+ *
+ * This is the one place COMPARE's activity rule is extended rather than copied.
+ * COMPARE folds activity into YES because for COMPARE the third state *is* YES;
+ * here it is its own answer and gets its own value.
  */
-DaliError dali_commissioning_verify_from_sequence(const DaliSequenceResult *result,
-                                                  bool *verified_out);
+DaliError dali_commissioning_verify_from_sequence(
+    const DaliSequenceResult *result,
+    DaliCommissioningVerifyOutcome *outcome_out);
 
 DaliError dali_commissioning_set_search_address(
     const DaliDiscoveryTransport *transport,
@@ -233,10 +316,11 @@ DaliError dali_commissioning_program_short_address(
     const DaliDiscoveryTransport *transport,
     uint8_t short_address);
 
+/* Standalone VERIFY, with the same three outcomes as the sequenced reader. */
 DaliError dali_commissioning_verify_short_address(
     const DaliDiscoveryTransport *transport,
     uint8_t short_address,
-    bool *verified_out);
+    DaliCommissioningVerifyOutcome *outcome_out);
 
 DaliError dali_commissioning_query_short_address(
     const DaliDiscoveryTransport *transport,

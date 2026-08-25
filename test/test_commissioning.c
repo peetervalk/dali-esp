@@ -45,6 +45,11 @@ typedef struct {
     DaliError  quiescent_fail_err;
     /* Frame most recently on the bus when a settle wait was requested. */
     uint32_t   delay_last_frame_data;
+    /* WITHDRAW reports success without removing anything from the search --
+     * gear that ignores it, or a master undoing the run. Models the one way the
+     * duplicate path could loop forever. */
+    bool       withdraw_is_noop;
+    uint8_t    deaddress_count;
 } MockCommissioningBus;
 
 static MockCommissioningBus s_bus;
@@ -133,7 +138,9 @@ static DaliError mock_special_no_reply(uint8_t opcode, uint8_t param)
         case 0xABu:
             for (uint8_t i = 0u; i < MOCK_DEVICE_COUNT; i++) {
                 if (mock_selected(&s_bus.devices[i])) {
-                    s_bus.devices[i].active = false;
+                    if (!s_bus.withdraw_is_noop) {
+                        s_bus.devices[i].active = false;
+                    }
                     s_bus.withdraw_count++;
                 }
             }
@@ -154,6 +161,19 @@ static DaliError mock_special_no_reply(uint8_t opcode, uint8_t param)
             return DALI_OK;
 
         case 0xB7u: {
+            /* 0xFF is "no short address": the selected devices give theirs back.
+             * It is the one parameter decode_short_address() refuses, so it has
+             * to be handled before the decode rather than through it. */
+            if (param == DALI_COMMISSIONING_NO_SHORT_ADDRESS) {
+                s_bus.deaddress_count++;
+                for (uint8_t i = 0u; i < MOCK_DEVICE_COUNT; i++) {
+                    if (mock_selected(&s_bus.devices[i])) {
+                        s_bus.devices[i].short_address = MOCK_UNADDRESSED;
+                    }
+                }
+                return DALI_OK;
+            }
+
             uint8_t short_address = 0u;
             DaliError err = dali_commissioning_decode_short_address(param,
                                                                     &short_address);
@@ -197,15 +217,21 @@ static DaliError mock_special_reply(uint8_t opcode,
             if (err != DALI_OK) {
                 return err;
             }
-            bool verified = false;
+            uint8_t responders = 0u;
             for (uint8_t i = 0u; i < MOCK_DEVICE_COUNT; i++) {
                 if (mock_selected(&s_bus.devices[i]) &&
                     s_bus.devices[i].short_address == short_address) {
-                    verified = true;
+                    responders++;
                 }
             }
-            if (!verified) {
+            if (responders == 0u) {
                 return DALI_ERR_TIMEOUT;
+            }
+            /* Two devices answering the same reply window overlap and do not
+             * decode. This is what an equal random address looks like from the
+             * master's side, and the only point in the walk where it shows. */
+            if (responders > 1u) {
+                return DALI_ERR_RX_ACTIVITY;
             }
             *reply_out = (DaliFrame){
                 .data = DALI_YES_RESPONSE,
@@ -1319,9 +1345,10 @@ void test_compare_from_sequence_reads_yes_and_no(void)
     TEST_ASSERT_FALSE(yes);
 }
 
-void test_rx_activity_means_yes_only_for_compare(void)
+void test_rx_activity_is_yes_for_compare_and_multiple_for_verify(void)
 {
     DaliSequenceResult result;
+    DaliCommissioningVerifyOutcome outcome = DALI_COMMISSIONING_VERIFY_SILENT;
     bool answer = false;
 
     result_reset(&result, 0u);
@@ -1341,13 +1368,29 @@ void test_rx_activity_means_yes_only_for_compare(void)
                       dali_commissioning_compare_from_sequence(&result,
                                                                 &answer));
 
+    /*
+     * Activity on the VERIFY step is the one place it is an answer rather than
+     * an ambiguity: exactly one device is selected when a program-verify runs,
+     * so a second responder means a second device shares the random address.
+     */
     result_reset(&result, 0u);
     result_fail(&result,
                 DALI_ERR_RX_ACTIVITY,
                 DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_VERIFY);
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_verify_from_sequence(&result,
+                                                               &outcome));
+    TEST_ASSERT_EQUAL(DALI_COMMISSIONING_VERIFY_MULTIPLE, outcome);
+
+    /* On the PROGRAM step it stays an error: a collided write says nothing
+     * about how many devices are out there. */
+    result_reset(&result, 0u);
+    result_fail(&result,
+                DALI_ERR_RX_ACTIVITY,
+                DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_PROGRAM);
     TEST_ASSERT_EQUAL(DALI_ERR_RX_ACTIVITY,
                       dali_commissioning_verify_from_sequence(&result,
-                                                               &answer));
+                                                               &outcome));
 
     DaliDiscoveryTransport activity_transport = {
         .transact = mock_rx_activity_transact,
@@ -1357,12 +1400,13 @@ void test_rx_activity_means_yes_only_for_compare(void)
                       dali_commissioning_compare(&activity_transport, &answer));
     TEST_ASSERT_TRUE(answer);
 
-    answer = false;
-    TEST_ASSERT_EQUAL(DALI_ERR_RX_ACTIVITY,
+    outcome = DALI_COMMISSIONING_VERIFY_CONFIRMED;
+    TEST_ASSERT_EQUAL(DALI_OK,
                       dali_commissioning_verify_short_address(
                           &activity_transport,
                           7u,
-                          &answer));
+                          &outcome));
+    TEST_ASSERT_EQUAL(DALI_COMMISSIONING_VERIFY_MULTIPLE, outcome);
 }
 
 void test_decoded_non_yes_reply_is_never_commissioning_no(void)
@@ -1371,13 +1415,16 @@ void test_decoded_non_yes_reply_is_never_commissioning_no(void)
         .transact = mock_non_yes_transact,
     };
     bool answer = true;
+    DaliCommissioningVerifyOutcome outcome = DALI_COMMISSIONING_VERIFY_CONFIRMED;
 
     TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
                       dali_commissioning_compare(&non_yes_transport, &answer));
     TEST_ASSERT_TRUE(answer);
+    /* A decoded byte that is not 0xFF is observed but invalid traffic. It is
+     * not SILENT, and it is not MULTIPLE either -- one device answered, badly. */
     TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
                       dali_commissioning_verify_short_address(
-                          &non_yes_transport, 7u, &answer));
+                          &non_yes_transport, 7u, &outcome));
 }
 
 void test_compare_from_sequence_does_not_mistake_a_failed_write_for_no(void)
@@ -1418,32 +1465,164 @@ void test_compare_from_sequence_does_not_mistake_a_failed_write_for_no(void)
                       dali_commissioning_compare_from_sequence(NULL, &yes));
 }
 
+/* ---------------------------------------------------------------------------
+ * Equal random addresses
+ *
+ * Two gear that RANDOMISE to the same 24-bit value are selected together and
+ * programmed together, so nothing before VERIFY can tell them apart. At roughly
+ * 1e-5 on a twenty-device bus this will never turn up in a hardware session,
+ * which is exactly why it has to be a vector.
+ * --------------------------------------------------------------------------*/
+
+void test_duplicate_random_address_is_taken_back_and_the_walk_continues(void)
+{
+    DaliDiscoveryTransport t = transport();
+    DaliCommissioningResult result;
+
+    /* Slots 0 and 1 are the twins; slot 2 is ordinary gear further up. */
+    mock_add_device(0u, 0x111111u);
+    mock_add_device(1u, 0x111111u);
+    mock_add_device(2u, 0x222222u);
+
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 0u,
+        .used_address_mask = 0u,
+        .query_short_address = false,
+    };
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_commission_unaddressed(&t,
+                                                                &options,
+                                                                &result,
+                                                                NULL,
+                                                                NULL));
+
+    /* The collision is reported, not inferred from a short count. */
+    TEST_ASSERT_EQUAL_UINT8(1u, result.duplicate_count);
+    TEST_ASSERT_EQUAL_HEX32(0x111111u, result.duplicate_random_addresses[0]);
+    TEST_ASSERT_FALSE(result.duplicate_recovery_failed);
+    TEST_ASSERT_EQUAL(DALI_OK, result.last_error);
+
+    /* One collision costs its own address and nothing else: the run finishes
+     * and the remaining gear is addressed. */
+    TEST_ASSERT_EQUAL_UINT8(1u, result.assigned_count);
+    TEST_ASSERT_TRUE(result.no_more_devices);
+    TEST_ASSERT_EQUAL_HEX32(0x222222u, result.assignments[0].random_address);
+
+    /* The short address the twins gave back is reused rather than burned. */
+    TEST_ASSERT_EQUAL_UINT8(0u, result.assignments[0].short_address);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_bus.devices[2].short_address);
+
+    /* The pair ends unaddressed -- where it started -- not sharing an address. */
+    TEST_ASSERT_EQUAL_UINT8(MOCK_UNADDRESSED, s_bus.devices[0].short_address);
+    TEST_ASSERT_EQUAL_UINT8(MOCK_UNADDRESSED, s_bus.devices[1].short_address);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.deaddress_count);
+
+    /* Both twins plus the real device left the search. */
+    TEST_ASSERT_EQUAL_UINT8(3u, s_bus.withdraw_count);
+
+    /* The safety unwind is unaffected by any of it. */
+    TEST_ASSERT_TRUE(result.terminate_tx_succeeded);
+    TEST_ASSERT_FALSE(result.initialisation_state_unknown);
+}
+
+void test_duplicate_recovery_reports_a_withdraw_that_did_not_transmit(void)
+{
+    DaliDiscoveryTransport t = transport();
+    DaliCommissioningResult result;
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 0u,
+        .used_address_mask = 0u,
+        .query_short_address = false,
+    };
+
+    mock_add_device(0u, 0x111111u);
+    mock_add_device(1u, 0x111111u);
+
+    /* WITHDRAW cannot be sent, so the pair stays selectable. Continuing would
+     * search the same address forever; the run has to stop instead. */
+    s_bus.fail_opcode = 0xABu;
+    s_bus.fail_err = DALI_ERR_BUS_STUCK;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK,
+                      dali_commissioning_commission_unaddressed(&t,
+                                                                &options,
+                                                                &result,
+                                                                NULL,
+                                                                NULL));
+
+    TEST_ASSERT_EQUAL_UINT8(1u, result.duplicate_count);
+    TEST_ASSERT_TRUE(result.duplicate_recovery_failed);
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK, result.last_error);
+    TEST_ASSERT_EQUAL_UINT8(0u, result.assigned_count);
+
+    /* The de-address went out before the withdraw failed, so the pair is at
+     * least not left sharing a short address. */
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.deaddress_count);
+}
+
+void test_duplicate_that_will_not_leave_the_search_stops_instead_of_looping(void)
+{
+    DaliDiscoveryTransport t = transport();
+    DaliCommissioningResult result;
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 0u,
+        .used_address_mask = 0u,
+        .query_short_address = false,
+    };
+
+    mock_add_device(0u, 0x111111u);
+    mock_add_device(1u, 0x111111u);
+
+    /* WITHDRAW reports success and removes nothing. Without the no-progress
+     * guard the walk searches 0x111111 forever, so reaching an assertion at all
+     * is half of what this test proves. */
+    s_bus.withdraw_is_noop = true;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_commissioning_commission_unaddressed(&t,
+                                                                &options,
+                                                                &result,
+                                                                NULL,
+                                                                NULL));
+
+    TEST_ASSERT_TRUE(result.duplicate_recovery_failed);
+    /* Recorded once. The second sighting is what proves no progress was made,
+     * so it is a diagnosis rather than another duplicate. */
+    TEST_ASSERT_EQUAL_UINT8(1u, result.duplicate_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, result.assigned_count);
+    TEST_ASSERT_TRUE(result.termination_attempted);
+}
+
 void test_verify_from_sequence_reads_confirmation_and_failures(void)
 {
     DaliSequenceResult result;
-    bool verified = false;
+    DaliCommissioningVerifyOutcome outcome = DALI_COMMISSIONING_VERIFY_SILENT;
 
     result_reset(&result, DALI_COMMISSIONING_PROGRAM_VERIFY_SEQUENCE_STEPS);
     seed_reply(&result, DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_VERIFY,
                DALI_YES_RESPONSE, DALI_BACKWARD_FRAME_BITS);
     TEST_ASSERT_EQUAL(DALI_OK,
-                      dali_commissioning_verify_from_sequence(&result, &verified));
-    TEST_ASSERT_TRUE(verified);
+                      dali_commissioning_verify_from_sequence(&result, &outcome));
+    TEST_ASSERT_EQUAL(DALI_COMMISSIONING_VERIFY_CONFIRMED, outcome);
 
     /* A silent VERIFY means the device did not confirm — not a bus failure. */
     result_reset(&result, 0u);
     result_fail(&result, DALI_ERR_TIMEOUT,
                 DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_VERIFY);
-    verified = true;
+    outcome = DALI_COMMISSIONING_VERIFY_CONFIRMED;
     TEST_ASSERT_EQUAL(DALI_OK,
-                      dali_commissioning_verify_from_sequence(&result, &verified));
-    TEST_ASSERT_FALSE(verified);
+                      dali_commissioning_verify_from_sequence(&result, &outcome));
+    TEST_ASSERT_EQUAL(DALI_COMMISSIONING_VERIFY_SILENT, outcome);
 
     result_reset(&result, DALI_COMMISSIONING_PROGRAM_VERIFY_SEQUENCE_STEPS);
     seed_reply(&result, DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_VERIFY,
                0x00u, DALI_BACKWARD_FRAME_BITS);
     TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
-                      dali_commissioning_verify_from_sequence(&result, &verified));
+                      dali_commissioning_verify_from_sequence(&result, &outcome));
 
     /* A PROGRAM that never went out must not be reported as "not confirmed",
      * which would look like a device problem rather than a transport one. */
@@ -1451,7 +1630,12 @@ void test_verify_from_sequence_reads_confirmation_and_failures(void)
     result_fail(&result, DALI_ERR_TIMEOUT,
                 DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_PROGRAM);
     TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT,
-                      dali_commissioning_verify_from_sequence(&result, &verified));
+                      dali_commissioning_verify_from_sequence(&result, &outcome));
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_commissioning_verify_from_sequence(&result, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_commissioning_verify_from_sequence(NULL, &outcome));
 }
 
 /* ---------------------------------------------------------------------------
@@ -1726,9 +1910,12 @@ int main(void)
     RUN_TEST(test_build_program_verify_sequence_layout);
     RUN_TEST(test_sequence_builders_reject_bad_arguments);
     RUN_TEST(test_compare_from_sequence_reads_yes_and_no);
-    RUN_TEST(test_rx_activity_means_yes_only_for_compare);
+    RUN_TEST(test_rx_activity_is_yes_for_compare_and_multiple_for_verify);
     RUN_TEST(test_decoded_non_yes_reply_is_never_commissioning_no);
     RUN_TEST(test_compare_from_sequence_does_not_mistake_a_failed_write_for_no);
+    RUN_TEST(test_duplicate_random_address_is_taken_back_and_the_walk_continues);
+    RUN_TEST(test_duplicate_recovery_reports_a_withdraw_that_did_not_transmit);
+    RUN_TEST(test_duplicate_that_will_not_leave_the_search_stops_instead_of_looping);
     RUN_TEST(test_verify_from_sequence_reads_confirmation_and_failures);
     RUN_TEST(test_short_address_encoding_round_trip);
     RUN_TEST(test_set_search_address_sends_h_m_l_special_commands);

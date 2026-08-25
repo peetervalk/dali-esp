@@ -111,9 +111,10 @@ release cannot be transmitted, the shell says so explicitly — control devices 
 stay silent, and `quiescent off all` is the fix.
 
 **It is still dependable only with a single unaddressed device on the bus.** The
-reply-activity and cleanup changes described here are not a multi-gear HIL result.
-Commission new gear one piece at a time until the equal-random-address and
-mixed-device cases below have been implemented and exercised on a real bus.
+reply-activity, cleanup, and equal-random-address handling described here are
+host-tested, not a multi-gear HIL result: the collision classification they all
+rest on has never met a real overlapping reply. Commission new gear one piece at
+a time until that has been exercised on a real bus.
 
 Before the walk starts, `commission` pre-scans the bus to learn which short
 addresses are already taken. An address that answers that pre-scan with
@@ -186,6 +187,57 @@ A failed cleanup reports `cleanup terminate ERR ... initialisation state
 unknown`; the firmware also logs the final primary and cleanup state, so a TCP
 disconnect does not make that result disappear with the socket.
 
+#### When two gear share a random address
+
+RANDOMISE gives each piece of gear a 24-bit number. Two gear drawing the same
+one is roughly a 1-in-100,000 event on a twenty-fixture bus — rare, but the walk
+has no way to see it coming: the pair is selected together, programmed together,
+and withdrawn together, and every command succeeds.
+
+`VERIFY SHORT ADDRESS` is where it shows. Exactly one device is selected when
+VERIFY runs, so one reply decodes and two overlap into something that does not.
+The run reads that as "more than one device answered", takes the short address
+back off both with PROGRAM SHORT ADDRESS `0xFF`, drops the pair out of the
+search, and carries on:
+
+```text
+commission: found random=0x4C1E90 -> short 5
+commission: random=0x4C1E90 answered from two gear; short 5 taken back, both left unaddressed
+commission: found random=0x8823A1 -> short 5
+commission: assigned short 5 (count=1)
+```
+
+Note that short 5 is reused rather than skipped — the pair gave it back, so the
+next fixture found takes it.
+
+At the end:
+
+```text
+commission: 1 random address(es) held by two gear
+    random 0x4C1E90
+  note: each pair was de-addressed and left out of this run.
+  They are unaddressed gear now, not missing gear. Run 'commission unaddressed'
+  again - they re-randomise, and colliding twice is a 1-in-16M event.
+```
+
+**Run it again.** That is the whole remedy — no hardware pass, nothing to
+unplug. The pair is back to being unaddressed gear, which is the case
+`commission unaddressed` exists for, and the second run draws them new random
+numbers.
+
+Two things this does not claim. The de-address is transmitted, not confirmed:
+two devices answering QUERY SHORT ADDRESS with the same "no address" reply
+collide exactly as they did before, so there is nothing clean to read back. And
+the detection can fire on a single piece of gear with a marginal reply waveform.
+That costs an extra search round and possibly a different short address than you
+expected — it does not damage anything, which is why the run acts on it rather
+than stopping to ask.
+
+If the pair cannot be dropped out of the search — WITHDRAW refused, or gear that
+ignores it — the run stops rather than searching the same address forever, and
+says so. That is the one case where two gear may still be sharing a short
+address; the post-scan below is what tells you.
+
 #### Reading the post-scan
 
 A run that assigned anything re-scans the bus afterwards and checks the result
@@ -209,9 +261,13 @@ commission: post-scan confirmed 2 of 3 assignment(s)
   Separate them physically, then re-run 'commission unaddressed'.
 ```
 
-That is the equal-random-address case, and the post-scan is the only place it
-becomes visible — every command in the walk succeeded. The remedy is a hardware
-pass: pull one fixture, commission it alone, put it back.
+An assigned address answering undecodably means two gear hold it. Since the run
+itself now catches the equal-random-address case and hands the pair back
+unaddressed, seeing it here means the in-run detection missed — twins whose
+replies happened to decode cleanly — or the run reported that it could not drop
+a pair out of the search. The post-scan is the backstop for the first and the
+confirmation for the second. This one does need a hardware pass: pull one
+fixture, commission it alone, put it back.
 
 `assigned but silent in the post-scan` is the other failure. VERIFY confirmed the
 write, so the gear took the address and then did not answer the scan — a reply
@@ -233,11 +289,10 @@ The remaining commissioning work is explicit:
   START/STOP QUIESCENT bracketing now runs, which stops a control device from
   *transmitting* into the run, but a device that never received the broadcast is
   unaffected and none of it is HIL-validated.
-- Two gear that generate the same 24-bit random address are detected after the
-  fact but not separated or recovered. They are selected, programmed, verified,
-  and withdrawn as one, so the walk itself reports a single assignment and no
-  error. The post-scan is what catches it: an assigned address that answers
-  undecodably held two gear all along. See "Reading the post-scan" above.
+- Two gear that generate the same 24-bit random address are detected during the
+  run and sent back to being unaddressed, but they are not placed for you: a
+  second run is what gives them addresses. See "When two gear share a random
+  address" above. The detection has host vectors and no bus result.
 - DALI-2 priority/backoff and complete multi-master intervention handling remain
   open. Local atomic sequences do not stop another physical master.
 - Multi-gear, mixed Part 102/Part 103, cancellation-fault, and external-master

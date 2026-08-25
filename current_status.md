@@ -271,6 +271,67 @@ result. `dali_capability_matrix.md` states which is which per capability.
   103 quiescence, equal-random-address recovery, external-master arbitration, and
   the 100 ms post-RANDOMISE value still need standards/hardware validation.
 
+### Verified locally on 2026-08-26 (equal-random-address detection)
+
+Step 2 and step 3 of the equal-random-address plan, which collapsed into one
+change once the recovery turned out not to need a nested INITIALISE window.
+
+- `VERIFY SHORT ADDRESS` now has three outcomes.
+  `dali_commissioning_verify_from_sequence()` and
+  `dali_commissioning_verify_short_address()` return
+  `DaliCommissioningVerifyOutcome` — CONFIRMED, SILENT, MULTIPLE — instead of a
+  bool. Qualified reply-window activity on the VERIFY step alone becomes
+  MULTIPLE with `DALI_OK`; on the PROGRAM step it stays an error, because a
+  collided write says nothing about how many devices exist. This is the one
+  place COMPARE's activity rule is extended rather than copied: COMPARE folds
+  activity into YES because for COMPARE the third state *is* YES.
+- Why the inference holds: VERIFY is answered only by selected devices, and the
+  PROGRAM in the same atomic sequence does not change the selected set. One
+  responder decodes, two overlap and do not. It is the only point in the walk
+  where co-selection is provable — COMPARE is a wired-OR and cannot distinguish
+  one device from two.
+- It is safe in both directions, which is what justifies acting on a heuristic.
+  A false positive (one device with a marginal backward waveform) costs an extra
+  search round and a different short address than expected, no damage. A false
+  negative (twins whose replies happen to decode) leaves a duplicate for the
+  post-scan to catch. The two layers compose; neither has to be perfect. It does
+  inherit the quiescence caveat: a control device that never received the
+  broadcast can still put frame-like activity into that window.
+- Recovery, without a nested INITIALISE. On MULTIPLE the walk sends PROGRAM
+  SHORT ADDRESS `0xFF` — taking the address back from both, since selection is
+  by random address — then WITHDRAW, then continues. The short address is
+  deliberately left unconsumed, so the next device found takes the address the
+  pair gave back. The twins end unaddressed rather than sharing an address,
+  which is where they started and what a later run handles: re-running
+  re-randomises them, and colliding twice is 2^-24.
+- One collision costs one address's worth of progress, not the run. Same
+  reasoning the short-address scan already applies to one contested address
+  among sixty-four.
+- The WITHDRAW is not optional and its failure is not survivable. Without it the
+  next `find_next_random_address()` converges on the same random address and the
+  walk never terminates, so a transmit failure aborts the run. A withdraw that
+  transmits but does not take is caught separately: the walk remembers the last
+  duplicated random address and stops if it comes back, because nothing about
+  retrying will change it.
+- `DaliCommissioningResult` gains `duplicate_count`,
+  `duplicate_random_addresses[4]`, and `duplicate_recovery_failed`;
+  `DaliCommissioningEventKind` gains
+  `DALI_COMMISSIONING_EVENT_DUPLICATE_RANDOM_ADDRESS`. The shell prints each
+  collision as it happens and summarises at the end, on the failure path too —
+  a de-addressed pair is unaddressed gear waiting for another run, not gear that
+  vanished.
+- Transmission, not confirmation. Two devices answering QUERY SHORT ADDRESS with
+  the same `0xFF` collide exactly as they did before, so there is no clean
+  readback for the de-address. Reported the way TERMINATE and quiescence are.
+
+Three new host vectors and three updated ones; `test_commissioning` goes from 40
+to 43 and all 26 suites pass. The mock gained a de-address path, a VERIFY that
+answers for however many devices hold the address, and a WITHDRAW that can be
+made a no-op to exercise the loop guard. Checked against a mutation: removing the
+de-address fails two of the three new tests rather than passing quietly.
+`dali_shell.c` compiles clean against the ESP-IDF flag set. No bus has run any
+of it, and none is expected to — at ~1.2e-5 per run this is vector territory.
+
 ### Verified locally on 2026-08-26 (commissioning post-scan verification)
 
 Prompted by a documentation-currency pass that turned into an audit of what the
@@ -1220,6 +1281,19 @@ write fits in one queue entry. This changes the public `DaliSequence` layout and
 requires all callers to rebuild. In the ESP32 build, the active-sequence and
 16-entry scheduler queue storage increase by 612 bytes in total.
 
+`dali_commissioning_verify_from_sequence()` and
+`dali_commissioning_verify_short_address()` replace their `bool *verified_out`
+with `DaliCommissioningVerifyOutcome *outcome_out`. The compiler catches the
+signature change, but the semantic change is quieter and matters more: what used
+to return `DALI_ERR_RX_ACTIVITY` now returns `DALI_OK` with
+`DALI_COMMISSIONING_VERIFY_MULTIPLE`, so a caller that only checked the error
+code will read a collision as success. `DaliCommissioningResult` gains
+`duplicate_count`, `duplicate_random_addresses`, and
+`duplicate_recovery_failed`; `DaliCommissioningEventKind` gains
+`DALI_COMMISSIONING_EVENT_DUPLICATE_RANDOM_ADDRESS` before
+`..._TERMINATED`, which changes that enumerator's numeric value — a switch over
+event kinds must be rebuilt, not just recompiled against the old value.
+
 `DaliCommandId` gains `DALI_CMD_CONTINUOUS_UP` and `DALI_CMD_CONTINUOUS_DOWN`,
 appended before `DALI_CMD_COUNT` so every existing numeric value is unchanged.
 `dali_command_lookup_opcode(DALI_CMD_FRAME_16BIT, ...)` now resolves opcodes
@@ -1555,31 +1629,28 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
      above. Turns the silent-success failure into a visible one with no protocol
      change. Still open within it: the failed-run path returns before any
      post-scan, which is where a collision is most likely.
-  2. **A detection point in the walk.** COMPARE cannot distinguish one responder
-     from two — it is a wired-OR. VERIFY and QUERY SHORT ADDRESS can: exactly one
-     device is selected there, so undecodable activity proves co-selection.
-     `verify_from_sequence()` needs a third outcome instead of collapsing
-     `RX_ACTIVITY` into "error", the same three-way split COMPARE already got.
-     Note the asymmetry that makes it safe: for COMPARE, activity→YES risks
-     inventing gear; for VERIFY, activity can only mean multiple responders.
-  3. **Recovery.** No new opcodes needed. `INITIALISE` takes `0x00` (all gear),
-     `0xFF` (unaddressed), or `(addr << 1) | 1` for one short address. Both twins
-     hold the just-programmed address, so a per-address INITIALISE opens a window
-     containing exactly them; RANDOMISE plus the settle re-rolls both with a
-     2^-24 chance of colliding again; the same binary search then places them on
-     two distinct free addresses. Re-enter `INITIALISE(0xFF)` afterwards and
-     continue — everything already programmed has a short address and stays out,
-     which is what makes the outer walk restartable. The pre-scan mask guarantees
-     the address held nothing else, which is what makes the nested window safe.
-     The cheaper alternative is a second pass after TERMINATE, but that leaves
-     two gear sharing an address across the gap.
-  4. **Somewhere to report it.** `DaliCommissioningResult` has no collision
-     field and `DaliCommissioningEventKind` no event, so a detected collision
-     currently has no way to reach the progress callback or the shell.
-  5. **Host vectors.** None of the 40 tests in `test_commissioning.c` models a
-     twin. A mock transport answering YES to COMPARE at R and `RX_ACTIVITY` to
-     the following VERIFY is the whole fixture. This must be a vector: at
-     roughly 1.2e-5 for a 20-device bus it will never appear in testing.
+  2. **Detection at VERIFY. Done 2026-08-26** — see the verification entry
+     above. `RX_ACTIVITY` on the VERIFY step is now `VERIFY_MULTIPLE` rather than
+     an error.
+  3. **Recovery. Done 2026-08-26**, and simpler than the nested per-address
+     INITIALISE window sketched for it. PROGRAM SHORT ADDRESS `0xFF` plus
+     WITHDRAW leaves the pair unaddressed and out of the search, the address
+     unconsumed, and the run continuing — so a re-run picks them up with fresh
+     random addresses. The nested window remains available if in-run placement
+     is ever wanted instead of asking for a second run; it is an optimisation
+     now, not a requirement.
+  4. **Reporting. Done 2026-08-26** — `duplicate_count`,
+     `duplicate_random_addresses`, `duplicate_recovery_failed`, and a progress
+     event, surfaced live and in the summary on both the success and failure
+     paths.
+  5. **Host vectors. Done 2026-08-26** — three added, three updated, mutation-
+     checked.
+
+  What remains on this half: **hardware**. Nothing in it has met a bus, and the
+  underlying `RX_ACTIVITY` classification still has no physical collision
+  capture behind it — the same HIL debt the COMPARE work carries. Until then the
+  single-unaddressed-device operating envelope stands, and the failed-run path
+  still returns before the post-scan.
 
   *Mixed device — Part 102 gear and Part 103 control devices on one bus.* Six
   distinct gaps, only one of which quiescence touches.

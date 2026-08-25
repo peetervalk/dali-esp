@@ -2897,6 +2897,14 @@ static void shell_commission_progress_cb(const DaliCommissioningEvent *event,
             shell_printf("commission: no free short addresses\r\n");
             break;
 
+        case DALI_COMMISSIONING_EVENT_DUPLICATE_RANDOM_ADDRESS:
+            shell_printf("commission: random=0x%06" PRIX32
+                   " answered from two gear; short %u taken back,"
+                   " both left unaddressed\r\n",
+                   event->random_address,
+                   (unsigned)event->short_address);
+            break;
+
         case DALI_COMMISSIONING_EVENT_TERMINATED:
             shell_printf("commission: terminate\r\n");
             break;
@@ -3075,6 +3083,51 @@ static void shell_report_commission_post_scan(
     }
 }
 
+/*
+ * Duplicate random addresses, reported whether the run succeeded or failed.
+ *
+ * Worth printing on the failure path too: the pairs it names were de-addressed
+ * before whatever went wrong afterwards, so the operator needs to know they are
+ * now unaddressed gear waiting for another run rather than gear that vanished.
+ */
+static void shell_report_duplicates(const DaliCommissioningResult *result)
+{
+    if (result->duplicate_count == 0u) {
+        return;
+    }
+
+    shell_printf("commission: %u random address(es) held by two gear\r\n",
+                 (unsigned)result->duplicate_count);
+
+    uint8_t listed = result->duplicate_count;
+    if (listed > DALI_COMMISSIONING_MAX_DUPLICATES) {
+        listed = DALI_COMMISSIONING_MAX_DUPLICATES;
+    }
+    for (uint8_t i = 0u; i < listed; i++) {
+        shell_printf("    random 0x%06" PRIX32 "\r\n",
+                     result->duplicate_random_addresses[i]);
+    }
+    if (result->duplicate_count > listed) {
+        shell_printf("    +%u more\r\n",
+                     (unsigned)(result->duplicate_count - listed));
+    }
+
+    if (result->duplicate_recovery_failed) {
+        shell_printf("  note: a pair could not be taken back off its short "
+                     "address.\r\n"
+                     "  Two gear may still share it - check the post-scan or "
+                     "run 'discover'.\r\n");
+        return;
+    }
+
+    shell_printf("  note: each pair was de-addressed and left out of this "
+                 "run.\r\n"
+                 "  They are unaddressed gear now, not missing gear. Run "
+                 "'commission unaddressed'\r\n"
+                 "  again - they re-randomise, and colliding twice is a 1-in-16M "
+                 "event.\r\n");
+}
+
 static void cmd_commission(const DaliCliTokens *t)
 {
     uint8_t first_address = 0u;
@@ -3183,6 +3236,7 @@ static void cmd_commission(const DaliCliTokens *t)
                          shell_err(result.cleanup_error));
         }
         shell_report_quiescence(&result);
+        shell_report_duplicates(&result);
         shell_printf("commission: ERR %s after %u assignment(s)\r\n",
                shell_err(err),
                (unsigned)result.assigned_count);
@@ -3194,6 +3248,7 @@ static void cmd_commission(const DaliCliTokens *t)
              (unsigned)result.assigned_count,
              result.terminate_tx_succeeded ? 1u : 0u);
     shell_report_quiescence(&result);
+    shell_report_duplicates(&result);
     shell_printf("commission: complete assigned=%u",
            (unsigned)result.assigned_count);
     if (result.no_more_devices) {
