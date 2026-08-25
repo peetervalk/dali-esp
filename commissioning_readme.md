@@ -69,7 +69,7 @@ physical DALI bus is single-master; another controller can still transmit.
 | `instances <addr>` | What a control device actually offers |
 | `sensor poll <addr>` | Read an input instance's current value |
 | `commission unaddressed` | Assign short addresses to new gear |
-| `max b`, `off b`, `level s3 128` | Drive gear directly while you work |
+| `max b`, `off b`, `level a3 128` | Drive gear directly while you work |
 | `trace on` | Live per-frame trace |
 | `capture start … export` | Rolling capture, dumped when something goes wrong |
 | `bus check`, `stats` | RX level, scheduler state, fault counters |

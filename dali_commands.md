@@ -66,20 +66,20 @@ Numbers may be decimal or `0x`-prefixed. A leading zero is decimal, not octal.
 
 Every verb declares how many arguments it takes, and both bounds are checked
 before the handler runs. A trailing token is rejected rather than ignored:
-`level s1 100 junk` fails with a usage string.
+`level a1 100 junk` fails with a usage string.
 
 ### Targets
 
 | Form | Range | Meaning |
 |---|---:|---|
-| `s<N>` | `0-63` | Short address |
+| `a<N>` | `0-63` | Short address |
 | `<N>` | `0-63` | Short address, bare number |
 | `g<N>` | `0-15` | Group |
 | `b` | n/a | Broadcast |
 
-`a<N>` is **not** accepted and fails as `bad target`. It was the console's
-spelling before the shared tables; there is no alias, so a stored Home Assistant
-script written against it stops working.
+`s<N>` is **not** accepted and fails as `bad target`. It was the spelling v1.2.0
+shipped; there is no alias, so a stored Home Assistant script written against it
+stops working.
 
 Queries should normally target one short address. Group and broadcast queries can
 collide when several devices answer.
@@ -193,8 +193,8 @@ catches up on the next refresh pass, the same as after a wall switch.
 
 ```text
 level g0 128
-level s3 mask
-step-up s3
+level a3 mask
+step-up a3
 cont-down g0
 scene g0 3
 off b
@@ -212,8 +212,8 @@ status` returns the same line. On the shell, `query <target>` with no name at al
 is shorthand for the same thing; the console requires a name.
 
 ```text
-status s0        ->  status: 0x06 lamp-fail,arc-on
-status s3        ->  status: 0x00 none
+status a0        ->  status: 0x06 lamp-fail,arc-on
+status a3        ->  status: 0x00 none
 ```
 
 The 34 shared query names (`list query`):
@@ -251,10 +251,10 @@ The 34 shared query names (`list query`):
 | `extended-version` | QUERY EXTENDED VERSION NUMBER |
 
 ```text
-query s0 actual
-query s0 fade
-query s0 groups-0-7
-query s0 scene-level 3
+query a0 actual
+query a0 fade
+query a0 groups-0-7
+query a0 scene-level 3
 ```
 
 ## Configuration
@@ -301,11 +301,11 @@ cache ambiguous. After a group-target edit, run a scan if that group has not
 already been scan-verified.
 
 ```text
-config-dtr0 s0 set-max-dtr0 200
-config-dtr0 s0 set-fade-time-dtr0 4
-config-dtr0 s0 set-scene 200 3
-config s0 add-group 3
-config s0 save-persistent
+config-dtr0 a0 set-max-dtr0 200
+config-dtr0 a0 set-fade-time-dtr0 4
+config-dtr0 a0 set-scene 200 3
+config a0 add-group 3
+config a0 save-persistent
 ```
 
 ## Special Commands
@@ -793,10 +793,10 @@ pressure and a stale group cache are most worth inspecting.
 Diagnose a driver that reports the wrong brightness:
 
 ```text
-query s5 device-type       # DT6 gear answers 6
+query a5 device-type       # DT6 gear answers 6
 dt6 5 dimming-curve        # 0 standard, 1 linear
-query s5 min-level
-query s5 max-level
+query a5 min-level
+query a5 max-level
 ```
 
 If the curve is not what the entity assumes, either correct the gear
@@ -806,7 +806,7 @@ cached profile; the first also re-reads it.
 Check an LED driver for faults:
 
 ```text
-status s5                  # Part 102 status flags
+status a5                  # Part 102 status flags
 dt6 5 failure-status       # DT6 fault bitset
 dt6 5 thermal-overload
 dt6 5 open-circuit
@@ -815,8 +815,8 @@ dt6 5 open-circuit
 Check group membership:
 
 ```text
-query s0 groups-0-7
-query s0 groups-8-15
+query a0 groups-0-7
+query a0 groups-8-15
 ```
 
 Set and verify an occupancy hold timer:

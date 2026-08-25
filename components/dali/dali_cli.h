@@ -184,7 +184,7 @@ typedef enum {
 } DaliCliCommandId;
 
 /* How a target is spelled, so every usage line says it the same way. */
-#define DALI_CLI_TARGET_ARG "<addr|sN|gN|b>"
+#define DALI_CLI_TARGET_ARG "<addr|aN|gN|b>"
 
 typedef struct {
     DaliCliCommandId id;

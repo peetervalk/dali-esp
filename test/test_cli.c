@@ -41,10 +41,10 @@ static DaliCliOut capture_begin(void)
 static void test_tokenize_splits_on_spaces(void)
 {
     DaliCliTokens t;
-    TEST_ASSERT_EQUAL(DALI_CLI_TOKENIZE_OK, dali_cli_tokenize("level s3 128", &t));
+    TEST_ASSERT_EQUAL(DALI_CLI_TOKENIZE_OK, dali_cli_tokenize("level a3 128", &t));
     TEST_ASSERT_EQUAL_UINT8(3u, t.count);
     TEST_ASSERT_EQUAL_STRING("level", t.tok[0]);
-    TEST_ASSERT_EQUAL_STRING("s3", t.tok[1]);
+    TEST_ASSERT_EQUAL_STRING("a3", t.tok[1]);
     TEST_ASSERT_EQUAL_STRING("128", t.tok[2]);
 }
 
@@ -52,7 +52,7 @@ static void test_tokenize_collapses_runs_and_tabs(void)
 {
     DaliCliTokens t;
     TEST_ASSERT_EQUAL(DALI_CLI_TOKENIZE_OK,
-                      dali_cli_tokenize("  level \t\t s3   128  ", &t));
+                      dali_cli_tokenize("  level \t\t a3   128  ", &t));
     TEST_ASSERT_EQUAL_UINT8(3u, t.count);
     TEST_ASSERT_EQUAL_STRING("128", t.tok[2]);
 }
@@ -225,7 +225,7 @@ static void test_has_subcommand_rejects_non_members(void)
 
     /* A verb whose first argument is a value declares no keywords at all. */
     TEST_ASSERT_FALSE(dali_cli_has_subcommand(
-        dali_cli_command_for_id(DALI_CLI_CMD_LEVEL), "s3"));
+        dali_cli_command_for_id(DALI_CLI_CMD_LEVEL), "a3"));
     TEST_ASSERT_FALSE(dali_cli_has_subcommand(NULL, "check"));
 }
 
@@ -247,7 +247,7 @@ static void test_usage_line_matches_table(void)
 {
     DaliCliOut out = capture_begin();
     dali_cli_print_usage(&out, dali_cli_command_for_id(DALI_CLI_CMD_SCENE));
-    TEST_ASSERT_EQUAL_STRING("usage: scene <addr|sN|gN|b> <0-15>\r\n", s_capture);
+    TEST_ASSERT_EQUAL_STRING("usage: scene <addr|aN|gN|b> <0-15>\r\n", s_capture);
 
     out = capture_begin();
     dali_cli_print_usage(&out, dali_cli_command_for_id(DALI_CLI_CMD_STATS));
@@ -263,7 +263,7 @@ static void test_resolve_accepts_exact_arity(void)
     DaliCliTokens t;
     const DaliCliCommandSpec *spec = NULL;
 
-    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_OK, dali_cli_resolve("level s3 128", &t, &spec));
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_OK, dali_cli_resolve("level a3 128", &t, &spec));
     TEST_ASSERT_EQUAL(DALI_CLI_CMD_LEVEL, spec->id);
     TEST_ASSERT_EQUAL_UINT8(3u, t.count);
 }
@@ -280,7 +280,7 @@ static void test_resolve_reports_unknown_verb(void)
 {
     DaliCliTokens t;
     const DaliCliCommandSpec *spec = NULL;
-    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_UNKNOWN, dali_cli_resolve("levl s3 1", &t, &spec));
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_UNKNOWN, dali_cli_resolve("levl a3 1", &t, &spec));
     TEST_ASSERT_NULL(spec);
 }
 
@@ -299,7 +299,7 @@ static void test_resolve_rejects_trailing_tokens(void)
     TEST_ASSERT_EQUAL(DALI_CLI_CMD_LEVEL, spec->id);
 
     TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY, dali_cli_resolve("stats now", &t, &spec));
-    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY, dali_cli_resolve("off s1 s2", &t, &spec));
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY, dali_cli_resolve("off a1 a2", &t, &spec));
     TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY,
                       dali_cli_resolve("raw2 FE00 len=16 wait", &t, &spec));
 }
@@ -309,7 +309,7 @@ static void test_resolve_rejects_missing_arguments(void)
     DaliCliTokens t;
     const DaliCliCommandSpec *spec = NULL;
 
-    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY, dali_cli_resolve("level s3", &t, &spec));
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY, dali_cli_resolve("level a3", &t, &spec));
     TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY, dali_cli_resolve("off", &t, &spec));
     TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY, dali_cli_resolve("devmem read 3 0", &t, &spec));
 }
@@ -339,16 +339,16 @@ static void test_report_resolve_messages(void)
     DaliCliTokens t;
     const DaliCliCommandSpec *spec = NULL;
 
-    DaliCliResolveResult r = dali_cli_resolve("levl s3", &t, &spec);
+    DaliCliResolveResult r = dali_cli_resolve("levl a3", &t, &spec);
     DaliCliOut out = capture_begin();
     dali_cli_report_resolve(&out, r, &t, spec);
     TEST_ASSERT_EQUAL_STRING("unknown command: levl\r\n"
                              "type 'help' for commands\r\n", s_capture);
 
-    r = dali_cli_resolve("scene s3", &t, &spec);
+    r = dali_cli_resolve("scene a3", &t, &spec);
     out = capture_begin();
     dali_cli_report_resolve(&out, r, &t, spec);
-    TEST_ASSERT_EQUAL_STRING("usage: scene <addr|sN|gN|b> <0-15>\r\n", s_capture);
+    TEST_ASSERT_EQUAL_STRING("usage: scene <addr|aN|gN|b> <0-15>\r\n", s_capture);
 
     r = dali_cli_resolve("", &t, &spec);
     out = capture_begin();
@@ -419,7 +419,7 @@ static void test_parse_target_forms(void)
     TEST_ASSERT_EQUAL(DALI_ADDR_GROUP, target.type);
     TEST_ASSERT_EQUAL_UINT8(7u, target.address);
 
-    TEST_ASSERT_TRUE(dali_cli_parse_target("s12", &target));
+    TEST_ASSERT_TRUE(dali_cli_parse_target("a12", &target));
     TEST_ASSERT_EQUAL(DALI_ADDR_SHORT, target.type);
     TEST_ASSERT_EQUAL_UINT8(12u, target.address);
 
@@ -432,10 +432,11 @@ static void test_parse_target_rejects_out_of_range(void)
 {
     DaliTarget target;
     TEST_ASSERT_FALSE(dali_cli_parse_target("g16", &target));
-    TEST_ASSERT_FALSE(dali_cli_parse_target("s64", &target));
+    TEST_ASSERT_FALSE(dali_cli_parse_target("a64", &target));
     TEST_ASSERT_FALSE(dali_cli_parse_target("64", &target));
     TEST_ASSERT_FALSE(dali_cli_parse_target("g", &target));
-    TEST_ASSERT_FALSE(dali_cli_parse_target("s", &target));
+    TEST_ASSERT_FALSE(dali_cli_parse_target("a", &target));
+    TEST_ASSERT_FALSE(dali_cli_parse_target("s1", &target));
     TEST_ASSERT_FALSE(dali_cli_parse_target("x1", &target));
     TEST_ASSERT_FALSE(dali_cli_parse_target("", &target));
 }
@@ -445,7 +446,7 @@ static void test_parse_short_addr_and_instance(void)
     uint8_t v = 0u;
     TEST_ASSERT_TRUE(dali_cli_parse_short_addr("3", &v));
     TEST_ASSERT_EQUAL_UINT8(3u, v);
-    TEST_ASSERT_TRUE(dali_cli_parse_short_addr("s63", &v));
+    TEST_ASSERT_TRUE(dali_cli_parse_short_addr("a63", &v));
     TEST_ASSERT_EQUAL_UINT8(63u, v);
     TEST_ASSERT_FALSE(dali_cli_parse_short_addr("64", &v));
 

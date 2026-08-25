@@ -395,7 +395,7 @@ cleared by the 2026-08-14 entry above):
   diagnostic. 57 host vectors cover this layer.
 - Trailing tokens are now rejected for every verb instead of ignored. The table
   carries each verb's argument-count bounds and `dali_cli_resolve()` enforces
-  them before a handler runs, so `level s1 100 junk` is refused rather than
+  them before a handler runs, so `level a1 100 junk` is refused rather than
   acted on. The same class of bug remains open in the separate ESPHome console
   parser, which does not share this code.
 - Help and `list <table>` are generated from the same tables the parser
@@ -1345,11 +1345,13 @@ below for what changed for an operator.
   rename table has never been written down — it is owed, not merely misfiled,
   and the list below is the raw material for it. Anything in Home Assistant that writes a command
   string to the `text:` entity (scripts, automations, dashboard buttons) needs
-  updating. The target spelling is the one that breaks every stored command at
-  once and is easiest to miss: `a<N>` is rejected as `bad target`, and a short
-  address is now `s<N>` or a bare number. Beyond that, `memread`/`memwrite`
+  updating. The target spelling lands back where the console started: a short
+  address is `a<N>` or a bare number, as it was before the shared tables. Only
+  v1.2.0's short-lived `s<N>` is gone, and it now fails as `bad target`, so a
+  script updated to `s<N>` for that one release needs updating again. Beyond
+  that, `memread`/`memwrite`
   became `devmem read`/`devmem write`, `iquery a0:1 x` became `iquery 0 1 x`,
-  `query a0 actual-level` became `query s0 actual`, `config <t> <name> <dtr0>`
+  `query a0 actual-level` became `query a0 actual`, `config <t> <name> <dtr0>`
   became `config-dtr0`, and the Part 303/304 instance names took type prefixes
   (`hold-timer` → `occ-hold-timer`).
 - Announce the console reply-format change alongside those renames. Every query

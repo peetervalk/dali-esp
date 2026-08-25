@@ -567,7 +567,7 @@ class Completer:
 
         # Targets are generated rather than listed: 64 short addresses is too
         # many to show unprompted, so they appear once a prefix narrows them.
-        if "<addr|sN|gN|b>" in spec.get("args", "") and index == 1:
+        if "<addr|aN|gN|b>" in spec.get("args", "") and index == 1:
             if word.startswith("a"):
                 return [f"a{n}" for n in range(64) if f"a{n}".startswith(word)]
             if word.startswith("g"):

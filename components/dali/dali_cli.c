@@ -476,7 +476,7 @@ bool dali_cli_parse_target(const char *text, DaliTarget *out)
         return true;
     }
 
-    const char *addr_text = text[0] == 's' ? text + 1 : text;
+    const char *addr_text = text[0] == 'a' ? text + 1 : text;
     uint8_t addr;
     if (!dali_cli_parse_u8(addr_text, DALI_MAX_SHORT_ADDRESS, &addr)) {
         return false;
@@ -490,9 +490,9 @@ bool dali_cli_parse_short_addr(const char *text, uint8_t *out)
     if (text == NULL) {
         return false;
     }
-    /* Accept the sN spelling here too, so a target and an address argument are
+    /* Accept the aN spelling here too, so a target and an address argument are
      * never written differently for the same device. */
-    return dali_cli_parse_u8(text[0] == 's' ? text + 1 : text,
+    return dali_cli_parse_u8(text[0] == 'a' ? text + 1 : text,
                              DALI_MAX_SHORT_ADDRESS,
                              out);
 }

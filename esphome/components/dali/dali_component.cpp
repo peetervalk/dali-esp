@@ -803,7 +803,7 @@ static void format_target(char *buf, size_t len, DaliTarget target)
 {
     const char *pfx = target.type == DALI_ADDR_GROUP ? "g"
                     : target.type == DALI_ADDR_BROADCAST ? "bc"
-                                                        : "s";
+                                                        : "a";
     if (target.type == DALI_ADDR_BROADCAST)
         snprintf(buf, len, "bc");
     else
@@ -815,7 +815,7 @@ static void format_event(char *buf, size_t len, const DaliInputEvent *e)
     if (e->frame_kind == DALI_EVENT_FRAME_LEGACY_16BIT) {
         const char *pfx = (e->address_kind == DALI_EVENT_ADDRESS_GROUP) ? "g"
                         : (e->address_kind == DALI_EVENT_ADDRESS_BROADCAST) ? "bc"
-                                                                             : "s";
+                                                                             : "a";
         if (!e->address_selector) {
             if (e->address_kind == DALI_EVENT_ADDRESS_BROADCAST)
                 snprintf(buf, len, "bc dapc %u", (unsigned)e->legacy_data);
@@ -833,12 +833,12 @@ static void format_event(char *buf, size_t len, const DaliInputEvent *e)
 
     if (e->frame_kind == DALI_EVENT_FRAME_POWER_NOTIFICATION_24BIT) {
         if (e->source.has_device_group && e->source.has_device_address) {
-            snprintf(buf, len, "power dg%u s%u", (unsigned)e->source.device_group,
+            snprintf(buf, len, "power dg%u a%u", (unsigned)e->source.device_group,
                      (unsigned)e->source.device_address);
         } else if (e->source.has_device_group) {
             snprintf(buf, len, "power dg%u", (unsigned)e->source.device_group);
         } else if (e->source.has_device_address) {
-            snprintf(buf, len, "power s%u", (unsigned)e->source.device_address);
+            snprintf(buf, len, "power a%u", (unsigned)e->source.device_address);
         } else {
             snprintf(buf, len, "power");
         }
@@ -848,13 +848,13 @@ static void format_event(char *buf, size_t len, const DaliInputEvent *e)
     if (e->frame_kind == DALI_EVENT_FRAME_INPUT_24BIT) {
         switch (e->source.scheme) {
             case DALI_EVENT_SOURCE_DEVICE:
-                snprintf(buf, len, "s%u type=%u evt=%u",
+                snprintf(buf, len, "a%u type=%u evt=%u",
                          (unsigned)e->source.device_address,
                          (unsigned)e->source.instance_type,
                          (unsigned)e->event_information);
                 break;
             case DALI_EVENT_SOURCE_DEVICE_INSTANCE:
-                snprintf(buf, len, "s%u inst=%u evt=%u",
+                snprintf(buf, len, "a%u inst=%u evt=%u",
                          (unsigned)e->source.device_address,
                          (unsigned)e->source.instance,
                          (unsigned)e->event_information);
@@ -1589,9 +1589,9 @@ void DaliComponent::console_group_(const DaliCliTokens &t)
 
     char buf[48];
     if (group == DALI_GROUP_MAP_ALL_GROUPS) {
-        snprintf(buf, sizeof(buf), "forgot s%u (all groups)", (unsigned)addr);
+        snprintf(buf, sizeof(buf), "forgot a%u (all groups)", (unsigned)addr);
     } else {
-        snprintf(buf, sizeof(buf), "forgot s%u from g%u", (unsigned)addr, (unsigned)group);
+        snprintf(buf, sizeof(buf), "forgot a%u from g%u", (unsigned)addr, (unsigned)group);
     }
     ESP_LOGI(TAG, "%s", buf);
     set_cmd_result(buf);
