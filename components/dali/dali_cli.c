@@ -1475,10 +1475,10 @@ void dali_cli_print_tx_result(const DaliCliOut *out, const char *name, DaliError
 
 void dali_cli_print_error(const DaliCliOut *out, const char *name, DaliError err)
 {
-    if (err == DALI_ERR_TIMEOUT) {
-        dali_cli_printf(out, "%s: timeout\r\n", name);
-    } else if (err == DALI_ERR_QUEUE_FULL) {
-        dali_cli_printf(out, "%s: queue full\r\n", name);
+    const char *text = dali_error_name(err);
+
+    if (text != NULL) {
+        dali_cli_printf(out, "%s: %s\r\n", name, text);
     } else {
         dali_cli_printf(out, "%s: ERR %d\r\n", name, (int)err);
     }

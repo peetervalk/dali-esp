@@ -678,6 +678,139 @@ void test_in_window_ring_overflow_is_preserved_as_overflow(void)
     TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_timeouts);
 }
 
+/*
+ * A reply-window error is not automatically the end of the step.
+ *
+ * MALFORMED is one waveform the decoder could not read, and OVERFLOW is an
+ * event dropped because the RX ring filled — a local resource fault, not a fact
+ * about the bus. Neither carries meaning, and both are what a retry budget
+ * exists to survive. Before this split, either one ended the step outright, and
+ * with it the sequence that owned it.
+ *
+ * These anchor their injected timestamps on the microsecond clock reading at
+ * each TX. The default mock reports no precise TX end, so that reading is what
+ * the scheduler uses to open the reply window — and it moves on a retry, unlike
+ * the untimestamped inject_reply() the older retry tests use.
+ */
+void test_in_window_malformed_spends_a_retry_and_second_attempt_succeeds(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .retries_left = 1u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    uint32_t tx1_us = g_mock_time_us;
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+
+    /* Short/ambiguous activity: stays MALFORMED rather than being promoted to
+     * RX_ACTIVITY, so it is a candidate for the retry. */
+    inject_rx_activity(tx1_us + DALI_REPLY_WINDOW_OPEN_US + 1000u,
+                       tx1_us + DALI_REPLY_WINDOW_OPEN_US + 1200u,
+                       2u,
+                       DALI_ERR_MALFORMED);
+    dali_sched_run();
+
+    /* The retry is booked but held behind the same backoff a timeout uses: a
+     * straggling reply may still be on the wire. */
+    TEST_ASSERT_EQUAL(0, g_cb_count);
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.tx_retries);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_timeouts);
+
+    advance_past_retry_backoff();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+
+    advance_past_settle();
+    dali_sched_run();
+    inject_reply(0xAFu, 8u);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+    TEST_ASSERT_EQUAL_HEX32(0xAFu, g_cb_reply.data);
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+}
+
+void test_in_window_overflow_spends_a_retry(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .retries_left = 1u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    uint32_t tx1_us = g_mock_time_us;
+    advance_past_settle();
+    dali_sched_run();
+
+    inject_rx_activity(tx1_us + DALI_REPLY_WINDOW_OPEN_US + 1000u,
+                       tx1_us + DALI_REPLY_WINDOW_OPEN_US + 1000u,
+                       DALI_PHY_RXDEBUG_MAX_EDGES,
+                       DALI_ERR_OVERFLOW);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(0, g_cb_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.tx_retries);
+
+    advance_past_retry_backoff();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+}
+
+/* The budget is finite: a bus that keeps producing noise still terminates, and
+ * reports the error rather than a timeout. */
+void test_in_window_malformed_reports_error_once_the_budget_is_gone(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .retries_left = 1u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    uint32_t tx1_us = g_mock_time_us;
+    advance_past_settle();
+    dali_sched_run();
+    inject_rx_activity(tx1_us + DALI_REPLY_WINDOW_OPEN_US + 1000u,
+                       tx1_us + DALI_REPLY_WINDOW_OPEN_US + 1200u,
+                       2u,
+                       DALI_ERR_MALFORMED);
+    dali_sched_run();
+
+    advance_past_retry_backoff();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    uint32_t tx2_us = g_mock_time_us;
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+
+    /* Same noise on the second attempt, with nothing left to spend. */
+    inject_rx_activity(tx2_us + DALI_REPLY_WINDOW_OPEN_US + 1000u,
+                       tx2_us + DALI_REPLY_WINDOW_OPEN_US + 1200u,
+                       2u,
+                       DALI_ERR_MALFORMED);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED, g_cb_result);
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.tx_retries);
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+}
+
 void test_timestamped_activity_survives_delayed_wait_settle_state(void)
 {
     DaliTransaction txn = {
@@ -2653,6 +2786,9 @@ int main(void)
     RUN_TEST(test_early_and_late_malformed_activity_do_not_become_replies);
     RUN_TEST(test_in_window_short_malformed_activity_aborts_instead_of_becoming_no);
     RUN_TEST(test_in_window_ring_overflow_is_preserved_as_overflow);
+    RUN_TEST(test_in_window_malformed_spends_a_retry_and_second_attempt_succeeds);
+    RUN_TEST(test_in_window_overflow_spends_a_retry);
+    RUN_TEST(test_in_window_malformed_reports_error_once_the_budget_is_gone);
     RUN_TEST(test_timestamped_activity_survives_delayed_wait_settle_state);
     RUN_TEST(test_precise_phy_tx_end_is_preferred_over_delayed_task_clock);
     RUN_TEST(test_timestamped_reply_survives_delayed_wait_settle_state);

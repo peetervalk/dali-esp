@@ -589,16 +589,14 @@ static void set_cmd_result(const char *str)
     portEXIT_CRITICAL(&s_string_mux);
 }
 
-static const char *cmd_enqueue_result_text(DaliError result)
-{
-    if (result == DALI_OK) return "OK";
-    if (result == DALI_ERR_QUEUE_FULL) return "queue full";
-    return "err";
-}
-
 static void set_cmd_enqueue_result(DaliError result)
 {
-    set_cmd_result(cmd_enqueue_result_text(result));
+    if (result == DALI_OK) {
+        set_cmd_result("OK");
+        return;
+    }
+    char buf[DALI_ERROR_TEXT_MAX];
+    set_cmd_result(dali_error_text(result, buf, sizeof(buf)));
 }
 
 static void set_cmd_enqueue_error(DaliError result)
@@ -683,10 +681,26 @@ static void set_cmd_reply_for_generation(const DaliFrame *reply, void *ctx)
     set_cmd_result_for_generation(line, ctx);
 }
 
+/*
+ * Publish what went wrong by name. "no reply" stays the wording for a timeout —
+ * it is what the documentation and existing automations expect — but every
+ * other code now says what it was instead of collapsing to "err", which is the
+ * difference between an operator seeing "rx activity" and seeing nothing.
+ */
+static void set_cmd_error_for_generation(DaliError err, void *ctx)
+{
+    if (err == DALI_ERR_TIMEOUT) {
+        set_cmd_result_for_generation("no reply", ctx);
+        return;
+    }
+    char buf[DALI_ERROR_TEXT_MAX];
+    set_cmd_result_for_generation(dali_error_text(err, buf, sizeof(buf)), ctx);
+}
+
 static void on_cmd_query_reply(DaliError result, const DaliFrame *reply, void *ctx)
 {
     if (result != DALI_OK || reply == nullptr) {
-        set_cmd_result_for_generation(result == DALI_ERR_TIMEOUT ? "no reply" : "err", ctx);
+        set_cmd_error_for_generation(result, ctx);
         return;
     }
     set_cmd_reply_for_generation(reply, ctx);
@@ -697,7 +711,7 @@ static void on_cmd_sequence_reply(const DaliSequenceResult *result, void *ctx)
 {
     if (result == nullptr || result->result != DALI_OK) {
         DaliError err = result != nullptr ? result->result : DALI_ERR_INVALID;
-        set_cmd_result_for_generation(err == DALI_ERR_TIMEOUT ? "no reply" : "err", ctx);
+        set_cmd_error_for_generation(err, ctx);
         return;
     }
 
@@ -730,8 +744,10 @@ static void set_raw_result(DaliError result, const DaliFrame *reply, bool sent_t
         return;
     }
 
-    char buf[20];
-    snprintf(buf, sizeof(buf), sent_twice ? "TX2 ERR %d" : "TX ERR %d", (int)result);
+    char ebuf[DALI_ERROR_TEXT_MAX];
+    char buf[40];
+    snprintf(buf, sizeof(buf), sent_twice ? "TX2 ERR %s" : "TX ERR %s",
+             dali_error_text(result, ebuf, sizeof(ebuf)));
     set_cmd_result_for_generation(buf, ctx);
 }
 
@@ -1473,7 +1489,7 @@ static void on_memory_read_done(const DaliSequenceResult *result, void *ctx)
 {
     if (result == nullptr || result->result != DALI_OK) {
         DaliError err = result != nullptr ? result->result : DALI_ERR_INVALID;
-        set_cmd_result_for_generation(err == DALI_ERR_TIMEOUT ? "no reply" : "err", ctx);
+        set_cmd_error_for_generation(err, ctx);
         return;
     }
 
@@ -1504,7 +1520,7 @@ static void on_dtrcheck_done(const DaliSequenceResult *result, void *ctx)
     if (result == nullptr || result->result != DALI_OK ||
         !dali_sequence_result_last_reply(result, &reply)) {
         DaliError err = result != nullptr ? result->result : DALI_ERR_INVALID;
-        set_cmd_result_for_generation(err == DALI_ERR_TIMEOUT ? "no reply" : "err", ctx);
+        set_cmd_error_for_generation(err, ctx);
         return;
     }
     char buf[24];

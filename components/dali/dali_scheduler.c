@@ -188,6 +188,15 @@ static bool sched_observation_can_match_active_reply(
            sched_observation_in_reply_window(observation);
 }
 
+/*
+ * Which of two in-window errors survives: higher wins. RX_ACTIVITY ranks lowest
+ * because it is the one that carries meaning (COMPARE reads it as YES), so a
+ * later ambiguous observation overrides it rather than the reverse.
+ *
+ * This is the same fail-closed policy as the unconditional clear below, applied
+ * to error-versus-error instead of error-versus-frame: the most ambiguous thing
+ * seen in the window is what gets reported.
+ */
 static uint8_t sched_reply_error_priority(DaliError error)
 {
     switch (error) {
@@ -202,6 +211,28 @@ static uint8_t sched_reply_error_priority(DaliError error)
     }
 }
 
+/*
+ * Latch an undecodable in-window observation, and deliberately invalidate any
+ * reply already decoded for this transaction.
+ *
+ * Note the asymmetry with the decoded-frame path in
+ * dali_sched_notify_rx_observation(), which refuses to latch a frame once an
+ * error is present: here the clear is unconditional, so in-window noise beats a
+ * clean reply whichever arrived first. SCHED_WAIT_REPLY then tests this error
+ * before the decoded frame, which is the same precedence a third time.
+ *
+ * That is intentional, not an oversight. An address that answers cleanly *and*
+ * puts frame-like activity into the same window is genuinely ambiguous — two
+ * devices sharing a short address is the obvious cause — and publishing the one
+ * clean value would present that as a confident single answer. The cost is real
+ * and worth knowing: for an ordinary query, a spike at 19 ms discards a good
+ * byte decoded at 8 ms. Since the reply-error path now spends a retry on
+ * MALFORMED and OVERFLOW, that case re-asks rather than failing outright, which
+ * either confirms the value or exposes the ambiguity.
+ *
+ * COMPARE is unaffected either way: a decoded 0xFF and qualified activity both
+ * mean YES.
+ */
 static void sched_latch_reply_error(DaliError error)
 {
     if (error == DALI_OK) {
@@ -261,6 +292,34 @@ static void sched_arm_tx_gap(uint32_t frame_done_us, uint32_t gap_us)
     s_tx_guard_started_us = frame_done_us;
     s_tx_guard_started_ms = s_ops.get_tick_ms();
     s_tx_guard_duration_us = gap_us;
+}
+
+/*
+ * Spend one retry on the active step and go back to TX, or report that the
+ * budget is gone.
+ *
+ * Both callers reach here having waited out most or all of a reply window, so
+ * the TX guard armed at transmission expired long ago. Re-arm it from now: a
+ * reply that missed the window by a little is still on the wire, and the retry
+ * has to wait for the straggler instead of transmitting over it.
+ *
+ * Only commands whose response is retry-safe are ever given a budget —
+ * dali_command_response_retry_safe() gates it at enqueue — so spending one here
+ * is exactly as safe as spending it on the timeout path.
+ */
+static bool sched_retry_active_step(void)
+{
+    if (s_active.retries_left == 0u) {
+        return false;
+    }
+
+    s_active.retries_left--;
+    g_dali_stats.tx_retries++;
+    sched_arm_tx_gap(sched_now_us(), DALI_REPLY_TIMEOUT_BACKOFF_US);
+    s_send_count = 0u;
+    s_send_twice_first_started_us = 0u;
+    s_send_twice_first_started_ms = 0u;
+    return true;
 }
 
 static void sched_complete_transaction(DaliError result, const DaliFrame *reply)
@@ -844,6 +903,26 @@ next:
                 DaliError reply_error = s_reply_error;
                 s_reply_error = DALI_OK;
                 s_reply_received = false;
+                /*
+                 * RX_ACTIVITY is an answer, not a failure: COMPARE reads
+                 * qualified in-window activity as YES. Re-sending it could meet
+                 * silence on the second attempt and turn a correct YES into a
+                 * NO, so it finishes on the result it already has.
+                 *
+                 * MALFORMED and OVERFLOW carry no such meaning. One is a
+                 * waveform the decoder could not read; the other is an event
+                 * dropped because the RX ring filled, which is a local resource
+                 * fault rather than a fact about the bus. They are precisely
+                 * what a retry budget exists to survive, and without one a
+                 * single blip anywhere in the reply window ends the step — and
+                 * with it the sequence that owns it, which for commissioning is
+                 * the whole run.
+                 */
+                if (reply_error != DALI_ERR_RX_ACTIVITY &&
+                    sched_retry_active_step()) {
+                    s_state = SCHED_TX;
+                    goto next;
+                }
                 if (sched_finish_active_step(reply_error, NULL)) {
                     s_state = SCHED_TX;
                 } else {
@@ -863,18 +942,7 @@ next:
             }
             if (elapsed_ms(s_state_entered_ms) >= DALI_REPLY_TIMEOUT_MS) {
                 g_dali_stats.reply_timeouts++;
-                if (s_active.retries_left > 0u) {
-                    s_active.retries_left--;
-                    g_dali_stats.tx_retries++;
-                    /* A reply that missed the window by a little is still on the
-                     * wire. Re-arm the guard from now — the one armed at TX
-                     * expired a dozen ms ago — so the retry waits for the
-                     * straggler instead of transmitting over it. */
-                    sched_arm_tx_gap(sched_now_us(),
-                                     DALI_REPLY_TIMEOUT_BACKOFF_US);
-                    s_send_count = 0u;
-                    s_send_twice_first_started_us = 0u;
-                    s_send_twice_first_started_ms = 0u;
+                if (sched_retry_active_step()) {
                     s_state = SCHED_TX;
                     goto next;
                 }

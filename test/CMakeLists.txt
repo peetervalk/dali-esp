@@ -19,6 +19,7 @@ target_include_directories(unity PUBLIC ${UNITY_DIR})
 # DALI component source files that are host-portable
 # ---------------------------------------------------------------------------
 set(DALI_SRC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_error.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_ringbuf.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_phy.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_protocol.c

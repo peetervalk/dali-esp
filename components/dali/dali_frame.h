@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 /* ---------------------------------------------------------------------------
  * Timing constants (IEC 62386 / 1200 bps Manchester)
@@ -121,6 +122,25 @@ typedef enum {
     DALI_ERR_FULL       = 11,   /* fixed-capacity registration table is full  */
     DALI_ERR_RX_ACTIVITY = 12,  /* reply-window activity was not decodable    */
 } DaliError;
+
+/*
+ * Short operator-facing name for a DaliError, or NULL for a code this build
+ * does not know. Callers print the number themselves in that case, so an
+ * enumerator added out of tree still reaches an operator as something readable
+ * rather than as a wrong name. Defined in dali_error.c.
+ */
+const char *dali_error_name(DaliError err);
+
+/*
+ * The same name, but always printable: an unknown code is rendered into buf
+ * as "error <n>". Returns buf only in that case, so a caller may pass a
+ * short scratch buffer and use the result with %s unconditionally.
+ */
+const char *dali_error_text(DaliError err, char *buf, size_t len);
+
+/* Scratch size that fits any dali_error_text() output, including the widest
+ * "error <n>" an out-of-range int can produce. */
+#define DALI_ERROR_TEXT_MAX 24u
 
 /* ---------------------------------------------------------------------------
  * DaliAddressType

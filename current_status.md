@@ -136,7 +136,41 @@ result. `dali_capability_matrix.md` states which is which per capability.
   previously required the entity's target type to equal the result's, so a
   broadcast matched only broadcast entities and ordinary short-address lights
   never saw it.
-- All 26 host suites pass. Focused totals are PHY 28, scheduler 75, transport 14,
+- `DaliError` reaches an operator by name on both surfaces. `dali_error.c` holds
+  the single name table — `dali_error_name()` returns NULL for a code this build
+  does not know, `dali_error_text()` renders that case as `error <n>` into a
+  caller buffer — so no defined code prints as a bare number and an undefined one
+  still carries its value. `DALI_ERR_RX_ACTIVITY`, which a commissioning run now
+  produces routinely, reads as `rx activity` instead of `ERR 12` in the native
+  shell and `err` in a Home Assistant text state. A host vector fails if a new
+  enumerator is added without a name. Deliberately unchanged: `no reply` stays the
+  ESPHome wording for a timeout, the shell keeps its `ERR` prefix ahead of the
+  name so line shapes and greps survive, and the inventory JSON `query_error`
+  field stays numeric. ESP_LOG lines still print numbers.
+- The reply-error path now spends the retry budget on the codes that carry no
+  meaning. `MALFORMED` (one unreadable waveform) and `OVERFLOW` (an event dropped
+  because the RX ring filled, a local resource fault rather than a fact about the
+  bus) decrement `retries_left` and re-arm the TX gap through the same
+  `sched_retry_active_step()` the timeout branch uses; only commands whose
+  response is retry-safe ever hold a budget, so this is exactly as safe as the
+  timeout retry already was. `DALI_ERR_RX_ACTIVITY` deliberately does not retry:
+  COMPARE reads it as YES, and a second attempt meeting silence would invert a
+  correct YES into a NO. Previously a single blip anywhere in the reply window
+  ended the step, and with it the sequence that owned it — for commissioning, the
+  whole run. Host-tested for both retry codes, budget exhaustion, and the
+  RX_ACTIVITY exclusion.
+- Precedence between a decoded reply and later in-window noise is settled as it
+  stood, and now says so in the source. Three mechanisms agree that noise wins
+  regardless of arrival order — the guarded decoded-frame latch, the unconditional
+  `s_reply_received = false` in `sched_latch_reply_error()`, and `SCHED_WAIT_REPLY`
+  testing the error first — and the priority ladder applies the same fail-closed
+  rule to error-versus-error. The reasoning is that an address answering cleanly
+  while something else adds frame-like activity is genuinely ambiguous, most
+  obviously two devices sharing a short address, and a confident single value
+  would hide that. The known cost is recorded with it: for an ordinary query a
+  spike at 19 ms discards a byte decoded at 8 ms. The retry split above softens
+  it — that case now re-asks rather than failing outright.
+- All 26 host suites pass. Focused totals are PHY 28, scheduler 78, transport 14,
   discovery 56, commissioning 32, and dispatch 31. Native ESP-IDF 6.0.1 and ESPHome 2026.7.4
   builds pass. These are host and compile results only: no COM6, flash, captured
   collision waveform, or commissioning run was used in this pass.
@@ -1100,24 +1134,6 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   confirmed-transmission treatment the light entities now have. Console `OK`,
   the refresh pump, and headless dispatch still report or act on admission
   rather than transmission; only light writes distinguish the two.
-- Decide whether the reply-error path should honour the retry budget. COMPARE and
-  VERIFY both set `retries_left = 1`, but the `s_reply_error` branch in
-  `dali_scheduler.c` finishes the step immediately, unlike the timeout branch
-  below it which decrements and re-arms the TX gap. That is correct for
-  `DALI_ERR_RX_ACTIVITY`, which already carries meaning, but it means a single
-  `MALFORMED` or `OVERFLOW` burst aborts a run the configured retry existed to
-  survive. Either consume a retry for the ambiguous results or state that failing
-  closed without one is deliberate.
-- Decide precedence between a decoded reply and later in-window noise.
-  `sched_latch_reply_error()` clears `s_reply_received` unconditionally, and
-  `SCHED_WAIT_REPLY` tests `s_reply_error` before `s_reply_received`, so a clean
-  backward frame latched early in the window is discarded by a malformed blip
-  later in the same window. The decoded-frame path guards with `!s_reply_received`;
-  the error path does not. Harmless for COMPARE, where both outcomes mean YES;
-  for an ordinary query it throws away a good answer. The counter-argument is that
-  an address where one device answers cleanly and another adds noise is genuinely
-  ambiguous and should not read as a single clean device — which is the argument
-  for leaving it as is, deliberately.
 
 ### P1 — CLI verification on real hardware
 
@@ -1174,12 +1190,6 @@ below for what changed for an operator.
 
 ### P1 — Release and verification quality
 
-- Give `DaliError` names on the operator surfaces. There is no error-to-string
-  helper anywhere in the repo: `dali_cli_print_error()` special-cases only
-  `TIMEOUT` and `QUEUE_FULL`, and `dali_component.cpp` maps only `TIMEOUT` to
-  "no reply". Every other result reaches an operator as a bare number, so the
-  newly reachable `DALI_ERR_RX_ACTIVITY` reads as `ERR 12` in the shell and as
-  `err` in a Home Assistant text state.
 - Correct the stale documentation filenames in this file. `dali_command_reference.md`
   is referenced four times — in the P1 item below, the release-notes item, the
   Source Layout table, and the Documentation Policy — and does not exist; that
@@ -1232,6 +1242,21 @@ below for what changed for an operator.
   `status: 0x04 arc-on` rather than `status: 0x04`, before the same per-field
   block, so anything scraping native CLI output for that exact line needs
   updating.
+  Also new: `components/dali/dali_error.c` is an additional translation unit, so
+  an out-of-tree build that lists sources by hand must add it or fail to link
+  `dali_error_name()`/`dali_error_text()`. Its second operator-visible output
+  change: every error a shell, native CLI, or Home Assistant `command_result`
+  reports is now a name rather than a number — `status: intervened` where the
+  CLI printed `status: ERR 10`, `commission: ERR rx activity` where the shell
+  printed `commission: ERR 12`, and `rx activity` where the text entity
+  published `err`. Anything matching on those strings or parsing the number out
+  of them needs updating; this belongs in the release notes next to the console
+  reply-format change, which has the same audience.
+  One runtime behaviour change to announce with them: a query that meets
+  `MALFORMED` or `OVERFLOW` inside its reply window now re-sends once if it holds
+  a retry budget, instead of failing on the first blip. Retry-safe commands only,
+  so no command repeats that could not already repeat on a timeout — but a noisy
+  bus will show more `tx_retries` and fewer aborted sequences than before.
 - Announce the ESPHome console verb renames in the release notes. They are the
   operator-visible half of the `dali_cli` adoption and have no aliases — the
   table is in `dali_command_reference.md` under "Verbs renamed when the console

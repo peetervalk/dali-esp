@@ -1127,6 +1127,57 @@ static void test_build_dapc_mask_rejects_invalid_args(void)
 /* ---------------------------------------------------------------------------
  * Main
  * --------------------------------------------------------------------------*/
+/* ---------------------------------------------------------------------------
+ * DaliError names
+ * --------------------------------------------------------------------------*/
+
+void test_error_name_covers_every_enumerator(void)
+{
+    /* The point of the helper is that no defined code reaches an operator as a
+     * bare number, so a new enumerator without a name has to fail here. */
+    for (int err = DALI_OK; err <= DALI_ERR_RX_ACTIVITY; err++) {
+        const char *name = dali_error_name((DaliError)err);
+        TEST_ASSERT_NOT_NULL_MESSAGE(name, "DaliError enumerator has no name");
+        TEST_ASSERT_TRUE_MESSAGE(name[0] != '\0', "DaliError name is empty");
+    }
+}
+
+void test_error_name_spells_the_operator_visible_codes(void)
+{
+    TEST_ASSERT_EQUAL_STRING("ok", dali_error_name(DALI_OK));
+    TEST_ASSERT_EQUAL_STRING("timeout", dali_error_name(DALI_ERR_TIMEOUT));
+    TEST_ASSERT_EQUAL_STRING("queue full", dali_error_name(DALI_ERR_QUEUE_FULL));
+    /* The code the commissioning rebuild made reachable: it used to read as
+     * "ERR 12" in the shell and as "err" in a Home Assistant text state. */
+    TEST_ASSERT_EQUAL_STRING("rx activity", dali_error_name(DALI_ERR_RX_ACTIVITY));
+}
+
+void test_error_name_returns_null_for_unknown_codes(void)
+{
+    TEST_ASSERT_NULL(dali_error_name((DaliError)(DALI_ERR_RX_ACTIVITY + 1)));
+    TEST_ASSERT_NULL(dali_error_name((DaliError)99));
+    TEST_ASSERT_NULL(dali_error_name((DaliError)-1));
+}
+
+void test_error_text_is_always_printable(void)
+{
+    char buf[DALI_ERROR_TEXT_MAX];
+
+    /* A known code ignores the buffer and returns the shared name. */
+    TEST_ASSERT_EQUAL_STRING("rx activity",
+                             dali_error_text(DALI_ERR_RX_ACTIVITY, buf, sizeof(buf)));
+
+    /* An unknown one still says something, and says which one. */
+    TEST_ASSERT_EQUAL_STRING("error 99", dali_error_text((DaliError)99, buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("error 99", buf);
+
+    /* No buffer is not a crash — call sites pass one, but the shell's static
+     * scratch is the only thing standing between this and a NULL %s. */
+    TEST_ASSERT_EQUAL_STRING("error", dali_error_text((DaliError)99, NULL, 0u));
+    TEST_ASSERT_EQUAL_STRING("error", dali_error_text((DaliError)99, buf, 0u));
+}
+
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1200,5 +1251,10 @@ int main(void)
     RUN_TEST(test_input_value_accumulator_combines_16bit_and_multibyte_values);
     RUN_TEST(test_input_value_accumulator_rejects_invalid_args);
     RUN_TEST(test_parse_rejects_invalid_args_and_none_response);
+    /* DaliError names */
+    RUN_TEST(test_error_name_covers_every_enumerator);
+    RUN_TEST(test_error_name_spells_the_operator_visible_codes);
+    RUN_TEST(test_error_name_returns_null_for_unknown_codes);
+    RUN_TEST(test_error_text_is_always_printable);
     return UNITY_END();
 }

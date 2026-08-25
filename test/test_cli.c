@@ -1068,7 +1068,18 @@ static void test_print_tx_and_error_results(void)
 
     out = capture_begin();
     dali_cli_print_error(&out, "status", DALI_ERR_INTERVENED);
-    TEST_ASSERT_EQUAL_STRING("status: ERR 10\r\n", s_capture);
+    TEST_ASSERT_EQUAL_STRING("status: intervened\r\n", s_capture);
+
+    /* The reason this stopped printing numbers: a commissioning run reports
+     * this code routinely, and "ERR 12" told an operator nothing. */
+    out = capture_begin();
+    dali_cli_print_error(&out, "compare", DALI_ERR_RX_ACTIVITY);
+    TEST_ASSERT_EQUAL_STRING("compare: rx activity\r\n", s_capture);
+
+    /* A code this build has no name for still carries its number. */
+    out = capture_begin();
+    dali_cli_print_error(&out, "status", (DaliError)99);
+    TEST_ASSERT_EQUAL_STRING("status: ERR 99\r\n", s_capture);
 }
 
 static void test_print_frame_widths(void)

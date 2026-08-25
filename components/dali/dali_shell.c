@@ -208,6 +208,17 @@ static void shell_printf(const char *fmt, ...)
 }
 
 /*
+ * Printable name for a DaliError. The shell serves one session from one task,
+ * and no output line carries two errors, so a single scratch buffer is enough
+ * for the unknown-code case and every call site stays a plain %s.
+ */
+static const char *shell_err(DaliError err)
+{
+    static char buf[DALI_ERROR_TEXT_MAX];
+    return dali_error_text(err, buf, sizeof(buf));
+}
+
+/*
  * The sink the shared dali_cli_* formatters print through, and the one place
  * every byte of shell output passes.
  *
@@ -1622,7 +1633,7 @@ static void cmd_reset(void)
 #ifndef DALI_HOST_BUILD
     DaliError err = shell_reset_sync();
     if (err != DALI_OK) {
-        shell_printf("reset: ERR %d\r\n", (int)err);
+        shell_printf("reset: ERR %s\r\n", shell_err(err));
         return;
     }
 
@@ -1703,7 +1714,7 @@ static void cmd_rxdebug(void)
     DaliPhyRxDebugSnapshot snapshot;
     DaliError err = dali_phy_get_rx_debug(&snapshot);
     if (err != DALI_OK) {
-        shell_printf("rxdebug: ERR %d\r\n", (int)err);
+        shell_printf("rxdebug: ERR %s\r\n", shell_err(err));
         return;
     }
     if (!snapshot.valid) {
@@ -1873,7 +1884,7 @@ static void cmd_raw(const DaliCliTokens *t, bool send_twice)
         } else if (err == DALI_ERR_TIMEOUT) {
             shell_printf("RX: timeout\r\n");
         } else {
-            shell_printf("TX/RX: ERR %d\r\n", (int)err);
+            shell_printf("TX/RX: ERR %s\r\n", shell_err(err));
         }
         return;
     }
@@ -2150,8 +2161,8 @@ static void shell_print_sequence_result(const char *name,
         return;
     }
     if (result != NULL && result->failed_step != DALI_SEQUENCE_NO_FAILED_STEP) {
-        shell_printf("%s: ERR %d at sequence step %u\r\n",
-               name, (int)err, (unsigned)result->failed_step);
+        shell_printf("%s: ERR %s at sequence step %u\r\n",
+               name, shell_err(err), (unsigned)result->failed_step);
         return;
     }
     dali_cli_print_error(&s_out, name, err);
@@ -2273,7 +2284,7 @@ static void cmd_instances(const DaliCliTokens *t)
         return;
     }
     if (err != DALI_OK) {
-        shell_printf("instances: ERR %d\r\n", (int)err);
+        shell_printf("instances: ERR %s\r\n", shell_err(err));
         return;
     }
     shell_input_cache_store(&input);
@@ -2303,7 +2314,7 @@ static void cmd_instances(const DaliCliTokens *t)
             continue;
         }
         if (type_err != DALI_OK) {
-            shell_printf("  %2u: type ERR %d\r\n", (unsigned)instance, (int)type_err);
+            shell_printf("  %2u: type ERR %s\r\n", (unsigned)instance, shell_err(type_err));
             continue;
         }
 
@@ -2367,7 +2378,7 @@ static void shell_sensor_poll_instance(uint8_t addr,
     } else if (err == DALI_ERR_TIMEOUT) {
         shell_printf(" poll=timeout\r\n");
     } else {
-        shell_printf(" poll=ERR %d\r\n", (int)err);
+        shell_printf(" poll=ERR %s\r\n", shell_err(err));
     }
 }
 
@@ -2394,7 +2405,7 @@ static void cmd_sensor(const DaliCliTokens *t)
         return;
     }
     if (err != DALI_OK) {
-        shell_printf("sensor poll: ERR %d\r\n", (int)err);
+        shell_printf("sensor poll: ERR %s\r\n", shell_err(err));
         return;
     }
     shell_input_cache_store(&input);
@@ -2427,7 +2438,7 @@ static void cmd_sensor(const DaliCliTokens *t)
             continue;
         }
         if (type_err != DALI_OK) {
-            shell_printf("  %2u: type ERR %d\r\n", (unsigned)instance, (int)type_err);
+            shell_printf("  %2u: type ERR %s\r\n", (unsigned)instance, shell_err(type_err));
             continue;
         }
         shell_sensor_poll_instance(addr, &input.device.instances[instance]);
@@ -2652,7 +2663,7 @@ static uint8_t shell_discover_bus(bool detailed)
         if (err == DALI_ERR_CANCELLED) {
             shell_printf("Scan aborted\r\n");
         } else {
-            shell_printf("Scan ERR %d\r\n", (int)err);
+            shell_printf("Scan ERR %s\r\n", shell_err(err));
         }
         return 0u;
     }
@@ -2887,7 +2898,7 @@ static void cmd_commission(const DaliCliTokens *t)
     if (err != DALI_OK) {
         shell_inventory_reset();
         shell_bus_release();
-        shell_printf("commission: pre-scan ERR %d\r\n", (int)err);
+        shell_printf("commission: pre-scan ERR %s\r\n", shell_err(err));
         return;
     }
     shell_inventory_replace(inventory);
@@ -2928,12 +2939,12 @@ static void cmd_commission(const DaliCliTokens *t)
                  result.initialisation_state_unknown ? 1u : 0u);
         if (result.termination_attempted &&
             !result.terminate_tx_succeeded) {
-            shell_printf("commission: cleanup terminate ERR %d; "
+            shell_printf("commission: cleanup terminate ERR %s; "
                          "initialisation state unknown\r\n",
-                         (int)result.cleanup_error);
+                         shell_err(result.cleanup_error));
         }
-        shell_printf("commission: ERR %d after %u assignment(s)\r\n",
-               (int)err,
+        shell_printf("commission: ERR %s after %u assignment(s)\r\n",
+               shell_err(err),
                (unsigned)result.assigned_count);
         return;
     }
@@ -2975,7 +2986,7 @@ static void cmd_commission(const DaliCliTokens *t)
                                   &found);
         if (err != DALI_OK) {
             shell_inventory_reset();
-            shell_printf("commission: post-scan ERR %d\r\n", (int)err);
+            shell_printf("commission: post-scan ERR %s\r\n", shell_err(err));
             return;
         }
         shell_inventory_replace(inventory);
@@ -3240,7 +3251,7 @@ static void cmd_bus(const DaliCliTokens *t)
                (unsigned)rx_level,
                rx_level != 0u ? "idle-high candidate" : "active-low/stuck-low candidate");
     } else {
-        shell_printf("  RX level: unavailable (ERR %d)\r\n", (int)rx_err);
+        shell_printf("  RX level: unavailable (ERR %s)\r\n", shell_err(rx_err));
     }
     shell_printf("  scheduler: %s\r\n",
            shell_sched_state_name(dali_sched_state()));
@@ -3304,7 +3315,7 @@ static void cmd_smoke(const DaliCliTokens *t)
             shell_inventory_replace(inventory);
         }
     } else {
-        shell_printf("  status: ERR %d\r\n", (int)err);
+        shell_printf("  status: ERR %s\r\n", shell_err(err));
         fail++;
     }
 
@@ -3330,7 +3341,7 @@ static void cmd_smoke(const DaliCliTokens *t)
             shell_printf("  %s: timeout/skip\r\n", queries[i].name);
             skip++;
         } else {
-            shell_printf("  %s: ERR %d\r\n", queries[i].name, (int)err);
+            shell_printf("  %s: ERR %s\r\n", queries[i].name, shell_err(err));
             fail++;
         }
     }
@@ -3363,7 +3374,7 @@ static void cmd_smoke(const DaliCliTokens *t)
         shell_printf("  input instances: timeout/skip\r\n");
         skip++;
     } else {
-        shell_printf("  input instances: ERR %d\r\n", (int)err);
+        shell_printf("  input instances: ERR %s\r\n", shell_err(err));
         fail++;
     }
 
@@ -3400,14 +3411,14 @@ static void cmd_identify(const DaliCliTokens *t)
     for (uint8_t i = 0u; i < SHELL_IDENTIFY_CYCLES; i++) {
         DaliError err = shell_send_no_reply(&max_frame, false);
         if (err != DALI_OK) {
-            shell_printf("identify: max ERR %d\r\n", (int)err);
+            shell_printf("identify: max ERR %s\r\n", shell_err(err));
             return;
         }
         vTaskDelay(pdMS_TO_TICKS(SHELL_IDENTIFY_STEP_MS));
 
         err = shell_send_no_reply(&min_frame, false);
         if (err != DALI_OK) {
-            shell_printf("identify: min ERR %d\r\n", (int)err);
+            shell_printf("identify: min ERR %s\r\n", shell_err(err));
             return;
         }
         vTaskDelay(pdMS_TO_TICKS(SHELL_IDENTIFY_STEP_MS));
