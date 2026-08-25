@@ -77,7 +77,8 @@ void DaliShellServer::dump_config()
 void DaliShellServer::write_cb(void *ctx, const char *text)
 {
     auto *self = static_cast<DaliShellServer *>(ctx);
-    if (self == nullptr || self->client_fd_ < 0 || text == nullptr) {
+    if (self == nullptr || self->client_fd_ < 0 || text == nullptr ||
+        self->peer_lost_) {
         return;
     }
 

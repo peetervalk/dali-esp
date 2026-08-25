@@ -34,6 +34,8 @@
 #define ESP_LOGI(tag, fmt, ...) ((void)(tag))
 #endif
 
+static const char *TAG = "DALI-SHELL";
+
 static volatile bool s_trace_enabled;
 
 /* ---------------------------------------------------------------------------
@@ -559,9 +561,12 @@ static DaliError shell_reset_sync(void)
  * retries_left is the scheduler retry budget after the first attempt.
  * reply_out may be NULL when the reply data is not needed.
  */
-static DaliError shell_sched_sync(const DaliFrame *frame, bool needs_reply,
-                                  uint8_t retries_left, bool send_twice,
-                                  DaliFrame *reply_out)
+static DaliError shell_sched_sync_impl(const DaliFrame *frame,
+                                       bool needs_reply,
+                                       uint8_t retries_left,
+                                       bool send_twice,
+                                       DaliFrame *reply_out,
+                                       bool honor_abort)
 {
     if (frame == NULL) {
         return DALI_ERR_INVALID;
@@ -573,7 +578,7 @@ static DaliError shell_sched_sync(const DaliFrame *frame, bool needs_reply,
      * its next frame without that module needing to know a front end can
      * vanish, and a ten-second identify blink stops on its next step.
      */
-    if (shell_aborted()) {
+    if (honor_abort && shell_aborted()) {
         return DALI_ERR_CANCELLED;
     }
 
@@ -632,6 +637,18 @@ static DaliError shell_sched_sync(const DaliFrame *frame, bool needs_reply,
         *reply_out = reply;
     }
     return result;
+}
+
+static DaliError shell_sched_sync(const DaliFrame *frame, bool needs_reply,
+                                  uint8_t retries_left, bool send_twice,
+                                  DaliFrame *reply_out)
+{
+    return shell_sched_sync_impl(frame,
+                                 needs_reply,
+                                 retries_left,
+                                 send_twice,
+                                 reply_out,
+                                 true);
 }
 
 /* Fill an outcome that never reached a completion callback. */
@@ -744,6 +761,22 @@ static DaliError shell_discovery_transact(const DaliFrame *frame,
                            reply_out);
 }
 
+static DaliError shell_discovery_cleanup_transact(const DaliFrame *frame,
+                                                  bool needs_reply,
+                                                  uint8_t retries_left,
+                                                  bool send_twice,
+                                                  DaliFrame *reply_out,
+                                                  void *ctx)
+{
+    (void)ctx;
+    return shell_sched_sync_impl(frame,
+                                 needs_reply,
+                                 retries_left,
+                                 send_twice,
+                                 reply_out,
+                                 false);
+}
+
 /* Atomic-group half of the transport: shared protocol code that needs a DTR
  * setup and its consuming command to stay together gets that here too, not just
  * in the ESPHome scan task. */
@@ -772,6 +805,7 @@ const DaliTransport *dali_shell_device_transport(void)
         .transact          = shell_discovery_transact,
         .transact_sequence = shell_discovery_sequence_transact,
         .ctx               = NULL,
+        .transact_cleanup  = shell_discovery_cleanup_transact,
     };
     return &transport;
 }
@@ -1493,6 +1527,7 @@ static void cmd_stats(void)
     shell_printf("RX overflow:      %" PRIu32 "\r\n", g_dali_stats.rx_overflow);
     shell_printf("TX retries:       %" PRIu32 "\r\n", g_dali_stats.tx_retries);
     shell_printf("Malformed frames: %" PRIu32 "\r\n", g_dali_stats.malformed_frames);
+    shell_printf("Reply RX activity: %" PRIu32 "\r\n", g_dali_stats.reply_rx_activity);
     shell_printf("Reply timeouts:   %" PRIu32 "\r\n", g_dali_stats.reply_timeouts);
     shell_printf("RX ignored:       %" PRIu32 "\r\n", g_dali_stats.rx_ignored_outside_reply);
     shell_printf("RX events routed: %" PRIu32 "\r\n", g_dali_stats.unsolicited_events_routed);
@@ -2581,13 +2616,12 @@ static uint8_t shell_discover_bus(bool detailed)
     }
 
     /*
-     * A backward frame that arrives after its reply window has closed is the one
-     * bus fault a scan cannot see: the transaction reports a plain timeout, and
-     * an address that answered a shade too late is indistinguishable from an
-     * empty one. Report the count so under-reporting a populated bus reads as a
-     * timing problem rather than as missing hardware.
+     * RX observations that cannot be attributed to an active reply window are
+     * the bus/timing fault a scan cannot otherwise see. They can be early, late,
+     * or malformed noise, so report the generic count without claiming each one
+     * was a decoded late backward reply.
      */
-    uint32_t late_replies_before = g_dali_stats.rx_ignored_outside_reply;
+    uint32_t ignored_rx_before = g_dali_stats.rx_ignored_outside_reply;
 
     shell_printf("Scanning short addresses 0-%u...\r\n", (unsigned)DALI_MAX_SHORT_ADDRESS);
     DaliError err = dali_discovery_scan(inventory,
@@ -2636,26 +2670,16 @@ static uint8_t shell_discover_bus(bool detailed)
         s_session.hooks.inventory_changed(s_session.hooks.ctx, inventory);
     }
 
-    uint32_t late_replies =
-        g_dali_stats.rx_ignored_outside_reply - late_replies_before;
+    uint32_t ignored_rx =
+        g_dali_stats.rx_ignored_outside_reply - ignored_rx_before;
     shell_printf("Scan complete: %u device(s) found.\r\n", (unsigned)found);
-    if (late_replies > 0u) {
-        /* Not a failure on its own: the retry hold-off exists to cover exactly
-         * this, and a bus whose gear answers a shade late reports a steady count
-         * on every scan. It earns a line because it is the one condition that
-         * can drop a present device from the list above without any other trace.
-         *
-         * Two calls rather than one sentence: as a single line this ran past
-         * DALI_CLI_FORMAT_MAX and was clipped of its own terminator, which left
-         * the prompt written onto the end of it and hung every client that
-         * frames replies on the prompt. shell_printf() now restores a clipped
-         * terminator, but keeping each line inside the buffer is what stops the
-         * text being cut in the first place. */
-        shell_printf("  note: %" PRIu32 " backward frame(s) answered after the "
-                     "%u ms reply window.\r\n",
-                     late_replies, (unsigned)DALI_REPLY_TIMEOUT_MS);
-        shell_printf("  Marginal gear timing; retries cover it. If a known "
-                     "device is missing above, re-run.\r\n");
+    if (ignored_rx > 0u) {
+        /* Keep this copy deliberately short. The TCP shell owns a 128-byte
+         * output buffer (including NUL) and sends one buffer per callback. */
+        shell_printf("  note: %" PRIu32 " RX observation(s) fell outside active "
+                     "reply attribution.\r\n", ignored_rx);
+        shell_printf("  Early/late activity or noise; inspect timing if a known "
+                     "device is missing.\r\n");
     }
     return found;
 }
@@ -2852,12 +2876,31 @@ static void cmd_commission(const DaliCliTokens *t)
     }
 
     if (err != DALI_OK) {
+        ESP_LOGW(TAG,
+                 "commission failed err=%d assignments=%u cleanup_attempted=%u "
+                 "terminate_tx=%u cleanup_err=%d init_state_unknown=%u",
+                 (int)err,
+                 (unsigned)result.assigned_count,
+                 result.termination_attempted ? 1u : 0u,
+                 result.terminate_tx_succeeded ? 1u : 0u,
+                 (int)result.cleanup_error,
+                 result.initialisation_state_unknown ? 1u : 0u);
+        if (result.termination_attempted &&
+            !result.terminate_tx_succeeded) {
+            shell_printf("commission: cleanup terminate ERR %d; "
+                         "initialisation state unknown\r\n",
+                         (int)result.cleanup_error);
+        }
         shell_printf("commission: ERR %d after %u assignment(s)\r\n",
                (int)err,
                (unsigned)result.assigned_count);
         return;
     }
 
+    ESP_LOGI(TAG,
+             "commission complete assignments=%u terminate_tx=%u",
+             (unsigned)result.assigned_count,
+             result.terminate_tx_succeeded ? 1u : 0u);
     shell_printf("commission: complete assigned=%u",
            (unsigned)result.assigned_count);
     if (result.no_more_devices) {
@@ -3176,10 +3219,12 @@ static void cmd_bus(const DaliCliTokens *t)
            capture_enabled ? "on" : "off",
            (unsigned)capture_count,
            capture_dropped);
-    shell_printf("  stats: malformed=%" PRIu32 ", timeouts=%" PRIu32
-           ", ignored=%" PRIu32 ", bus_idle_failures=%" PRIu32 "\r\n",
+    shell_printf("  stats: malformed=%" PRIu32 ", rx_activity=%" PRIu32
+           ", timeouts=%" PRIu32 "\r\n",
            g_dali_stats.malformed_frames,
-           g_dali_stats.reply_timeouts,
+           g_dali_stats.reply_rx_activity,
+           g_dali_stats.reply_timeouts);
+    shell_printf("         ignored=%" PRIu32 ", bus_idle_failures=%" PRIu32 "\r\n",
            g_dali_stats.rx_ignored_outside_reply,
            g_dali_stats.bus_idle_failures);
 }

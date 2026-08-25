@@ -1658,11 +1658,11 @@ void DaliComponent::console_devmem_(const DaliCliTokens &t, void *ctx)
 /*
  * Special (broadcast) commands.
  *
- * The commissioning primitives are refused here. This integration exposes
- * discovery, not a guarded commissioning workflow, and these are the commands
- * that can destroy the addressing of every device on the bus in one line typed
- * into a Home Assistant text box — RANDOMISE irreversibly. The native CLI runs
- * them inside `commission`, which sequences and checks them; use it.
+ * The commissioning primitives are refused on this Home Assistant text-command
+ * surface. They can destroy the addressing of every device on the bus in one
+ * line — RANDOMISE irreversibly. The shared native/TCP diagnostic shell runs
+ * them inside the guarded `commission` workflow, which sequences and checks
+ * them; use that surface instead.
  *
  * TERMINATE stays available on purpose: it is what closes an initialise window
  * another tool left open, and refusing it would leave an operator holding the

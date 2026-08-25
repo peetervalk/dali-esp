@@ -13,6 +13,28 @@ bool dali_transport_supports_atomic_sequence(const DaliTransport *transport)
            transport->transact_sequence != NULL;
 }
 
+DaliError dali_transport_transact_cleanup(const DaliTransport *transport,
+                                          const DaliFrame *frame,
+                                          bool needs_reply,
+                                          uint8_t retries_left,
+                                          bool send_twice,
+                                          DaliFrame *reply_out)
+{
+    if (!dali_transport_valid(transport) || frame == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliTransactionFn fn = transport->transact_cleanup != NULL
+                         ? transport->transact_cleanup
+                         : transport->transact;
+    return fn(frame,
+              needs_reply,
+              retries_left,
+              send_twice,
+              reply_out,
+              transport->ctx);
+}
+
 uint32_t dali_transport_sequence_timeout_ms(const DaliSequence *seq)
 {
     uint32_t ms = DALI_TRANSPORT_SEQUENCE_QUEUE_BUDGET_MS;

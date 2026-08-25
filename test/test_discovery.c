@@ -8,6 +8,7 @@ typedef struct {
     uint8_t   status[DALI_SHORT_ADDRESS_COUNT];
     bool      malformed[DALI_SHORT_ADDRESS_COUNT];
     int       bus_error_addr;
+    DaliError bus_error;
     uint32_t  tx_count;
     uint32_t  sequence_count;
     uint32_t  query_next_device_type_count;
@@ -101,7 +102,7 @@ static DaliError mock_transact(const DaliFrame *frame,
     uint8_t addr = 0u;
     if (is_status_query(frame, &addr)) {
         if (bus->bus_error_addr == (int)addr) {
-            return DALI_ERR_BUS_STUCK;
+            return bus->bus_error;
         }
         if (bus->malformed[addr]) {
             *reply_out = (DaliFrame){
@@ -240,6 +241,7 @@ void setUp(void)
     memset(&s_bus, 0, sizeof(s_bus));
     memset(&s_script, 0, sizeof(s_script));
     s_bus.bus_error_addr = -1;
+    s_bus.bus_error = DALI_ERR_BUS_STUCK;
     s_script_count = 0u;
 }
 
@@ -317,6 +319,22 @@ void test_scan_aborts_on_bus_error(void)
     /* 5 status queries (0..4) + 4 instance probes for absent addresses 0..3
      * before the bus-error at address 4 terminates the scan. */
     TEST_ASSERT_EQUAL_UINT32(9u, s_bus.tx_count);
+}
+
+void test_scan_aborts_on_ambiguous_rx_activity(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 99u;
+
+    s_bus.bus_error_addr = 0;
+    s_bus.bus_error = DALI_ERR_RX_ACTIVITY;
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_ERR_RX_ACTIVITY,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    TEST_ASSERT_FALSE(inventory.valid);
+    TEST_ASSERT_EQUAL_UINT8(99u, found);
+    TEST_ASSERT_EQUAL_UINT32(1u, s_bus.tx_count);
 }
 
 void test_query_status_rejects_bad_reply_width(void)
@@ -1805,6 +1823,7 @@ int main(void)
     RUN_TEST(test_scan_records_responders_and_callback);
     RUN_TEST(test_scan_ignores_timeouts_and_malformed_slots);
     RUN_TEST(test_scan_aborts_on_bus_error);
+    RUN_TEST(test_scan_aborts_on_ambiguous_rx_activity);
     RUN_TEST(test_query_status_rejects_bad_reply_width);
     RUN_TEST(test_query_input_device_clamps_and_keeps_optional_timeouts);
     RUN_TEST(test_query_input_device_records_type_errors);

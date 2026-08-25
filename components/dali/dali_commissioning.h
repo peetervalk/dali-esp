@@ -46,6 +46,15 @@ typedef struct {
     bool    no_more_devices;
     bool    address_space_full;
     DaliError last_error;
+    bool    termination_required;
+    bool    termination_attempted;
+    /* A no-reply TERMINATE frame was reported fully transmitted. This cannot
+     * prove that every gear accepted it in the presence of other bus traffic. */
+    bool    terminate_tx_succeeded;
+    /* True when the safety TERMINATE could not be transmitted, so the
+     * fifteen-minute initialisation state may still be active. */
+    bool    initialisation_state_unknown;
+    DaliError cleanup_error;
     DaliCommissioningAssignment assignments[DALI_COMMISSIONING_MAX_ASSIGNMENTS];
 } DaliCommissioningResult;
 
@@ -85,10 +94,10 @@ DaliError dali_commissioning_decode_short_address(uint8_t encoded,
  * dependent group is issued. A separate physical bus master can still
  * interpose; that requires bus-level arbitration beyond this transport API.
  *
- * These sequences do not address the known COMPARE collision problem: when
- * several devices answer at once the reply is undecodable and the PHY drops it,
- * which still reads as NO. Atomicity keeps other traffic out; it does not make
- * a collided reply readable.
+ * The PHY/scheduler preserve frame-like undecodable activity as
+ * DALI_ERR_RX_ACTIVITY. COMPARE alone interprets that as YES; other queries
+ * retain the ambiguity as an error. Atomicity keeps other local traffic out,
+ * but a separate bus master can still invalidate the operation.
  * --------------------------------------------------------------------------*/
 
 /* TERMINATE, INITIALISE(unaddressed), RANDOMIZE. */

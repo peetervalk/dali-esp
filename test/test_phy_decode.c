@@ -2,7 +2,33 @@
 #include "dali_phy.h"
 #include "dali_frame.h"
 
-void setUp(void)  {}
+static DaliPhyRxObservation s_observation;
+static uint8_t s_observation_count;
+static DaliPhyRxObservation s_overflow_observation;
+static uint8_t s_overflow_observation_count;
+
+static void capture_observation(const DaliPhyRxObservation *observation,
+                                void *ctx)
+{
+    (void)ctx;
+    TEST_ASSERT_NOT_NULL(observation);
+    s_observation = *observation;
+    s_observation_count++;
+    if (observation->result == DALI_ERR_OVERFLOW) {
+        s_overflow_observation = *observation;
+        s_overflow_observation_count++;
+    }
+}
+
+void setUp(void)
+{
+    s_observation = (DaliPhyRxObservation){0};
+    s_observation_count = 0u;
+    s_overflow_observation = (DaliPhyRxObservation){0};
+    s_overflow_observation_count = 0u;
+    TEST_ASSERT_EQUAL(DALI_OK, dali_phy_init(0u, 0u));
+    dali_phy_set_rx_callback(capture_observation, NULL);
+}
 void tearDown(void) {}
 
 /* ---------------------------------------------------------------------------
@@ -152,6 +178,68 @@ void test_decode_edges_non_alternating_levels_returns_malformed(void)
     TEST_ASSERT_EQUAL_INT(DALI_ERR_MALFORMED, err);
 }
 
+void test_frame_like_malformed_edges_emit_timestamped_observation(void)
+{
+    uint32_t timestamp_us = 100000u;
+    uint8_t level = 0u;
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_phy_test_feed_rx_edge(timestamp_us, level));
+
+    for (uint8_t i = 0u; i < 15u; i++) {
+        timestamp_us += i == 5u ? 580u : DALI_HALF_BIT_US;
+        level ^= 1u;
+        TEST_ASSERT_EQUAL(DALI_OK,
+                          dali_phy_test_feed_rx_edge(timestamp_us, level));
+    }
+    dali_phy_rx_process();
+
+    TEST_ASSERT_EQUAL_UINT8(1u, s_observation_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED, s_observation.result);
+    TEST_ASSERT_TRUE(s_observation.has_timestamps);
+    TEST_ASSERT_EQUAL_UINT32(100000u, s_observation.first_edge_us);
+    TEST_ASSERT_EQUAL_UINT32(timestamp_us & 0xFFFFFFFEu,
+                             s_observation.last_edge_us);
+    TEST_ASSERT_EQUAL_UINT8(16u, s_observation.edge_count);
+}
+
+void test_lone_short_pulse_does_not_emit_rx_observation(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK, dali_phy_test_feed_rx_edge(200000u, 0u));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_phy_test_feed_rx_edge(200100u, 1u));
+    dali_phy_rx_process();
+
+    TEST_ASSERT_EQUAL_UINT8(0u, s_observation_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_glitch_drops);
+}
+
+void test_rx_ring_overflow_emits_task_context_observation(void)
+{
+    uint32_t timestamp_us = 300000u;
+    uint8_t level = 0u;
+    for (uint16_t i = 0u; i < DALI_RX_EDGE_BUFFER_SIZE; i++) {
+        TEST_ASSERT_EQUAL(DALI_OK,
+                          dali_phy_test_feed_rx_edge(timestamp_us, level));
+        timestamp_us += 200u;
+        level ^= 1u;
+    }
+
+    TEST_ASSERT_EQUAL(DALI_ERR_OVERFLOW,
+                      dali_phy_test_feed_rx_edge(timestamp_us, level));
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_overflow);
+    dali_phy_rx_process();
+
+    TEST_ASSERT_GREATER_THAN_UINT8(0u, s_observation_count);
+    /* The deliberately overlong buffered waveform can also overflow the
+     * decoder interval array; at least one observation must be the ring event. */
+    TEST_ASSERT_GREATER_THAN_UINT8(0u, s_overflow_observation_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_OVERFLOW, s_overflow_observation.result);
+    TEST_ASSERT_TRUE(s_overflow_observation.has_timestamps);
+    TEST_ASSERT_EQUAL_UINT32(timestamp_us & 0xFFFFFFFEu,
+                             s_overflow_observation.first_edge_us);
+    TEST_ASSERT_EQUAL_UINT32(s_overflow_observation.first_edge_us,
+                             s_overflow_observation.last_edge_us);
+}
+
 /* ---------------------------------------------------------------------------
  * Round-trip decode tests — 8-bit backward / response frames
  * --------------------------------------------------------------------------*/
@@ -198,6 +286,9 @@ int main(void)
     RUN_TEST(test_decode_interval_between_windows_returns_malformed);
     RUN_TEST(test_decode_interval_too_long_returns_malformed);
     RUN_TEST(test_decode_edges_non_alternating_levels_returns_malformed);
+    RUN_TEST(test_frame_like_malformed_edges_emit_timestamped_observation);
+    RUN_TEST(test_lone_short_pulse_does_not_emit_rx_observation);
+    RUN_TEST(test_rx_ring_overflow_emits_task_context_observation);
     RUN_TEST(test_decode_lunatone_broadcast_off_capture);
 
     RUN_TEST(test_decode_8bit_all_zeros);

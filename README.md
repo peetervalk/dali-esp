@@ -9,7 +9,7 @@ A reusable C protocol stack (`components/dali`) drives the bus — PHY, schedule
 - Lights by group, short address, or broadcast, with query-based state readback; short-address entities query themselves by default and groups use a representative member (`QUERY ACTUAL LEVEL`)
 - Brightness maps through the DALI arc-power curve rather than a linear percentage. Each target's curve and MIN/MAX LEVEL window are queried from the gear and cached; a group entity uses the union of its members' windows. `dimming_curve`, `min_level`, and `max_level` override the queried values per light.
 - Multi-frame operations (DTR loads, ENABLE DEVICE TYPE, memory reads, send-twice config) run as atomic scheduler transactions, so locally scheduled traffic cannot interleave between the steps
-- Bus scan and discovery from Home Assistant; scan-verified group membership is persisted to flash and survives reboots; control-gear commissioning through the native CLI
+- Bus scan and discovery from Home Assistant; scan-verified group membership is persisted to flash and survives reboots; control-gear commissioning through the native serial CLI or the TCP diagnostic shell with `allow_commissioning: true`
 - DALI-2 input devices: occupancy, lux, temperature, humidity — authoritative polling, with matching Device/Instance events requesting an immediate poll (`poll_on_event`)
 - Passive observation of existing pushbutton couplers (`headless_dispatch`): couplers keep commanding the lamps, ESP32 keeps HA state in sync
 - Diagnostic shell over TCP (`shell:`): the full native CLI — discover, identify, commissioning, live trace, rolling capture, JSON export — from a terminal, with no serial cable. The same shell, running the same code, as the serial console on a native ESP-IDF build
@@ -32,7 +32,7 @@ Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The controller has
 ## Getting started
 
 1. Flash [dali-starter.yaml](dali-starter.yaml) (`esphome run dali-starter.yaml`).
-2. Commission the bus, either way round:
+2. Commission or inspect the bus:
    - **From a terminal.** Run [tools/dali-shell](tools/dali-shell) from any host
      that can reach the device — standard library only, nothing to install, and
      it drops straight into the HA "Advanced SSH & Web Terminal" add-on. Copy it
@@ -52,6 +52,13 @@ Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The controller has
      groups; `identify <addr>` blinks one fixture; `export inventory` writes the
      result as JSON. `help` lists every verb. With no client to hand,
      `nc <address> 2323` is a complete if unfriendly substitute.
+
+     The commissioning entry point is `commission unaddressed [first] [max]`.
+     Over TCP it is refused unless the firmware sets
+     `shell: { allow_commissioning: true }`; the native serial shell permits it.
+     Timestamped reply-activity handling and the safety `TERMINATE` cleanup path
+     are host-tested, not real-bus proof of multi-device commissioning. Use one
+     unaddressed control gear at a time for now.
 
      `export config` answers the other half: it prints the `dali:` block, and
      the `light:` and `sensor:` entries naming it, as YAML you can paste back.
@@ -193,6 +200,12 @@ text:
 - Control gear: DT6 (LED) and DT8 (colour) are implemented. Other device types (DT0 fluorescent, DT1 emergency, …) are not.
 - One DALI bus per controller. Direct-control couplers are additional transmitters;
   simultaneous traffic is not collision-safe.
+- Commissioning preserves frame-like, undecodable reply-window activity for
+  COMPARE and attempts an abort-bypassing safety `TERMINATE` if the workflow is
+  cancelled. Those paths are host-tested only: real-bus multi-device
+  commissioning remains unverified, so the supported operating procedure is one
+  unaddressed gear at a time. Part 103 quiescence, equal-random-address recovery,
+  and multi-master arbitration are still open.
 - Implemented does not mean verified on hardware. Several paths — the DT6/DT8
   command sets, memory writes, input-device configuration — have host vectors but
   no recorded real-bus result; [dali_capability_matrix.md](dali_capability_matrix.md)

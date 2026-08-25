@@ -4,7 +4,7 @@ How to go from an unknown bus to a configuration you can keep. Flash the starter
 firmware, find out what is on the wire, then write your own config from what it
 found.
 
-**Last reviewed:** 2026-08-14
+**Last reviewed:** 2026-08-25
 
 `dali-starter.yaml` is mostly a shim: it brings up the bus and opens the
 diagnostic shell on a TCP port. The shell is the tool. The buttons and the
@@ -49,9 +49,12 @@ Once connected, `help` lists every verb and `list <table>` prints a named comman
 table. This is the same shell, running the same code, as the serial console on a
 native ESP-IDF build — not a subset written for ESPHome.
 
-**One session at a time.** The bus is single-tenant, so the shell is too. A
-second connection is accepted only far enough to be told why it is closing. A
-terminal closed without quitting is reclaimed by the `idle_timeout` in the YAML.
+**One shell session at a time.** Long shell workflows also gate the controller's
+other local producers, so a refresh cannot be inserted into a commissioning
+probe. A second connection is accepted only far enough to be told why it is
+closing, and a terminal closed without quitting is reclaimed by the
+`idle_timeout` in the YAML. This is local serialization, not proof that the
+physical DALI bus is single-master; another controller can still transmit.
 
 ## 3. Walk the bus
 
@@ -77,18 +80,77 @@ switch.
 
 A long verb prints as it goes and holds the bus for as long as it runs —
 `find switches 300` is five minutes by design. Ctrl-C in the client drops the
-connection, which the device notices between bus steps and stops.
+connection. Once the device observes that loss, ordinary work stops at the next
+transport boundary. Commissioning is the exception described below: it stops the
+addressing walk, but still runs its safety TERMINATE cleanup.
 
 Full verb syntax is in `dali_commands.md`.
 
 ### Assigning short addresses
 
 `commission unaddressed [first-addr] [max-devices]` runs the INITIALISE /
-RANDOMISE / COMPARE / PROGRAM SHORT ADDRESS walk, sequenced and checked.
+RANDOMIZE / COMPARE / PROGRAM SHORT ADDRESS walk, sequenced and checked.
 
-**It is dependable only with a single unaddressed device on the bus.** The
-COMPARE collision inversion recorded in `current_status.md` is unfixed, so
-commission new gear one piece at a time.
+**It is still dependable only with a single unaddressed device on the bus.** The
+reply-activity and cleanup changes described here are not a multi-gear HIL result.
+Commission new gear one piece at a time until the equal-random-address and
+mixed-device cases below have been implemented and exercised on a real bus.
+
+COMPARE now distinguishes silence from observed but undecodable traffic:
+
+- Silence through the reply window is the only valid NO.
+- A decoded backward reply is YES only when its byte is exactly `0xFF`. Any
+  decoded non-`0xFF` byte is malformed traffic, not NO, and aborts the walk.
+- A timestamped, frame-like malformed waveform wholly inside the backward-reply
+  window is reported as qualified RX activity. COMPARE alone maps that condition
+  to YES, which preserves the positive meaning of overlapping replies.
+- Activity that does not qualify as a backward-frame-shaped collision remains
+  ambiguous and aborts. RX overflow and an intervening decoded 16- or 24-bit
+  forward frame also abort rather than being turned into either YES or NO.
+
+This closes the previous path where an overlapping reply was dropped and then
+mistaken for silence. It deliberately does not turn every pulse or decode error
+into a device.
+
+Once the opening TERMINATE / INITIALISE / RANDOMIZE sequence is handed to the
+atomic transport, every later exit converges on one Part 102 TERMINATE attempt:
+normal completion, a bus error, front-end cancellation, and even a local wait
+timeout whose sequence may finish later. The shell provides a cleanup transport
+that ignores the disconnected/cancelled front end, while still reporting normal
+scheduler, PHY, timing, and bus errors. Closing the terminal therefore does not
+cancel the safety unwind itself.
+
+For code using the shared workflow, `DaliCommissioningResult` records the two
+outcomes separately:
+
+- `last_error` remains the primary addressing error. If addressing otherwise
+  succeeded, a failed TERMINATE becomes the primary error instead.
+- `termination_required` says the opening sequence was handed to the transport;
+  it is historical and remains true after successful cleanup.
+- `termination_attempted` says the centralized unwind ran.
+- `terminate_tx_succeeded` means the no-reply TERMINATE frame was reported fully
+  transmitted. It does not prove that every gear accepted it in the presence of
+  another bus master or a physical collision.
+- `cleanup_error` preserves a cleanup failure without overwriting an earlier
+  primary error. `initialisation_state_unknown` is then true because the
+  fifteen-minute initialisation window may still be active.
+
+With a live connection, successful cleanup appears as `commission: terminate`.
+A failed cleanup reports `cleanup terminate ERR ... initialisation state
+unknown`; the firmware also logs the final primary and cleanup state, so a TCP
+disconnect does not make that result disappear with the socket.
+
+The remaining commissioning work is explicit:
+
+- Part 103 START/STOP QUIESCENT and the cross-part TERMINATE guard are not yet
+  implemented. An active input device or event source can still disturb gear
+  commissioning.
+- Two gear that generate the same 24-bit random address are not separated or
+  recovered today; they can be programmed and withdrawn together.
+- DALI-2 priority/backoff and complete multi-master intervention handling remain
+  open. Local atomic sequences do not stop another physical master.
+- Multi-gear, mixed Part 102/Part 103, cancellation-fault, and external-master
+  scenarios still need hardware-in-loop runs before this warning can be relaxed.
 
 The verb is refused unless the YAML says `allow_commissioning: true`. The shell
 port is unauthenticated — the same posture as OTA and the web server, but a lower
@@ -98,7 +160,7 @@ is for. Set it to `false` on anything left flashed on a shared network:
 RANDOMISE cannot be undone.
 
 The same rule refuses the nine commissioning primitives under `special`
-(`initialise`, `randomise`, `search-h/m/l`, `program-short`, `withdraw`, and both
+(`initialise`, `randomize`, `search-h/m/l`, `program-short`, `withdraw`, and both
 write-memory forms). `terminate` always stays available, because it is what
 closes an initialise window another tool opened.
 

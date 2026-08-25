@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-08-24
+**Last updated:** 2026-08-25
 
 **Known-working deployment/component baseline:** `v1.1.1` (`76cede1`), hardware
 tested; this is not a conformance claim.
@@ -73,6 +73,34 @@ and it clears four items recorded as unverified under 2026-08-12:
 Unchanged by this pass: the DT6 and DT8 command sets, memory writes, and
 input-device configuration writes still have host vectors and no real-bus
 result. `dali_capability_matrix.md` states which is which per capability.
+
+### Verified locally on 2026-08-25 (commissioning P0 slice)
+
+- The PHY now exports task-context RX observations for decoded frames, malformed
+  waveforms, and ring overflow, including wrapping first/last-edge timestamps and
+  an edge count. The scheduler anchors the reply window to the ISR-captured TX bus
+  release and attributes observations from 7 through 27 ms after that point,
+  including replies decoded while the owner task still says `WAIT_SETTLE`.
+- Commissioning COMPARE now has three outcomes instead of treating every missing
+  byte as NO. Silence is NO; a decoded `0xFF` or qualified undecodable backward
+  activity is YES; short/ambiguous malformed activity and overflow abort with an
+  error. A decoded backward byte other than `0xFF` is malformed. Only COMPARE maps
+  `DALI_ERR_RX_ACTIVITY` to YES; VERIFY and ordinary discovery propagate it.
+- Every admitted commissioning opening now unwinds through one cleanup path. It
+  attempts TERMINATE even if cancellation or a lost TCP peer prevents the normal
+  waiter from knowing how far the opening sequence progressed. The device shell's
+  dedicated cleanup transport bypasses front-end cancellation but preserves
+  scheduler/bus failure; transports without that optional channel still record a
+  failed attempt. The result keeps the primary operation error when both fail and
+  records whether TERMINATE was transmitted or initialisation remains unknown.
+- All 26 host suites pass. Focused totals are PHY 28, scheduler 74, transport 14,
+  discovery 55, and commissioning 28. Native ESP-IDF 6.0.1 and ESPHome 2026.7.4
+  builds pass. These are host and compile results only: no COM6, flash, captured
+  collision waveform, or commissioning run was used in this pass.
+- Multi-device commissioning therefore remains restricted to the documented
+  single-unaddressed-device envelope until HIL proves overlapping replies. Part
+  103 quiescence, equal-random-address recovery, external-master arbitration, and
+  the 100 ms post-RANDOMIZE value still need standards/hardware validation.
 
 ### Verified locally on 2026-08-12 (console verb parity)
 
@@ -345,7 +373,8 @@ cleared by the 2026-08-14 entry above):
 - A 16- or 24-bit forward frame arriving during a local reply window now aborts
   the pending query with `DALI_ERR_INTERVENED`; a later backward byte cannot be
   misattributed as its reply and the invalidated query is not retried. Physical
-  collision/activity detection is still open below.
+  collision/activity plumbing is now host-tested as described in the 2026-08-25
+  slice; real-bus collision waveforms and arbitration remain open below.
 - ESPHome scans gate all component-owned producers, wait for already admitted
   work to drain, and retain due sensor/refresh requests. Identify timing pauses;
   console/diagnostic commands are rejected; headless events are drained but
@@ -379,10 +408,10 @@ cleared by the 2026-08-14 entry above):
 - That grouping also closed a leftover-state bug. If INITIALISE went out and
   RANDOMIZE then failed, the old code returned the error without a TERMINATE,
   leaving the gear in initialisation state for the full fifteen minutes with
-  nothing on the bus aware of it. A failed start now issues TERMINATE whenever
-  the INITIALISE step was attempted, and does not when only the opening
-  TERMINATE itself failed. Both paths have vectors, driven by a new
-  fault-injection hook in the commissioning mock.
+  nothing on the bus aware of it. The 2026-08-25 cleanup now conservatively
+  issues TERMINATE after every admitted opening sequence, even when cancellation
+  leaves local progress unknown; a queue-admission failure needs no cleanup.
+  Fault-injection vectors cover operation and cleanup failures independently.
 - The DT8 16-bit colour value read is now one four-step sequence built by
   `dali_dt8_build_colour_value_sequence()`: DTR0 = selector, ENABLE DEVICE
   TYPE 8, QUERY COLOUR VALUE for the MSB, then QUERY CONTENT DTR0 for the LSB
@@ -411,16 +440,16 @@ cleared by the 2026-08-14 entry above):
   and the COMPARE that interprets it, or between an address write and its
   confirmation.
 - The sequence readers keep the standard "silence means no" rule but scope it to
-  the query step. A reply-window timeout on COMPARE or VERIFY is still reported
-  as a negative answer with `DALI_OK`; a failure on any earlier step is returned
-  as the error it was. Previously a failed SEARCH ADDR write could not be told
-  apart from a genuine NO, which would walk the binary search past a real
-  device. Independent vectors cover both readings.
-- This does not address the COMPARE collision inversion recorded below. Several
-  devices answering at once still produce an undecodable reply that the PHY
-  drops, which reads as NO. Atomicity keeps other traffic out of the group; it
-  does not make a collided reply readable, and commissioning remains dependable
-  only with a single unaddressed device on the bus.
+  the query step. A reply-window timeout on COMPARE or VERIFY is a negative answer
+  with `DALI_OK`; a failure on any earlier step is returned as the error it was.
+  Qualified malformed activity on COMPARE is YES, while an ambiguous waveform,
+  overflow, or a decoded byte other than `0xFF` aborts rather than becoming NO.
+  Previously a failed SEARCH ADDR write or dropped collision could walk the
+  binary search past a real device. Independent host vectors cover these cases.
+- The software side of the COMPARE collision inversion is therefore closed, but
+  the classifier has not seen a captured overlapping `0xFF` response on hardware.
+  Commissioning remains supported only with one unaddressed device until that HIL
+  result exists; Part 103 event quiescence is also still absent.
 - Discovery's order-dependent query groups now run as sequences instead of
   independent transactions. `dali_discovery_build_device_type_query_sequence()`
   pairs ENABLE DEVICE TYPE with the query it enables,
@@ -803,10 +832,21 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
   `..._input_pin_number`), rejects TX equal to RX, and rejects GPIO16/17 for the
   WROVER PSRAM restriction. DALI-task creation is checked and fails the
   component rather than running without a bus task.
-- ESPHome exposes discovery, not a guarded commissioning workflow.
+- The ESPHome TCP diagnostic shell exposes the shared guarded `commission` verb
+  only when `allow_commissioning: true`; the Home Assistant text command surface
+  still blocks raw commissioning primitives and has no dedicated workflow entity.
 - `esphome/dali_esphome.h` is an unused legacy placeholder.
 
 ### Next-release API migrations
+
+The RX-observation and cleanup work changes public source interfaces. External
+callers must update `DaliPhyRxCallback` to receive `DaliPhyRxObservation`;
+`DaliSchedOps` appends `get_last_tx_end_us`, and `DaliTransport` appends
+`transact_cleanup`. `dali_stats_t` gains `reply_rx_activity`,
+`DaliCommissioningResult` gains termination/cleanup state, and `DaliError` gains
+`DALI_ERR_RX_ACTIVITY`. Existing designated initializers remain valid for the
+appended optional callbacks, but positional initializers and callback adapters
+must be rebuilt and reviewed.
 
 The corrected input-configuration surface intentionally removes invalid generic
 timer/hysteresis/deadtime aliases and non-standard Part 301/304 APIs. C callers
@@ -957,29 +997,26 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 
 ### P0 — Protocol correctness and conformance
 
-- Complete bus timing beyond the local own-forward-frame guard: export reliable
-  backward/external frame-end timestamps, implement DALI-2 priority/backoff and
-  collision/intervening-frame handling, and add a deadline-aware PHY call if a
-  repeat that crosses the 100 ms limit must be suppressed rather than transmitted
-  and reported late.
-- Fix the COMPARE collision inversion. When two or more unaddressed devices
-  answer COMPARE at once, the overlapping backward frames usually fail Manchester
-  decode; the PHY drops them before the scheduler sees anything, so the reply
-  window times out and `dali_commissioning_compare()` reports NO. The binary
-  search then walks past real devices, which makes commissioning dependable only
-  with a single unaddressed device on the bus. IEC 62386-102 requires undecodable
-  reply-window activity to count as YES, so this needs a new PHY signal for
-  "activity detected but not decodable" that the scheduler can surface as a
-  distinct result.
+- Complete and prove bus timing beyond the local own-forward-frame guard. Precise
+  TX-end and backward/malformed observation timestamps are now exported and
+  host-tested; HIL must validate their 7--27 ms attribution, physical collision
+  behavior, and external-frame cases. DALI-2 priority/backoff remains open, as
+  does a deadline-aware PHY call when a repeat would cross the 100 ms limit.
+- Validate the COMPARE collision fix on hardware. Qualified undecodable activity
+  in the reply window now reaches commissioning as `DALI_ERR_RX_ACTIVITY` and
+  counts as YES; ambiguous activity or overflow fails closed instead of becoming
+  silence. Host vectors cover the plumbing and prevent a phantom NO, but no
+  overlapping backward-frame capture proves the heuristic yet. Keep the
+  single-unaddressed-device warning until HIL exercises real collisions.
 - Confirm the post-RANDOMIZE settle time against the standard text, then verify a
   commissioning run on a bus. `DALI_COMMISSIONING_RANDOMISE_SETTLE_MS` was raised
   from 15 ms to 100 ms on 2026-08-24 on the strength of Espressif's `esp_dali`
   citing IEC 62386-102 §11.3 for the time gear needs to generate a 24-bit random
   address; the clause has not been read here, and no commissioning run has
   happened since the change. If 15 ms was genuinely too short, gear could have
-  been unsearchable at the first COMPARE, which presents exactly like the COMPARE
-  inversion above — so a visible improvement here would look like a partial fix
-  for that and would not be one.
+  been unsearchable at the first COMPARE, which presents exactly like the former
+  silence/collision inversion — so a visible improvement here would look like a
+  partial fix for that and would not be one.
 - Add the Part 103 device-level quiescent-mode commands — `0x1D` START, `0x1E`
   STOP, both send-twice, instance byte `0xFE` — to the command table, with
   builders in `dali_input_device` and an `iconfig quiescent on|off [addr|all]`
@@ -994,8 +1031,8 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   `DaliSequenceStep` has no delay field — so this belongs as its own sequence run
   around `commissioning_start_unaddressed()` and `commissioning_finish()` rather
   than as extra steps in the start sequence, whose atomicity exists to hold
-  dependent pairs together. It reduces how often the search is disturbed; it does
-  not make a collided reply readable, so the COMPARE inversion above stays open.
+  dependent pairs together. It reduces false frame-like activity from control
+  devices; physical collision classification and HIL validation remain open.
 - Strengthen commissioning collision handling, equal-random-address recovery, and
   the separation of gear and control-device address spaces.
 
@@ -1158,8 +1195,9 @@ below for what changed for an operator.
   light traits after native CLI and hardware validation.
 - Add typed Part 303/type 3 occupancy/binary-sensor and Part 304/type 4
   illuminance profiles.
-- Add guarded commissioning to ESPHome only after shared commissioning is robust;
-  otherwise retain commissioning as a native diagnostic workflow.
+- Add a dedicated Home Assistant commissioning workflow/UI only after the shared
+  path is hardware-proven. The ESPHome TCP diagnostic shell already exposes the
+  shared guarded verb behind `allow_commissioning: true`.
 - Improve scene/fade UX. A level-changing command now arms a deferred re-read,
   but the refresh it triggers is a full pass over every light entity rather than
   a query of the one that moved, and nothing reads a final value after a

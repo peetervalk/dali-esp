@@ -46,6 +46,24 @@ static DaliError send_special_no_reply(const DaliDiscoveryTransport *transport,
     return transact_frame(transport, &frame, false, 0u, send_twice, NULL);
 }
 
+static DaliError send_special_cleanup_no_reply(
+    const DaliDiscoveryTransport *transport,
+    DaliCommandId id,
+    uint8_t param)
+{
+    DaliFrame frame;
+    DaliError err = dali_build_special(id, param, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+    return dali_transport_transact_cleanup(transport,
+                                           &frame,
+                                           false,
+                                           0u,
+                                           false,
+                                           NULL);
+}
+
 static DaliError query_special_u8(const DaliDiscoveryTransport *transport,
                                   DaliCommandId id,
                                   uint8_t param,
@@ -262,13 +280,28 @@ static DaliError answer_from_sequence(const DaliSequenceResult *result,
         return DALI_ERR_MALFORMED;
     }
 
-    *yes_out = dali_is_yes((uint8_t)(reply.data & 0xFFu));
+    if (!dali_is_yes((uint8_t)(reply.data & 0xFFu))) {
+        /* COMPARE/VERIFY encode NO as silence. A decoded non-YES backward
+         * frame is observed but invalid traffic, not a legitimate NO. */
+        return DALI_ERR_MALFORMED;
+    }
+    *yes_out = true;
     return DALI_OK;
 }
 
 DaliError dali_commissioning_compare_from_sequence(const DaliSequenceResult *result,
                                                    bool *yes_out)
 {
+    if (result == NULL || yes_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    if (result->result == DALI_ERR_RX_ACTIVITY &&
+        result->failed_step ==
+            DALI_COMMISSIONING_SEARCH_COMPARE_STEP_COMPARE) {
+        *yes_out = true;
+        return DALI_OK;
+    }
+
     return answer_from_sequence(result,
                                 DALI_COMMISSIONING_SEARCH_COMPARE_STEP_COMPARE,
                                 yes_out);
@@ -351,11 +384,18 @@ DaliError dali_commissioning_compare(const DaliDiscoveryTransport *transport,
         *yes_out = false;
         return DALI_OK;
     }
+    if (err == DALI_ERR_RX_ACTIVITY) {
+        *yes_out = true;
+        return DALI_OK;
+    }
     if (err != DALI_OK) {
         return err;
     }
 
-    *yes_out = dali_is_yes(raw);
+    if (!dali_is_yes(raw)) {
+        return DALI_ERR_MALFORMED;
+    }
+    *yes_out = true;
     return DALI_OK;
 }
 
@@ -456,7 +496,10 @@ DaliError dali_commissioning_verify_short_address(
         return err;
     }
 
-    *verified_out = dali_is_yes(raw);
+    if (!dali_is_yes(raw)) {
+        return DALI_ERR_MALFORMED;
+    }
+    *verified_out = true;
     return DALI_OK;
 }
 
@@ -535,23 +578,38 @@ static uint8_t count_free_addresses(uint64_t used_mask, uint8_t first_address)
 static DaliError commissioning_finish(const DaliDiscoveryTransport *transport);
 
 static DaliError commissioning_start_unaddressed(
-    const DaliDiscoveryTransport *transport)
+    const DaliDiscoveryTransport *transport,
+    bool *termination_required_out)
 {
+    if (termination_required_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    *termination_required_out = false;
+
     DaliSequence seq;
     DaliError err = dali_commissioning_build_start_sequence(&seq);
     if (err != DALI_OK) {
         return err;
     }
 
+    /* A transport with no atomic-sequence entry point is known not to have
+     * admitted any opening frame. Preserve the no-traffic rejection contract;
+     * only an actual callback hand-off makes progress uncertain. */
+    if (!dali_transport_supports_atomic_sequence(transport)) {
+        return DALI_ERR_INVALID;
+    }
+
+    /*
+     * Once the opening sequence is handed to an atomic transport, a local
+     * timeout can no longer prove that INITIALISE did not reach the bus: the
+     * admitted sequence may already be active or may complete after the waiter
+     * gives up. TERMINATE is harmless before INITIALISE, so unwind
+     * conservatively on every return from the transport.
+     */
+    *termination_required_out = true;
     DaliSequenceResult result;
     err = dali_transport_run_sequence_atomic(transport, &seq, &result);
     if (err != DALI_OK) {
-        /* Once INITIALISE has been attempted the gear may be in initialisation
-         * state, where it stays for fifteen minutes. Failing out without a
-         * TERMINATE would leave it there with nothing on the bus aware of it. */
-        if (result.steps_run > DALI_COMMISSIONING_START_STEP_INITIALISE) {
-            (void)commissioning_finish(transport);
-        }
         return err;
     }
 
@@ -565,7 +623,7 @@ static DaliError commissioning_start_unaddressed(
 
 static DaliError commissioning_finish(const DaliDiscoveryTransport *transport)
 {
-    return send_special_no_reply(transport, DALI_CMD_TERMINATE, 0u, false);
+    return send_special_cleanup_no_reply(transport, DALI_CMD_TERMINATE, 0u);
 }
 
 /* Assign one short address and read back the confirmation, with nothing able to
@@ -600,6 +658,7 @@ DaliError dali_commissioning_commission_unaddressed(
 
     memset(out, 0, sizeof(*out));
     out->last_error = DALI_OK;
+    out->cleanup_error = DALI_OK;
 
     uint64_t used_mask = options->used_address_mask;
     out->free_address_count = count_free_addresses(used_mask,
@@ -620,11 +679,16 @@ DaliError dali_commissioning_commission_unaddressed(
         requested_count = out->free_address_count;
     }
 
-    DaliError err = commissioning_start_unaddressed(transport);
+    bool termination_required = false;
+    DaliError err = commissioning_start_unaddressed(
+        transport,
+        &termination_required);
+    out->termination_required = termination_required;
     if (err != DALI_OK) {
         out->last_error = err;
-        return err;
+        goto cleanup;
     }
+    out->termination_required = true;
     emit_progress(progress_cb,
                   progress_ctx,
                   DALI_COMMISSIONING_EVENT_INITIALISED,
@@ -659,8 +723,7 @@ DaliError dali_commissioning_commission_unaddressed(
                                                           &found);
         if (err != DALI_OK) {
             out->last_error = err;
-            (void)commissioning_finish(transport);
-            return err;
+            goto cleanup;
         }
         if (!found) {
             out->no_more_devices = true;
@@ -684,13 +747,12 @@ DaliError dali_commissioning_commission_unaddressed(
         err = program_and_verify(transport, short_address, &verified);
         if (err != DALI_OK) {
             out->last_error = err;
-            (void)commissioning_finish(transport);
-            return err;
+            goto cleanup;
         }
         if (!verified) {
-            out->last_error = DALI_ERR_MALFORMED;
-            (void)commissioning_finish(transport);
-            return DALI_ERR_MALFORMED;
+            err = DALI_ERR_MALFORMED;
+            out->last_error = err;
+            goto cleanup;
         }
 
         DaliCommissioningAssignment *assignment =
@@ -706,8 +768,7 @@ DaliError dali_commissioning_commission_unaddressed(
             err = dali_commissioning_query_short_address(transport, &encoded);
             if (err != DALI_OK) {
                 out->last_error = err;
-                (void)commissioning_finish(transport);
-                return err;
+                goto cleanup;
             }
 
             assignment->query_short_raw = encoded;
@@ -716,9 +777,9 @@ DaliError dali_commissioning_commission_unaddressed(
                 &assignment->query_short_address);
             if (err != DALI_OK ||
                 assignment->query_short_address != short_address) {
-                out->last_error = DALI_ERR_MALFORMED;
-                (void)commissioning_finish(transport);
-                return DALI_ERR_MALFORMED;
+                err = DALI_ERR_MALFORMED;
+                out->last_error = err;
+                goto cleanup;
             }
             assignment->has_query_short = true;
         }
@@ -726,8 +787,7 @@ DaliError dali_commissioning_commission_unaddressed(
         err = send_special_no_reply(transport, DALI_CMD_WITHDRAW, 0u, false);
         if (err != DALI_OK) {
             out->last_error = err;
-            (void)commissioning_finish(transport);
-            return err;
+            goto cleanup;
         }
 
         used_mask |= ((uint64_t)1u << short_address);
@@ -741,17 +801,32 @@ DaliError dali_commissioning_commission_unaddressed(
                       out->assigned_count);
     }
 
-    err = commissioning_finish(transport);
-    if (err != DALI_OK) {
-        out->last_error = err;
-        return err;
+cleanup:
+    if (out->termination_required) {
+        out->termination_attempted = true;
+        out->cleanup_error = commissioning_finish(transport);
+        out->terminate_tx_succeeded = out->cleanup_error == DALI_OK;
+        out->initialisation_state_unknown =
+            !out->terminate_tx_succeeded;
+        if (out->terminate_tx_succeeded) {
+            emit_progress(progress_cb,
+                          progress_ctx,
+                          DALI_COMMISSIONING_EVENT_TERMINATED,
+                          0u,
+                          0u,
+                          out->assigned_count);
+        }
     }
-    emit_progress(progress_cb,
-                  progress_ctx,
-                  DALI_COMMISSIONING_EVENT_TERMINATED,
-                  0u,
-                  0u,
-                  out->assigned_count);
 
+    /* A cleanup failure is secondary when another operation already failed.
+     * Keep that primary result as the return value and expose the unwind
+     * outcome independently in cleanup_error/initialisation_state_unknown. */
+    if (out->last_error != DALI_OK) {
+        return out->last_error;
+    }
+    if (out->cleanup_error != DALI_OK) {
+        out->last_error = out->cleanup_error;
+        return out->cleanup_error;
+    }
     return DALI_OK;
 }

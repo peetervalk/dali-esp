@@ -1,6 +1,6 @@
 # DALI Capability Matrix
 
-**Last reviewed:** 2026-08-14
+**Last reviewed:** 2026-08-25
 
 One question per row: for a given DALI capability, what exists in the reusable C
 stack, whether the CLI exposes it, whether an independent host vector covers it,
@@ -84,13 +84,24 @@ cached level profile and triggers a refresh.
 | Identify blink | n/a | `identify` | no | yes | yes (button, shell) |
 | Smoke check | n/a | `smoke` | no | yes | shell |
 
-Commissioning is dependable only with a single unaddressed device on the bus; the
-COMPARE collision inversion recorded in `current_status.md` is unfixed.
+The host suite now carries timestamped RX observations from the PHY into the
+scheduler. Frame-like undecodable activity in an active reply window becomes
+`DALI_ERR_RX_ACTIVITY`; COMPARE alone interprets it as YES, while ordinary
+queries retain the ambiguity as an error. The same host coverage asserts that a
+cancelled commissioning workflow uses a safety transport to attempt TERMINATE
+despite the latched front-end abort, and reports a failed cleanup separately.
+
+That is host evidence, not a real-bus multi-device result. Commissioning remains
+limited operationally to one unaddressed control gear at a time until the
+multi-device path is exercised on hardware. Part 103 START/STOP QUIESCENT MODE,
+equal-random-address recovery, and arbitration against another bus master remain
+open.
 
 The shell rows are the same code the native CLI runs, reached through
-`esphome/components/dali/dali_shell_tcp.cpp`. `commission` and the nine
-commissioning primitives are refused there unless the YAML sets
-`allow_commissioning: true`, because the port is unauthenticated.
+`esphome/components/dali/dali_shell_tcp.cpp`. Its commissioning entry point is
+`commission unaddressed [first] [max]`; that verb and the nine commissioning
+primitives are refused over TCP unless the YAML sets `allow_commissioning: true`,
+because the port is unauthenticated.
 
 The shell was flashed and run against a real bus on 2026-08-14 in `v1.1.1`:
 discover, identify, live trace, rolling capture, and JSON export were exercised

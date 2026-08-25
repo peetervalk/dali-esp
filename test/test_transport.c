@@ -26,6 +26,7 @@ static uint8_t   s_fail_on_frame;   /* 1-based; 0 disables */
 static uint8_t   s_sequence_calls;
 static DaliSequence s_last_sequence;
 static bool      s_sequence_writes_result;
+static uint8_t   s_cleanup_calls;
 
 void setUp(void)
 {
@@ -42,6 +43,7 @@ void setUp(void)
     s_sequence_calls = 0u;
     memset(&s_last_sequence, 0, sizeof(s_last_sequence));
     s_sequence_writes_result = true;
+    s_cleanup_calls = 0u;
 }
 
 void tearDown(void) {}
@@ -105,6 +107,22 @@ static DaliError mock_transact_sequence(const DaliSequence *seq,
     return DALI_OK;
 }
 
+static DaliError mock_cleanup_transact(const DaliFrame *frame,
+                                       bool needs_reply,
+                                       uint8_t retries_left,
+                                       bool send_twice,
+                                       DaliFrame *reply_out,
+                                       void *ctx)
+{
+    s_cleanup_calls++;
+    return mock_transact(frame,
+                         needs_reply,
+                         retries_left,
+                         send_twice,
+                         reply_out,
+                         ctx);
+}
+
 static DaliTransport frame_only_transport(void)
 {
     return (DaliTransport){ .transact = mock_transact };
@@ -153,6 +171,47 @@ void test_transport_validity_and_capability(void)
     TEST_ASSERT_TRUE(dali_transport_supports_atomic_sequence(&atomic));
     TEST_ASSERT_FALSE(dali_transport_supports_atomic_sequence(&sequence_only));
     TEST_ASSERT_FALSE(dali_transport_supports_atomic_sequence(NULL));
+}
+
+void test_cleanup_transaction_prefers_dedicated_callback(void)
+{
+    DaliTransport transport = frame_only_transport();
+    transport.transact_cleanup = mock_cleanup_transact;
+    DaliFrame frame = { .data = 0xA100u, .bit_length = 16u };
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_transport_transact_cleanup(&transport,
+                                                      &frame,
+                                                      false,
+                                                      0u,
+                                                      false,
+                                                      NULL));
+    TEST_ASSERT_EQUAL_UINT8(1u, s_cleanup_calls);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_frame_count);
+    TEST_ASSERT_EQUAL_HEX32(0xA100u, s_frames[0].data);
+}
+
+void test_cleanup_transaction_falls_back_to_normal_transport(void)
+{
+    DaliTransport transport = frame_only_transport();
+    DaliFrame frame = { .data = 0xA100u, .bit_length = 16u };
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_transport_transact_cleanup(&transport,
+                                                      &frame,
+                                                      false,
+                                                      0u,
+                                                      false,
+                                                      NULL));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_cleanup_calls);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_frame_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_transport_transact_cleanup(NULL,
+                                                      &frame,
+                                                      false,
+                                                      0u,
+                                                      false,
+                                                      NULL));
 }
 
 /* ---------------------------------------------------------------------------
@@ -419,6 +478,8 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_transport_validity_and_capability);
+    RUN_TEST(test_cleanup_transaction_prefers_dedicated_callback);
+    RUN_TEST(test_cleanup_transaction_falls_back_to_normal_transport);
     RUN_TEST(test_run_sequence_delegates_when_transport_is_atomic);
     RUN_TEST(test_run_sequence_seeds_result_before_delegating);
     RUN_TEST(test_run_sequence_atomic_delegates_as_one_group);

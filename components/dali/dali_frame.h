@@ -19,6 +19,15 @@
 /* Confirmed from IEC 62386-101 */
 #define DALI_SETTLE_MS                2u    /* RX self-echo suppression after TX */
 #define DALI_REPLY_TIMEOUT_MS        25u    /* max wait for backward frame (ms) — 22 ms spec + 3 ms margin */
+#define DALI_REPLY_WINDOW_OPEN_US   7000u   /* earliest accepted reply activity */
+/* The scheduler starts its 25 ms wait after the 2 ms TX/RX handoff. Keep that
+ * existing effective deadline while attributing timestamped RX observations. */
+#define DALI_REPLY_WINDOW_CLOSE_US (((uint32_t)DALI_SETTLE_MS + (uint32_t)DALI_REPLY_TIMEOUT_MS) * 1000u)
+/* Reject isolated pulses as commissioning replies. A corrupted backward frame
+ * must still span the first edge through the final data-bit region at the
+ * decoder's -25% timing tolerance, and contain several real transitions. */
+#define DALI_BACKWARD_ACTIVITY_MIN_SPAN_US ((DALI_HALF_BIT_US * 17u * 3u) / 4u)
+#define DALI_BACKWARD_ACTIVITY_MIN_EDGES 4u
 #define DALI_MAX_RETRIES              3u    /* send attempts before offline    */
 #define DALI_SEND_TWICE_WINDOW_MS   100u    /* max gap between repeated sends  */
 /* DALI_HALF_BIT_US rounds nominal Te upward, making this 22 Te guard 9174 µs. */
@@ -103,6 +112,7 @@ typedef enum {
     DALI_ERR_CANCELLED  = 9,    /* queued/active work cancelled by reset      */
     DALI_ERR_INTERVENED = 10,   /* another forward frame invalidated a reply  */
     DALI_ERR_FULL       = 11,   /* fixed-capacity registration table is full  */
+    DALI_ERR_RX_ACTIVITY = 12,  /* reply-window activity was not decodable    */
 } DaliError;
 
 /* ---------------------------------------------------------------------------
@@ -137,6 +147,8 @@ typedef struct {
      * without a positive counter an integration cannot tell a bus that is
      * currently stuck from one that failed once an hour ago and works now. */
     volatile uint32_t tx_frames_ok;
+    /* Undecodable PHY observations attributed to an active reply window. */
+    volatile uint32_t reply_rx_activity;
 } dali_stats_t;
 
 /* Global stats instance — defined in dali_phy.c, read everywhere */

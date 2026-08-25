@@ -3,7 +3,7 @@
 Every verb, its arguments, and its named command tables, for both surfaces that
 accept typed commands.
 
-**Last reviewed:** 2026-08-14
+**Last reviewed:** 2026-08-25
 
 Frame layouts and opcodes are in `dali_protocol.md`. Per-capability status —
 shared API, host vector, real-bus result, exposure — is in
@@ -668,14 +668,36 @@ smoke <addr>                            # read/write/read-back check
 commission unaddressed [first] [max]    # assign short addresses
 ```
 
-Commissioning is dependable only with a single unaddressed device on the bus: the
-COMPARE collision inversion recorded in `current_status.md` is unfixed. Over TCP,
-`commission` and the nine commissioning specials are refused unless the YAML sets
-`allow_commissioning: true`, because the port is unauthenticated. See
+Commissioning remains hardware-dependable only with a single unaddressed device
+on the bus. The receive path now attributes observations to the precise
+TX-end-relative 7–27 ms reply window and distinguishes three cases during
+`COMPARE`:
+
+- silence is NO;
+- qualified, response-like malformed activity is `DALI_ERR_RX_ACTIVITY`, which
+  `COMPARE` alone treats as YES;
+- ambiguous malformed activity or RX overflow is an error and aborts the run.
+
+This fixes the software-side collision inversion recorded in `current_status.md`,
+but overlapping replies and the activity qualifier have host coverage only; they
+have not been validated as physical-bus collision detection. Do not rely on
+multi-device commissioning until that hardware validation is complete. Part 103
+`START QUIESCENT MODE` / `STOP QUIESCENT MODE` bracketing also remains open, so
+active input devices or other bus traffic can interfere with a commissioning run.
+
+Over TCP, `commission` and the nine commissioning specials are refused unless the
+YAML sets `allow_commissioning: true`, because the port is unauthenticated. See
 `commissioning_readme.md` for the workflow.
 
 A long verb prints as it goes and holds the bus for as long as it runs.
-Disconnecting drops it: the device notices between bus steps and stops.
+Cancellation or a TCP disconnect is noticed between ordinary bus steps. Once the
+opening atomic sequence has been handed to the transport, however, `INITIALISE`
+may already have reached the bus. Cleanup therefore bypasses the cancellation
+gate and attempts a final Part 102 `TERMINATE` before returning. The original
+operation error remains primary; if the cleanup transmission also fails, the
+shell reports that separately and warns that the initialisation state is unknown.
+`TERMINATE` is cancellation-safe in the sense that it is still attempted, not
+that delivery can be guaranteed after a bus or transport failure.
 
 ## Diagnostics
 

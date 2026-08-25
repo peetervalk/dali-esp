@@ -3,7 +3,7 @@
 Frame layouts, opcode tables, and standard behaviour, mapped to what this
 project implements. It is not a replacement for IEC 62386.
 
-**Last reviewed:** 2026-08-24
+**Last reviewed:** 2026-08-25
 
 For the verbs that send these frames, see `dali_commands.md`. For what has been
 run against real gear, see `dali_capability_matrix.md`.
@@ -61,8 +61,41 @@ than as lines a user is expected to type quickly.
 
 All locally generated forward frames share the same rounded 22 Te minimum gap.
 This is not DALI-2 priority/backoff or multi-master arbitration: the scheduler
-cannot prove that an external command did not intervene, and it does not derive
-backward/external-frame gaps from a PHY frame-end timestamp.
+cannot prove that an external command did not intervene. The PHY now exports the
+precise ISR timestamp at which its own transmission released the bus, but the
+scheduler does not yet derive backward/external-frame gaps or full arbitration
+state from externally received frames.
+
+### Timestamped RX observations and reply outcomes
+
+The receive ISR still follows the buffer-first rule: it records edges into the
+fixed ring, and task context decodes them. The decoder now reports an observation
+containing the decode result, edge count, and first/last edge timestamps. Those
+timestamps are a wrapping 32-bit microsecond clock quantised to 2 us. A successful
+local transmission separately records its precise end timestamp in the TX ISR.
+Unsigned deltas make attribution wrap-safe; task scheduling latency does not move
+an observation into or out of a reply window.
+
+For a transaction that expects a backward reply, the whole observation must be
+attributable to the interval from 7,000 us through 27,000 us after that precise
+TX end: its first edge cannot precede the opening and its last edge cannot exceed
+the closing. The outcomes are deliberately three-way rather than treating every
+decode failure as either a reply or silence:
+
+| Observation in the attributed window | Scheduler result | Meaning |
+|---|---|---|
+| Valid 8-bit backward frame | `DALI_OK` | Decoded reply |
+| Qualified, response-like malformed waveform | `DALI_ERR_RX_ACTIVITY` | Something answered, but its byte could not be decoded |
+| Malformed activity that does not meet the response-like qualification, or RX overflow | The corresponding malformed/overflow error | Ambiguous observation; abort rather than inventing an answer |
+| No observation | `DALI_ERR_TIMEOUT` | Silence |
+| Valid 16- or 24-bit forward frame | Intervention error | Another forward transaction occupied the reply window |
+
+`DALI_ERR_RX_ACTIVITY` is not a general yes response. Only the Part 102 `COMPARE`
+operation maps it to YES, because overlapping affirmative backward replies may be
+undecodable; silence maps to NO. `VERIFY SHORT ADDRESS`, ordinary queries, and all
+other callers preserve it as an error. The classification has host coverage, but
+the response-like thresholds and overlapping-reply behaviour have not yet been
+validated with physical collision captures or hardware-in-the-loop tests.
 
 ## Control Gear — IEC 62386-102
 
@@ -380,7 +413,10 @@ generic deadband.
 ## Cross-Part Interference
 
 Control gear and control devices share one bus, and each part's commissioning
-sequence can disturb the other's. None of this is handled here today. It is
+sequence can disturb the other's. Timestamped reply attribution does not solve
+this: Part 103 `START QUIESCENT MODE` / `STOP QUIESCENT MODE` bracketing is not
+implemented, so active control-device traffic can still disturb a Part 102
+commissioning run. It is
 recorded because it is a plausible explanation for phantom devices in a
 mixed-installation binary search, and because it is separate from the COMPARE
 collision problem rather than another face of it.
@@ -477,13 +513,17 @@ Steinel HF 360 II memory-bank layout and its tuning workflow are in
 | Bit period | ~833.3 us |
 | Half-bit period | ~416.7 us |
 | TX-to-RX settle suppression | 2 ms |
-| Reply window opens | 7 ms |
-| Reply timeout | 25 ms |
+| Timestamped reply attribution opens | 7 ms after precise local TX end |
+| Timestamped reply attribution closes | 27 ms after precise local TX end |
+| Scheduler reply wait after TX handoff | 25 ms |
 | Send-twice window | 100 ms |
 | Post-RANDOMIZE settle, before the first COMPARE | 100 ms |
 
 Every row above except the last is frame-level timing the PHY and scheduler
-enforce. The RANDOMIZE settle is a commissioning-sequence delay in
+enforce. The 2 ms handoff suppression plus the 25 ms reply wait gives the precise
+TX-end-relative 27 ms attribution close; observations are accepted by their
+captured edge timestamps, not by when task context delivers them. The RANDOMIZE
+settle is a commissioning-sequence delay in
 `dali_commissioning`, raised from 15 ms on 2026-08-24 to match the figure
 Espressif's `esp_dali` attributes to IEC 62386-102 §11.3. Unconfirmed against the
 standard text and unexercised on a bus since the change.

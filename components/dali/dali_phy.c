@@ -37,7 +37,8 @@ dali_stats_t g_dali_stats;
 
 /* ---------------------------------------------------------------------------
  * RX ring buffer storage
- * Each entry packs: bits[31:1] = timestamp_us (31-bit), bit[0] = edge level
+ * Each entry packs a 32-bit wrapping timestamp at 2 us resolution in bits
+ * [31:1], with bit[0] holding the edge level.
  * --------------------------------------------------------------------------*/
 static uint32_t s_rx_edge_buf[DALI_RX_EDGE_BUFFER_SIZE];
 static DaliRingBuf s_rx_rb;
@@ -59,7 +60,8 @@ static uint8_t  s_rx_edge_levels[DALI_PHY_RXDEBUG_MAX_EDGES];
 static uint8_t  s_rx_interval_count;
 static uint8_t  s_rx_edge_count;
 static uint8_t  s_rx_last_edge_level;
-static uint32_t s_rx_last_edge_ts_us;   /* 31-bit wrapped µs timestamp */
+static uint32_t s_rx_first_edge_ts_us;
+static uint32_t s_rx_last_edge_ts_us;
 static bool     s_rx_in_frame;           /* currently accumulating edges */
 
 static DaliPhyRxDebugSnapshot s_rx_debug_snapshot;
@@ -78,11 +80,16 @@ static uint8_t  s_tx_half_bit_idx;
 static volatile DaliPhyTxState s_tx_state;
 static volatile uint8_t        s_tx_tick_count; /* counts 0..3 per half-bit  */
 
-#define RX_TS_MASK       0x7FFFFFFFu
-#define RX_TS_HALF_RANGE 0x40000000u
+#define RX_TS_VALUE_MASK 0xFFFFFFFEu
+#define RX_TS_HALF_RANGE 0x80000000u
 
 static volatile uint8_t  s_rx_settle_suppression_active;
 static volatile uint32_t s_rx_suppress_until_us;
+static volatile uint32_t s_rx_ring_overflow_ts_us;
+static volatile uint32_t s_rx_ring_overflow_generation;
+static uint32_t          s_rx_ring_overflow_seen;
+static volatile uint8_t  s_last_tx_end_valid;
+static volatile uint32_t s_last_tx_end_us;
 
 /* Task to notify when TX completes */
 #ifndef DALI_HOST_BUILD
@@ -142,7 +149,7 @@ static portMUX_TYPE s_rx_debug_mux = portMUX_INITIALIZER_UNLOCKED;
 #ifndef DALI_HOST_BUILD
 static bool IRAM_ATTR rx_ts_not_after(uint32_t now_us, uint32_t deadline_us)
 {
-    return ((deadline_us - now_us) & RX_TS_MASK) < RX_TS_HALF_RANGE;
+    return (deadline_us - now_us) < RX_TS_HALF_RANGE;
 }
 
 static bool IRAM_ATTR rx_settle_suppression_active(uint32_t now_us)
@@ -230,6 +237,23 @@ static void rx_debug_store(DaliError error)
     RX_DEBUG_EXIT();
 }
 
+static void rx_emit_observation(DaliError result, const DaliFrame *frame)
+{
+    if (s_rx_callback == NULL) {
+        return;
+    }
+
+    DaliPhyRxObservation observation = {
+        .result          = result,
+        .frame           = frame != NULL ? *frame : (DaliFrame){0u, 0u},
+        .first_edge_us   = s_rx_first_edge_ts_us,
+        .last_edge_us    = s_rx_last_edge_ts_us,
+        .edge_count      = s_rx_edge_count,
+        .has_timestamps  = true,
+    };
+    s_rx_callback(&observation, s_rx_callback_ctx);
+}
+
 static void complete_rx_frame(void)
 {
     if (!s_rx_in_frame || s_rx_interval_count == 0u) {
@@ -247,12 +271,11 @@ static void complete_rx_frame(void)
     if (err == DALI_OK) {
         ESP_LOGD(TAG, "RX frame: 0x%"PRIx32" (%u bits)",
                  frame.data, (unsigned)frame.bit_length);
-        if (s_rx_callback != NULL) {
-            s_rx_callback(&frame, s_rx_callback_ctx);
-        }
+        rx_emit_observation(DALI_OK, &frame);
     } else {
         rx_debug_store(err);
         g_dali_stats.malformed_frames++;
+        rx_emit_observation(err, NULL);
         ESP_LOGD(TAG, "RX decode error %d (%u intervals)",
                  (int)err, (unsigned)s_rx_interval_count);
     }
@@ -492,9 +515,11 @@ static bool IRAM_ATTR dali_phy_tx_isr(gptimer_handle_t timer,
         /* Arm the settle-suppression window from the ISR so the deadline is
          * precise (no FreeRTOS scheduling jitter).  The window must expire
          * well before the 7 ms DALI minimum answer time. */
-        uint32_t ts_us = (uint32_t)(esp_timer_get_time() & RX_TS_MASK);
-        s_rx_suppress_until_us = (ts_us + (uint32_t)DALI_SETTLE_MS * 1000u) & RX_TS_MASK;
+        uint32_t ts_us = (uint32_t)esp_timer_get_time() & RX_TS_VALUE_MASK;
+        s_last_tx_end_us = ts_us;
+        s_rx_suppress_until_us = ts_us + (uint32_t)DALI_SETTLE_MS * 1000u;
         __asm__ __volatile__("" ::: "memory");
+        s_last_tx_end_valid = 1u;
         s_rx_settle_suppression_active = 1u;
 
         s_tx_state = DALI_PHY_TX_DONE;
@@ -522,9 +547,9 @@ static void IRAM_ATTR dali_phy_rx_isr(void *arg)
 {
     (void)arg;
 
-    /* Pack timestamp (µs, lower 31 bits) and level into one uint32_t */
+    /* Quantise the timestamp to 2 us so its low bit can carry the level. */
     int64_t  ts_raw   = esp_timer_get_time();
-    uint32_t ts_us    = (uint32_t)(ts_raw & RX_TS_MASK);
+    uint32_t ts_us    = (uint32_t)ts_raw & RX_TS_VALUE_MASK;
 
     if (tx_rx_suppression_active()) {
         g_dali_stats.rx_self_echo_suppressed++;
@@ -537,11 +562,14 @@ static void IRAM_ATTR dali_phy_rx_isr(void *arg)
     }
 
     uint32_t level    = (uint32_t)rx_bus_level_from_pin();
-    uint32_t entry    = (ts_us << 1u) | (level & 0x01u);
+    uint32_t entry    = ts_us | (level & 0x01u);
 
     DaliError err = dali_rb_push_from_isr(&s_rx_rb, entry);
     if (err != DALI_OK) {
         g_dali_stats.rx_overflow++;
+        s_rx_ring_overflow_ts_us = ts_us;
+        __asm__ __volatile__("" ::: "memory");
+        s_rx_ring_overflow_generation++;
     }
 }
 #endif /* !DALI_HOST_BUILD */
@@ -566,10 +594,17 @@ DaliError dali_phy_init(uint8_t tx_gpio, uint8_t rx_gpio)
     s_isr_active        = 0u;
     s_rx_settle_suppression_active = 0u;
     s_rx_suppress_until_us         = 0u;
+    s_rx_ring_overflow_ts_us       = 0u;
+    s_rx_ring_overflow_generation  = 0u;
+    s_rx_ring_overflow_seen        = 0u;
+    s_last_tx_end_valid            = 0u;
+    s_last_tx_end_us               = 0u;
     s_rx_in_frame       = false;
     s_rx_interval_count = 0u;
     s_rx_edge_count     = 0u;
     s_rx_last_edge_level = 0u;
+    s_rx_first_edge_ts_us = 0u;
+    s_rx_last_edge_ts_us  = 0u;
     rx_debug_clear();
 
 #ifndef DALI_HOST_BUILD
@@ -743,11 +778,21 @@ DaliError dali_phy_tx(const DaliFrame *frame)
     return DALI_OK;
 }
 
+DaliError dali_phy_get_last_tx_end_us(uint32_t *timestamp_out)
+{
+    if (timestamp_out == NULL || s_last_tx_end_valid == 0u) {
+        return DALI_ERR_INVALID;
+    }
+
+    *timestamp_out = s_last_tx_end_us;
+    return DALI_OK;
+}
+
 void dali_phy_rx_process(void)
 {
     /*
-     * Drain the RX ring buffer.  Each entry: bits[31:1] = timestamp_us,
-     * bit[0] = bus level after the edge.
+     * Drain the RX ring buffer. Each entry carries an even microsecond
+     * timestamp plus the bus level in bit 0.
      *
      * Accumulate edge-to-edge intervals.  When the bus has been silent
      * past a legal full-bit interval after the last edge, the frame is
@@ -759,7 +804,7 @@ void dali_phy_rx_process(void)
      */
     uint32_t entry;
     while (dali_rb_pop(&s_rx_rb, &entry) == DALI_OK) {
-        uint32_t ts_us = entry >> 1u;
+        uint32_t ts_us = entry & RX_TS_VALUE_MASK;
         uint8_t  level = (uint8_t)(entry & 0x01u);
         if (!s_rx_in_frame) {
             if (level != 0u) {
@@ -772,10 +817,11 @@ void dali_phy_rx_process(void)
             s_rx_edge_count      = 1u;
             s_rx_edge_levels[0]  = level;
             s_rx_last_edge_level = level;
+            s_rx_first_edge_ts_us = ts_us;
             s_rx_last_edge_ts_us = ts_us;
         } else {
-            /* Compute interval; handle 31-bit counter wrap. */
-            uint32_t iv = (ts_us - s_rx_last_edge_ts_us) & 0x7FFFFFFFu;
+            /* Unsigned subtraction handles the wrapping 32-bit clock. */
+            uint32_t iv = ts_us - s_rx_last_edge_ts_us;
             if (iv > RX_FRAME_GAP_MIN_US) {
                 complete_rx_frame();
                 if (level != 0u) {
@@ -787,6 +833,7 @@ void dali_phy_rx_process(void)
                 s_rx_edge_count      = 1u;
                 s_rx_edge_levels[0]  = level;
                 s_rx_last_edge_level = level;
+                s_rx_first_edge_ts_us = ts_us;
                 s_rx_last_edge_ts_us = ts_us;
                 continue;
             }
@@ -803,6 +850,7 @@ void dali_phy_rx_process(void)
             } else {
                 /* Interval buffer overflow — discard this frame. */
                 rx_debug_store(DALI_ERR_OVERFLOW);
+                rx_emit_observation(DALI_ERR_OVERFLOW, NULL);
                 s_rx_in_frame       = false;
                 s_rx_interval_count = 0u;
                 s_rx_edge_count     = 0u;
@@ -813,11 +861,27 @@ void dali_phy_rx_process(void)
         }
     }
 
+    uint32_t overflow_generation = s_rx_ring_overflow_generation;
+    if (overflow_generation != s_rx_ring_overflow_seen) {
+        uint32_t overflow_ts = s_rx_ring_overflow_ts_us;
+        s_rx_ring_overflow_seen = overflow_generation;
+        if (s_rx_callback != NULL) {
+            DaliPhyRxObservation observation = {
+                .result         = DALI_ERR_OVERFLOW,
+                .first_edge_us  = overflow_ts,
+                .last_edge_us   = overflow_ts,
+                .edge_count     = DALI_PHY_RXDEBUG_MAX_EDGES,
+                .has_timestamps = true,
+            };
+            s_rx_callback(&observation, s_rx_callback_ctx);
+        }
+    }
+
     /* Check for frame completion: bus silent for >= 1 bit period. */
     if (s_rx_in_frame && s_rx_interval_count > 0u) {
 #ifndef DALI_HOST_BUILD
-        uint32_t now_us  = (uint32_t)(esp_timer_get_time() & 0x7FFFFFFFu);
-        uint32_t silence = (now_us - s_rx_last_edge_ts_us) & 0x7FFFFFFFu;
+        uint32_t now_us  = (uint32_t)esp_timer_get_time() & RX_TS_VALUE_MASK;
+        uint32_t silence = now_us - s_rx_last_edge_ts_us;
         if (silence >= RX_FRAME_GAP_MIN_US) {
             complete_rx_frame();
         }
@@ -833,6 +897,8 @@ DaliError dali_phy_reset(void)
 #ifndef DALI_HOST_BUILD
     gptimer_stop(s_gptimer);
     gpio_set_level(s_tx_gpio, tx_pin_level_for_bus_level(1u));
+    /* Stop producers before clearing the overflow generation and edge ring. */
+    gpio_intr_disable(s_rx_gpio);
 #endif
     s_tx_state           = DALI_PHY_TX_IDLE;
     s_tx_half_bit_idx    = 0u;
@@ -841,15 +907,21 @@ DaliError dali_phy_reset(void)
     s_isr_active         = 0u;
     s_rx_settle_suppression_active = 0u;
     s_rx_suppress_until_us         = 0u;
+    s_rx_ring_overflow_ts_us       = 0u;
+    s_rx_ring_overflow_generation  = 0u;
+    s_rx_ring_overflow_seen        = 0u;
+    s_last_tx_end_valid            = 0u;
+    s_last_tx_end_us               = 0u;
 #ifndef DALI_HOST_BUILD
     s_tx_notify_task     = NULL;
-    gpio_intr_disable(s_rx_gpio);
 #endif
     dali_rb_clear(&s_rx_rb);
     s_rx_in_frame        = false;
     s_rx_interval_count  = 0u;
     s_rx_edge_count      = 0u;
     s_rx_last_edge_level = 0u;
+    s_rx_first_edge_ts_us = 0u;
+    s_rx_last_edge_ts_us  = 0u;
 #ifndef DALI_HOST_BUILD
     gpio_intr_enable(s_rx_gpio);
 #endif
@@ -872,6 +944,25 @@ DaliError dali_phy_read_rx_level(uint8_t *level_out)
     return DALI_ERR_INVALID;
 #endif
 }
+
+#ifdef DALI_HOST_BUILD
+DaliError dali_phy_test_feed_rx_edge(uint32_t timestamp_us, uint8_t level)
+{
+    if (level > 1u) {
+        return DALI_ERR_INVALID;
+    }
+
+    uint32_t quantised_ts = timestamp_us & RX_TS_VALUE_MASK;
+    uint32_t entry = quantised_ts | level;
+    DaliError err = dali_rb_push_from_isr(&s_rx_rb, entry);
+    if (err != DALI_OK) {
+        g_dali_stats.rx_overflow++;
+        s_rx_ring_overflow_ts_us = quantised_ts;
+        s_rx_ring_overflow_generation++;
+    }
+    return err;
+}
+#endif
 
 DaliError dali_phy_get_rx_debug(DaliPhyRxDebugSnapshot *snapshot_out)
 {
