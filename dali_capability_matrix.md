@@ -96,9 +96,11 @@ despite the latched front-end abort, and reports a failed cleanup separately.
 
 That is host evidence, not a real-bus multi-device result. Commissioning remains
 limited operationally to one unaddressed control gear at a time until the
-multi-device path is exercised on hardware. Part 103 START/STOP QUIESCENT MODE,
-equal-random-address recovery, and arbitration against another bus master remain
-open.
+multi-device path is exercised on hardware. A run now brackets itself with
+broadcast START/STOP QUIESCENT MODE — host-tested for ordering, settle,
+release-on-every-exit, and the two failure modes, but never run on a bus, and it
+cannot reach a device that does not receive the broadcast. Equal-random-address
+recovery and arbitration against another bus master remain open.
 
 The shell rows are the same code the native CLI runs, reached through
 `esphome/components/dali/dali_shell_tcp.cpp`. Its commissioning entry point is
@@ -171,6 +173,9 @@ a gap.
 | Multi-byte input polling | `dali_input_poll_build_value_sequence` | `sensor poll` | yes | yes | yes |
 | Event decode | `dali_event_*` | `events`, `capture`, `find switches` | yes | yes | yes |
 | Event dispatch rules | `dali_dispatch_*` | n/a | yes | yes | yes |
+| Quiescent mode | `dali_input_build_quiescent_mode[_broadcast]` | `quiescent on\|off <addr\|all>` | yes | no | yes (console) |
+| Commissioning quiescence bracket | `DaliCommissioningOptions.quiesce_control_devices` | automatic in `commission` | yes | no | n/a |
+| Device broadcast (0xFF) | `dali_build_device_broadcast_command` | via `quiescent ... all` | yes | no | yes (console) |
 
 Configuration writes are experimental everywhere. The native CLI says so on every
 `iconfig` success line: the result means transmitted, not applied.
@@ -187,7 +192,7 @@ Configuration writes are experimental everywhere. The native CLI says so on ever
 
 | Capability | Shared API | Native CLI verb | Host vector | Real bus | ESPHome |
 |---|---|---|---|---|---|
-| Tokenising and trailing-token rejection | `dali_cli_tokenize`, `dali_cli_resolve[_in]` | every verb | yes | no | yes |
+| Tokenizing and trailing-token rejection | `dali_cli_tokenize`, `dali_cli_resolve[_in]` | every verb | yes | no | yes |
 | Verb table / help parity | `dali_cli_command_*`, `dali_cli_print_help` | `help` | yes | n/a | n/a |
 | Argument validation | `dali_cli_parse_*` | every verb | yes | no | yes |
 | Named table listing | `dali_cli_print_table` | `list`, `*-list` | yes | n/a | n/a |
@@ -199,7 +204,7 @@ Configuration writes are experimental everywhere. The native CLI says so on ever
 | Frame capture | n/a | `capture` | no | yes | yes (bus monitor) |
 
 The console supplies its own verb table to `dali_cli_resolve_in()` — the subset
-that suits a Home Assistant text entity — but shares the tokeniser, argument
+that suits a Home Assistant text entity — but shares the tokenizer, argument
 parsers, arity checking, named tables, and reply decoding. None of the migrated
 console paths has been exercised on a real bus.
 
@@ -238,4 +243,8 @@ belongs to the ESPHome component rather than to the protocol stack.
   validation, and reply decoding are shared code with host vectors, but the
   dispatch in `dali_component.cpp` between them is ESPHome/FreeRTOS-bound and
   reachable only on the device.
+- Quiescent mode has frame-level host vectors but no bus result. Commissioning
+  releases what it started; the standalone verb does not, so a device left
+  quiescent by hand stays silent until `quiescent off`, which is
+  indistinguishable from a dead sensor.
 - Nothing here claims DALI Alliance certification or complete IEC 62386 coverage.

@@ -82,7 +82,7 @@ DaliCliOut dali_cli_buffer_out(DaliCliBufferSink *sink)
 }
 
 /* ---------------------------------------------------------------------------
- * Tokenising
+ * Tokenizing
  * --------------------------------------------------------------------------*/
 
 static bool cli_is_space(char c)
@@ -212,6 +212,8 @@ static const DaliCliCommandSpec s_commands[] = {
     { DALI_CLI_CMD_EXPORT, "export", "inventory|config", "inventory as JSON, or the dali: YAML block for this device", 1u, 1u,
       "inventory config" },
     { DALI_CLI_CMD_IDENTIFY, "identify", "<addr>", "blink one short-addressed lamp", 1u, 1u, NULL },
+    { DALI_CLI_CMD_QUIESCENT, "quiescent", "on|off <addr|all>", "Part 103 quiescent mode: silence control-device events", 2u, 2u,
+      "on off" },
 };
 
 #define CLI_COMMAND_COUNT ((uint8_t)(sizeof(s_commands) / sizeof(s_commands[0])))
@@ -628,7 +630,7 @@ static const DaliCliGearCommand s_special_commands[] = {
     { "terminate",       DALI_CMD_TERMINATE,                      false, 0u,   false },
     { "dtr0",            DALI_CMD_DTR0_DATA,                      true,  255u, false },
     { "initialise",      DALI_CMD_INITIALISE,                     true,  255u, false },
-    { "randomize",       DALI_CMD_RANDOMIZE,                      false, 0u,   false },
+    { "randomise",       DALI_CMD_RANDOMISE,                      false, 0u,   false },
     { "compare",         DALI_CMD_COMPARE,                        false, 0u,   false },
     { "withdraw",        DALI_CMD_WITHDRAW,                       false, 0u,   false },
     { "ping",            DALI_CMD_PING,                           false, 0u,   false },
@@ -708,7 +710,7 @@ bool dali_cli_special_is_commissioning(DaliCommandId id)
 {
     switch (id) {
         case DALI_CMD_INITIALISE:
-        case DALI_CMD_RANDOMIZE:
+        case DALI_CMD_RANDOMISE:
         case DALI_CMD_SEARCH_ADDRH:
         case DALI_CMD_SEARCH_ADDRM:
         case DALI_CMD_SEARCH_ADDRL:

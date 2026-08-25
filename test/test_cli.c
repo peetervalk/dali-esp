@@ -2,7 +2,7 @@
  * test_cli.c — native CLI parsing, dispatch, table, and formatting vectors
  *
  * These cover the half of the diagnostic CLI that decides what a typed line
- * means: tokenising, the verb table, argument validation, the named command
+ * means: tokenizing, the verb table, argument validation, the named command
  * tables, and how a reply is rendered. Execution — scheduler slots, transports,
  * and the long-running workflows — stays in dali_diag.c and is not reachable
  * from the host.
@@ -35,7 +35,7 @@ static DaliCliOut capture_begin(void)
 }
 
 /* ---------------------------------------------------------------------------
- * Tokenising
+ * Tokenizing
  * --------------------------------------------------------------------------*/
 
 static void test_tokenize_splits_on_spaces(void)
@@ -131,7 +131,7 @@ static void test_command_table_entries_are_well_formed(void)
         TEST_ASSERT_TRUE(spec->name[0] != '\0');
         TEST_ASSERT_TRUE(spec->summary[0] != '\0');
         TEST_ASSERT_TRUE(spec->min_args <= spec->max_args);
-        /* Every argument has to fit alongside the verb in one tokenised line. */
+        /* Every argument has to fit alongside the verb in one tokenized line. */
         TEST_ASSERT_TRUE(spec->max_args < DALI_CLI_MAX_TOKENS);
         /* A verb that takes arguments has to document them. */
         if (spec->max_args > 0u) {
@@ -189,7 +189,7 @@ static void test_subcommands_appear_in_usage(void)
             word[len] = '\0';
 
             TEST_ASSERT_TRUE_MESSAGE(dali_cli_has_subcommand(spec, word),
-                                     "declared subcommand not recognised");
+                                     "declared subcommand not recognized");
             TEST_ASSERT_NOT_NULL_MESSAGE(strstr(spec->args, word),
                                          "subcommand missing from usage line");
         }
@@ -210,6 +210,18 @@ static void test_has_subcommand_rejects_non_members(void)
     TEST_ASSERT_TRUE(dali_cli_has_subcommand(capture, "start"));
     TEST_ASSERT_TRUE(dali_cli_has_subcommand(capture, "export"));
     TEST_ASSERT_FALSE(dali_cli_has_subcommand(capture, "stopp"));
+
+    /* quiescent takes its on/off keyword first, then a target that may be a
+     * short address or the literal `all`, so only on/off are keywords. */
+    const DaliCliCommandSpec *quiescent =
+        dali_cli_command_for_id(DALI_CLI_CMD_QUIESCENT);
+    TEST_ASSERT_NOT_NULL(quiescent);
+    TEST_ASSERT_EQUAL_STRING("quiescent", quiescent->name);
+    TEST_ASSERT_EQUAL_UINT8(2u, quiescent->min_args);
+    TEST_ASSERT_EQUAL_UINT8(2u, quiescent->max_args);
+    TEST_ASSERT_TRUE(dali_cli_has_subcommand(quiescent, "on"));
+    TEST_ASSERT_TRUE(dali_cli_has_subcommand(quiescent, "off"));
+    TEST_ASSERT_FALSE(dali_cli_has_subcommand(quiescent, "all"));
 
     /* A verb whose first argument is a value declares no keywords at all. */
     TEST_ASSERT_FALSE(dali_cli_has_subcommand(
@@ -974,7 +986,7 @@ static void test_format_response_truncates_within_bounds(void)
 static void test_special_commissioning_set(void)
 {
     static const char *restricted[] = {
-        "initialise", "randomize", "search-h", "search-m", "search-l",
+        "initialise", "randomise", "search-h", "search-m", "search-l",
         "program-short", "withdraw", "write-memory", "write-memory-nr",
     };
     static const char *allowed[] = {

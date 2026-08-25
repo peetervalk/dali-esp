@@ -122,7 +122,7 @@ static void shell_deferred_push(const char *text)
      * either allocating or holding the critical section any longer. The
      * terminator is restored for the same reason shell_printf() restores it: a
      * queued line that loses its "\r\n" is flushed into the stream ahead of a
-     * prompt and desynchronises a client reading up to one. */
+     * prompt and desynchronizes a client reading up to one. */
     size_t len = strlen(text);
     if (len >= SHELL_DEFERRED_LINE_MAX) {
         len = SHELL_DEFERRED_LINE_MAX - 3u;
@@ -1537,7 +1537,7 @@ void dali_shell_on_trace(const DaliSchedTraceEvent *event, void *ctx)
  * Command handlers
  *
  * Every handler drives the bus through the blocking scheduler helpers above, so
- * the whole section is device-only. The portable half of the CLI — tokenising,
+ * the whole section is device-only. The portable half of the CLI — tokenizing,
  * the verb table, argument validation, and response formatting — is in
  * dali_cli.c, which the host suite builds and exercises directly.
  * --------------------------------------------------------------------------*/
@@ -2820,7 +2820,7 @@ static void shell_commission_progress_cb(const DaliCommissioningEvent *event,
             break;
 
         case DALI_COMMISSIONING_EVENT_RANDOMISED:
-            shell_printf("commission: randomize\r\n");
+            shell_printf("commission: randomise\r\n");
             break;
 
         case DALI_COMMISSIONING_EVENT_SEARCH_FOUND:
@@ -2856,6 +2856,32 @@ static void shell_commission_progress_cb(const DaliCommissioningEvent *event,
     (void)event;
     (void)ctx;
 #endif
+}
+
+/*
+ * What the quiescence bracket did, on every exit path.
+ *
+ * Silence is the normal case and prints nothing: the operator asked to
+ * commission, not to hear about a hardening step that worked. The two states
+ * worth a line are a START that never went out — the run was noisier than it
+ * looked, which may explain a phantom device — and a release that failed, which
+ * leaves the installation's sensors quiet and is the one an operator has to act
+ * on.
+ */
+static void shell_report_quiescence(const DaliCommissioningResult *result)
+{
+    if (!result->quiescence_requested) {
+        return;
+    }
+    if (!result->quiescence_started) {
+        shell_printf("commission: quiescence not started (%s); control-device "
+                     "traffic was not suppressed\r\n",
+                     shell_err(result->quiescence_error));
+    }
+    if (result->quiescent_state_unknown) {
+        shell_printf("commission: STOP QUIESCENT MODE failed; control devices "
+                     "may still be silent - run 'quiescent off all'\r\n");
+    }
 }
 
 static void cmd_commission(const DaliCliTokens *t)
@@ -2910,6 +2936,10 @@ static void cmd_commission(const DaliCliTokens *t)
         .used_address_mask =
             dali_commissioning_used_mask_from_inventory(inventory),
         .query_short_address = true,
+        /* Silence control devices for the run. An event frame landing in a
+         * COMPARE reply window reads as YES and invents gear that is not
+         * there; this is the cheap half of not letting that happen. */
+        .quiesce_control_devices = true,
     };
     DaliCommissioningResult result;
     err = dali_commissioning_commission_unaddressed(
@@ -2943,6 +2973,7 @@ static void cmd_commission(const DaliCliTokens *t)
                          "initialisation state unknown\r\n",
                          shell_err(result.cleanup_error));
         }
+        shell_report_quiescence(&result);
         shell_printf("commission: ERR %s after %u assignment(s)\r\n",
                shell_err(err),
                (unsigned)result.assigned_count);
@@ -2953,6 +2984,7 @@ static void cmd_commission(const DaliCliTokens *t)
              "commission complete assignments=%u terminate_tx=%u",
              (unsigned)result.assigned_count,
              result.terminate_tx_succeeded ? 1u : 0u);
+    shell_report_quiescence(&result);
     shell_printf("commission: complete assigned=%u",
            (unsigned)result.assigned_count);
     if (result.no_more_devices) {
@@ -3742,6 +3774,66 @@ static void cmd_devmem(const DaliCliTokens *t)
  * from "the command that consumes it was ignored". Both frames go out as one
  * sequence, so no other locally scheduled DTR write can land between them.
  */
+/*
+ * quiescent on|off <addr|all>
+ *
+ * Part 103 device-level START/STOP QUIESCENT MODE. Both are send-twice, so the
+ * frame goes to the scheduler once with send_twice set rather than being
+ * enqueued twice — the pair has to land inside the 100 ms window with nothing
+ * between it.
+ *
+ * `all` is address byte 0xFF: every control device on the bus, which is the
+ * form worth having, since the point is a quiet bus rather than one quiet
+ * sensor. It reaches control devices only; control gear keeps working.
+ *
+ * The warning on `on` is not decoration. A quiesced device reports no events,
+ * so anything driven by one — an occupancy light, a wall switch — stops
+ * responding, and the operator gets no feedback that the bus went quiet on
+ * purpose. Nothing in this project tracks the state or releases it on exit.
+ */
+static void cmd_quiescent(const DaliCliTokens *t)
+{
+    const DaliCliCommandSpec *usage = dali_cli_command_for_id(DALI_CLI_CMD_QUIESCENT);
+    bool enable;
+
+    if (strcmp(t->tok[1], "on") == 0) {
+        enable = true;
+    } else if (strcmp(t->tok[1], "off") == 0) {
+        enable = false;
+    } else {
+        dali_cli_print_usage(&s_out, usage);
+        return;
+    }
+
+    DaliFrame frame;
+    DaliError err;
+    bool      all = strcmp(t->tok[2], "all") == 0;
+    uint8_t   addr = 0u;
+
+    if (all) {
+        err = dali_input_build_quiescent_mode_broadcast(enable, &frame);
+    } else if (dali_cli_parse_short_addr(t->tok[2], &addr)) {
+        err = dali_input_build_quiescent_mode(addr, enable, &frame);
+    } else {
+        dali_cli_print_usage(&s_out, usage);
+        return;
+    }
+
+    if (err != DALI_OK) {
+        dali_cli_print_error(&s_out, "quiescent", err);
+        return;
+    }
+
+    err = shell_send_no_reply(&frame, true);
+    shell_print_tx_result("quiescent", err);
+
+    if (err == DALI_OK && enable) {
+        shell_printf("quiescent: control device%s will report no events until "
+                     "'quiescent off %s'\r\n",
+                     all ? "s" : "", all ? "all" : t->tok[2]);
+    }
+}
+
 static void cmd_dtrcheck(const DaliCliTokens *t)
 {
     const DaliCliCommandSpec *usage = dali_cli_command_for_id(DALI_CLI_CMD_DTRCHECK);
@@ -4292,6 +4384,7 @@ static void shell_execute(DaliCliCommandId id, const DaliCliTokens *t)
         case DALI_CLI_CMD_FIND:         cmd_find(t); break;
         case DALI_CLI_CMD_EXPORT:       cmd_export(t); break;
         case DALI_CLI_CMD_IDENTIFY:     cmd_identify(t); break;
+        case DALI_CLI_CMD_QUIESCENT:    cmd_quiescent(t); break;
 
         case DALI_CLI_CMD_COUNT:
             break;
@@ -4455,7 +4548,7 @@ bool dali_shell_feed_byte(uint8_t ch)
      * Swallow the LF of a CRLF pair. Without this a client that ends lines the
      * usual network way dispatches twice per line — once for the CR, once for
      * an empty line — and a front end that writes a prompt per dispatched line
-     * emits two. That is invisible to a human, but it desynchronises any client
+     * emits two. That is invisible to a human, but it desynchronizes any client
      * that reads replies up to the prompt.
      */
     bool follows_cr = s_line_last_was_cr;

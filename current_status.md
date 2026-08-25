@@ -111,12 +111,12 @@ result. `dali_capability_matrix.md` states which is which per capability.
   in `WAIT_REPLY` regardless of arrival. A regression test pins a decoded reply at
   6 ms — inside the range, below the nominal — as accepted. The citation is still
   owed; see the P0 item.
-- `dali_commissioning.c` no longer depends on FreeRTOS. The post-RANDOMIZE settle
+- `dali_commissioning.c` no longer depends on FreeRTOS. The post-RANDOMISE settle
   comes from a new optional `DaliTransport::delay_ms`, and commissioning refuses a
   transport that supplies none before it transmits anything — a skipped settle
   otherwise presents as an empty bus rather than as an error. The module's header
   claim of no task dependency is true again, and the 100 ms settle now has a host
-  vector asserting it happens exactly once with RANDOMIZE as the last frame sent.
+  vector asserting it happens exactly once with RANDOMISE as the last frame sent.
   The ESPHome scan transport deliberately supplies no wait: it never commissions,
   and the explicit rejection is preferable to a path that silently works.
 - `dali_dispatch` no longer asserts levels it cannot know. RECALL MAX (both the
@@ -170,6 +170,95 @@ result. `dali_capability_matrix.md` states which is which per capability.
   would hide that. The known cost is recorded with it: for an ordinary query a
   spike at 19 ms discards a byte decoded at 8 ms. The retry split above softens
   it — that case now re-asks rather than failing outright.
+- Part 103 quiescent mode is implemented end to end. `START`/`STOP QUIESCENT MODE`
+  (`0x1D`/`0x1E`, instance byte `0xFE`, send-twice, no reply) are in the command
+  table; `dali_input_build_quiescent_mode[_broadcast]()` build the frames; and
+  `quiescent on|off <addr|all>` is a verb on both the native shell and the ESPHome
+  console. The send-twice pair goes to the scheduler as one transaction rather
+  than two enqueues, so nothing can land between the halves.
+  `dali_build_device_broadcast_command()` closes the gap that made `all`
+  impossible: address byte `0xFF` is not a short address, so it needed its own
+  builder rather than a sentinel through `dali_build_device_command()`, which
+  still rejects anything at or above 64. Both surfaces warn on `on`, because a
+  quiesced device reports no events and nothing here tracks or releases the
+  state — a forgotten `quiescent on all` presents as dead sensors. Host-tested
+  for frame layout, the send-twice table flag, broadcast-versus-addressed
+  distinctness across all 64 addresses, and argument rejection; no bus has run it.
+  Whether the standard also ends the state on its own timer is not established
+  here, so `off` is documented as the only reliable release.
+- Gear commissioning brackets itself with broadcast quiescence. A send-twice
+  START QUIESCENT MODE goes out before INITIALISE and a STOP follows TERMINATE on
+  every exit path, so a conforming control device cannot put an event frame into
+  a COMPARE reply window, where frame-like activity reads as YES and invents gear
+  that is not there. Both live outside the opening `DaliSequence`, as its own
+  transactions: `DaliSequenceStep` carries a frame and no duration, and the start
+  sequence's atomicity exists to hold dependent pairs together rather than to
+  carry unrelated steps.
+  Decisions worth keeping: a failed START does not abort the run, because
+  quiescence is hardening rather than a precondition and refusing to commission
+  over it would trade a working operation for a risk the operator may not have;
+  the release goes through the cleanup transport for the same reason TERMINATE
+  does, so a cancelled run or a dropped TCP peer cannot be what leaves an
+  installation's sensors silent; and `quiescence_started` is set from the
+  transmit alone, separately from the settle that follows, because a settle
+  failure after a successful transmit still leaves the bus quiesced and still has
+  to be unwound.
+  The settle before INITIALISE is `DALI_COMMISSIONING_QUIESCENT_SETTLE_MS`, 39 ms,
+  and is deliberately not presented as a standards figure: it is two 24-bit frame
+  times, long enough for an event frame already on the wire when START arrived to
+  finish. If the standard specifies an entry time it is not read here, so the
+  constant is bounded below by an argument that is checkable without it.
+  `quiesce_control_devices` is off in a zero-initialized `DaliCommissioningOptions`,
+  so an out-of-tree caller keeps its previous behaviour; the shell sets it and
+  reports the two states that matter — a START that never went out, and a release
+  that failed, which leaves control devices silent and names `quiescent off all`
+  as the fix. Host-tested for ordering against INITIALISE and TERMINATE, the
+  settle accounting, release on failure and on cancellation, both failure modes,
+  and rejection before any traffic when the transport cannot wait. No bus has run
+  it, and it cannot reach a device that never receives the broadcast.
+- Spelling is now consistent, and the rule is which *thing* is being named
+  rather than which dialect. The trigger was a real inconsistency: `special
+  initialise` and `special randomize` sat on adjacent lines of the same CLI
+  table.
+  **DALI command names use the standard's `-ise` spelling.** IEC 62386 spells
+  them INITIALISE and RANDOMISE, so matching the standard beats matching the
+  surrounding prose — a name that differs from the spec is a name you cannot
+  grep the spec for. This covers the command-table strings, both CLI verbs, the
+  identifiers that denote a command or the protocol state one opens
+  (`DALI_CMD_INITIALISE`, `DALI_CMD_RANDOMISE`, `dali_cmd_initialise()`,
+  `dali_cmd_randomise()`, `DALI_INITIALISE_UNADDRESSED_PARAM`,
+  `DALI_COMMISSIONING_RANDOMISE_SETTLE_MS`,
+  `DALI_COMMISSIONING_START_STEP_INITIALISE`/`_RANDOMISE`,
+  `DALI_COMMISSIONING_EVENT_INITIALISED`/`_RANDOMISED`,
+  `DaliCommissioningResult::initialisation_state_unknown`), and every prose
+  reference to the commands or to the fifteen-minute initialisation state.
+  **Everything else is American.** `tokenize`, `recognize`, `quantize`,
+  `normalize`, `serialize`, and ordinary software initialization —
+  `Initialize the ring buffer`, `zero-initialized struct`, `s_initialized`,
+  `main.c`'s "Initialization complete" — all take the `z`.
+  Net effect on the operator surface: `special initialise` is unchanged from
+  where it started, and `special randomize` became `special randomise`. The word
+  migration itself was driven by an explicit list rather than a suffix regex, so
+  `otherwise`, `raise`, `noise`, `precise`, `size`, and `advertise` were never
+  candidates.
+- Documentation cross-references audited. `dali_command_reference.md` was cited
+  five times and `esphome_verb_readme.md` once; neither has existed since the
+  2026-08-11 documentation split. Both are gone from the Source Layout table,
+  which now also lists `test/`, `tools/`, `dali_commands.md`, `dali_protocol.md`,
+  and `commissioning_readme.md`. The Documentation Policy and the
+  hyphenated-filenames item point at the files that exist. One stale path fixed
+  in prose: `dali_cli.c` has lived in `components/dali/` since the console
+  adopted it, not `main/`. Every remaining `.md` file reference in the tree now
+  resolves; `README.md` and `AGENTS.md` were already correct.
+- The four GitHub workflows were reviewed and need no change. Verified rather
+  than assumed: `actions/checkout@v7`, `actions/setup-python@v7`, and
+  `actions/cache@v6` are all current majors; ESP-IDF `v6.0.1` is a real tag, and
+  the pin is deliberate because it matches the tracked sdkconfig header, though
+  `v6.0.2` now exists in that line; ESPHome 2026.8.1 requires Python
+  `>=3.12,<3.15`, so the workflows' 3.12 is valid; the six dummy secrets CI
+  writes cover the five `dali-starter.yaml` actually uses; and `test/build/` is
+  gitignored, so no workstation CMake cache can leak into a run. No workflow
+  hardcodes a suite or module count that `dali_error.c` would have invalidated.
 - All 26 host suites pass. Focused totals are PHY 28, scheduler 78, transport 14,
   discovery 56, commissioning 32, and dispatch 31. Native ESP-IDF 6.0.1 and ESPHome 2026.7.4
   builds pass. These are host and compile results only: no COM6, flash, captured
@@ -177,7 +266,7 @@ result. `dali_capability_matrix.md` states which is which per capability.
 - Multi-device commissioning therefore remains restricted to the documented
   single-unaddressed-device envelope until HIL proves overlapping replies. Part
   103 quiescence, equal-random-address recovery, external-master arbitration, and
-  the 100 ms post-RANDOMIZE value still need standards/hardware validation.
+  the 100 ms post-RANDOMISE value still need standards/hardware validation.
 
 ### Verified locally on 2026-08-12 (console verb parity)
 
@@ -297,8 +386,8 @@ cleared by the 2026-08-14 entry above):
 ### Verified locally on 2026-08-11
 
 - The native CLI is now table-driven, and the half of it that decides what a
-  typed line means is portable and host-tested. `main/dali_cli.c` owns
-  tokenising, the verb table, argument validation, the named command tables, and
+  typed line means is portable and host-tested. `components/dali/dali_cli.c` owns
+  tokenizing, the verb table, argument validation, the named command tables, and
   response formatting; `main/dali_diag.c` keeps the FreeRTOS task, the blocking
   scheduler slots, and the long-running workflows. A verb is reachable only
   through the one table, and `dali_diag.c` switches over `DaliCliCommandId` with
@@ -366,7 +455,7 @@ cleared by the 2026-08-14 entry above):
   added after the first version of the table advertised `bus on|off` while the
   handler accepted only `bus check`: help told the operator to type a command
   that could not work, and nothing caught it. A host vector now asserts that
-  every declared keyword is recognised and appears in the usage line.
+  every declared keyword is recognized and appears in the usage line.
 - All 24 host executables pass. The new CLI suite is 59 cases; protocol is now
   66, control 31, DT6 21, DT8 46, and input config 9.
 - The native firmware builds with ESP-IDF 6.0.1 (`0x3C0A0`-byte application
@@ -479,11 +568,11 @@ cleared by the 2026-08-14 entry above):
 
 - Commissioning's opening is one three-step sequence built by
   `dali_commissioning_build_start_sequence()`: TERMINATE, INITIALISE
-  (unaddressed), RANDOMIZE. INITIALISE and RANDOMIZE are send-twice, so three
+  (unaddressed), RANDOMISE. INITIALISE and RANDOMISE are send-twice, so three
   logical steps become five forward frames. No step retries, because a repeated
-  RANDOMIZE would hand out a fresh set of random addresses.
+  RANDOMISE would hand out a fresh set of random addresses.
 - That grouping also closed a leftover-state bug. If INITIALISE went out and
-  RANDOMIZE then failed, the old code returned the error without a TERMINATE,
+  RANDOMISE then failed, the old code returned the error without a TERMINATE,
   leaving the gear in initialisation state for the full fifteen minutes with
   nothing on the bus aware of it. The 2026-08-25 cleanup now conservatively
   issues TERMINATE after every admitted opening sequence, even when cancellation
@@ -781,7 +870,7 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
   tests; `dali_diag.c` owns the task, the blocking scheduler slots, the caches,
   and the long-running workflows. `dali_cli.c` sits in `components/dali` rather
   than `main/` because the ESPHome console dispatches through the same table.
-- Dispatch is one table. `dali_cli_resolve()` tokenises, looks the verb up, and
+- Dispatch is one table. `dali_cli_resolve()` tokenizes, looks the verb up, and
   checks the argument-count bounds before any handler runs, so trailing tokens
   are rejected rather than ignored. Help and `list <table>` are generated from
   the same tables, so neither can describe a command the parser will not accept.
@@ -1000,8 +1089,8 @@ aliases of the shared `DaliTransport` in the new `dali_transport.h`, and
 `DaliDt8TransactionFn` alias `DaliTransactionFn`. Existing code keeps compiling,
 and a transport built for one module can now be passed to another without
 conversion. The struct gains an optional `transact_sequence` member between
-`transact` and `ctx`: designated initialisers are unaffected, but any positional
-initialiser must be updated. `DALI_MEMORY_QUERY_RETRIES` is removed, because
+`transact` and `ctx`: designated initializers are unaffected, but any positional
+initializer must be updated. `DALI_MEMORY_QUERY_RETRIES` is removed, because
 memory reads no longer retry individual READ MEMORY LOCATION frames.
 
 Dependent public executors require the new strict
@@ -1036,13 +1125,6 @@ mattered — `type: local` with `path: esphome/components`, so a configuration a
 the component it configures always agree within a commit — while owing nothing
 to any hardware. The `_local` copies keep the git pin because they are what gets
 flashed and the operator chooses when to move.
-
-One consequence of that split is live right now: both sites run `v1.1.1`, but
-`_local/dali-1k.yaml` and `_local/dali-2k.yaml` still pin `ref: v1.0.5-dev`.
-Neither file describes what is deployed, and re-resolving either one as written
-would roll a site backwards past the shell and the level-window work. The pins
-are the operator's to move; nothing in the repository can move them, because the
-directory is untracked by design.
 
 The entire `_local` directory is deliberately ignored by Git. This checkout also
 contains `_local/dali-diag-local.yaml`, a compile-test copy of the tracked
@@ -1096,7 +1178,7 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   Guard against the regression this closed: before timestamped attribution, any
   decoded backward frame in `WAIT_REPLY` was accepted regardless of arrival time,
   so too high a value presents as gear that used to answer going quiet.
-- Confirm the post-RANDOMIZE settle time against the standard text, then verify a
+- Confirm the post-RANDOMISE settle time against the standard text, then verify a
   commissioning run on a bus. `DALI_COMMISSIONING_RANDOMISE_SETTLE_MS` was raised
   from 15 ms to 100 ms on 2026-08-24 on the strength of Espressif's `esp_dali`
   citing IEC 62386-102 §11.3 for the time gear needs to generate a 24-bit random
@@ -1105,22 +1187,6 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   been unsearchable at the first COMPARE, which presents exactly like the former
   silence/collision inversion — so a visible improvement here would look like a
   partial fix for that and would not be one.
-- Add the Part 103 device-level quiescent-mode commands — `0x1D` START, `0x1E`
-  STOP, both send-twice, instance byte `0xFE` — to the command table, with
-  builders in `dali_input_device` and an `iconfig quiescent on|off [addr|all]`
-  verb. This needs a device-broadcast builder as well:
-  `dali_build_device_command()` rejects any address at or above 64, so nothing
-  can address all control devices at once today. The commands are worth having on
-  their own for any operation that wants a quiet bus, and they are a prerequisite
-  for the guard below.
-- Bracket gear commissioning with broadcast START QUIESCENT MODE, so that control
-  devices cannot put event frames into a COMPARE reply window and be counted as
-  gear. The settle delays cannot live inside a `DaliSequence` —
-  `DaliSequenceStep` has no delay field — so this belongs as its own sequence run
-  around `commissioning_start_unaddressed()` and `commissioning_finish()` rather
-  than as extra steps in the start sequence, whose atomicity exists to hold
-  dependent pairs together. It reduces false frame-like activity from control
-  devices; physical collision classification and HIL validation remain open.
 - Strengthen commissioning collision handling, equal-random-address recovery, and
   the separation of gear and control-device address spaces.
 
@@ -1156,7 +1222,7 @@ The typed verb surface is in place; what is missing is evidence. Keep
   this is done the whole surface stays experimental.
 - Add host vectors for `identify`, `smoke`, `capture`, and the inventory JSON
   export, whose output formats are currently unasserted.
-- The ESPHome console shares `dali_cli`'s tokeniser, argument parsers, named
+- The ESPHome console shares `dali_cli`'s tokenizer, argument parsers, named
   command tables, and reply decoding. `dali_cli.{c,h}` moved to
   `components/dali/` so both front ends can reach it, and
   `dali_cli_resolve_in()` resolves against a caller-supplied verb table — the
@@ -1190,14 +1256,6 @@ below for what changed for an operator.
 
 ### P1 — Release and verification quality
 
-- Correct the stale documentation filenames in this file. `dali_command_reference.md`
-  is referenced four times — in the P1 item below, the release-notes item, the
-  Source Layout table, and the Documentation Policy — and does not exist; that
-  content is now split across `dali_commands.md` and `dali_protocol.md`. The
-  Source Layout table also lists `esphome_verb_readme.md`, which does not exist,
-  and omits `commissioning_readme.md`, `dali_protocol.md`, `test/`, and `tools/`.
-  The release-notes item additionally points at a "Verbs renamed when the console
-  adopted the shared tables" heading that no longer exists under that name.
 - Keep one intentional ESPHome source-inclusion path. The unused component
   `CMakeLists.txt` is gone and the Python-copy/wrapper route is authoritative;
   what is left is the second candidate in `_protocol_source_dir()`,
@@ -1212,9 +1270,9 @@ below for what changed for an operator.
   release and against nothing else. Note also that the two builds compile the same
   `components/dali` C with different toolchains: the native build uses IDF 6.0.1,
   ESPHome uses whatever its `framework: type: esp-idf` pins through PlatformIO.
-- Keep local filenames hyphenated in all documentation. `dali_command_reference.md`
-  was synchronized with both verb surfaces on 2026-08-12; it needs re-checking
-  whenever either table changes.
+- Keep local filenames hyphenated in all documentation. `dali_commands.md` is
+  the file that has to track both verb surfaces; it needs re-checking whenever
+  either table changes.
 - Complete release provenance: project SPDX identifiers and the full vendored
   Unity MIT license/third-party notice.
 - Document the next-release C migration before tagging it. Accumulated so far:
@@ -1234,7 +1292,7 @@ below for what changed for an operator.
   `DALI_ERR_RX_ACTIVITY = 12`, so any switch over it outside this repo needs a
   new arm; `DaliDiscoveryDeviceInfo` gained `has_undecodable_activity` and
   `DaliDiscoveryInventory` gained `undecodable_count`, changing both layouts; `DaliCliCommandSpec` and
-  `DaliCliInstanceConfig` gained fields, so brace-initialised tables outside
+  `DaliCliInstanceConfig` gained fields, so brace-initialized tables outside
   this repo need updating. Additive since: `dali_control_continuous_up/down()`,
   `dali_cli_format_response()`, `dali_cli_format_status()`, and
   `dali_cli_special_is_commissioning()`. One output change comes with them —
@@ -1252,6 +1310,31 @@ below for what changed for an operator.
   published `err`. Anything matching on those strings or parsing the number out
   of them needs updating; this belongs in the release notes next to the console
   reply-format change, which has the same audience.
+  `DaliCommandId` gained `DALI_CMD_START_QUIESCENT_MODE` and
+  `DALI_CMD_STOP_QUIESCENT_MODE` before `DALI_CMD_COUNT`, and `DaliCliCommandId`
+  gained `DALI_CLI_CMD_QUIESCENT` before `DALI_CLI_CMD_COUNT`, so both counts moved
+  again and any out-of-tree switch over the CLI ids needs a new arm. Additive:
+  `dali_cmd_device_broadcast()`, `dali_build_device_broadcast_command()`, and
+  `dali_input_build_quiescent_mode[_broadcast]()`.
+  The spelling work adds one operator-visible break, smaller than it could have
+  been: `special randomize` is now `special randomise`, with no alias, so a
+  stored Home Assistant command using the old spelling is rejected as an unknown
+  special. `special initialise` is unchanged. On the C side `DALI_CMD_RANDOMIZE`
+  became `DALI_CMD_RANDOMISE` and `dali_cmd_randomize()` became
+  `dali_cmd_randomise()`; the other renamed identifiers are listed under the
+  2026-08-25 entry above, and the words outside the command surface
+  (`tokenize`, `recognize`, `quantize`, `serialize`, `normalize`) changed with
+  no API impact.
+  One release step this forces: `dali-starter.yaml` and the README example pin
+  `ref: v1.2.0`, which predates the rename, so the documented spelling and the
+  firmware an operator actually flashes disagree until that pin is bumped to the
+  next tag. CI cannot catch it — the starter config is validated against the tag
+  it names, not against this tree.
+  `DaliCommissioningOptions` gained `quiesce_control_devices` and
+  `DaliCommissioningResult` gained `quiescence_requested`, `quiescence_started`,
+  `quiescence_release_attempted`, `quiescent_state_unknown`, and
+  `quiescence_error`, changing both layouts; the option is off when the struct is
+  zero-initialized, so behaviour is unchanged for a caller that does not set it.
   One runtime behaviour change to announce with them: a query that meets
   `MALFORMED` or `OVERFLOW` inside its reply window now re-sends once if it holds
   a retry budget, instead of failing on the first blip. Retry-safe commands only,
@@ -1259,8 +1342,8 @@ below for what changed for an operator.
   bus will show more `tx_retries` and fewer aborted sequences than before.
 - Announce the ESPHome console verb renames in the release notes. They are the
   operator-visible half of the `dali_cli` adoption and have no aliases — the
-  table is in `dali_command_reference.md` under "Verbs renamed when the console
-  adopted the shared tables". Anything in Home Assistant that writes a command
+  rename table has never been written down — it is owed, not merely misfiled,
+  and the list below is the raw material for it. Anything in Home Assistant that writes a command
   string to the `text:` entity (scripts, automations, dashboard buttons) needs
   updating. The target spelling is the one that breaks every stored command at
   once and is easiest to miss: `a<N>` is rejected as `bad target`, and a short
@@ -1324,7 +1407,7 @@ below for what changed for an operator.
 | Path | Role |
 |---|---|
 | `components/dali` | Reusable C protocol, scheduler, PHY, discovery, dispatch, memory, dimming curve, and device-type stack |
-| `components/dali/dali_cli.c/.h` | Portable CLI core: tokenising, verb table, validation, formatting. Shared by the native app and the ESPHome console |
+| `components/dali/dali_cli.c/.h` | Portable CLI core: tokenizing, verb table, validation, formatting. Shared by the native app and the ESPHome console |
 | `components/dali/dali_dim_curve.c/.h` | IEC 62386-102 arc power level ↔ light output conversion |
 | `main/main.c` | Native ESP-IDF diagnostic application entry point |
 | `main/dali_diag.c/.h` | Device half of the serial CLI: task, transports, workflows |
@@ -1335,9 +1418,12 @@ below for what changed for an operator.
 | `_local/secrets.yaml` | Ignored, untracked, and holds live credentials — see Installation State |
 | `_local/dali-1k.yaml` | Ignored first-floor site firmware |
 | `_local/dali-2k.yaml` | Ignored second-floor site firmware |
-| `dali_command_reference.md` | Protocol and command catalog |
+| `test/` | Host suites and the vendored Unity runner |
+| `tools/` | `dali-shell` and other operator-side scripts |
+| `dali_commands.md` | Every verb and named command table, both surfaces |
+| `dali_protocol.md` | Frame layouts, opcode tables by IEC part, event decoding |
+| `commissioning_readme.md` | Commissioning workflow: flash, walk the bus, export a config |
 | `dali_capability_matrix.md` | Per-capability API/verb/vector/hardware/ESPHome status |
-| `esphome_verb_readme.md` | ESPHome console examples and notes |
 | `steinel_bank2_reference.md` | Installation-specific Steinel memory observations |
 
 ## Build and Test Commands
@@ -1434,8 +1520,9 @@ Notes an operator needs:
 - Keep this file limited to current verified state, constraints, and open work.
 - Record completed changes in Git history or a changelog; remove them from the
   active backlog.
-- Keep protocol/command detail in `dali_command_reference.md`, and per-capability
-  API/verb/vector/hardware status in `dali_capability_matrix.md`.
+- Keep verb and argument detail in `dali_commands.md`, frame and opcode detail
+  in `dali_protocol.md`, and per-capability API/verb/vector/hardware status in
+  `dali_capability_matrix.md`.
 - Label claims as host-tested, hardware-verified, or still unverified.
 - Do not add session-log TODO files; merge active work into the prioritized list
   above.

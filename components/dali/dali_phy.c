@@ -547,7 +547,7 @@ static void IRAM_ATTR dali_phy_rx_isr(void *arg)
 {
     (void)arg;
 
-    /* Quantise the timestamp to 2 us so its low bit can carry the level. */
+    /* Quantize the timestamp to 2 us so its low bit can carry the level. */
     int64_t  ts_raw   = esp_timer_get_time();
     uint32_t ts_us    = (uint32_t)ts_raw & RX_TS_VALUE_MASK;
 
@@ -952,12 +952,12 @@ DaliError dali_phy_test_feed_rx_edge(uint32_t timestamp_us, uint8_t level)
         return DALI_ERR_INVALID;
     }
 
-    uint32_t quantised_ts = timestamp_us & RX_TS_VALUE_MASK;
-    uint32_t entry = quantised_ts | level;
+    uint32_t quantized_ts = timestamp_us & RX_TS_VALUE_MASK;
+    uint32_t entry = quantized_ts | level;
     DaliError err = dali_rb_push_from_isr(&s_rx_rb, entry);
     if (err != DALI_OK) {
         g_dali_stats.rx_overflow++;
-        s_rx_ring_overflow_ts_us = quantised_ts;
+        s_rx_ring_overflow_ts_us = quantized_ts;
         s_rx_ring_overflow_generation++;
     }
     return err;

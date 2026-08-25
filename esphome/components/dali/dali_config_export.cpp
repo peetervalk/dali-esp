@@ -346,7 +346,7 @@ void emit_light_entity(const DaliCliOut *out, const DaliLightConfig *cfg)
     const char *type = target_type_name(cfg->target_type);
     if (type == nullptr) {
         dali_cli_write(out,
-                       "  # entity omitted: unrecognised target type\r\n");
+                       "  # entity omitted: unrecognized target type\r\n");
         return;
     }
 

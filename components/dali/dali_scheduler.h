@@ -181,7 +181,7 @@ typedef struct {
  * API
  * --------------------------------------------------------------------------*/
 
-/* Initialise the scheduler with the given ops.  Must be called first. */
+/* Initialize the scheduler with the given ops.  Must be called first. */
 DaliError dali_sched_init(const DaliSchedOps *ops);
 
 /* Enqueue a transaction.  Thread-safe between tasks (not ISR-safe). */
@@ -334,7 +334,7 @@ void dali_sched_reset_queue_stats(void);
 
 #ifndef DALI_HOST_BUILD
 /*
- * Convenience initialiser for on-device use.
+ * Convenience initializer for on-device use.
  * Wires the DALI PHY plus esp_timer millisecond and microsecond clocks.
  */
 DaliError dali_sched_init_device(void);

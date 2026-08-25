@@ -10,7 +10,7 @@
  *
  * The split is:
  *
- *   dali_cli.c   tokenising, the verb table, argument validation, the named
+ *   dali_cli.c   tokenizing, the verb table, argument validation, the named
  *                command tables, and response formatting
  *   dali_diag.c  transports, blocking waits, caches, and the long-running
  *                workflows (scan, commissioning, capture, find switches)
@@ -75,7 +75,7 @@ void       dali_cli_buffer_sink_init(DaliCliBufferSink *sink, char *buf, size_t 
 DaliCliOut dali_cli_buffer_out(DaliCliBufferSink *sink);
 
 /* ---------------------------------------------------------------------------
- * Tokenising
+ * Tokenizing
  * --------------------------------------------------------------------------*/
 
 #define DALI_CLI_MAX_TOKENS     8u
@@ -171,6 +171,7 @@ typedef enum {
     DALI_CLI_CMD_FIND,
     DALI_CLI_CMD_EXPORT,
     DALI_CLI_CMD_IDENTIFY,
+    DALI_CLI_CMD_QUIESCENT,
 
     /*
      * Also the marker a front end with its own table (see dali_cli_resolve_in)
@@ -223,7 +224,7 @@ typedef enum {
 } DaliCliResolveResult;
 
 /*
- * Tokenise, look the verb up, and check the argument count. On DALI_CLI_RESOLVE_OK
+ * Tokenize, look the verb up, and check the argument count. On DALI_CLI_RESOLVE_OK
  * both tokens and *spec_out are filled; on DALI_CLI_RESOLVE_ARITY tokens and
  * *spec_out are filled so the caller can print the verb's usage.
  */
@@ -238,7 +239,7 @@ DaliCliResolveResult dali_cli_resolve(const char                *line,
  * offers a deliberately smaller surface: it has no terminal to print a scan or
  * a capture into, and its result is a single Home Assistant text state. It
  * therefore brings its own table of the verbs it actually implements, and gets
- * this module's tokenising, arity checking, argument parsing, and named command
+ * this module's tokenizing, arity checking, argument parsing, and named command
  * tables for free — which is what keeps one spelling of a command name and one
  * definition of what counts as a well-formed line across both front ends.
  */

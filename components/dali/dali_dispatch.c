@@ -78,7 +78,7 @@ static void toggle_set(DaliDispatchToggleState *state, DaliTarget out, bool on)
  * entries on overlapping targets stay consistent.
  *
  * Returns DALI_ERR_INVALID for DAPC frames (address_selector = 0) or
- * unrecognised opcodes — caller treats these as no-match.
+ * unrecognized opcodes — caller treats these as no-match.
  */
 static DaliError apply_mirror(const DaliInputEvent    *event,
                               DaliTarget               out,

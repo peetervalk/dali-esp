@@ -115,7 +115,7 @@ typedef enum {
     DALI_CMD_TERMINATE,
     DALI_CMD_DTR0_DATA,
     DALI_CMD_INITIALISE,
-    DALI_CMD_RANDOMIZE,
+    DALI_CMD_RANDOMISE,
     DALI_CMD_COMPARE,
     DALI_CMD_WITHDRAW,
     DALI_CMD_PING,
@@ -165,6 +165,13 @@ typedef enum {
     DALI_CMD_QUERY_DEVICE_CONTENT_DTR0,
     DALI_CMD_QUERY_DEVICE_CONTENT_DTR1,
     DALI_CMD_QUERY_DEVICE_CONTENT_DTR2,
+
+    /* IEC 62386-103 device-level quiescent mode. Both are send-twice and take
+     * no DTR. Quiescent mode suppresses a control device's own bus activity —
+     * event frames above all — so it is what makes a bus quiet enough for a
+     * COMPARE reply window, a memory block read, or a scan. */
+    DALI_CMD_START_QUIESCENT_MODE,
+    DALI_CMD_STOP_QUIESCENT_MODE,
 
     DALI_CMD_COUNT,
 } DaliCommandId;
@@ -220,6 +227,21 @@ DaliError dali_build_instance_command(uint8_t addr,
 
 /* Build a short-addressed DALI-2 24-bit device command from metadata.
  * Device-level commands use instance byte 0xFE. */
+/*
+ * Address every control device at once: address byte 0xFF, instance byte 0xFE.
+ *
+ * Separate from dali_build_device_command() rather than a sentinel address,
+ * because 0xFF is an address *byte* and that function takes a short address.
+ * Note what this reaches: all control devices, not control gear, and the two
+ * address spaces are independent — a control device and a control gear may
+ * share short address 5 and answer different frames.
+ *
+ * Every 24-bit device command is accepted, queries included, matching what
+ * dali_build_command() allows for gear. A broadcast query collides by
+ * construction, so the operator surfaces warn before sending one.
+ */
+DaliError dali_build_device_broadcast_command(DaliCommandId id, DaliFrame *out);
+
 DaliError dali_build_device_command(uint8_t addr,
                                     DaliCommandId id,
                                     DaliFrame *out);
@@ -298,7 +320,7 @@ DaliFrame dali_cmd_broadcast_recall_max(void);
 /* Special command frame convenience builders. */
 DaliFrame dali_cmd_terminate(void);
 DaliFrame dali_cmd_initialise(uint8_t param);
-DaliFrame dali_cmd_randomize(void);
+DaliFrame dali_cmd_randomise(void);
 DaliFrame dali_cmd_compare(void);
 DaliFrame dali_cmd_withdraw(void);
 DaliFrame dali_cmd_ping(void);
@@ -342,6 +364,7 @@ DaliFrame dali_cmd_instance(uint8_t addr, uint8_t instance, uint8_t cmd);
 
 /* Device-level command to a single device (short address 0-63). */
 DaliFrame dali_cmd_device(uint8_t addr, uint8_t cmd);
+DaliFrame dali_cmd_device_broadcast(uint8_t cmd);
 
 /* Instance command to a device group (0–15).
  * instance: 0–31 for a specific instance; 0xFF for all instances. */
@@ -392,7 +415,7 @@ typedef struct {
     bool     complete;
 } DaliInputValue;
 
-/* Initialise an MSB-first DALI-2 input-value accumulator. expected: 1..4. */
+/* Initialize an MSB-first DALI-2 input-value accumulator. expected: 1..4. */
 DaliError dali_input_value_start(DaliInputValue *out, uint8_t expected_bytes);
 
 /* Append one raw byte to an input-value accumulator. */

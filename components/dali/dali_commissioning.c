@@ -59,6 +59,67 @@ static DaliError send_special_cleanup_no_reply(
                                            NULL);
 }
 
+/*
+ * Broadcast START QUIESCENT MODE, then wait for any event frame already on the
+ * wire to finish.
+ *
+ * Send-twice, no reply, address byte 0xFF: every control device, control gear
+ * untouched. Nothing acknowledges it, so success here means transmitted, not
+ * quiesced — a bus with no control devices on it reports exactly the same.
+ *
+ * transmitted_out is set the moment the frame is reported sent, separately from
+ * the return value, because the settle that follows can fail on its own. The
+ * bus is quiet either way at that point, and the release must run; collapsing
+ * the two into one result would lose exactly the case that leaves an
+ * installation silent.
+ */
+static DaliError commissioning_start_quiescence(
+    const DaliDiscoveryTransport *transport,
+    bool *transmitted_out)
+{
+    if (transmitted_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    *transmitted_out = false;
+
+    DaliFrame frame;
+    DaliError err = dali_build_device_broadcast_command(
+        DALI_CMD_START_QUIESCENT_MODE, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    err = transact_frame(transport, &frame, false, 0u, true, NULL);
+    if (err != DALI_OK) {
+        return err;
+    }
+    *transmitted_out = true;
+
+    return dali_transport_delay_ms(transport,
+                                   DALI_COMMISSIONING_QUIESCENT_SETTLE_MS);
+}
+
+/*
+ * Broadcast STOP QUIESCENT MODE through the cleanup path.
+ *
+ * Same reasoning as the TERMINATE unwind: this has to be attempted even when a
+ * front-end cancellation is latched, because the alternative is an installation
+ * whose sensors stay silent after an aborted run. No settle follows — the
+ * caller is on its way out and nothing else is about to transmit.
+ */
+static DaliError commissioning_release_quiescence(
+    const DaliDiscoveryTransport *transport)
+{
+    DaliFrame frame;
+    DaliError err = dali_build_device_broadcast_command(
+        DALI_CMD_STOP_QUIESCENT_MODE, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+    return dali_transport_transact_cleanup(transport, &frame, false, 0u, true,
+                                           NULL);
+}
+
 static DaliError query_special_u8(const DaliDiscoveryTransport *transport,
                                   DaliCommandId id,
                                   uint8_t param,
@@ -156,16 +217,16 @@ DaliError dali_commissioning_build_start_sequence(DaliSequence *out)
     }
     initialise->send_twice = true;
 
-    DaliSequenceStep *randomize =
-        &out->steps[DALI_COMMISSIONING_START_STEP_RANDOMIZE];
-    err = set_special_step(randomize, DALI_CMD_RANDOMIZE, 0u);
+    DaliSequenceStep *randomise =
+        &out->steps[DALI_COMMISSIONING_START_STEP_RANDOMISE];
+    err = set_special_step(randomise, DALI_CMD_RANDOMISE, 0u);
     if (err != DALI_OK) {
         return err;
     }
-    randomize->send_twice = true;
+    randomise->send_twice = true;
 
     /* No retries: the scheduler already brackets each send-twice pair, and a
-     * repeated RANDOMIZE would hand out a fresh set of random addresses. */
+     * repeated RANDOMISE would hand out a fresh set of random addresses. */
     out->step_count = DALI_COMMISSIONING_START_SEQUENCE_STEPS;
     return DALI_OK;
 }
@@ -626,7 +687,7 @@ static DaliError commissioning_start_unaddressed(
         return err;
     }
 
-    /* The sequence ends with RANDOMIZE; nothing may search until every gear has
+    /* The sequence ends with RANDOMISE; nothing may search until every gear has
      * finished generating its random address. The environment supplies the wait
      * so this module keeps no task dependency of its own. */
     return dali_transport_delay_ms(transport,
@@ -689,6 +750,41 @@ DaliError dali_commissioning_commission_unaddressed(
     uint8_t requested_count = options->max_devices;
     if (requested_count == 0u || requested_count > out->free_address_count) {
         requested_count = out->free_address_count;
+    }
+
+    /*
+     * Quiescence goes first, before INITIALISE: a control device that is still
+     * free to transmit can put an event frame into a COMPARE reply window,
+     * where frame-like activity reads as YES and invents gear that is not
+     * there. Bracketing narrows that window; it does not close it, because a
+     * device that never receives the broadcast is unaffected and no physical
+     * collision classification exists yet.
+     *
+     * The capability check is hoisted here so the no-traffic rejection contract
+     * still holds: commissioning_start_unaddressed() makes the same check, but
+     * by then the START would already be on the bus.
+     */
+    if (options->quiesce_control_devices) {
+        if (!dali_transport_supports_atomic_sequence(transport) ||
+            !dali_transport_supports_delay(transport)) {
+            return DALI_ERR_INVALID;
+        }
+        out->quiescence_requested = true;
+        bool started = false;
+        out->quiescence_error = commissioning_start_quiescence(transport,
+                                                               &started);
+        out->quiescence_started = started;
+        /*
+         * A failed START does not end the run. Quiescence is hardening, not a
+         * precondition: commissioning worked without it, and refusing to
+         * commission because an optional silencing step failed would trade a
+         * working operation for a noisy-bus risk the operator may not even
+         * have. The result carries the failure instead.
+         *
+         * The release still runs. START may have been transmitted and then
+         * reported an error on the settle, so anything short of "certainly
+         * nothing left the scheduler" has to be unwound.
+         */
     }
 
     bool termination_required = false;
@@ -827,6 +923,22 @@ cleanup:
                           0u,
                           0u,
                           out->assigned_count);
+        }
+    }
+
+    /*
+     * Release after TERMINATE, and attempt it regardless of how TERMINATE went.
+     * Order matters only in that the gear's fifteen-minute initialisation state
+     * is the more dangerous one to leave set, so it is unwound first; both are
+     * attempted either way.
+     */
+    if (out->quiescence_requested) {
+        out->quiescence_release_attempted = true;
+        DaliError release_err = commissioning_release_quiescence(transport);
+        out->quiescent_state_unknown =
+            out->quiescence_started && release_err != DALI_OK;
+        if (out->quiescence_error == DALI_OK) {
+            out->quiescence_error = release_err;
         }
     }
 

@@ -51,7 +51,7 @@ typedef DaliError (*DaliSequenceTransactionFn)(const DaliSequence *seq,
 /*
  * Block for at least ms milliseconds before the caller's next frame.
  *
- * Some protocol steps must let the bus or the gear settle — the post-RANDOMIZE
+ * Some protocol steps must let the bus or the gear settle — the post-RANDOMISE
  * wait while every control gear generates its 24-bit random address is the one
  * that exists today. A settle cannot be expressed as a DaliSequenceStep, which
  * carries a frame and no duration, and the shared modules must not call an RTOS

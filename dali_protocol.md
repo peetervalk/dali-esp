@@ -1,5 +1,13 @@
 # DALI Protocol Reference
 
+> **Spelling.** DALI command names follow IEC 62386, which spells them
+> **INITIALISE** and **RANDOMISE** — so those are the spellings used here, in
+> the command tables, the CLI verbs (`special initialise`, `special randomise`),
+> and the C identifiers that name them. Everything else in this project is
+> American English: `tokenize`, `recognize`, `quantize`, and ordinary software
+> initialization. The split is deliberate — a command name you cannot grep the
+> standard for is worth less than internal consistency of dialect.
+
 Frame layouts, opcode tables, and standard behaviour, mapped to what this
 project implements. It is not a replacement for IEC 62386.
 
@@ -71,7 +79,7 @@ state from externally received frames.
 The receive ISR still follows the buffer-first rule: it records edges into the
 fixed ring, and task context decodes them. The decoder now reports an observation
 containing the decode result, edge count, and first/last edge timestamps. Those
-timestamps are a wrapping 32-bit microsecond clock quantised to 2 us. A successful
+timestamps are a wrapping 32-bit microsecond clock quantized to 2 us. A successful
 local transmission separately records its precise end timestamp in the TX ISR.
 Unsigned deltas make attribution wrap-safe; task scheduling latency does not move
 an observation into or out of a reply window.
@@ -215,7 +223,7 @@ sees them.
 | `0xA1` | TERMINATE | Closes an initialise window |
 | `0xA3` | DTR0 DATA | |
 | `0xA5` | INITIALISE | Send twice |
-| `0xA7` | RANDOMIZE | Send twice |
+| `0xA7` | RANDOMISE | Send twice |
 | `0xA9` | COMPARE | Commissioning walk |
 | `0xAB` | WITHDRAW | Commissioning walk |
 | `0xAD` | PING | |
@@ -309,8 +317,8 @@ single-send.
 | `0x10` | RESET — not implemented | twice |
 | `0x14` | SET SHORT ADDRESS DTR0 — not implemented | twice |
 | `0x15` | ENABLE WRITE MEMORY — not implemented | twice |
-| `0x1D` | START QUIESCENT MODE — not implemented | twice |
-| `0x1E` | STOP QUIESCENT MODE — not implemented | twice |
+| `0x1D` | START QUIESCENT MODE | twice |
+| `0x1E` | STOP QUIESCENT MODE | twice |
 | `0x30` | QUERY DEVICE STATUS — not implemented | reply |
 | `0x35` | QUERY NUMBER OF INSTANCES | reply |
 | `0x36`/`0x37`/`0x38` | QUERY CONTENT DTR0/DTR1/DTR2 | reply |
@@ -323,9 +331,16 @@ read, or DT8 bring-up, competes with sensor traffic otherwise. Espressif's
 brightness commands, which would make an unquiesced sensor a visible fault rather
 than only noise. Unverified here.
 
-Device address byte `0xFF` addresses all control devices. There is no builder for
-it: `dali_build_device_command()` rejects any address at or above 64, so every
-device command this project can send is short-addressed.
+Device address byte `0xFF` addresses all control devices.
+`dali_build_device_broadcast_command()` builds that form;
+`dali_build_device_command()` still takes a short address and still rejects
+anything at or above 64, because 0xFF is an address *byte*, not an address.
+Both accept any 24-bit device command, queries included — a broadcast query
+collides by construction, which the operator surfaces warn about rather than the
+builder forbidding it.
+
+`quiescent on|off <addr|all>` is the verb on both front ends. Host-tested;
+no bus has run it.
 
 ### Part 103 special commands
 
@@ -434,12 +449,14 @@ generic deadband.
 
 Control gear and control devices share one bus, and each part's commissioning
 sequence can disturb the other's. Timestamped reply attribution does not solve
-this: Part 103 `START QUIESCENT MODE` / `STOP QUIESCENT MODE` bracketing is not
-implemented, so active control-device traffic can still disturb a Part 102
-commissioning run. It is
-recorded because it is a plausible explanation for phantom devices in a
-mixed-installation binary search, and because it is separate from the COMPARE
-collision problem rather than another face of it.
+this on its own. Gear commissioning now brackets itself with broadcast
+`START`/`STOP QUIESCENT MODE`, which stops a conforming control device from
+transmitting into a COMPARE reply window; the same commands are available by hand
+as the `quiescent` verb. What that does not cover: a device that never received
+the broadcast, and the reverse direction below. It is recorded because it is a
+plausible explanation for phantom devices in a mixed-installation binary search,
+and because it is separate from the COMPARE collision problem rather than another
+face of it. Host-tested only.
 
 `0xC1` means two things depending on frame width. As a Part 102 special opcode it
 is `ENABLE DEVICE TYPE`; as the first byte of a 24-bit frame it is the Part 103
@@ -537,12 +554,12 @@ Steinel HF 360 II memory-bank layout and its tuning workflow are in
 | Timestamped reply attribution closes | 27 ms after precise local TX end |
 | Scheduler reply wait after TX handoff | 25 ms |
 | Send-twice window | 100 ms |
-| Post-RANDOMIZE settle, before the first COMPARE | 100 ms |
+| Post-RANDOMISE settle, before the first COMPARE | 100 ms |
 
 Every row above except the last is frame-level timing the PHY and scheduler
 enforce. The 2 ms handoff suppression plus the 25 ms reply wait gives the precise
 TX-end-relative 27 ms attribution close; observations are accepted by their
-captured edge timestamps, not by when task context delivers them. The RANDOMIZE
+captured edge timestamps, not by when task context delivers them. The RANDOMISE
 settle is a commissioning-sequence delay in
 `dali_commissioning`, raised from 15 ms on 2026-08-24 to match the figure
 Espressif's `esp_dali` attributes to IEC 62386-102 §11.3. Unconfirmed against the

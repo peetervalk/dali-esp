@@ -16,7 +16,7 @@
 #define DALI_COMMISSIONING_QUERY_RETRIES_LEFT 1u
 
 /*
- * Settle time after RANDOMIZE, before the first COMPARE. Gear needs this long to
+ * Settle time after RANDOMISE, before the first COMPARE. Gear needs this long to
  * finish generating its 24-bit random address, and gear that has not finished
  * does not answer COMPARE — which is indistinguishable from there being no gear
  * left to find. Raised from 15 ms on 2026-08-24; the 100 ms figure is Espressif's
@@ -28,6 +28,24 @@
  * a bus with nothing on it rather than as an error.
  */
 #define DALI_COMMISSIONING_RANDOMISE_SETTLE_MS 100u
+
+/*
+ * Settle after broadcast START QUIESCENT MODE, before INITIALISE.
+ *
+ * Unlike the RANDOMISE settle, this is not a standards figure and is not
+ * presented as one. It is derived from the bus: a control device that began
+ * transmitting an event frame just before START arrived is still clocking it
+ * out, and a 24-bit frame at 1200 bps takes about 20 ms. Waiting two frame
+ * times lets any such frame finish and its stop condition pass before
+ * INITIALISE opens the window that a stray frame would corrupt.
+ *
+ * What it does not do: quiescent mode stops a device from starting new
+ * transmissions, so nothing here needs the device to compute anything. If the
+ * standard specifies an entry time, it is not read here and this constant may
+ * be too short — but it is bounded below by the frame-duration argument, which
+ * is checkable without the standard.
+ */
+#define DALI_COMMISSIONING_QUIESCENT_SETTLE_MS     ((2u * DALI_EXTENDED_FRAME_BITS * DALI_BIT_US) / 1000u)
 
 typedef struct {
     uint32_t random_address;
@@ -42,6 +60,20 @@ typedef struct {
     uint8_t max_devices;       /* 0 = fill every free short address */
     uint64_t used_address_mask; /* bit N set means short address N is unavailable */
     bool query_short_address;
+    /*
+     * Bracket the run with broadcast START/STOP QUIESCENT MODE, so control
+     * devices cannot put event frames into a COMPARE reply window and be
+     * counted as gear.
+     *
+     * Off when the struct is zero-initialized, which keeps an out-of-tree
+     * caller on the behaviour it already had. Two things to know before turning
+     * it on: the release at the end of the run is unconditional, so it also
+     * releases a quiescence an operator started by hand with the `quiescent`
+     * verb; and a failed START does not abort the run, because quiescence is
+     * hardening rather than a correctness requirement — the result says what
+     * happened instead.
+     */
+    bool quiesce_control_devices;
 } DaliCommissioningOptions;
 
 typedef struct {
@@ -59,6 +91,19 @@ typedef struct {
      * fifteen-minute initialisation state may still be active. */
     bool    initialisation_state_unknown;
     DaliError cleanup_error;
+    /* Quiescence bracketing, reported the same way TERMINATE is: what was
+     * transmitted, never what was applied. No control device acknowledges
+     * either command, so a bus with none present and a bus that ignored the
+     * broadcast are indistinguishable from here. */
+    bool    quiescence_requested;
+    bool    quiescence_started;
+    bool    quiescence_release_attempted;
+    /* True when quiescence was started and the release could not be
+     * transmitted, so control devices may still be silent. The counterpart of
+     * initialisation_state_unknown, and the more visible failure of the two:
+     * an installation whose sensors stay quiet looks broken. */
+    bool    quiescent_state_unknown;
+    DaliError quiescence_error;
     DaliCommissioningAssignment assignments[DALI_COMMISSIONING_MAX_ASSIGNMENTS];
 } DaliCommissioningResult;
 
@@ -104,11 +149,11 @@ DaliError dali_commissioning_decode_short_address(uint8_t encoded,
  * but a separate bus master can still invalidate the operation.
  * --------------------------------------------------------------------------*/
 
-/* TERMINATE, INITIALISE(unaddressed), RANDOMIZE. */
+/* TERMINATE, INITIALISE(unaddressed), RANDOMISE. */
 #define DALI_COMMISSIONING_START_SEQUENCE_STEPS  3u
 #define DALI_COMMISSIONING_START_STEP_TERMINATE  0u
 #define DALI_COMMISSIONING_START_STEP_INITIALISE 1u
-#define DALI_COMMISSIONING_START_STEP_RANDOMIZE  2u
+#define DALI_COMMISSIONING_START_STEP_RANDOMISE  2u
 
 /* SEARCH ADDRH, SEARCH ADDRM, SEARCH ADDRL. */
 #define DALI_COMMISSIONING_SEARCH_SEQUENCE_STEPS 3u
@@ -128,10 +173,10 @@ DaliError dali_commissioning_decode_short_address(uint8_t encoded,
 /*
  * Build the opening of an unaddressed commissioning run. Grouping these matters
  * for what it prevents on failure as much as for ordering: if INITIALISE is
- * admitted and RANDOMIZE is not, the gear sits in initialisation state for
+ * admitted and RANDOMISE is not, the gear sits in initialisation state for
  * fifteen minutes with nothing on the bus aware of it.
  *
- * INITIALISE and RANDOMIZE are send-twice commands; the scheduler expands each
+ * INITIALISE and RANDOMISE are send-twice commands; the scheduler expands each
  * into an adjacent pair, so three logical steps become five forward frames.
  */
 DaliError dali_commissioning_build_start_sequence(DaliSequence *out);

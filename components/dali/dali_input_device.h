@@ -93,6 +93,24 @@ DaliError dali_input_build_dtr_check_sequence(uint8_t addr,
                                               DaliDtrRegister reg,
                                               uint8_t value,
                                               DaliSequence *out);
+/*
+ * Quiescent mode (Part 103 device level, opcodes 0x1D/0x1E, instance byte
+ * 0xFE). enable selects START, otherwise STOP.
+ *
+ * Both are send-twice: the caller must transmit the returned frame twice within
+ * the 100 ms window, which for this project means handing it to the scheduler
+ * with send_twice set rather than enqueueing it twice.
+ *
+ * A quiesced device stops producing event frames, so anything driven by one —
+ * an occupancy light, a wall switch — goes silent until STOP is sent. Whether
+ * the standard also ends the state on its own timer is not established here;
+ * treat STOP as the only thing that reliably releases it.
+ */
+DaliError dali_input_build_quiescent_mode(uint8_t addr, bool enable, DaliFrame *out);
+
+/* The same, addressed to every control device at once (address byte 0xFF). */
+DaliError dali_input_build_quiescent_mode_broadcast(bool enable, DaliFrame *out);
+
 DaliError dali_input_build_query_instance_type(uint8_t addr, uint8_t instance, DaliFrame *out);
 DaliError dali_input_build_query_resolution(uint8_t addr, uint8_t instance, DaliFrame *out);
 DaliError dali_input_build_query_instance_error(uint8_t addr, uint8_t instance, DaliFrame *out);

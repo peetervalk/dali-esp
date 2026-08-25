@@ -1307,7 +1307,7 @@ void dali_sched_reset_queue_stats(void)
 }
 
 /* ---------------------------------------------------------------------------
- * On-device convenience initialiser
+ * On-device convenience initializer
  * --------------------------------------------------------------------------*/
 #ifndef DALI_HOST_BUILD
 static uint32_t device_get_tick_ms(void)

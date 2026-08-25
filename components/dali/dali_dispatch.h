@@ -110,7 +110,7 @@ typedef struct {
  * Tracks on/off state per target for DALI_DISPATCH_ACTION_TOGGLE.
  * OBSERVE and MIRROR also update this so a mix of legacy direct-control,
  * phantom-translation, and TOGGLE entries stays consistent.
- * Zero-initialise on startup; no persistence across power cycles.
+ * Zero-initialize on startup; no persistence across power cycles.
  */
 typedef struct {
     uint16_t group_on;  /* bit N = group N considered on */

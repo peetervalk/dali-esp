@@ -89,7 +89,18 @@ Full verb syntax is in `dali_commands.md`.
 ### Assigning short addresses
 
 `commission unaddressed [first-addr] [max-devices]` runs the INITIALISE /
-RANDOMIZE / COMPARE / PROGRAM SHORT ADDRESS walk, sequenced and checked.
+RANDOMISE / COMPARE / PROGRAM SHORT ADDRESS walk, sequenced and checked.
+
+The run silences control devices for its duration. A broadcast Part 103 START
+QUIESCENT MODE goes out before INITIALISE and a STOP follows TERMINATE, so an
+occupancy sensor or wall switch cannot put an event frame into a COMPARE reply
+window, where frame-like activity reads as YES and invents gear that is not
+there. Only control devices are affected; lights keep working throughout.
+
+Two consequences worth knowing. The release is unconditional, so a run also
+releases a quiescence you started by hand with `quiescent on all`. And if the
+release cannot be transmitted, the shell says so explicitly — control devices may
+stay silent, and `quiescent off all` is the fix.
 
 **It is still dependable only with a single unaddressed device on the bus.** The
 reply-activity and cleanup changes described here are not a multi-gear HIL result.
@@ -130,7 +141,7 @@ This closes the previous path where an overlapping reply was dropped and then
 mistaken for silence. It deliberately does not turn every pulse or decode error
 into a device.
 
-Once the opening TERMINATE / INITIALISE / RANDOMIZE sequence is handed to the
+Once the opening TERMINATE / INITIALISE / RANDOMISE sequence is handed to the
 atomic transport, every later exit converges on one Part 102 TERMINATE attempt:
 normal completion, a bus error, front-end cancellation, and even a local wait
 timeout whose sequence may finish later. The shell provides a cleanup transport
@@ -152,6 +163,15 @@ outcomes separately:
 - `cleanup_error` preserves a cleanup failure without overwriting an earlier
   primary error. `initialisation_state_unknown` is then true because the
   fifteen-minute initialisation window may still be active.
+- `quiesce_control_devices` in `DaliCommissioningOptions` turns the bracketing
+  on. It is off in a zero-initialized struct, so an out-of-tree caller keeps the
+  behaviour it had; the shell sets it.
+- `quiescence_started` means START was transmitted, never that any device
+  quiesced — nothing acknowledges it, so an empty bus reports the same. A failed
+  START does not abort the run: quiescence is hardening, not a precondition.
+- `quiescent_state_unknown` is the counterpart of `initialisation_state_unknown`
+  and the more visible of the two: quiescence was started and the release could
+  not be transmitted, so the installation's sensors may still be silent.
 
 With a live connection, successful cleanup appears as `commission: terminate`.
 A failed cleanup reports `cleanup terminate ERR ... initialisation state
@@ -160,9 +180,11 @@ disconnect does not make that result disappear with the socket.
 
 The remaining commissioning work is explicit:
 
-- Part 103 START/STOP QUIESCENT and the cross-part TERMINATE guard are not yet
-  implemented. An active input device or event source can still disturb gear
-  commissioning.
+- The cross-part TERMINATE guard is not implemented: a control device that
+  observes the Part 102 INITIALISE can still enter its own addressing state.
+  START/STOP QUIESCENT bracketing now runs, which stops a control device from
+  *transmitting* into the run, but a device that never received the broadcast is
+  unaffected and none of it is HIL-validated.
 - Two gear that generate the same 24-bit random address are not separated or
   recovered today; they can be programmed and withdrawn together.
 - DALI-2 priority/backoff and complete multi-master intervention handling remain
@@ -178,7 +200,7 @@ is for. Set it to `false` on anything left flashed on a shared network:
 RANDOMISE cannot be undone.
 
 The same rule refuses the nine commissioning primitives under `special`
-(`initialise`, `randomize`, `search-h/m/l`, `program-short`, `withdraw`, and both
+(`initialise`, `randomise`, `search-h/m/l`, `program-short`, `withdraw`, and both
 write-memory forms). `terminate` always stays available, because it is what
 closes an initialise window another tool opened.
 

@@ -57,6 +57,21 @@ DaliError dali_input_build_query_content_dtr2(uint8_t addr, DaliFrame *out)
     return dali_build_device_command(addr, DALI_CMD_QUERY_DEVICE_CONTENT_DTR2, out);
 }
 
+DaliError dali_input_build_quiescent_mode(uint8_t addr, bool enable, DaliFrame *out)
+{
+    return dali_build_device_command(
+        addr,
+        enable ? DALI_CMD_START_QUIESCENT_MODE : DALI_CMD_STOP_QUIESCENT_MODE,
+        out);
+}
+
+DaliError dali_input_build_quiescent_mode_broadcast(bool enable, DaliFrame *out)
+{
+    return dali_build_device_broadcast_command(
+        enable ? DALI_CMD_START_QUIESCENT_MODE : DALI_CMD_STOP_QUIESCENT_MODE,
+        out);
+}
+
 static DaliError dtr_readback_command_id(DaliDtrRegister reg, DaliCommandId *out)
 {
     switch (reg) {

@@ -1382,7 +1382,7 @@ void DaliComponent::loop()
 
 /*
  * The console and the native CLI reach the same bus through the same protocol
- * stack, so they share one tokeniser, one set of argument parsers, and one set
+ * stack, so they share one tokenizer, one set of argument parsers, and one set
  * of named command tables (dali_cli.h). What they do not share is the verb
  * list: there is no terminal here to print a scan, a capture, or an inventory
  * into, and the result of a command is a single Home Assistant text state.
@@ -1454,6 +1454,8 @@ static const DaliCliCommandSpec s_console_commands[] = {
     { DALI_CLI_CMD_MEMREAD,  "memread",  "<addr> <bank> <offset> [count]", "control-gear memory read (Part 102)", 3u, 4u, NULL },
     { DALI_CLI_CMD_DEVMEM,   "devmem",   "read|write <addr> <bank> <offset> [count|value]", "control-device memory (Part 103)", 4u, 5u, "read write" },
     { DALI_CLI_CMD_DTRCHECK, "dtrcheck", "<addr> <0|1|2> <0-255>", "load a control-device DTR and read it back", 3u, 3u, NULL },
+
+    { DALI_CLI_CMD_QUIESCENT, "quiescent", "on|off <addr|all>", "Part 103 quiescent mode: silence control-device events", 2u, 2u, "on off" },
 
     { DALI_CLI_CMD_COUNT, "group", "forget <addr> [group]", "retire a departed member from the group cache", 2u, 3u, "forget" },
 };
@@ -2416,6 +2418,58 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         case DALI_CLI_CMD_DEVMEM:
             console_devmem_(tokens, cmd_ctx);
             return;
+
+        /*
+         * START/STOP QUIESCENT MODE, send-twice, no reply. `all` is address
+         * byte 0xFF — every control device, control gear untouched.
+         *
+         * A quiesced device reports no events, so anything an automation drives
+         * from one stops updating until it is released. The console can only
+         * say so in the result string; nothing here tracks the state.
+         */
+        case DALI_CLI_CMD_QUIESCENT: {
+            bool enable;
+            if (strcmp(tokens.tok[1], "on") == 0) {
+                enable = true;
+            } else if (strcmp(tokens.tok[1], "off") == 0) {
+                enable = false;
+            } else {
+                set_cmd_usage(spec);
+                return;
+            }
+
+            DaliFrame frame;
+            DaliError err;
+            uint8_t addr = 0u;
+            bool all = strcmp(tokens.tok[2], "all") == 0;
+            if (all) {
+                err = dali_input_build_quiescent_mode_broadcast(enable, &frame);
+            } else if (dali_cli_parse_short_addr(tokens.tok[2], &addr)) {
+                err = dali_input_build_quiescent_mode(addr, enable, &frame);
+            } else {
+                set_cmd_usage(spec);
+                return;
+            }
+            if (err != DALI_OK) {
+                set_cmd_enqueue_result(err);
+                return;
+            }
+
+            /* Send-twice expansion is the scheduler's job: one transaction,
+             * not two enqueues, so nothing can land between the pair. */
+            DaliTransaction txn = {};
+            txn.frame      = frame;
+            txn.send_twice = true;
+            err = dali_sched_enqueue(&txn);
+            if (err != DALI_OK) {
+                set_cmd_enqueue_result(err);
+                return;
+            }
+            set_cmd_result(enable ? (all ? "quiescent on: all, no events"
+                                         : "quiescent on: no events")
+                                  : "OK");
+            return;
+        }
 
         case DALI_CLI_CMD_DTRCHECK: {
             uint8_t addr, reg, value;

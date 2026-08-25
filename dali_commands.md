@@ -24,7 +24,7 @@ the verb, its argument checking, its blocking transport, and its output are the
 same code (`components/dali/dali_shell.c`).
 
 The console is a different execution model, not a different language. It shares
-the tokeniser, argument parsers, named tables, and reply decoding
+the tokenizer, argument parsers, named tables, and reply decoding
 (`components/dali/dali_cli.c`), so a verb, an argument form, and a command name
 mean the same thing on both. What it cannot do is stream or block: a result is
 one Home Assistant text state, and every console verb is one enqueue and one
@@ -87,7 +87,9 @@ collide when several devices answer.
 Input-device verbs take no target. They take the short address and the instance
 as two separate arguments — `iquery 0 1 input-value`, not `iquery a0:1
 input-value`. `iquery`, `iconfig`, `devmem`, and `dtrcheck` require a short
-address and reject group and broadcast forms.
+address and reject group and broadcast forms. `quiescent` is the exception: it
+is device-level rather than instance-level, so it takes no instance, and its
+target is a short address or the literal `all`.
 
 ### Console results
 
@@ -133,6 +135,7 @@ named form.
 | `iquery` `iconfig` `vendor` | yes | yes |
 | `raw` `raw2` `dtr` | yes | yes |
 | `memread` `devmem` `dtrcheck` | yes | yes |
+| `quiescent` | yes | yes |
 | `meminfo` | yes | no — walks a bank, needs a blocking transport |
 | `queue` | yes | yes |
 | `group forget` | no | yes — the cache it edits is the component's |
@@ -324,7 +327,7 @@ Not addressed: every device on the bus sees them.
 | `enable-type` | `0-255` | ENABLE DEVICE TYPE for the next command |
 
 The console refuses the nine commissioning primitives that
-`dali_cli_special_is_commissioning()` marks — `initialise`, `randomize`,
+`dali_cli_special_is_commissioning()` marks — `initialise`, `randomise`,
 `search-h/m/l`, `program-short`, `withdraw`, `write-memory`, and
 `write-memory-nr` — with `commissioning special; use the native CLI`. Those are
 the commands that can readdress a whole installation from one line typed into a
@@ -664,9 +667,24 @@ find switches [seconds]                 # listen for events and map switches
 events                                  # drain queued Part 103 events
 instances <addr>                        # what a control device offers
 sensor poll <addr> [instance]           # read an input instance's value
+quiescent on|off <addr|all>             # silence control-device events
 smoke <addr>                            # read/write/read-back check
 commission unaddressed [first] [max]    # assign short addresses
 ```
+
+`quiescent` sends the Part 103 device-level `START`/`STOP QUIESCENT MODE`
+(opcodes `0x1D`/`0x1E`, instance byte `0xFE`, send-twice). `all` is address byte
+`0xFF` — every control device at once, which is the form worth having, since the
+point is a quiet bus rather than one quiet sensor. Control gear is untouched:
+lights keep responding while sensors and wall switches go silent.
+
+Two things an operator has to hold in their head, because nothing enforces them:
+a quiesced device reports no events, so anything driven by one stops updating
+until `quiescent off` releases it; and nothing in this project tracks the state
+or releases it on exit, so a forgotten `quiescent on all` leaves the installation
+looking broken. Whether the standard also ends the state on its own timer is not
+established here — treat `off` as the only thing that reliably releases it.
+Host-tested; no bus has run it.
 
 Commissioning remains hardware-dependable only with a single unaddressed device
 on the bus. The receive path now attributes observations to the precise
@@ -681,9 +699,12 @@ TX-end-relative 5.5–27 ms reply window and distinguishes three cases during
 This fixes the software-side collision inversion recorded in `current_status.md`,
 but overlapping replies and the activity qualifier have host coverage only; they
 have not been validated as physical-bus collision detection. Do not rely on
-multi-device commissioning until that hardware validation is complete. Part 103
-`START QUIESCENT MODE` / `STOP QUIESCENT MODE` bracketing also remains open, so
-active input devices or other bus traffic can interfere with a commissioning run.
+multi-device commissioning until that hardware validation is complete. A run now brackets itself with broadcast
+`START`/`STOP QUIESCENT MODE`, so control devices are silent for its duration
+and cannot put an event frame into a COMPARE reply window. The release is
+unconditional, so a run also releases a quiescence started by hand with
+`quiescent on all`; if the release fails, the shell says so and `quiescent off
+all` is the fix.
 
 Over TCP, `commission` and the nine commissioning specials are refused unless the
 YAML sets `allow_commissioning: true`, because the port is unauthenticated. See

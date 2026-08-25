@@ -53,7 +53,7 @@ typedef struct {
  * Timestamped RX observation delivered from task context.
  *
  * Timestamps share the PHY's wrapping 32-bit microsecond clock and are
- * quantised to 2 us because the low storage bit carries the edge level.
+ * quantized to 2 us because the low storage bit carries the edge level.
  * frame is meaningful only when result is DALI_OK. A decode error is still
  * delivered: the scheduler needs to distinguish reply-window activity from
  * true silence during commissioning.
@@ -75,7 +75,7 @@ typedef void (*DaliPhyRxCallback)(const DaliPhyRxObservation *observation,
  * --------------------------------------------------------------------------*/
 
 /*
- * Initialise the PHY layer.
+ * Initialize the PHY layer.
  * tx_gpio: GPIO number connected to DALI-2 Click RST / DALI_TX pin.
  *          The Click transmit optocoupler is active-high; the PHY maps
  *          logical DALI idle/high to the inactive physical GPIO level.

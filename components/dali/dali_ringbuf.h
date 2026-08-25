@@ -29,7 +29,7 @@ typedef struct {
 } DaliRingBuf;
 
 /*
- * Initialise a ring buffer.  buf must point to an array of `capacity`
+ * Initialize a ring buffer.  buf must point to an array of `capacity`
  * uint32_t elements; capacity must be a power of 2.
  */
 void dali_rb_init(DaliRingBuf *rb, uint32_t *buf, uint32_t capacity);

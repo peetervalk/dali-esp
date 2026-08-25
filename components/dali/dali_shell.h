@@ -3,7 +3,7 @@
 /*
  * dali_shell.h — the diagnostic CLI as a reusable session
  *
- * dali_cli.c decides what a line *means*: tokenising, the verb table, argument
+ * dali_cli.c decides what a line *means*: tokenizing, the verb table, argument
  * validation, the named command tables, and response formatting. This module
  * decides what a line *does*: it owns the blocking transport, the caches a
  * workflow accumulates across commands, and the long-running walks (scan,
@@ -28,7 +28,7 @@
  * module state, not per-session state, and dali_shell_attach() refuses a second
  * caller while one holds the session. That is a deliberate limit rather than an
  * omission: the bus itself is single-tenant, so a second concurrent session
- * would serialise on the transport anyway while giving two operators an
+ * would serialize on the transport anyway while giving two operators an
  * inconsistent view of one capture ring. A front end that must survive an
  * abandoned session (a terminal window closed without a quit) is responsible
  * for its own idle timeout, and calls dali_shell_detach() when it fires.

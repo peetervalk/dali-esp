@@ -166,7 +166,7 @@ void test_command_lookup_send_twice_metadata(void)
         DALI_CMD_SET_SHORT_ADDRESS_DTR0,
         DALI_CMD_ENABLE_WRITE_MEMORY,
         DALI_CMD_INITIALISE,
-        DALI_CMD_RANDOMIZE,
+        DALI_CMD_RANDOMISE,
     };
 
     for (uint8_t i = 0u;
@@ -360,7 +360,7 @@ void test_command_lookup_special_commands_are_builder_implemented(void)
         DALI_CMD_TERMINATE,
         DALI_CMD_DTR0_DATA,
         DALI_CMD_INITIALISE,
-        DALI_CMD_RANDOMIZE,
+        DALI_CMD_RANDOMISE,
         DALI_CMD_COMPARE,
         DALI_CMD_WITHDRAW,
         DALI_CMD_PING,
@@ -1178,6 +1178,54 @@ void test_error_text_is_always_printable(void)
 }
 
 
+void test_build_device_broadcast_command_and_rejections(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_device_broadcast_command(
+                          DALI_CMD_START_QUIESCENT_MODE, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xFFFE1Du, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(DALI_EXTENDED_FRAME_BITS, frame.bit_length);
+
+    /* Queries are accepted here for the same reason dali_build_command() accepts
+     * a broadcast query: the collision is the operator's to be warned about,
+     * not the builder's to forbid. */
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_device_broadcast_command(
+                          DALI_CMD_QUERY_NUMBER_OF_INSTANCES, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xFFFE35u, frame.data);
+
+    /* Only 24-bit device commands. A Part 102 gear command shares neither the
+     * frame shape nor the opcode space. */
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_device_broadcast_command(DALI_CMD_OFF, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_device_broadcast_command(
+                          DALI_CMD_QUERY_INSTANCE_TYPE, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_device_broadcast_command(DALI_CMD_COUNT, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_device_broadcast_command(
+                          DALI_CMD_START_QUIESCENT_MODE, NULL));
+}
+
+void test_device_broadcast_differs_from_every_short_address(void)
+{
+    DaliFrame broadcast;
+    DaliFrame addressed;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_device_broadcast_command(
+                          DALI_CMD_STOP_QUIESCENT_MODE, &broadcast));
+    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        TEST_ASSERT_EQUAL(DALI_OK,
+                          dali_build_device_command(
+                              addr, DALI_CMD_STOP_QUIESCENT_MODE, &addressed));
+        TEST_ASSERT_NOT_EQUAL(broadcast.data, addressed.data);
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1256,5 +1304,8 @@ int main(void)
     RUN_TEST(test_error_name_spells_the_operator_visible_codes);
     RUN_TEST(test_error_name_returns_null_for_unknown_codes);
     RUN_TEST(test_error_text_is_always_printable);
+    /* Part 103 device broadcast */
+    RUN_TEST(test_build_device_broadcast_command_and_rejections);
+    RUN_TEST(test_device_broadcast_differs_from_every_short_address);
     return UNITY_END();
 }
