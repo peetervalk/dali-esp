@@ -96,6 +96,42 @@ struct ProfileRefreshQuery {
     bool               actual_level_pending;
 };
 
+/*
+ * Cold-start group seed sweep.
+ *
+ * A group light needs one member's short address to poll: QUERY ACTUAL LEVEL
+ * addressed to the group collides as soon as the group has two members. That
+ * representative used to have to be written into the YAML as `query_address`,
+ * which is a fact about the bus kept in a file the ESP32 never sees, and which
+ * goes stale silently the day the fixture is replaced.
+ *
+ * The bus can answer the question itself. QUERY GROUPS 0-7 / 8-15 against each
+ * short address says which groups it is in, which is the same data a scan
+ * collects — so this walks addresses until every group light has a
+ * representative and then stops. Usually that is a handful of addresses.
+ *
+ * It seeds rather than publishes a snapshot: the result is explicitly
+ * unverified, so a later scan supersedes it exactly as it supersedes a
+ * hand-written seed, and `dali_group_map_scan_covers_known_members()` keeps its
+ * meaning. Seeding only addresses that actually answered is also strictly safer
+ * than the YAML form, which could name an address that does not exist and block
+ * every future scan snapshot.
+ *
+ * Runs only when no snapshot was restored from flash — the same condition that
+ * used to select the YAML seed — so a commissioned installation never pays for
+ * it. Nothing here is persisted; only a scan or an explicit edit writes flash.
+ */
+struct GroupSeedSweep {
+    bool               active;
+    bool               in_flight;
+    uint8_t            address;       /* the address the in-flight query asks about */
+    uint16_t           wanted;        /* groups still without a representative */
+    DaliSequenceResult result;
+    std::atomic<bool>  result_ready;
+};
+
+static GroupSeedSweep s_group_seed_sweep = {};
+
 static LevelProfileCacheEntry s_level_profile_cache[DALI_SHORT_ADDRESS_COUNT] = {};
 static ScanLevelProfileRecord
     s_scan_level_profile_snapshot[DALI_SHORT_ADDRESS_COUNT] = {};
@@ -474,6 +510,25 @@ static void on_level_profile_query_done(const DaliSequenceResult *result,
                                         void * /*ctx*/)
 {
     publish_level_profile_query_result(result);
+}
+
+/*
+ * The seed sweep shares s_refresh_query_in_flight_ with the refresh pump on
+ * purpose: one component-issued query on the bus at a time, whichever stage
+ * asked for it.
+ */
+static void on_group_seed_query_done(const DaliSequenceResult *result,
+                                     void * /*ctx*/)
+{
+    if (result != nullptr) {
+        s_group_seed_sweep.result = *result;
+    } else {
+        s_group_seed_sweep.result = {};
+        s_group_seed_sweep.result.result = DALI_ERR_INVALID;
+        s_group_seed_sweep.result.failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
+    }
+    s_group_seed_sweep.result_ready.store(true, std::memory_order_release);
+    s_refresh_query_in_flight_.store(false, std::memory_order_release);
 }
 
 static void on_level_profile_device_type_done(DaliError result,
@@ -1078,8 +1133,13 @@ void DaliComponent::setup()
 
     /* Group-membership table: prefer the persisted snapshot (from a prior scan
      * or console edits); it fully describes reality including empty groups. Only
-     * when nothing is persisted (first boot, flash erase, format change) do we
-     * fall back to seeding from each group light's static query_address.
+     * when nothing is persisted (first boot, flash erase, format change) is a
+     * cold-start seed needed at all.
+     *
+     * The seed comes from two places, in this order: an explicit `query_address`
+     * where the YAML gives one, and the bus itself for every group light left
+     * without a representative. The second is what makes the first optional —
+     * see GroupSeedSweep.
      *
      * Reading get_query_address() is safe here (unlike inside register_light()):
      * codegen emits set_query_address() after set_dali_component(), so the value
@@ -1102,6 +1162,7 @@ void DaliComponent::setup()
             dali_group_map_seed(&s_group_map, e.target_address, qa);
         }
         portEXIT_CRITICAL(&s_group_map_mux);
+        arm_group_seed_sweep();
     }
 
     /* Nothing below this point works without the task: it is what drives RX
@@ -1204,6 +1265,12 @@ void DaliComponent::loop()
     uint64_t forget_mask =
         external_profile_forget_mask_.exchange(0ull, std::memory_order_acq_rel);
     if (forget_mask != 0ull) forget_level_profile_mask(forget_mask);
+
+    /* Ahead of the refresh: until a group light has a representative the
+     * refresh can only hand it a default profile and move on, so finding one is
+     * the more useful thing to spend the single query slot on. Disarmed for
+     * good once every group light has one. */
+    pump_group_seed_sweep();
 
     /* Admit full-refresh queries one at a time. Queue pressure and scans retain
      * the cursor, so no later light is silently dropped. */
@@ -2756,6 +2823,125 @@ void DaliComponent::add_dispatch_entry(uint8_t frame_kind, uint8_t address_kind,
 void DaliComponent::start_refresh()
 {
     dali_refresh_cursor_request(&refresh_cursor_);
+}
+
+void DaliComponent::arm_group_seed_sweep()
+{
+    uint16_t wanted = 0u;
+    for (uint8_t i = 0u; i < s_light_count; i++) {
+        const LightEntry &e = s_light_registry[i];
+        if (e.target_type != (uint8_t) DALI_ADDR_GROUP ||
+            e.target_address >= DALI_GROUP_COUNT) {
+            continue;
+        }
+        /* An explicit query_address already answered for this group. Asking the
+         * bus anyway would be traffic spent to re-derive what was configured. */
+        if (pick_group_member(e.target_address) != 0xFFu) continue;
+        wanted |= (uint16_t) 1u << e.target_address;
+    }
+
+    if (wanted == 0u) return;
+
+    /* Field by field: the struct holds an atomic, so it is not assignable. */
+    s_group_seed_sweep.in_flight = false;
+    s_group_seed_sweep.address = 0u;
+    s_group_seed_sweep.wanted = wanted;
+    s_group_seed_sweep.result_ready.store(false, std::memory_order_relaxed);
+    s_group_seed_sweep.active = true;
+    ESP_LOGI(TAG, "group seed: no membership in flash; asking the bus for a "
+                  "representative of group mask 0x%04X", (unsigned) wanted);
+}
+
+/*
+ * One address per completion, never blocking. Shaped like pump_refresh() for
+ * the same reason: Core 0's loop may not block, so a walk here is a state
+ * machine advanced by whichever pass observes the previous answer.
+ */
+void DaliComponent::pump_group_seed_sweep()
+{
+    if (!s_group_seed_sweep.active) return;
+    /* A scan rebuilds the whole table from a better source; a shell workflow
+     * holds the bus through the same gate. Either way there is nothing to add
+     * here, and the scan's result will disarm this on its own. */
+    if (scan_running_.load(std::memory_order_acquire)) return;
+
+    if (s_group_seed_sweep.in_flight) {
+        if (!s_group_seed_sweep.result_ready.load(std::memory_order_acquire)) return;
+        s_group_seed_sweep.result_ready.store(false, std::memory_order_relaxed);
+        s_group_seed_sweep.in_flight = false;
+
+        const uint8_t address = s_group_seed_sweep.address;
+        uint16_t groups = 0u;
+        /* An address nothing answers for is the common case on a sparse bus and
+         * is not a fault: the sequence times out and the walk moves on. */
+        if (dali_discovery_groups_from_sequence(&s_group_seed_sweep.result,
+                                                &groups) == DALI_OK &&
+            groups != 0u) {
+            portENTER_CRITICAL(&s_group_map_mux);
+            for (uint8_t g = 0u; g < DALI_GROUP_COUNT; g++) {
+                if (((groups >> g) & 1u) != 0u) {
+                    dali_group_map_seed(&s_group_map, g, address);
+                }
+            }
+            portEXIT_CRITICAL(&s_group_map_mux);
+            ESP_LOGD(TAG, "group seed: a%u is in group mask 0x%04X",
+                     (unsigned) address, (unsigned) groups);
+            s_group_seed_sweep.wanted &= (uint16_t) ~groups;
+        }
+        s_group_seed_sweep.address++;
+
+        /* Something else may have answered the question meanwhile — a scan that
+         * completed, or a console `add-group`. Re-derive here rather than every
+         * pass: the check costs a lock per group, and one extra address is a
+         * cheaper way to notice than paying for it while idle. */
+        for (uint8_t g = 0u; g < DALI_GROUP_COUNT; g++) {
+            if (((s_group_seed_sweep.wanted >> g) & 1u) != 0u &&
+                pick_group_member(g) != 0xFFu) {
+                s_group_seed_sweep.wanted &= (uint16_t) ~((uint16_t) 1u << g);
+            }
+        }
+    }
+
+    if (s_group_seed_sweep.wanted == 0u ||
+        s_group_seed_sweep.address >= DALI_SHORT_ADDRESS_COUNT) {
+        s_group_seed_sweep.active = false;
+        if (s_group_seed_sweep.wanted == 0u) {
+            ESP_LOGI(TAG, "group seed: every group light has a representative "
+                          "after %u address(es)",
+                     (unsigned) s_group_seed_sweep.address);
+        } else {
+            /* Not an error: a group with no gear in it has no representative to
+             * find, and the entity still controls the group perfectly well. It
+             * just cannot read a level back. */
+            ESP_LOGW(TAG, "group seed: no member found for group mask 0x%04X; "
+                          "those lights will not poll until a scan",
+                     (unsigned) s_group_seed_sweep.wanted);
+        }
+        /* Newly seeded groups have a poll target now; go and use it. */
+        dali_refresh_cursor_request(&refresh_cursor_);
+        return;
+    }
+
+    /* One component query on the bus at a time, shared with the refresh pump. */
+    if (s_refresh_query_in_flight_.load(std::memory_order_acquire)) return;
+
+    DaliSequence sequence;
+    if (dali_discovery_build_groups_sequence(s_group_seed_sweep.address,
+                                             &sequence) != DALI_OK) {
+        s_group_seed_sweep.address++;
+        return;
+    }
+    sequence.on_complete = on_group_seed_query_done;
+    sequence.cb_ctx = nullptr;
+    s_group_seed_sweep.result_ready.store(false, std::memory_order_relaxed);
+    s_refresh_query_in_flight_.store(true, std::memory_order_release);
+    if (dali_sched_enqueue_sequence(&sequence) != DALI_OK) {
+        /* Queue full or a reset barrier: retry the same address next pass
+         * rather than skipping it, since nothing was asked. */
+        s_refresh_query_in_flight_.store(false, std::memory_order_release);
+        return;
+    }
+    s_group_seed_sweep.in_flight = true;
 }
 
 void DaliComponent::pump_refresh()

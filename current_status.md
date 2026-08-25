@@ -326,6 +326,53 @@ fault.
   need a hardware pass. `Configuration commands (19 names)` still reads `partial`
   on the real-bus column and `DTR0-consuming configuration` still reads `no`.
 
+### Verified locally on 2026-08-25 (group representative discovery)
+
+A group light needs one member's short address to poll, because QUERY ACTUAL
+LEVEL addressed to a group collides the moment the group has two members. That
+representative had to be written into the YAML as `query_address` — a fact about
+the bus kept in a file the ESP32 never sees, which goes stale silently the day
+the fixture is replaced. The bus can answer the question itself.
+
+- `DaliComponent` gained a cold-start group seed sweep. When no membership
+  snapshot is restored from flash, it walks short addresses running
+  `dali_discovery_build_groups_sequence()` — QUERY GROUPS 0-7 / 8-15 — and seeds
+  `s_group_map` with what answers, stopping as soon as every group-type light
+  entity has a representative. Armed in `setup()` under exactly the condition
+  that used to select the YAML seed, so a commissioned installation never pays
+  for it.
+- It seeds rather than publishing a snapshot. The result is explicitly
+  unverified, so a scan supersedes it exactly as it supersedes a hand-written
+  seed and `dali_group_map_scan_covers_known_members()` keeps its meaning.
+  Seeding only addresses that actually answered is also safer than the YAML
+  form, which could name an address that does not exist and would then block
+  every future scan snapshot.
+- Nothing about it blocks. `pump_group_seed_sweep()` is a state machine advanced
+  by whichever loop pass observes the previous answer, shaped like
+  `pump_refresh()` and sharing `s_refresh_query_in_flight_` with it so there is
+  one component-issued query on the bus at a time. It yields to `scan_running_`,
+  which is the same gate a shell workflow claims, and re-derives what it still
+  wants after each completion so a scan or a console `add-group` landing
+  mid-sweep disarms it within one address.
+- Nothing is persisted from it: only a scan or an explicit edit writes flash.
+  A cold node therefore re-derives on each boot until its first real scan, which
+  is the same lifecycle the YAML seed had.
+- `query_address` stays, as an override rather than a required seed. A
+  `broadcast` entity still needs it — "everyone" has no member to derive — and
+  pinning a particular member (a plain lamp rather than one sharing an input
+  device) is a judgement no sweep can make. `dali_test.yaml` keeps it so the
+  override stays under test; the README example and `_local` site configs no
+  longer need it.
+- `export config` no longer drafts a `query_address` into the group entities it
+  proposes. It names one member in a comment instead, so the export cannot
+  reintroduce the hardcode it was just used to remove.
+- Compile-verified only, and not yet run on a bus. The cost model in particular
+  is unmeasured: each address is a two-step sequence, and an address nothing
+  answers for costs a reply timeout per step, so the worst case — a configured
+  group with no gear in it, forcing the full 0-63 walk — has not been timed.
+  The early stop is what keeps the normal case short, and that has not been
+  observed either.
+
 ### Verified locally on 2026-08-12 (console verb parity)
 
 - The ESPHome console now implements every native CLI verb whose answer fits one

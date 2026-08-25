@@ -57,8 +57,11 @@ CONFIG_SCHEMA = cv.All(
             cv.Required(CONF_TARGET_TYPE): cv.enum(TARGET_TYPES, lower=True),
             cv.Optional(CONF_TARGET_ADDRESS, default=0): cv.int_range(min=0, max=63),
             # Optional QUERY_ACTUAL_LEVEL short-address override. A short target
-            # queries itself by default; group/broadcast targets need a
-            # representative gear address (or scan-derived group membership).
+            # queries itself by default. A group target does not need this: the
+            # component asks the bus which addresses are in the group and seeds
+            # a representative itself, and a scan replaces that with verified
+            # membership. Set it only to pin a particular member — or for a
+            # broadcast target, where "everyone" has no member to derive.
             cv.Optional(CONF_QUERY_ADDRESS): cv.int_range(min=0, max=63),
             # List of DALI group numbers (0-15) this entity belongs to.
             # Only needed for short-address entities so that group-addressed

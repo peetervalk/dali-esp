@@ -139,6 +139,13 @@ class DaliComponent : public Component {
 
   void start_scan();
   void start_refresh();
+  // Cold-start group seed: ask the bus which addresses are in the groups the
+  // configured group lights target, so `query_address` does not have to be
+  // written into the YAML. Armed by setup() only when no membership snapshot
+  // was restored from flash, and only for groups an explicit query_address did
+  // not already answer for. Pumped from loop(); disarms itself.
+  void arm_group_seed_sweep();
+  void pump_group_seed_sweep();
   bool is_scan_running() const {
     return scan_running_.load(std::memory_order_acquire);
   }

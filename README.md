@@ -132,14 +132,15 @@ light:
     name: "Living Room"
     target_type: group        # short | group | broadcast
     target_address: 0
-    query_address: 2          # cold-start seed: any group member; only a
-                              # complete scan replaces verified membership
+                              # No query_address: a group entity needs one
+                              # member's short address to poll for state, and
+                              # the component asks the bus for one rather than
+                              # being told. Set it only to pin a member.
   - platform: dali
     dali_id: dali_bus
     name: "Hallway"
     target_type: group
     target_address: 1
-    query_address: 5
 
   - platform: dali
     dali_id: dali_bus

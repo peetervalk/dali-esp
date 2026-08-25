@@ -245,7 +245,8 @@ in it: not the node's own blocks, not an entity's unit, device class, id,
 platforms. Read it as a diff against your source.
 
 From there, work from the example configuration in the README: give the entities
-real names, set `query_address` for group lights, and add the sensors you found.
+real names and add the sensors you found. Group lights need nothing extra — the
+member each one polls for state is discovered, not configured.
 
 ## 5. Change a bus that is already commissioned
 
@@ -345,9 +346,16 @@ a group-level `max` / `off` rather than assuming the write landed.
 #### What the controller caches, and when it needs a scan
 
 A `light:` entity with `target_type: group` needs one member's short address to
-poll for state. `query_address:` in the YAML is only a cold-start seed; once a
-scan completes, the scan-verified membership table replaces it, and that table
-is persisted to flash.
+poll for state, because QUERY ACTUAL LEVEL addressed to a group collides as soon
+as the group has two members. Nothing has to tell it which: on a node with no
+membership in flash the component asks the bus — QUERY GROUPS against each short
+address until every group light has a representative — and seeds itself. A scan
+then replaces that with verified membership, which is persisted to flash.
+
+`query_address:` remains as an override, for pinning a particular member (a
+plain lamp rather than one sharing an input device) and for a `broadcast`
+entity, where "everyone" has no member to derive. It is not a required seed,
+and on any node that has been scanned it has been inert since the first scan.
 
 Every surface that can change it also updates it:
 
