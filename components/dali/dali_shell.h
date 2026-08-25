@@ -118,6 +118,24 @@ typedef struct {
      * integration can re-read what it holds. NULL when nothing caches. */
     void (*inventory_changed)(void *ctx, const DaliDiscoveryInventory *inventory);
     /*
+     * Called after one addressed configuration command was accepted for
+     * transmission, naming what it was.
+     *
+     * A `config` verb is a single frame rather than a workflow, so it claims no
+     * bus and reaches none of the hooks above — which meant a group edit typed
+     * into a session left the integration's group-membership cache asserting
+     * the previous membership, and a group light polling a fixture that had
+     * left. The shell holds no such cache and cannot fix that itself; it can
+     * only say what it just sent.
+     *
+     * `id` is the shared DaliCommandId, so the integration decides what a given
+     * command invalidates rather than the shell deciding for it. Called on the
+     * session's task, and only when the send reported success: a refused frame
+     * changed nothing. NULL when nothing caches.
+     */
+    void (*config_applied)(void *ctx, DaliTarget target, DaliCommandId id,
+                           uint8_t param);
+    /*
      * Print the integration's own configuration as the YAML block that would
      * produce it — what `export config` emits.
      *

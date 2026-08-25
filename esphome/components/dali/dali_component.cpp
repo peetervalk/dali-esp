@@ -253,28 +253,48 @@ static bool dt6_changes_level_profile(const DaliCliDtCommand *spec)
 }
 
 /*
+ * Which short addresses a target names, as one bit per address.
+ *
+ * A group resolves through the runtime membership table, so it is only as
+ * complete as the last scan; broadcast is every address by definition. Used
+ * both to drop caches a command invalidated and to say which addresses a
+ * warning is about.
+ */
+static uint64_t config_target_mask(DaliTarget target)
+{
+    if (target.type == DALI_ADDR_SHORT) {
+        return target.address < DALI_SHORT_ADDRESS_COUNT
+                   ? ((uint64_t) 1u << target.address)
+                   : 0ull;
+    }
+    if (target.type == DALI_ADDR_GROUP) {
+        return group_member_mask(target.address);
+    }
+    return ~0ull;
+}
+
+/*
  * Drop cached profiles the command just invalidated.
  *
  * The refresh that follows only re-reads addresses some entity queries, so a
  * group member that is not its group's representative would otherwise keep a
  * stale window in the union until the next scan. Dropping the entry makes that
  * member abstain from the union instead of skewing it.
+ *
+ * Core 0 owns s_level_profile_cache, so a caller on another task routes through
+ * external_profile_forget_mask_ rather than calling this.
  */
-static void forget_level_profile_cache(DaliTarget target)
+static void forget_level_profile_mask(uint64_t mask)
 {
-    if (target.type == DALI_ADDR_SHORT) {
-        if (target.address < DALI_SHORT_ADDRESS_COUNT)
-            s_level_profile_cache[target.address].valid = false;
-        return;
-    }
-
-    uint64_t mask = target.type == DALI_ADDR_GROUP
-                        ? group_member_mask(target.address)
-                        : ~0ull;
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         if (((mask >> addr) & 1ull) != 0ull)
             s_level_profile_cache[addr].valid = false;
     }
+}
+
+static void forget_level_profile_cache(DaliTarget target)
+{
+    forget_level_profile_mask(config_target_mask(target));
 }
 
 /* ── Input sensor registry ───────────────────────────────────────────────── */
@@ -1176,6 +1196,14 @@ void DaliComponent::loop()
         ESP_LOGD(TAG, "deferred level query firing");
         start_refresh();
     }
+
+    /* ── Drop profiles a config edit invalidated, before anything reads them ──
+     * Ordered ahead of pump_refresh() on purpose: the refresh is what re-reads
+     * the window, and reusing a cached one it was told to forget would make the
+     * edit invisible for a whole poll interval. */
+    uint64_t forget_mask =
+        external_profile_forget_mask_.exchange(0ull, std::memory_order_acq_rel);
+    if (forget_mask != 0ull) forget_level_profile_mask(forget_mask);
 
     /* Admit full-refresh queries one at a time. Queue pressure and scans retain
      * the cursor, so no later light is silently dropped. */
@@ -2352,6 +2380,19 @@ void DaliComponent::execute_command(const std::string &cmd_str)
                                          : "use config-dtr0 for this command");
                 return;
             }
+            /* Same reasoning as the commissioning specials below: this is the
+             * text box, and SET SHORT ADDRESS re-addresses an installation from
+             * one line. Held to the same rule as `special program-short` so the
+             * gate cannot be walked around by choosing the other spelling. */
+            if (dali_cli_config_is_commissioning(c->id)) {
+                set_cmd_result("commissioning config; use the native CLI");
+                return;
+            }
+            if (tgt.type == DALI_ADDR_BROADCAST &&
+                dali_cli_config_rejects_broadcast(c->id)) {
+                set_cmd_result(DALI_CLI_MSG_NO_BROADCAST_GROUP);
+                return;
+            }
 
             uint8_t first_param_tok = with_dtr0 ? 4u : 3u;
             uint8_t dtr0 = 0u;
@@ -2372,21 +2413,13 @@ void DaliComponent::execute_command(const std::string &cmd_str)
                 return;
             }
 
-            bool group_edit = (c->id == DALI_CMD_ADD_TO_GROUP ||
-                               c->id == DALI_CMD_REMOVE_FROM_GROUP);
-            if (group_edit && tgt.type == DALI_ADDR_BROADCAST) {
-                set_cmd_result("no broadcast group config");
-                return;
-            }
-
             DaliError err = with_dtr0
                                 ? dali_control_config_with_dtr0(tgt, c->id, dtr0, param)
                                 : dali_control_config(tgt, c->id, param);
-            if (err == DALI_OK) {
-                if (group_edit) update_group_members_from_config(tgt, c->id, param);
-                if (config_changes_level_profile(c->id)) forget_level_profile_cache(tgt);
-                if (group_edit || config_changes_level_profile(c->id)) start_refresh();
-            }
+            /* Everything a config command invalidates is decided in one place,
+             * so this surface and the shell cannot each remember a different
+             * half of it. */
+            if (err == DALI_OK) on_config_applied(tgt, c->id, param);
             set_cmd_enqueue_result(err);
             return;
         }
@@ -2600,6 +2633,70 @@ bool DaliComponent::set_group_membership_snapshot(const uint64_t masks[16],
     portEXIT_CRITICAL(&s_group_map_mux);
     s_group_members_dirty_.store(true, std::memory_order_release);
     return true;
+}
+
+bool DaliComponent::apply_inventory_snapshot(const DaliDiscoveryInventory *inventory)
+{
+    if (inventory == nullptr) return false;
+
+    DaliGroupMap map;
+    if (!dali_group_map_rebuild_from_inventory(&map, inventory)) return false;
+
+    /* Which gear the walk actually saw *and* read groups from. An address it
+     * could not reach must not read as "left every group": that is the
+     * difference between an offline fixture and a removed one, and only
+     * `group forget` is entitled to make the second claim. */
+    uint64_t observed_gear = 0u;
+    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        const DaliDiscoveryDeviceInfo *device =
+            dali_discovery_inventory_get(inventory, addr);
+        if (device != nullptr && device->present &&
+            device->has_control_gear && device->has_groups) {
+            observed_gear |= (uint64_t) 1u << addr;
+        }
+    }
+    return set_group_membership_snapshot(map.members, map.verified, observed_gear);
+}
+
+void DaliComponent::on_config_applied(DaliTarget target, DaliCommandId id,
+                                      uint8_t param)
+{
+    bool notify = false;
+
+    if (id == DALI_CMD_ADD_TO_GROUP || id == DALI_CMD_REMOVE_FROM_GROUP) {
+        update_group_members_from_config(target, id, param);
+        notify = true;
+    }
+
+    if (config_changes_level_profile(id)) {
+        /* Deferred rather than applied here: this may be a shell session's
+         * task, and the cache belongs to Core 0's loop. */
+        uint64_t mask = config_target_mask(target);
+        external_profile_forget_mask_.fetch_or(mask, std::memory_order_acq_rel);
+        notify = true;
+    }
+
+    if (dali_cli_config_is_commissioning(id)) {
+        /*
+         * The gear now answers to a different short address, or to none. Which
+         * one is not knowable from here: the DTR0 form carries the new value
+         * out of band, and the plain `config` form consumes whatever DTR0
+         * already held. So drop what is keyed by the old address and say that
+         * only a scan can restore the rest — guessing would put a group light
+         * on a poll target that no longer exists.
+         */
+        external_profile_forget_mask_.fetch_or(config_target_mask(target),
+                                               std::memory_order_acq_rel);
+        ESP_LOGW(TAG,
+                 "short address changed (target type=%u addr=%u): group "
+                 "membership and poll targets are stale until the next scan",
+                 (unsigned) target.type, (unsigned) target.address);
+        notify = true;
+    }
+
+    /* Handed over as an atomic for the same reason the profile mask is: a
+     * config verb typed into a shell session does not run on Core 0. */
+    if (notify) external_refresh_request_.store(true, std::memory_order_release);
 }
 
 bool DaliComponent::load_group_membership()

@@ -148,6 +148,37 @@ void DaliShellServer::export_config_cb(void *ctx, const DaliCliOut *out,
     self->parent_->export_config_yaml(out, &shell, inventory, input_lookup);
 }
 
+/*
+ * A session finished a walk that says which addresses exist and what groups
+ * they are in. Publishing it here is what makes a shell `discover` worth as
+ * much to the component as the button scan: without it, a session could
+ * commission new gear or watch a fixture change rooms and the group-membership
+ * table would go on describing the bus as it was at the last button press.
+ *
+ * The component rejects an incomplete inventory itself, so nothing here decides
+ * what counts as good enough.
+ */
+void DaliShellServer::inventory_changed_cb(void *ctx,
+                                           const DaliDiscoveryInventory *inventory)
+{
+    auto *self = static_cast<DaliShellServer *>(ctx);
+    if (self == nullptr || self->parent_ == nullptr) {
+        return;
+    }
+    self->parent_->apply_inventory_snapshot(inventory);
+}
+
+/* One `config` verb went out. What it invalidated is the component's to decide. */
+void DaliShellServer::config_applied_cb(void *ctx, DaliTarget target,
+                                        DaliCommandId id, uint8_t param)
+{
+    auto *self = static_cast<DaliShellServer *>(ctx);
+    if (self == nullptr || self->parent_ == nullptr) {
+        return;
+    }
+    self->parent_->on_config_applied(target, id, param);
+}
+
 /* ── Accept loop ─────────────────────────────────────────────────────────── */
 
 void DaliShellServer::task_entry(void *arg)
@@ -230,7 +261,8 @@ void DaliShellServer::serve(int client_fd)
     session.transport = *dali_shell_device_transport();
     session.hooks.bus_claim = bus_claim_cb;
     session.hooks.bus_release = bus_release_cb;
-    session.hooks.inventory_changed = nullptr;
+    session.hooks.inventory_changed = inventory_changed_cb;
+    session.hooks.config_applied = config_applied_cb;
     session.hooks.export_config = export_config_cb;
     session.hooks.ctx = this;
     session.policy = allow_commissioning_ ? DALI_SHELL_ALLOW_ALL : DALI_SHELL_ALLOW_RESET;

@@ -55,7 +55,7 @@ verb by verb.
 | GO TO SCENE | `dali_control_build_go_to_scene` | `scene` | yes | no | yes (console) |
 | Addressed queries (34 names) | `dali_control_build_query` | `query`, `status` | yes | yes | yes (console) |
 | Configuration commands (19 names) | `dali_control_build_config` | `config` | yes | partial | yes (console) |
-| DTR0-consuming configuration | `dali_control_build_config` + sequence | `config-dtr0` | yes | no | yes (console) |
+| DTR0-consuming configuration | `dali_control_build_config` + sequence | `config-dtr0` | yes | no | yes (console, minus `set-short-address-dtr0`) |
 | DTR0/1/2 load | `dali_control_build_dtr` | `dtr` | yes | yes | yes (console) |
 | Special/broadcast commands (18 names) | `dali_build_special` | `special` | yes | partial | partial (console) |
 | Arbitrary frame | n/a | `raw` | yes (parse only) | yes | yes (`raw`) |
@@ -222,12 +222,20 @@ native-only, and why:
 | `scan`, `discover`, `inventory`, `export inventory`, `identify` | Exposed as buttons and text sensors instead |
 | `export config` | A whole config block; the scan's `yaml_result` sensor carries the group map the console can fit |
 | `commission unaddressed` | No guarded workflow here; `special` refuses its primitives for the same reason |
+| `config <t> set-short-address-dtr0` | Re-addresses gear from one typed line, the same reason `special program-short` is refused |
 | `meminfo`, `instances`, `sensor poll` | Each walks a device and decides the next query from the last reply, which needs a blocking transport. Covered by the scan and the sensor platform |
 | `smoke` | Composed of `devmem` write/read; run the parts |
 | `dt8` | Held until real DT8 gear is available to test against |
 
 `group forget` runs the other way: it is console-only, because the cache it edits
 belongs to the ESPHome component rather than to the protocol stack.
+
+The caches that cache is part of are now fed by both surfaces. A shell session's
+`discover` and `commission` publish their inventory through
+`DaliShellHooks::inventory_changed`, and a `config` verb reports what it sent
+through `DaliShellHooks::config_applied`, so the group-membership table and the
+level-profile cache no longer depend on which surface an operator happened to
+use. Host- and compile-verified only; no bus has run it.
 
 ## Known gaps this matrix is tracking
 

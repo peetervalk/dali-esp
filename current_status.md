@@ -268,6 +268,64 @@ result. `dali_capability_matrix.md` states which is which per capability.
   103 quiescence, equal-random-address recovery, external-master arbitration, and
   the 100 ms post-RANDOMISE value still need standards/hardware validation.
 
+### Verified locally on 2026-08-25 (reconfiguration surface)
+
+Prompted by a documentation gap: group membership had no obvious verb, and
+`commission` only ever addresses gear that has none, so nothing described how to
+change a bus that already works. Writing that section surfaced three defects,
+each an inconsistency between the two command surfaces rather than a protocol
+fault.
+
+- `set-short-address-dtr0` is now gated as a commissioning command.
+  `allow_commissioning` covered `commission` and the nine `special` primitives
+  and nothing else, so `special program-short` was refused from the Home
+  Assistant text entity while `config-dtr0 b set-short-address-dtr0 255` — which
+  de-addresses an entire installation — was accepted there with
+  `allow_commissioning: false`. The gate refused the harder spelling of
+  re-addressing and permitted the easier one. `dali_cli_config_is_commissioning()`
+  now names it; the shell requires `DALI_SHELL_ALLOW_COMMISSION` and the console
+  refuses it outright, matching the specials. Both spellings are covered: with
+  DTR0 already holding `0xFF`, plain `config <t> set-short-address-dtr0` does the
+  same thing as the DTR0 form.
+- Broadcast group edits are refused in one place. The console rejected
+  `config b add-group <g>`; the shell accepted it after a generic multi-target
+  warning — a front end gating a verb, which is what the architecture rule in
+  `AGENTS.md` exists to prevent. `dali_cli_config_rejects_broadcast()` and
+  `DALI_CLI_MSG_NO_BROADCAST_GROUP` now hold the rule and its wording, and both
+  surfaces report it identically. `raw2` remains the deliberate way to send the
+  frame.
+- A shell session now tells the component what it changed.
+  `dali_shell_tcp.cpp` bound `inventory_changed` to `nullptr`, so a shell
+  `discover` or `commission` never rebuilt the group-membership table, and a
+  `config` verb reached no hook at all — a group edit typed into the shell was
+  correct on the bus while a group light went on polling the member it had
+  before. `DaliShellHooks` gained `config_applied`, the ESPHome binding
+  implements both hooks, and `DaliComponent::on_config_applied()` is now the one
+  place deciding what a config command invalidates, called by the console path
+  too. `DaliComponent::apply_inventory_snapshot()` holds the group rebuild that
+  was private to `dali_scan.cpp`, so the button scan and a shell walk publish
+  through the same code. `commission` publishes its post-scan inventory rather
+  than only the pre-scan one.
+- Cache writes Core 0 owns are deferred rather than made from the session task:
+  `external_profile_forget_mask_` is set by whichever task ran the edit and
+  drained by `loop()` ahead of `pump_refresh()`, the same shape
+  `external_refresh_request_` already had.
+- A short address that moved is reported, not guessed. The new address is not
+  knowable from the command — the DTR0 form carries it out of band and the plain
+  form consumes whatever DTR0 held — so caches keyed by the old address are
+  dropped and a warning says a scan is needed. Inventing a poll target would be
+  worse than admitting the gap.
+- Two host vectors added in `test/test_cli.c` assert both predicates by name and
+  by set size, so a later config name cannot join or leave either set silently.
+  All 26 host suites pass. `dali_shell.c`, `dali_cli.c`, and `main/dali_diag.c`
+  compile clean against the ESP-IDF 6.0.1 flag set; `dali_component.cpp`,
+  `dali_scan.cpp`, and `dali_shell_tcp.cpp` compile clean against the ESPHome
+  flag set.
+- Host- and compile-verified only. No bus has run any of it: the group-edit
+  round trip, the console refusals, and the post-commission inventory publish all
+  need a hardware pass. `Configuration commands (19 names)` still reads `partial`
+  on the real-bus column and `DTR0-consuming configuration` still reads `no`.
+
 ### Verified locally on 2026-08-12 (console verb parity)
 
 - The ESPHome console now implements every native CLI verb whose answer fits one

@@ -335,6 +335,40 @@ uint8_t                   dali_cli_config_count(void);
 const DaliCliGearCommand *dali_cli_config_at(uint8_t index);
 const DaliCliGearCommand *dali_cli_config_find(const char *name);
 
+/*
+ * True for the config commands that carry the same risk as the commissioning
+ * specials, and must be gated the same way.
+ *
+ * SET SHORT ADDRESS (DTR0) is the whole set. It is spelled as an ordinary
+ * addressed configuration command, but what it configures is which address the
+ * gear answers to, and a broadcast target de-addresses an entire installation
+ * from one line. Gating `special program-short` while leaving this open refuses
+ * the harder spelling of the operation and permits the easier one.
+ *
+ * The other DTR0 names change how a device behaves at an address it keeps, so
+ * they stay outside the set: a wrong fade time is visible and reversible, while
+ * a lost short address takes a commissioning walk to recover.
+ */
+bool dali_cli_config_is_commissioning(DaliCommandId id);
+
+/*
+ * True for the config commands a broadcast target must not carry.
+ *
+ * ADD TO GROUP and REMOVE FROM GROUP qualify because the runtime group-query
+ * cache cannot represent the result: an integration that tracks which short
+ * address to poll for a group's state has no way to record "every device on the
+ * bus" as a membership change, and the undo is not symmetric — a broadcast
+ * REMOVE empties the group, including the members that were there first.
+ *
+ * Refused in the shared layer rather than per surface, so that the console and
+ * the shell cannot disagree about what the verb does. `raw2` remains the way to
+ * send the frame deliberately.
+ */
+bool dali_cli_config_rejects_broadcast(DaliCommandId id);
+
+/* The one wording for that refusal, so both front ends report it identically. */
+#define DALI_CLI_MSG_NO_BROADCAST_GROUP  "no broadcast group config"
+
 /* ---------------------------------------------------------------------------
  * Device-type (DT6/DT8) command tables
  * --------------------------------------------------------------------------*/

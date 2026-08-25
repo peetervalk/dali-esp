@@ -734,6 +734,16 @@ const DaliCliGearCommand *dali_cli_config_find(const char *name)
     return gear_find(s_config_commands, dali_cli_config_count(), name);
 }
 
+bool dali_cli_config_is_commissioning(DaliCommandId id)
+{
+    return id == DALI_CMD_SET_SHORT_ADDRESS_DTR0;
+}
+
+bool dali_cli_config_rejects_broadcast(DaliCommandId id)
+{
+    return id == DALI_CMD_ADD_TO_GROUP || id == DALI_CMD_REMOVE_FROM_GROUP;
+}
+
 /* ---------------------------------------------------------------------------
  * Device type 6 (IEC 62386-207)
  * --------------------------------------------------------------------------*/

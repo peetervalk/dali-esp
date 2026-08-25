@@ -2103,6 +2103,44 @@ static void cmd_special(const DaliCliTokens *t)
     }
 }
 
+/*
+ * Policy and target checks shared by `config` and `config-dtr0`.
+ *
+ * The two verbs spell the same command with a different way of loading DTR0, so
+ * a check applied to only one of them is a hole rather than a difference: with
+ * DTR0 already holding 0xFF, `config <t> set-short-address-dtr0` de-addresses
+ * exactly as `config-dtr0 <t> set-short-address-dtr0 255` does.
+ */
+static bool shell_config_allowed(const char *verb,
+                                 const DaliCliGearCommand *spec,
+                                 DaliTarget target)
+{
+    if (dali_cli_config_is_commissioning(spec->id) &&
+        !shell_policy_allows(DALI_SHELL_ALLOW_COMMISSION, spec->name)) {
+        return false;
+    }
+    if (target.type == DALI_ADDR_BROADCAST &&
+        dali_cli_config_rejects_broadcast(spec->id)) {
+        shell_printf("%s: %s\r\n", verb, DALI_CLI_MSG_NO_BROADCAST_GROUP);
+        return false;
+    }
+    return true;
+}
+
+/*
+ * Tell the integration what a config verb just put on the bus, so a cache it
+ * keeps of device state does not go on asserting what was true before.
+ * See DaliShellHooks::config_applied.
+ */
+static void shell_notify_config_applied(DaliTarget target,
+                                        DaliCommandId id,
+                                        uint8_t param)
+{
+    if (s_session.hooks.config_applied != NULL) {
+        s_session.hooks.config_applied(s_session.hooks.ctx, target, id, param);
+    }
+}
+
 static void cmd_config(const DaliCliTokens *t)
 {
     const DaliCliCommandSpec *usage = dali_cli_command_for_id(DALI_CLI_CMD_CONFIG);
@@ -2117,6 +2155,10 @@ static void cmd_config(const DaliCliTokens *t)
     if (spec == NULL) {
         shell_printf("config: unknown config '%s'\r\n", t->tok[2]);
         shell_printf("use 'list config'\r\n");
+        return;
+    }
+
+    if (!shell_config_allowed("config", spec, target)) {
         return;
     }
 
@@ -2143,6 +2185,9 @@ static void cmd_config(const DaliCliTokens *t)
     const DaliCommandInfo *cmd = dali_command_lookup(spec->id);
     if (err == DALI_OK && cmd != NULL) {
         err = shell_send_no_reply(&frame, cmd->send_twice);
+        if (err == DALI_OK) {
+            shell_notify_config_applied(target, spec->id, param);
+        }
     }
     shell_print_tx_result(spec->name, err);
 }
@@ -2186,6 +2231,10 @@ static void cmd_config_dtr0(const DaliCliTokens *t)
     }
     if (!spec->uses_dtr0 || !dali_control_config_uses_dtr0(spec->id)) {
         shell_printf("config-dtr0: '%s' does not consume DTR0\r\n", spec->name);
+        return;
+    }
+
+    if (!shell_config_allowed("config-dtr0", spec, target)) {
         return;
     }
 
@@ -2236,6 +2285,9 @@ static void cmd_config_dtr0(const DaliCliTokens *t)
 
     DaliSequenceResult seq_result;
     err = shell_sched_sequence_sync(&seq, &seq_result);
+    if (err == DALI_OK) {
+        shell_notify_config_applied(target, spec->id, param);
+    }
     shell_print_sequence_result(spec->name, err, &seq_result);
 }
 
@@ -2951,8 +3003,17 @@ static void cmd_commission(const DaliCliTokens *t)
 
     shell_bus_release();
 
-    /* Commissioning changes which short addresses exist, so the integration's
-     * cached view is stale on both the success and the partial-failure path. */
+    /*
+     * Commissioning changes which short addresses exist, so the integration's
+     * cached view is stale on both the success and the partial-failure path.
+     *
+     * What it gets here is the pre-scan: the only inventory that exists at this
+     * point, and still accurate about the gear that was already addressed —
+     * which is what group membership is made of. Freshly assigned gear belongs
+     * to no group, so its absence is not a wrong answer. The post-scan below
+     * supersedes it whenever the run got far enough to produce one, and every
+     * early return above leaves this as the last word.
+     */
     if (s_session.hooks.inventory_changed != NULL) {
         s_session.hooks.inventory_changed(s_session.hooks.ctx, inventory);
     }
@@ -3022,6 +3083,12 @@ static void cmd_commission(const DaliCliTokens *t)
             return;
         }
         shell_inventory_replace(inventory);
+
+        /* The authoritative view: taken after the walk, so it is the one that
+         * knows the addresses it just created. */
+        if (s_session.hooks.inventory_changed != NULL) {
+            s_session.hooks.inventory_changed(s_session.hooks.ctx, inventory);
+        }
         shell_printf("commission: post-scan found=%u\r\n", (unsigned)found);
     }
 }

@@ -1015,6 +1015,69 @@ static void test_special_commissioning_set(void)
                             dali_cli_special_count());
 }
 
+/*
+ * The config table's commissioning set. Gating `special program-short` while
+ * leaving SET SHORT ADDRESS open refuses the harder spelling of re-addressing
+ * and permits the easier one, so this asserts the set by name rather than by
+ * whether the command happens to consume DTR0.
+ */
+static void test_config_commissioning_set(void)
+{
+    const DaliCliGearCommand *spec =
+        dali_cli_config_find("set-short-address-dtr0");
+    TEST_ASSERT_NOT_NULL(spec);
+    TEST_ASSERT_TRUE(dali_cli_config_is_commissioning(spec->id));
+
+    /* Every other config name, including the rest of the DTR0 forms: a wrong
+     * fade time is visible and reversible, a lost short address is not. */
+    uint8_t count = dali_cli_config_count();
+    uint8_t restricted = 0u;
+    for (uint8_t i = 0u; i < count; i++) {
+        const DaliCliGearCommand *entry = dali_cli_config_at(i);
+        TEST_ASSERT_NOT_NULL(entry);
+        if (dali_cli_config_is_commissioning(entry->id)) {
+            restricted++;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT8(1u, restricted);
+}
+
+/*
+ * The group edits are the config commands a broadcast target must not carry,
+ * and they are the only ones: the predicate is what keeps the console and the
+ * shell from disagreeing about it.
+ */
+static void test_config_broadcast_rejection_set(void)
+{
+    static const char *rejected[] = { "add-group", "remove-group" };
+
+    for (size_t i = 0u; i < sizeof(rejected) / sizeof(rejected[0]); i++) {
+        const DaliCliGearCommand *spec = dali_cli_config_find(rejected[i]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(spec, rejected[i]);
+        TEST_ASSERT_TRUE_MESSAGE(dali_cli_config_rejects_broadcast(spec->id),
+                                 rejected[i]);
+    }
+
+    uint8_t count = dali_cli_config_count();
+    uint8_t rejecting = 0u;
+    for (uint8_t i = 0u; i < count; i++) {
+        const DaliCliGearCommand *entry = dali_cli_config_at(i);
+        TEST_ASSERT_NOT_NULL(entry);
+        if (dali_cli_config_rejects_broadcast(entry->id)) {
+            rejecting++;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)(sizeof(rejected) / sizeof(rejected[0])),
+                            rejecting);
+
+    /* `remove-scene` shares the group commands' shape — addressed, one 0-15
+     * parameter — and is deliberately not in the set: clearing a scene on every
+     * device is representable, and losing a group's poll target is not. */
+    const DaliCliGearCommand *scene = dali_cli_config_find("remove-scene");
+    TEST_ASSERT_NOT_NULL(scene);
+    TEST_ASSERT_FALSE(dali_cli_config_rejects_broadcast(scene->id));
+}
+
 static void test_print_response_yes_no(void)
 {
     DaliFrame yes = backward(DALI_YES_RESPONSE);
@@ -1203,6 +1266,8 @@ int main(void)
     RUN_TEST(test_print_table_marks_send_twice_specials);
 
     RUN_TEST(test_special_commissioning_set);
+    RUN_TEST(test_config_commissioning_set);
+    RUN_TEST(test_config_broadcast_rejection_set);
 
     RUN_TEST(test_format_status_names_only_the_set_flags);
     RUN_TEST(test_format_status_fits_all_eight_flags);

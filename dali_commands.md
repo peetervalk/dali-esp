@@ -128,7 +128,7 @@ named form.
 | `up` `down` `step-up` `step-down` `step-off` `on-step` | yes | yes |
 | `cont-up` `cont-down` `dapc-seq` `last` `scene` | yes | yes |
 | `status` `query` | yes | yes |
-| `config` `config-dtr0` | yes | yes |
+| `config` `config-dtr0` | yes | yes, minus `set-short-address-dtr0` |
 | `special` | yes | yes, minus commissioning primitives |
 | `dt6` | yes | yes |
 | `dt8` | yes | no — held until real DT8 gear is available |
@@ -292,13 +292,25 @@ The 19 shared config names (`list config`):
 | `set-fade-rate-dtr0` | `config-dtr0` | — | Set fade rate from DTR0 |
 | `set-extended-fade-dtr0` | `config-dtr0` | — | Set extended fade time from DTR0 |
 | `set-operating-mode-dtr0` | `config-dtr0` | — | Set operating mode from DTR0 |
-| `set-short-address-dtr0` | `config-dtr0` | — | Set the short address from DTR0 |
+| `set-short-address-dtr0` | `config-dtr0` | — | Set the short address from DTR0, **encoded** — see [Encoded short addresses](#encoded-short-addresses) |
 | `reset-memory-dtr0` | `config-dtr0` | — | Reset the memory bank named by DTR0 |
 
 `add-group` and `remove-group` require the group value. Short and group targets
-are accepted; broadcast is rejected, because it makes the runtime group query
-cache ambiguous. After a group-target edit, run a scan if that group has not
-already been scan-verified.
+are accepted. Broadcast is refused on both surfaces with
+`no broadcast group config`, because the runtime group query cache cannot
+represent the result and the undo is not symmetric: a broadcast REMOVE empties
+the group, including the members that were there first. The refusal comes from
+`dali_cli_config_rejects_broadcast()` rather than from either front end, so the
+console and the shell cannot disagree about it. `raw2` still sends the frame
+when that is genuinely what you want.
+
+Either surface applies what the edit invalidated: the runtime group-membership
+table, any cached level profile, and a light refresh. After a **group-target**
+edit, run a scan if that group has not already been scan-verified — the
+affected set is not computable from an unverified source group. A short address
+that moved needs a scan for the same kind of reason: the new address is not
+knowable from the command, so caches keyed by the old one are dropped and a
+warning is logged rather than a new address guessed.
 
 ```text
 config-dtr0 a0 set-max-dtr0 200
@@ -306,7 +318,17 @@ config-dtr0 a0 set-fade-time-dtr0 4
 config-dtr0 a0 set-scene 200 3
 config a0 add-group 3
 config a0 save-persistent
+config-dtr0 a0 set-short-address-dtr0 27   # a0 -> a13   ((13<<1)|1 = 27)
 ```
+
+`set-short-address-dtr0` is the one config name that changes which address a
+device answers to, and its DTR0 value is the encoded form, not the address. It
+is gated exactly as the commissioning specials are: a shell session refuses it
+without `allow_commissioning: true`, and the console refuses it outright with
+`commissioning config; use the native CLI`. Both spellings are covered — with
+DTR0 already holding `0xFF`, plain `config <t> set-short-address-dtr0`
+de-addresses exactly as the `config-dtr0` form does, so gating only one of them
+would be a hole rather than a difference.
 
 ## Special Commands
 
@@ -322,7 +344,7 @@ Not addressed: every device on the bus sees them.
 | `dtr0`, `dtr1`, `dtr2` | `0-255` | Load a DTR register |
 | `ping` | none | DALI-2 presence ping |
 | `compare` | none | Whether any device is in the current search selection |
-| `verify-short` | `0-63` | Whether a device holds this short address |
+| `verify-short` | `0-255` | Whether the selected device holds this **encoded** short address |
 | `query-short` | none | The selected device's short address |
 | `enable-type` | `0-255` | ENABLE DEVICE TYPE for the next command |
 
@@ -334,12 +356,47 @@ the commands that can readdress a whole installation from one line typed into a
 text box, and RANDOMISE cannot be undone. The shell runs them sequenced and
 checked inside `commission`, subject to `allow_commissioning`.
 
+The same rule reaches one name in the config table:
+`set-short-address-dtr0` re-addresses gear as effectively as `program-short`
+does, so `dali_cli_config_is_commissioning()` marks it and both surfaces treat
+it the same way. See [Configuration](#configuration).
+
 `terminate` stays available on purpose: it is what closes a window another tool
 opened, and withholding it would leave you holding the problem without the
 remedy.
 
+`verify-short` and `query-short` answer about the device *selected* inside an
+initialisation window — `verify-short` about whatever `program-short` last
+wrote, which is how `commission` uses it. Neither is a way to ask whether a
+short address is free on a working bus; `scan` and `status a<N>` are.
+
 `enable-type` applies only to the very next command on the bus, which neither
 surface can guarantee is yours. That is why `dt6` and `dt8` exist as verbs.
+
+### Encoded short addresses
+
+A short address carried as a command's **data byte** is encoded
+`(address << 1) | 1`; `0xFF` means no short address. That applies to
+`program-short`, `verify-short`, the reply from `query-short`, the address
+form of `initialise`, and the DTR0 value for `set-short-address-dtr0`. It does
+not apply to the `a<N>` target form, which is an address byte and is written
+as the plain number.
+
+| Short address | Encoded byte |
+|---:|---|
+| `a0` | `0x01` (1) |
+| `a1` | `0x03` (3) |
+| `a5` | `0x0B` (11) |
+| `a10` | `0x15` (21) |
+| `a63` | `0x7F` (127) |
+| none | `0xFF` (255) |
+
+Nothing converts for you, and nothing can reject the mistake:
+`special program-short 5` is a well-formed frame that programs short address
+**2**. An even value has bit 0 clear and is not a valid short address at all.
+
+`initialise` takes `0` for all control gear, `255` for gear with no short
+address, or an encoded address to open the window for one device.
 
 ## Device Type 6 — LED gear
 
@@ -672,6 +729,11 @@ smoke <addr>                            # read/write/read-back check
 commission unaddressed [first] [max]    # assign short addresses
 ```
 
+`commission` only ever addresses gear that has none, so it is the verb for new
+gear and never the verb for a change. Re-grouping, re-addressing, and retiring
+a fixture are `config` and `config-dtr0` commands — see the recipes below and
+the reconfiguration section of `commissioning_readme.md`.
+
 `quiescent` sends the Part 103 device-level `START`/`STOP QUIESCENT MODE`
 (opcodes `0x1D`/`0x1E`, instance byte `0xFE`, send-twice). `all` is address byte
 `0xFF` — every control device at once, which is the form worth having, since the
@@ -817,6 +879,42 @@ Check group membership:
 ```text
 query a0 groups-0-7
 query a0 groups-8-15
+```
+
+Move a fixture from one room's group to another's — add before removing, so it
+is never briefly in neither:
+
+```text
+query a5 groups-0-7        # before
+config a5 add-group 3
+config a5 remove-group 1
+config a5 save-persistent
+query a5 groups-0-7        # after
+max g3                     # it should light with the rest of group 3
+```
+
+Move a whole group's worth of gear in two commands:
+
+```text
+config g1 add-group 3      # every current member of group 1 also joins 3
+config g1 remove-group 1   # ...and then leaves 1
+discover                   # the controller cannot compute this one
+```
+
+Give a fixture a different short address, or none at all. No initialise window
+is involved; `SET SHORT ADDRESS` is an ordinary addressed config command:
+
+```text
+scan                                       # confirm the destination is free
+config-dtr0 a5 set-short-address-dtr0 27   # a5 -> a13   ((13<<1)|1 = 27)
+config a13 save-persistent
+scan
+identify 13
+```
+
+```text
+config-dtr0 a5 set-short-address-dtr0 255  # a5 -> unaddressed; commission
+                                           # unaddressed can reassign it
 ```
 
 Set and verify an occupancy hold timer:
