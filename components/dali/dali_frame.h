@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 /* ---------------------------------------------------------------------------
  * Timing constants (IEC 62386 / 1200 bps Manchester)
@@ -19,6 +20,48 @@
 /* Confirmed from IEC 62386-101 */
 #define DALI_SETTLE_MS                2u    /* RX self-echo suppression after TX */
 #define DALI_REPLY_TIMEOUT_MS        25u    /* max wait for backward frame (ms) — 22 ms spec + 3 ms margin */
+/*
+ * Earliest accepted reply activity, measured from the precise local TX end.
+ * IEC 62386-101 gives the forward-to-backward settling time as a range; this is
+ * its minimum, so gear answering at the fast end of the range is attributed to
+ * its own reply window rather than discarded as stray activity. Do not raise it
+ * towards the nominal 7 ms: everything between would then time out.
+ */
+#define DALI_REPLY_WINDOW_OPEN_US   5500u
+/*
+ * The open edge for an observation that decoded as a complete backward frame.
+ *
+ * Derived from DALI_SETTLE_MS rather than chosen, because for a decoded frame
+ * that is the only floor with a physical meaning. The 5.5 ms edge above exists
+ * to keep *undecodable* activity from being read as a reply — the case that
+ * matters, because COMPARE maps qualified activity to YES and so invents gear
+ * that is not there. A complete 8-bit backward frame, arriving while a query is
+ * outstanding, carries none of that ambiguity: our own 16-bit transmission
+ * cannot decode as one, ringing cannot, and another master's forward frame is
+ * caught by the intervening-frame branch. What remains is the PHY's own RX
+ * self-echo suppression, which is DALI_SETTLE_MS.
+ *
+ * The alternative was a hand-picked margin, and the 1k installation showed why
+ * that loses. Four LED-strip drivers settle in 5.24-5.62 ms, straddling the
+ * standard's 5.5 ms minimum. One DT6 driver at a0 varies from 4.12 to 5.85 ms
+ * on the same device between consecutive queries — 25% faster than the minimum
+ * at its worst — which made it look like it answered some opcodes and not
+ * others until three captures showed the failures falling wherever the edge
+ * happened to be. Any fixed margin gets chased by the next such device.
+ *
+ * IEC 62386-101 makes this gear non-conformant. Refusing to read it makes the
+ * installation unusable, which is the worse answer, and the verb that asked
+ * reported a timeout while a correctly decoded byte sat in the buffer.
+ */
+#define DALI_REPLY_WINDOW_OPEN_DECODED_US ((uint32_t)DALI_SETTLE_MS * 1000u)
+/* The scheduler starts its 25 ms wait after the 2 ms TX/RX handoff. Keep that
+ * existing effective deadline while attributing timestamped RX observations. */
+#define DALI_REPLY_WINDOW_CLOSE_US (((uint32_t)DALI_SETTLE_MS + (uint32_t)DALI_REPLY_TIMEOUT_MS) * 1000u)
+/* Reject isolated pulses as commissioning replies. A corrupted backward frame
+ * must still span the first edge through the final data-bit region at the
+ * decoder's -25% timing tolerance, and contain several real transitions. */
+#define DALI_BACKWARD_ACTIVITY_MIN_SPAN_US ((DALI_HALF_BIT_US * 17u * 3u) / 4u)
+#define DALI_BACKWARD_ACTIVITY_MIN_EDGES 4u
 #define DALI_MAX_RETRIES              3u    /* send attempts before offline    */
 #define DALI_SEND_TWICE_WINDOW_MS   100u    /* max gap between repeated sends  */
 /* DALI_HALF_BIT_US rounds nominal Te upward, making this 22 Te guard 9174 µs. */
@@ -103,7 +146,27 @@ typedef enum {
     DALI_ERR_CANCELLED  = 9,    /* queued/active work cancelled by reset      */
     DALI_ERR_INTERVENED = 10,   /* another forward frame invalidated a reply  */
     DALI_ERR_FULL       = 11,   /* fixed-capacity registration table is full  */
+    DALI_ERR_RX_ACTIVITY = 12,  /* reply-window activity was not decodable    */
 } DaliError;
+
+/*
+ * Short operator-facing name for a DaliError, or NULL for a code this build
+ * does not know. Callers print the number themselves in that case, so an
+ * enumerator added out of tree still reaches an operator as something readable
+ * rather than as a wrong name. Defined in dali_error.c.
+ */
+const char *dali_error_name(DaliError err);
+
+/*
+ * The same name, but always printable: an unknown code is rendered into buf
+ * as "error <n>". Returns buf only in that case, so a caller may pass a
+ * short scratch buffer and use the result with %s unconditionally.
+ */
+const char *dali_error_text(DaliError err, char *buf, size_t len);
+
+/* Scratch size that fits any dali_error_text() output, including the widest
+ * "error <n>" an out-of-range int can produce. */
+#define DALI_ERROR_TEXT_MAX 24u
 
 /* ---------------------------------------------------------------------------
  * DaliAddressType
@@ -137,6 +200,8 @@ typedef struct {
      * without a positive counter an integration cannot tell a bus that is
      * currently stuck from one that failed once an hour ago and works now. */
     volatile uint32_t tx_frames_ok;
+    /* Undecodable PHY observations attributed to an active reply window. */
+    volatile uint32_t reply_rx_activity;
 } dali_stats_t;
 
 /* Global stats instance — defined in dali_phy.c, read everywhere */

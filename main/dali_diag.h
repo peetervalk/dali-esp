@@ -20,7 +20,7 @@
 #include "dali_frame.h"
 
 /*
- * Initialise the serial front end and start its FreeRTOS task. Call after
+ * Initialize the serial front end and start its FreeRTOS task. Call after
  * dali_shell_init(); the session is attached for the life of the firmware,
  * because physical access to the UART is already physical access to the bus.
  */

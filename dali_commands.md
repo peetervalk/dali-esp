@@ -3,7 +3,7 @@
 Every verb, its arguments, and its named command tables, for both surfaces that
 accept typed commands.
 
-**Last reviewed:** 2026-08-14
+**Last reviewed:** 2026-08-25
 
 Frame layouts and opcodes are in `dali_protocol.md`. Per-capability status —
 shared API, host vector, real-bus result, exposure — is in
@@ -24,7 +24,7 @@ the verb, its argument checking, its blocking transport, and its output are the
 same code (`components/dali/dali_shell.c`).
 
 The console is a different execution model, not a different language. It shares
-the tokeniser, argument parsers, named tables, and reply decoding
+the tokenizer, argument parsers, named tables, and reply decoding
 (`components/dali/dali_cli.c`), so a verb, an argument form, and a command name
 mean the same thing on both. What it cannot do is stream or block: a result is
 one Home Assistant text state, and every console verb is one enqueue and one
@@ -66,20 +66,20 @@ Numbers may be decimal or `0x`-prefixed. A leading zero is decimal, not octal.
 
 Every verb declares how many arguments it takes, and both bounds are checked
 before the handler runs. A trailing token is rejected rather than ignored:
-`level s1 100 junk` fails with a usage string.
+`level a1 100 junk` fails with a usage string.
 
 ### Targets
 
 | Form | Range | Meaning |
 |---|---:|---|
-| `s<N>` | `0-63` | Short address |
+| `a<N>` | `0-63` | Short address |
 | `<N>` | `0-63` | Short address, bare number |
 | `g<N>` | `0-15` | Group |
 | `b` | n/a | Broadcast |
 
-`a<N>` is **not** accepted and fails as `bad target`. It was the console's
-spelling before the shared tables; there is no alias, so a stored Home Assistant
-script written against it stops working.
+`s<N>` is **not** accepted and fails as `bad target`. It was the spelling v1.2.0
+shipped; there is no alias, so a stored Home Assistant script written against it
+stops working.
 
 Queries should normally target one short address. Group and broadcast queries can
 collide when several devices answer.
@@ -87,7 +87,9 @@ collide when several devices answer.
 Input-device verbs take no target. They take the short address and the instance
 as two separate arguments — `iquery 0 1 input-value`, not `iquery a0:1
 input-value`. `iquery`, `iconfig`, `devmem`, and `dtrcheck` require a short
-address and reject group and broadcast forms.
+address and reject group and broadcast forms. `quiescent` is the exception: it
+is device-level rather than instance-level, so it takes no instance, and its
+target is a short address or the literal `all`.
 
 ### Console results
 
@@ -126,13 +128,14 @@ named form.
 | `up` `down` `step-up` `step-down` `step-off` `on-step` | yes | yes |
 | `cont-up` `cont-down` `dapc-seq` `last` `scene` | yes | yes |
 | `status` `query` | yes | yes |
-| `config` `config-dtr0` | yes | yes |
+| `config` `config-dtr0` | yes | yes, minus `set-short-address-dtr0` |
 | `special` | yes | yes, minus commissioning primitives |
 | `dt6` | yes | yes |
 | `dt8` | yes | no — held until real DT8 gear is available |
 | `iquery` `iconfig` `vendor` | yes | yes |
 | `raw` `raw2` `dtr` | yes | yes |
 | `memread` `devmem` `dtrcheck` | yes | yes |
+| `quiescent` | yes | yes |
 | `meminfo` | yes | no — walks a bank, needs a blocking transport |
 | `queue` | yes | yes |
 | `group forget` | no | yes — the cache it edits is the component's |
@@ -190,8 +193,8 @@ catches up on the next refresh pass, the same as after a wall switch.
 
 ```text
 level g0 128
-level s3 mask
-step-up s3
+level a3 mask
+step-up a3
 cont-down g0
 scene g0 3
 off b
@@ -209,8 +212,8 @@ status` returns the same line. On the shell, `query <target>` with no name at al
 is shorthand for the same thing; the console requires a name.
 
 ```text
-status s0        ->  status: 0x06 lamp-fail,arc-on
-status s3        ->  status: 0x00 none
+status a0        ->  status: 0x06 lamp-fail,arc-on
+status a3        ->  status: 0x00 none
 ```
 
 The 34 shared query names (`list query`):
@@ -248,10 +251,10 @@ The 34 shared query names (`list query`):
 | `extended-version` | QUERY EXTENDED VERSION NUMBER |
 
 ```text
-query s0 actual
-query s0 fade
-query s0 groups-0-7
-query s0 scene-level 3
+query a0 actual
+query a0 fade
+query a0 groups-0-7
+query a0 scene-level 3
 ```
 
 ## Configuration
@@ -289,21 +292,43 @@ The 19 shared config names (`list config`):
 | `set-fade-rate-dtr0` | `config-dtr0` | — | Set fade rate from DTR0 |
 | `set-extended-fade-dtr0` | `config-dtr0` | — | Set extended fade time from DTR0 |
 | `set-operating-mode-dtr0` | `config-dtr0` | — | Set operating mode from DTR0 |
-| `set-short-address-dtr0` | `config-dtr0` | — | Set the short address from DTR0 |
+| `set-short-address-dtr0` | `config-dtr0` | — | Set the short address from DTR0, **encoded** — see [Encoded short addresses](#encoded-short-addresses) |
 | `reset-memory-dtr0` | `config-dtr0` | — | Reset the memory bank named by DTR0 |
 
 `add-group` and `remove-group` require the group value. Short and group targets
-are accepted; broadcast is rejected, because it makes the runtime group query
-cache ambiguous. After a group-target edit, run a scan if that group has not
-already been scan-verified.
+are accepted. Broadcast is refused on both surfaces with
+`no broadcast group config`, because the runtime group query cache cannot
+represent the result and the undo is not symmetric: a broadcast REMOVE empties
+the group, including the members that were there first. The refusal comes from
+`dali_cli_config_rejects_broadcast()` rather than from either front end, so the
+console and the shell cannot disagree about it. `raw2` still sends the frame
+when that is genuinely what you want.
+
+Either surface applies what the edit invalidated: the runtime group-membership
+table, any cached level profile, and a light refresh. After a **group-target**
+edit, run a scan if that group has not already been scan-verified — the
+affected set is not computable from an unverified source group. A short address
+that moved needs a scan for the same kind of reason: the new address is not
+knowable from the command, so caches keyed by the old one are dropped and a
+warning is logged rather than a new address guessed.
 
 ```text
-config-dtr0 s0 set-max-dtr0 200
-config-dtr0 s0 set-fade-time-dtr0 4
-config-dtr0 s0 set-scene 200 3
-config s0 add-group 3
-config s0 save-persistent
+config-dtr0 a0 set-max-dtr0 200
+config-dtr0 a0 set-fade-time-dtr0 4
+config-dtr0 a0 set-scene 200 3
+config a0 add-group 3
+config a0 save-persistent
+config-dtr0 a0 set-short-address-dtr0 27   # a0 -> a13   ((13<<1)|1 = 27)
 ```
+
+`set-short-address-dtr0` is the one config name that changes which address a
+device answers to, and its DTR0 value is the encoded form, not the address. It
+is gated exactly as the commissioning specials are: a shell session refuses it
+without `allow_commissioning: true`, and the console refuses it outright with
+`commissioning config; use the native CLI`. Both spellings are covered — with
+DTR0 already holding `0xFF`, plain `config <t> set-short-address-dtr0`
+de-addresses exactly as the `config-dtr0` form does, so gating only one of them
+would be a hole rather than a difference.
 
 ## Special Commands
 
@@ -319,24 +344,59 @@ Not addressed: every device on the bus sees them.
 | `dtr0`, `dtr1`, `dtr2` | `0-255` | Load a DTR register |
 | `ping` | none | DALI-2 presence ping |
 | `compare` | none | Whether any device is in the current search selection |
-| `verify-short` | `0-63` | Whether a device holds this short address |
+| `verify-short` | `0-255` | Whether the selected device holds this **encoded** short address |
 | `query-short` | none | The selected device's short address |
 | `enable-type` | `0-255` | ENABLE DEVICE TYPE for the next command |
 
 The console refuses the nine commissioning primitives that
-`dali_cli_special_is_commissioning()` marks — `initialise`, `randomize`,
+`dali_cli_special_is_commissioning()` marks — `initialise`, `randomise`,
 `search-h/m/l`, `program-short`, `withdraw`, `write-memory`, and
 `write-memory-nr` — with `commissioning special; use the native CLI`. Those are
 the commands that can readdress a whole installation from one line typed into a
 text box, and RANDOMISE cannot be undone. The shell runs them sequenced and
 checked inside `commission`, subject to `allow_commissioning`.
 
+The same rule reaches one name in the config table:
+`set-short-address-dtr0` re-addresses gear as effectively as `program-short`
+does, so `dali_cli_config_is_commissioning()` marks it and both surfaces treat
+it the same way. See [Configuration](#configuration).
+
 `terminate` stays available on purpose: it is what closes a window another tool
 opened, and withholding it would leave you holding the problem without the
 remedy.
 
+`verify-short` and `query-short` answer about the device *selected* inside an
+initialisation window — `verify-short` about whatever `program-short` last
+wrote, which is how `commission` uses it. Neither is a way to ask whether a
+short address is free on a working bus; `scan` and `status a<N>` are.
+
 `enable-type` applies only to the very next command on the bus, which neither
 surface can guarantee is yours. That is why `dt6` and `dt8` exist as verbs.
+
+### Encoded short addresses
+
+A short address carried as a command's **data byte** is encoded
+`(address << 1) | 1`; `0xFF` means no short address. That applies to
+`program-short`, `verify-short`, the reply from `query-short`, the address
+form of `initialise`, and the DTR0 value for `set-short-address-dtr0`. It does
+not apply to the `a<N>` target form, which is an address byte and is written
+as the plain number.
+
+| Short address | Encoded byte |
+|---:|---|
+| `a0` | `0x01` (1) |
+| `a1` | `0x03` (3) |
+| `a5` | `0x0B` (11) |
+| `a10` | `0x15` (21) |
+| `a63` | `0x7F` (127) |
+| none | `0xFF` (255) |
+
+Nothing converts for you, and nothing can reject the mistake:
+`special program-short 5` is a well-formed frame that programs short address
+**2**. An even value has bit 0 clear and is not a valid short address at all.
+
+`initialise` takes `0` for all control gear, `255` for gear with no short
+address, or an encoded address to open the window for one device.
 
 ## Device Type 6 — LED gear
 
@@ -664,18 +724,64 @@ find switches [seconds]                 # listen for events and map switches
 events                                  # drain queued Part 103 events
 instances <addr>                        # what a control device offers
 sensor poll <addr> [instance]           # read an input instance's value
+quiescent on|off <addr|all>             # silence control-device events
 smoke <addr>                            # read/write/read-back check
 commission unaddressed [first] [max]    # assign short addresses
 ```
 
-Commissioning is dependable only with a single unaddressed device on the bus: the
-COMPARE collision inversion recorded in `current_status.md` is unfixed. Over TCP,
-`commission` and the nine commissioning specials are refused unless the YAML sets
-`allow_commissioning: true`, because the port is unauthenticated. See
+`commission` only ever addresses gear that has none, so it is the verb for new
+gear and never the verb for a change. Re-grouping, re-addressing, and retiring
+a fixture are `config` and `config-dtr0` commands — see the recipes below and
+the reconfiguration section of `commissioning_readme.md`.
+
+`quiescent` sends the Part 103 device-level `START`/`STOP QUIESCENT MODE`
+(opcodes `0x1D`/`0x1E`, instance byte `0xFE`, send-twice). `all` is address byte
+`0xFF` — every control device at once, which is the form worth having, since the
+point is a quiet bus rather than one quiet sensor. Control gear is untouched:
+lights keep responding while sensors and wall switches go silent.
+
+Two things an operator has to hold in their head, because nothing enforces them:
+a quiesced device reports no events, so anything driven by one stops updating
+until `quiescent off` releases it; and nothing in this project tracks the state
+or releases it on exit, so a forgotten `quiescent on all` leaves the installation
+looking broken. Whether the standard also ends the state on its own timer is not
+established here — treat `off` as the only thing that reliably releases it.
+Host-tested; no bus has run it.
+
+Commissioning remains hardware-dependable only with a single unaddressed device
+on the bus. The receive path now attributes observations to a precise
+TX-end-relative reply window — opening at 5.5 ms for undecodable activity, which
+is the case `COMPARE` turns on, and closing at 27 ms — and distinguishes three
+cases during `COMPARE`:
+
+- silence is NO;
+- qualified, response-like malformed activity is `DALI_ERR_RX_ACTIVITY`, which
+  `COMPARE` alone treats as YES;
+- ambiguous malformed activity or RX overflow is an error and aborts the run.
+
+This fixes the software-side collision inversion recorded in `current_status.md`,
+but overlapping replies and the activity qualifier have host coverage only; they
+have not been validated as physical-bus collision detection. Do not rely on
+multi-device commissioning until that hardware validation is complete. A run now brackets itself with broadcast
+`START`/`STOP QUIESCENT MODE`, so control devices are silent for its duration
+and cannot put an event frame into a COMPARE reply window. The release is
+unconditional, so a run also releases a quiescence started by hand with
+`quiescent on all`; if the release fails, the shell says so and `quiescent off
+all` is the fix.
+
+Over TCP, `commission` and the nine commissioning specials are refused unless the
+YAML sets `allow_commissioning: true`, because the port is unauthenticated. See
 `commissioning_readme.md` for the workflow.
 
 A long verb prints as it goes and holds the bus for as long as it runs.
-Disconnecting drops it: the device notices between bus steps and stops.
+Cancellation or a TCP disconnect is noticed between ordinary bus steps. Once the
+opening atomic sequence has been handed to the transport, however, `INITIALISE`
+may already have reached the bus. Cleanup therefore bypasses the cancellation
+gate and attempts a final Part 102 `TERMINATE` before returning. The original
+operation error remains primary; if the cleanup transmission also fails, the
+shell reports that separately and warns that the initialisation state is unknown.
+`TERMINATE` is cancellation-safe in the sense that it is still attempted, not
+that delivery can be guaranteed after a bus or transport failure.
 
 ## Diagnostics
 
@@ -696,6 +802,60 @@ reset                      # reset PHY, scheduler, and diagnostic state
 
 `help`, `list`, and `schema` are generated from the table the parser dispatches
 on, so they cannot drift from what the CLI accepts.
+
+### Reading a `capture export`
+
+The ring holds 128 records. A `discover` generates roughly 1900, so a full scan
+can never be captured — only its tail, with `dropped` naming what was lost.
+**Capture narrowly**: `capture start`, one command, `capture export`. Six
+records that answer the question beat 128 that happen to be the end of
+something else.
+
+| Field | Meaning |
+|---|---|
+| `kind` | `tx` or `rx` |
+| `timestamp_us` | Free-running microsecond clock; only differences are meaningful |
+| `raw`, `raw_bits` | The frame and its width — 16 or 24 forward, 8 backward |
+| `since_tx_us` | On an `rx` record: the backward frame's **last edge**, measured from the preceding TX **bus release** |
+
+`since_tx_us` is the field worth being careful with, because neither end of it
+is what a first reading assumes. It is anchored to the end of the forward
+frame, not its start, and it runs to the end of the reply, not its beginning.
+A backward frame is nine bit periods — about 7.5 ms — so the settling time the
+standard talks about is `since_tx_us` minus 7500.
+
+IEC 62386-101 gives that settling time as 5.5 to 10.5 ms, nominal 7 ms, so
+healthy gear lands at `since_tx_us` of roughly 13000-18000. The scheduler
+attributes anything from `DALI_REPLY_WINDOW_OPEN_US` (5.5 ms) through
+`DALI_REPLY_WINDOW_CLOSE_US` (27 ms) after release; a reply outside that is
+counted in `rx_ignored_outside_reply` and reported by `discover` as an
+observation that fell outside active reply attribution.
+
+Empty addresses produce no observations at all — a capture across a stretch of
+unpopulated addresses shows TX with no RX — so a non-zero count on an otherwise
+quiet bus is not noise. It is gear whose replies are landing outside the window,
+one count per attempt including retries, and the verb that asked reports
+`timeout` while a correctly decoded reply sits in the buffer.
+
+Gear replying *early* is the case to watch for, because the arithmetic hides it.
+The open edge is tested against the observation's **first** edge, so subtract the
+7500 before comparing against any window figure. Two edges apply, and which one
+depends on whether the observation decoded:
+
+| Observation | Open edge | Rejected below `since_tx_us` |
+|---|---:|---:|
+| Decoded 8-bit backward frame | `DALI_REPLY_WINDOW_OPEN_DECODED_US` (2 ms, the RX self-echo suppression) | ~9500 |
+| Undecodable activity | `DALI_REPLY_WINDOW_OPEN_US` (5.5 ms, the standard's minimum) | ~13000 |
+
+The split is deliberate. A decoded backward frame arriving while a query is
+outstanding is unambiguously the reply, so only the PHY's own suppression floor
+applies. Undecodable activity keeps the standard's edge, because that is the
+path COMPARE reads as YES and where a wrong call invents gear.
+
+A device that answers some runs and not others, with `since_tx_us` clustered
+either side of one of those thresholds, is sitting on the window open rather
+than failing intermittently, and retries will not rescue it — the gear is not
+random, it is on a threshold.
 
 ### `queue [reset]` — both surfaces
 
@@ -750,10 +910,10 @@ pressure and a stale group cache are most worth inspecting.
 Diagnose a driver that reports the wrong brightness:
 
 ```text
-query s5 device-type       # DT6 gear answers 6
+query a5 device-type       # DT6 gear answers 6
 dt6 5 dimming-curve        # 0 standard, 1 linear
-query s5 min-level
-query s5 max-level
+query a5 min-level
+query a5 max-level
 ```
 
 If the curve is not what the entity assumes, either correct the gear
@@ -763,7 +923,7 @@ cached profile; the first also re-reads it.
 Check an LED driver for faults:
 
 ```text
-status s5                  # Part 102 status flags
+status a5                  # Part 102 status flags
 dt6 5 failure-status       # DT6 fault bitset
 dt6 5 thermal-overload
 dt6 5 open-circuit
@@ -772,8 +932,44 @@ dt6 5 open-circuit
 Check group membership:
 
 ```text
-query s0 groups-0-7
-query s0 groups-8-15
+query a0 groups-0-7
+query a0 groups-8-15
+```
+
+Move a fixture from one room's group to another's — add before removing, so it
+is never briefly in neither:
+
+```text
+query a5 groups-0-7        # before
+config a5 add-group 3
+config a5 remove-group 1
+config a5 save-persistent
+query a5 groups-0-7        # after
+max g3                     # it should light with the rest of group 3
+```
+
+Move a whole group's worth of gear in two commands:
+
+```text
+config g1 add-group 3      # every current member of group 1 also joins 3
+config g1 remove-group 1   # ...and then leaves 1
+discover                   # the controller cannot compute this one
+```
+
+Give a fixture a different short address, or none at all. No initialise window
+is involved; `SET SHORT ADDRESS` is an ordinary addressed config command:
+
+```text
+scan                                       # confirm the destination is free
+config-dtr0 a5 set-short-address-dtr0 27   # a5 -> a13   ((13<<1)|1 = 27)
+config a13 save-persistent
+scan
+identify 13
+```
+
+```text
+config-dtr0 a5 set-short-address-dtr0 255  # a5 -> unaddressed; commission
+                                           # unaddressed can reassign it
 ```
 
 Set and verify an occupancy hold timer:

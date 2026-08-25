@@ -2,7 +2,7 @@
  * test_cli.c — native CLI parsing, dispatch, table, and formatting vectors
  *
  * These cover the half of the diagnostic CLI that decides what a typed line
- * means: tokenising, the verb table, argument validation, the named command
+ * means: tokenizing, the verb table, argument validation, the named command
  * tables, and how a reply is rendered. Execution — scheduler slots, transports,
  * and the long-running workflows — stays in dali_diag.c and is not reachable
  * from the host.
@@ -35,16 +35,16 @@ static DaliCliOut capture_begin(void)
 }
 
 /* ---------------------------------------------------------------------------
- * Tokenising
+ * Tokenizing
  * --------------------------------------------------------------------------*/
 
 static void test_tokenize_splits_on_spaces(void)
 {
     DaliCliTokens t;
-    TEST_ASSERT_EQUAL(DALI_CLI_TOKENIZE_OK, dali_cli_tokenize("level s3 128", &t));
+    TEST_ASSERT_EQUAL(DALI_CLI_TOKENIZE_OK, dali_cli_tokenize("level a3 128", &t));
     TEST_ASSERT_EQUAL_UINT8(3u, t.count);
     TEST_ASSERT_EQUAL_STRING("level", t.tok[0]);
-    TEST_ASSERT_EQUAL_STRING("s3", t.tok[1]);
+    TEST_ASSERT_EQUAL_STRING("a3", t.tok[1]);
     TEST_ASSERT_EQUAL_STRING("128", t.tok[2]);
 }
 
@@ -52,7 +52,7 @@ static void test_tokenize_collapses_runs_and_tabs(void)
 {
     DaliCliTokens t;
     TEST_ASSERT_EQUAL(DALI_CLI_TOKENIZE_OK,
-                      dali_cli_tokenize("  level \t\t s3   128  ", &t));
+                      dali_cli_tokenize("  level \t\t a3   128  ", &t));
     TEST_ASSERT_EQUAL_UINT8(3u, t.count);
     TEST_ASSERT_EQUAL_STRING("128", t.tok[2]);
 }
@@ -131,7 +131,7 @@ static void test_command_table_entries_are_well_formed(void)
         TEST_ASSERT_TRUE(spec->name[0] != '\0');
         TEST_ASSERT_TRUE(spec->summary[0] != '\0');
         TEST_ASSERT_TRUE(spec->min_args <= spec->max_args);
-        /* Every argument has to fit alongside the verb in one tokenised line. */
+        /* Every argument has to fit alongside the verb in one tokenized line. */
         TEST_ASSERT_TRUE(spec->max_args < DALI_CLI_MAX_TOKENS);
         /* A verb that takes arguments has to document them. */
         if (spec->max_args > 0u) {
@@ -189,7 +189,7 @@ static void test_subcommands_appear_in_usage(void)
             word[len] = '\0';
 
             TEST_ASSERT_TRUE_MESSAGE(dali_cli_has_subcommand(spec, word),
-                                     "declared subcommand not recognised");
+                                     "declared subcommand not recognized");
             TEST_ASSERT_NOT_NULL_MESSAGE(strstr(spec->args, word),
                                          "subcommand missing from usage line");
         }
@@ -211,9 +211,21 @@ static void test_has_subcommand_rejects_non_members(void)
     TEST_ASSERT_TRUE(dali_cli_has_subcommand(capture, "export"));
     TEST_ASSERT_FALSE(dali_cli_has_subcommand(capture, "stopp"));
 
+    /* quiescent takes its on/off keyword first, then a target that may be a
+     * short address or the literal `all`, so only on/off are keywords. */
+    const DaliCliCommandSpec *quiescent =
+        dali_cli_command_for_id(DALI_CLI_CMD_QUIESCENT);
+    TEST_ASSERT_NOT_NULL(quiescent);
+    TEST_ASSERT_EQUAL_STRING("quiescent", quiescent->name);
+    TEST_ASSERT_EQUAL_UINT8(2u, quiescent->min_args);
+    TEST_ASSERT_EQUAL_UINT8(2u, quiescent->max_args);
+    TEST_ASSERT_TRUE(dali_cli_has_subcommand(quiescent, "on"));
+    TEST_ASSERT_TRUE(dali_cli_has_subcommand(quiescent, "off"));
+    TEST_ASSERT_FALSE(dali_cli_has_subcommand(quiescent, "all"));
+
     /* A verb whose first argument is a value declares no keywords at all. */
     TEST_ASSERT_FALSE(dali_cli_has_subcommand(
-        dali_cli_command_for_id(DALI_CLI_CMD_LEVEL), "s3"));
+        dali_cli_command_for_id(DALI_CLI_CMD_LEVEL), "a3"));
     TEST_ASSERT_FALSE(dali_cli_has_subcommand(NULL, "check"));
 }
 
@@ -235,7 +247,7 @@ static void test_usage_line_matches_table(void)
 {
     DaliCliOut out = capture_begin();
     dali_cli_print_usage(&out, dali_cli_command_for_id(DALI_CLI_CMD_SCENE));
-    TEST_ASSERT_EQUAL_STRING("usage: scene <addr|sN|gN|b> <0-15>\r\n", s_capture);
+    TEST_ASSERT_EQUAL_STRING("usage: scene <addr|aN|gN|b> <0-15>\r\n", s_capture);
 
     out = capture_begin();
     dali_cli_print_usage(&out, dali_cli_command_for_id(DALI_CLI_CMD_STATS));
@@ -251,7 +263,7 @@ static void test_resolve_accepts_exact_arity(void)
     DaliCliTokens t;
     const DaliCliCommandSpec *spec = NULL;
 
-    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_OK, dali_cli_resolve("level s3 128", &t, &spec));
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_OK, dali_cli_resolve("level a3 128", &t, &spec));
     TEST_ASSERT_EQUAL(DALI_CLI_CMD_LEVEL, spec->id);
     TEST_ASSERT_EQUAL_UINT8(3u, t.count);
 }
@@ -268,7 +280,7 @@ static void test_resolve_reports_unknown_verb(void)
 {
     DaliCliTokens t;
     const DaliCliCommandSpec *spec = NULL;
-    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_UNKNOWN, dali_cli_resolve("levl s3 1", &t, &spec));
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_UNKNOWN, dali_cli_resolve("levl a3 1", &t, &spec));
     TEST_ASSERT_NULL(spec);
 }
 
@@ -287,7 +299,7 @@ static void test_resolve_rejects_trailing_tokens(void)
     TEST_ASSERT_EQUAL(DALI_CLI_CMD_LEVEL, spec->id);
 
     TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY, dali_cli_resolve("stats now", &t, &spec));
-    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY, dali_cli_resolve("off s1 s2", &t, &spec));
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY, dali_cli_resolve("off a1 a2", &t, &spec));
     TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY,
                       dali_cli_resolve("raw2 FE00 len=16 wait", &t, &spec));
 }
@@ -297,7 +309,7 @@ static void test_resolve_rejects_missing_arguments(void)
     DaliCliTokens t;
     const DaliCliCommandSpec *spec = NULL;
 
-    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY, dali_cli_resolve("level s3", &t, &spec));
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY, dali_cli_resolve("level a3", &t, &spec));
     TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY, dali_cli_resolve("off", &t, &spec));
     TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY, dali_cli_resolve("devmem read 3 0", &t, &spec));
 }
@@ -327,16 +339,16 @@ static void test_report_resolve_messages(void)
     DaliCliTokens t;
     const DaliCliCommandSpec *spec = NULL;
 
-    DaliCliResolveResult r = dali_cli_resolve("levl s3", &t, &spec);
+    DaliCliResolveResult r = dali_cli_resolve("levl a3", &t, &spec);
     DaliCliOut out = capture_begin();
     dali_cli_report_resolve(&out, r, &t, spec);
     TEST_ASSERT_EQUAL_STRING("unknown command: levl\r\n"
                              "type 'help' for commands\r\n", s_capture);
 
-    r = dali_cli_resolve("scene s3", &t, &spec);
+    r = dali_cli_resolve("scene a3", &t, &spec);
     out = capture_begin();
     dali_cli_report_resolve(&out, r, &t, spec);
-    TEST_ASSERT_EQUAL_STRING("usage: scene <addr|sN|gN|b> <0-15>\r\n", s_capture);
+    TEST_ASSERT_EQUAL_STRING("usage: scene <addr|aN|gN|b> <0-15>\r\n", s_capture);
 
     r = dali_cli_resolve("", &t, &spec);
     out = capture_begin();
@@ -407,7 +419,7 @@ static void test_parse_target_forms(void)
     TEST_ASSERT_EQUAL(DALI_ADDR_GROUP, target.type);
     TEST_ASSERT_EQUAL_UINT8(7u, target.address);
 
-    TEST_ASSERT_TRUE(dali_cli_parse_target("s12", &target));
+    TEST_ASSERT_TRUE(dali_cli_parse_target("a12", &target));
     TEST_ASSERT_EQUAL(DALI_ADDR_SHORT, target.type);
     TEST_ASSERT_EQUAL_UINT8(12u, target.address);
 
@@ -420,10 +432,11 @@ static void test_parse_target_rejects_out_of_range(void)
 {
     DaliTarget target;
     TEST_ASSERT_FALSE(dali_cli_parse_target("g16", &target));
-    TEST_ASSERT_FALSE(dali_cli_parse_target("s64", &target));
+    TEST_ASSERT_FALSE(dali_cli_parse_target("a64", &target));
     TEST_ASSERT_FALSE(dali_cli_parse_target("64", &target));
     TEST_ASSERT_FALSE(dali_cli_parse_target("g", &target));
-    TEST_ASSERT_FALSE(dali_cli_parse_target("s", &target));
+    TEST_ASSERT_FALSE(dali_cli_parse_target("a", &target));
+    TEST_ASSERT_FALSE(dali_cli_parse_target("s1", &target));
     TEST_ASSERT_FALSE(dali_cli_parse_target("x1", &target));
     TEST_ASSERT_FALSE(dali_cli_parse_target("", &target));
 }
@@ -433,7 +446,7 @@ static void test_parse_short_addr_and_instance(void)
     uint8_t v = 0u;
     TEST_ASSERT_TRUE(dali_cli_parse_short_addr("3", &v));
     TEST_ASSERT_EQUAL_UINT8(3u, v);
-    TEST_ASSERT_TRUE(dali_cli_parse_short_addr("s63", &v));
+    TEST_ASSERT_TRUE(dali_cli_parse_short_addr("a63", &v));
     TEST_ASSERT_EQUAL_UINT8(63u, v);
     TEST_ASSERT_FALSE(dali_cli_parse_short_addr("64", &v));
 
@@ -974,7 +987,7 @@ static void test_format_response_truncates_within_bounds(void)
 static void test_special_commissioning_set(void)
 {
     static const char *restricted[] = {
-        "initialise", "randomize", "search-h", "search-m", "search-l",
+        "initialise", "randomise", "search-h", "search-m", "search-l",
         "program-short", "withdraw", "write-memory", "write-memory-nr",
     };
     static const char *allowed[] = {
@@ -1000,6 +1013,69 @@ static void test_special_commissioning_set(void)
     TEST_ASSERT_EQUAL_UINT8((uint8_t)(sizeof(restricted) / sizeof(restricted[0]) +
                                       sizeof(allowed) / sizeof(allowed[0])),
                             dali_cli_special_count());
+}
+
+/*
+ * The config table's commissioning set. Gating `special program-short` while
+ * leaving SET SHORT ADDRESS open refuses the harder spelling of re-addressing
+ * and permits the easier one, so this asserts the set by name rather than by
+ * whether the command happens to consume DTR0.
+ */
+static void test_config_commissioning_set(void)
+{
+    const DaliCliGearCommand *spec =
+        dali_cli_config_find("set-short-address-dtr0");
+    TEST_ASSERT_NOT_NULL(spec);
+    TEST_ASSERT_TRUE(dali_cli_config_is_commissioning(spec->id));
+
+    /* Every other config name, including the rest of the DTR0 forms: a wrong
+     * fade time is visible and reversible, a lost short address is not. */
+    uint8_t count = dali_cli_config_count();
+    uint8_t restricted = 0u;
+    for (uint8_t i = 0u; i < count; i++) {
+        const DaliCliGearCommand *entry = dali_cli_config_at(i);
+        TEST_ASSERT_NOT_NULL(entry);
+        if (dali_cli_config_is_commissioning(entry->id)) {
+            restricted++;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT8(1u, restricted);
+}
+
+/*
+ * The group edits are the config commands a broadcast target must not carry,
+ * and they are the only ones: the predicate is what keeps the console and the
+ * shell from disagreeing about it.
+ */
+static void test_config_broadcast_rejection_set(void)
+{
+    static const char *rejected[] = { "add-group", "remove-group" };
+
+    for (size_t i = 0u; i < sizeof(rejected) / sizeof(rejected[0]); i++) {
+        const DaliCliGearCommand *spec = dali_cli_config_find(rejected[i]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(spec, rejected[i]);
+        TEST_ASSERT_TRUE_MESSAGE(dali_cli_config_rejects_broadcast(spec->id),
+                                 rejected[i]);
+    }
+
+    uint8_t count = dali_cli_config_count();
+    uint8_t rejecting = 0u;
+    for (uint8_t i = 0u; i < count; i++) {
+        const DaliCliGearCommand *entry = dali_cli_config_at(i);
+        TEST_ASSERT_NOT_NULL(entry);
+        if (dali_cli_config_rejects_broadcast(entry->id)) {
+            rejecting++;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)(sizeof(rejected) / sizeof(rejected[0])),
+                            rejecting);
+
+    /* `remove-scene` shares the group commands' shape — addressed, one 0-15
+     * parameter — and is deliberately not in the set: clearing a scene on every
+     * device is representable, and losing a group's poll target is not. */
+    const DaliCliGearCommand *scene = dali_cli_config_find("remove-scene");
+    TEST_ASSERT_NOT_NULL(scene);
+    TEST_ASSERT_FALSE(dali_cli_config_rejects_broadcast(scene->id));
 }
 
 static void test_print_response_yes_no(void)
@@ -1068,7 +1144,18 @@ static void test_print_tx_and_error_results(void)
 
     out = capture_begin();
     dali_cli_print_error(&out, "status", DALI_ERR_INTERVENED);
-    TEST_ASSERT_EQUAL_STRING("status: ERR 10\r\n", s_capture);
+    TEST_ASSERT_EQUAL_STRING("status: intervened\r\n", s_capture);
+
+    /* The reason this stopped printing numbers: a commissioning run reports
+     * this code routinely, and "ERR 12" told an operator nothing. */
+    out = capture_begin();
+    dali_cli_print_error(&out, "compare", DALI_ERR_RX_ACTIVITY);
+    TEST_ASSERT_EQUAL_STRING("compare: rx activity\r\n", s_capture);
+
+    /* A code this build has no name for still carries its number. */
+    out = capture_begin();
+    dali_cli_print_error(&out, "status", (DaliError)99);
+    TEST_ASSERT_EQUAL_STRING("status: ERR 99\r\n", s_capture);
 }
 
 static void test_print_frame_widths(void)
@@ -1179,6 +1266,8 @@ int main(void)
     RUN_TEST(test_print_table_marks_send_twice_specials);
 
     RUN_TEST(test_special_commissioning_set);
+    RUN_TEST(test_config_commissioning_set);
+    RUN_TEST(test_config_broadcast_rejection_set);
 
     RUN_TEST(test_format_status_names_only_the_set_flags);
     RUN_TEST(test_format_status_fits_all_eight_flags);

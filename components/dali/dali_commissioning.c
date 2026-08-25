@@ -2,11 +2,6 @@
 
 #include <string.h>
 
-#ifndef DALI_HOST_BUILD
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#endif
-
 #define DALI_RANDOM_ADDRESS_LIMIT (DALI_RANDOM_ADDRESS_MAX + 1u)
 
 static bool comm_transport_valid(const DaliDiscoveryTransport *transport)
@@ -44,6 +39,85 @@ static DaliError send_special_no_reply(const DaliDiscoveryTransport *transport,
         return err;
     }
     return transact_frame(transport, &frame, false, 0u, send_twice, NULL);
+}
+
+static DaliError send_special_cleanup_no_reply(
+    const DaliDiscoveryTransport *transport,
+    DaliCommandId id,
+    uint8_t param)
+{
+    DaliFrame frame;
+    DaliError err = dali_build_special(id, param, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+    return dali_transport_transact_cleanup(transport,
+                                           &frame,
+                                           false,
+                                           0u,
+                                           false,
+                                           NULL);
+}
+
+/*
+ * Broadcast START QUIESCENT MODE, then wait for any event frame already on the
+ * wire to finish.
+ *
+ * Send-twice, no reply, address byte 0xFF: every control device, control gear
+ * untouched. Nothing acknowledges it, so success here means transmitted, not
+ * quiesced — a bus with no control devices on it reports exactly the same.
+ *
+ * transmitted_out is set the moment the frame is reported sent, separately from
+ * the return value, because the settle that follows can fail on its own. The
+ * bus is quiet either way at that point, and the release must run; collapsing
+ * the two into one result would lose exactly the case that leaves an
+ * installation silent.
+ */
+static DaliError commissioning_start_quiescence(
+    const DaliDiscoveryTransport *transport,
+    bool *transmitted_out)
+{
+    if (transmitted_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    *transmitted_out = false;
+
+    DaliFrame frame;
+    DaliError err = dali_build_device_broadcast_command(
+        DALI_CMD_START_QUIESCENT_MODE, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    err = transact_frame(transport, &frame, false, 0u, true, NULL);
+    if (err != DALI_OK) {
+        return err;
+    }
+    *transmitted_out = true;
+
+    return dali_transport_delay_ms(transport,
+                                   DALI_COMMISSIONING_QUIESCENT_SETTLE_MS);
+}
+
+/*
+ * Broadcast STOP QUIESCENT MODE through the cleanup path.
+ *
+ * Same reasoning as the TERMINATE unwind: this has to be attempted even when a
+ * front-end cancellation is latched, because the alternative is an installation
+ * whose sensors stay silent after an aborted run. No settle follows — the
+ * caller is on its way out and nothing else is about to transmit.
+ */
+static DaliError commissioning_release_quiescence(
+    const DaliDiscoveryTransport *transport)
+{
+    DaliFrame frame;
+    DaliError err = dali_build_device_broadcast_command(
+        DALI_CMD_STOP_QUIESCENT_MODE, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+    return dali_transport_transact_cleanup(transport, &frame, false, 0u, true,
+                                           NULL);
 }
 
 static DaliError query_special_u8(const DaliDiscoveryTransport *transport,
@@ -143,16 +217,16 @@ DaliError dali_commissioning_build_start_sequence(DaliSequence *out)
     }
     initialise->send_twice = true;
 
-    DaliSequenceStep *randomize =
-        &out->steps[DALI_COMMISSIONING_START_STEP_RANDOMIZE];
-    err = set_special_step(randomize, DALI_CMD_RANDOMIZE, 0u);
+    DaliSequenceStep *randomise =
+        &out->steps[DALI_COMMISSIONING_START_STEP_RANDOMISE];
+    err = set_special_step(randomise, DALI_CMD_RANDOMISE, 0u);
     if (err != DALI_OK) {
         return err;
     }
-    randomize->send_twice = true;
+    randomise->send_twice = true;
 
     /* No retries: the scheduler already brackets each send-twice pair, and a
-     * repeated RANDOMIZE would hand out a fresh set of random addresses. */
+     * repeated RANDOMISE would hand out a fresh set of random addresses. */
     out->step_count = DALI_COMMISSIONING_START_SEQUENCE_STEPS;
     return DALI_OK;
 }
@@ -262,13 +336,28 @@ static DaliError answer_from_sequence(const DaliSequenceResult *result,
         return DALI_ERR_MALFORMED;
     }
 
-    *yes_out = dali_is_yes((uint8_t)(reply.data & 0xFFu));
+    if (!dali_is_yes((uint8_t)(reply.data & 0xFFu))) {
+        /* COMPARE/VERIFY encode NO as silence. A decoded non-YES backward
+         * frame is observed but invalid traffic, not a legitimate NO. */
+        return DALI_ERR_MALFORMED;
+    }
+    *yes_out = true;
     return DALI_OK;
 }
 
 DaliError dali_commissioning_compare_from_sequence(const DaliSequenceResult *result,
                                                    bool *yes_out)
 {
+    if (result == NULL || yes_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    if (result->result == DALI_ERR_RX_ACTIVITY &&
+        result->failed_step ==
+            DALI_COMMISSIONING_SEARCH_COMPARE_STEP_COMPARE) {
+        *yes_out = true;
+        return DALI_OK;
+    }
+
     return answer_from_sequence(result,
                                 DALI_COMMISSIONING_SEARCH_COMPARE_STEP_COMPARE,
                                 yes_out);
@@ -351,11 +440,18 @@ DaliError dali_commissioning_compare(const DaliDiscoveryTransport *transport,
         *yes_out = false;
         return DALI_OK;
     }
+    if (err == DALI_ERR_RX_ACTIVITY) {
+        *yes_out = true;
+        return DALI_OK;
+    }
     if (err != DALI_OK) {
         return err;
     }
 
-    *yes_out = dali_is_yes(raw);
+    if (!dali_is_yes(raw)) {
+        return DALI_ERR_MALFORMED;
+    }
+    *yes_out = true;
     return DALI_OK;
 }
 
@@ -456,7 +552,10 @@ DaliError dali_commissioning_verify_short_address(
         return err;
     }
 
-    *verified_out = dali_is_yes(raw);
+    if (!dali_is_yes(raw)) {
+        return DALI_ERR_MALFORMED;
+    }
+    *verified_out = true;
     return DALI_OK;
 }
 
@@ -482,13 +581,23 @@ uint64_t dali_commissioning_used_mask_from_inventory(
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         const DaliDiscoveryDeviceInfo *device =
             dali_discovery_inventory_get(inventory, addr);
+        if (device == NULL) {
+            continue;
+        }
         /*
          * Control gear and control devices have independent 0..63 short-
          * address spaces.  This mask feeds control-gear commissioning, so a
          * pure input device at the same numeric address must not reserve it.
          * Hybrid inventory entries still count because they contain gear.
+         *
+         * Undecodable activity also reserves the address: it answered a gear
+         * QUERY STATUS, so the address is occupied in the gear space even
+         * though nothing there could be read. Reserving it is the safe
+         * direction — assigning a further device onto a contested address is
+         * exactly the fault a commissioning run must not create.
          */
-        if (device != NULL && device->present && device->has_control_gear) {
+        if (device->has_undecodable_activity ||
+            (device->present && device->has_control_gear)) {
             mask |= ((uint64_t)1u << addr);
         }
     }
@@ -535,35 +644,59 @@ static uint8_t count_free_addresses(uint64_t used_mask, uint8_t first_address)
 static DaliError commissioning_finish(const DaliDiscoveryTransport *transport);
 
 static DaliError commissioning_start_unaddressed(
-    const DaliDiscoveryTransport *transport)
+    const DaliDiscoveryTransport *transport,
+    bool *termination_required_out)
 {
+    if (termination_required_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    *termination_required_out = false;
+
     DaliSequence seq;
     DaliError err = dali_commissioning_build_start_sequence(&seq);
     if (err != DALI_OK) {
         return err;
     }
 
+    /* A transport with no atomic-sequence entry point is known not to have
+     * admitted any opening frame. Preserve the no-traffic rejection contract;
+     * only an actual callback hand-off makes progress uncertain.
+     *
+     * The settle wait is checked in the same breath and for the same reason.
+     * Without it the first COMPARE can outrun the gear's random-address
+     * generation, and every device answers NO — a silent wrong answer that
+     * looks exactly like an empty bus. Refusing here costs nothing; skipping
+     * the wait costs a commissioning run that appears to succeed at finding
+     * nothing. */
+    if (!dali_transport_supports_atomic_sequence(transport) ||
+        !dali_transport_supports_delay(transport)) {
+        return DALI_ERR_INVALID;
+    }
+
+    /*
+     * Once the opening sequence is handed to an atomic transport, a local
+     * timeout can no longer prove that INITIALISE did not reach the bus: the
+     * admitted sequence may already be active or may complete after the waiter
+     * gives up. TERMINATE is harmless before INITIALISE, so unwind
+     * conservatively on every return from the transport.
+     */
+    *termination_required_out = true;
     DaliSequenceResult result;
     err = dali_transport_run_sequence_atomic(transport, &seq, &result);
     if (err != DALI_OK) {
-        /* Once INITIALISE has been attempted the gear may be in initialisation
-         * state, where it stays for fifteen minutes. Failing out without a
-         * TERMINATE would leave it there with nothing on the bus aware of it. */
-        if (result.steps_run > DALI_COMMISSIONING_START_STEP_INITIALISE) {
-            (void)commissioning_finish(transport);
-        }
         return err;
     }
 
-#ifndef DALI_HOST_BUILD
-    vTaskDelay(pdMS_TO_TICKS(15u));
-#endif
-    return DALI_OK;
+    /* The sequence ends with RANDOMISE; nothing may search until every gear has
+     * finished generating its random address. The environment supplies the wait
+     * so this module keeps no task dependency of its own. */
+    return dali_transport_delay_ms(transport,
+                                   DALI_COMMISSIONING_RANDOMISE_SETTLE_MS);
 }
 
 static DaliError commissioning_finish(const DaliDiscoveryTransport *transport)
 {
-    return send_special_no_reply(transport, DALI_CMD_TERMINATE, 0u, false);
+    return send_special_cleanup_no_reply(transport, DALI_CMD_TERMINATE, 0u);
 }
 
 /* Assign one short address and read back the confirmation, with nothing able to
@@ -598,6 +731,7 @@ DaliError dali_commissioning_commission_unaddressed(
 
     memset(out, 0, sizeof(*out));
     out->last_error = DALI_OK;
+    out->cleanup_error = DALI_OK;
 
     uint64_t used_mask = options->used_address_mask;
     out->free_address_count = count_free_addresses(used_mask,
@@ -618,11 +752,51 @@ DaliError dali_commissioning_commission_unaddressed(
         requested_count = out->free_address_count;
     }
 
-    DaliError err = commissioning_start_unaddressed(transport);
+    /*
+     * Quiescence goes first, before INITIALISE: a control device that is still
+     * free to transmit can put an event frame into a COMPARE reply window,
+     * where frame-like activity reads as YES and invents gear that is not
+     * there. Bracketing narrows that window; it does not close it, because a
+     * device that never receives the broadcast is unaffected and no physical
+     * collision classification exists yet.
+     *
+     * The capability check is hoisted here so the no-traffic rejection contract
+     * still holds: commissioning_start_unaddressed() makes the same check, but
+     * by then the START would already be on the bus.
+     */
+    if (options->quiesce_control_devices) {
+        if (!dali_transport_supports_atomic_sequence(transport) ||
+            !dali_transport_supports_delay(transport)) {
+            return DALI_ERR_INVALID;
+        }
+        out->quiescence_requested = true;
+        bool started = false;
+        out->quiescence_error = commissioning_start_quiescence(transport,
+                                                               &started);
+        out->quiescence_started = started;
+        /*
+         * A failed START does not end the run. Quiescence is hardening, not a
+         * precondition: commissioning worked without it, and refusing to
+         * commission because an optional silencing step failed would trade a
+         * working operation for a noisy-bus risk the operator may not even
+         * have. The result carries the failure instead.
+         *
+         * The release still runs. START may have been transmitted and then
+         * reported an error on the settle, so anything short of "certainly
+         * nothing left the scheduler" has to be unwound.
+         */
+    }
+
+    bool termination_required = false;
+    DaliError err = commissioning_start_unaddressed(
+        transport,
+        &termination_required);
+    out->termination_required = termination_required;
     if (err != DALI_OK) {
         out->last_error = err;
-        return err;
+        goto cleanup;
     }
+    out->termination_required = true;
     emit_progress(progress_cb,
                   progress_ctx,
                   DALI_COMMISSIONING_EVENT_INITIALISED,
@@ -657,8 +831,7 @@ DaliError dali_commissioning_commission_unaddressed(
                                                           &found);
         if (err != DALI_OK) {
             out->last_error = err;
-            (void)commissioning_finish(transport);
-            return err;
+            goto cleanup;
         }
         if (!found) {
             out->no_more_devices = true;
@@ -682,13 +855,12 @@ DaliError dali_commissioning_commission_unaddressed(
         err = program_and_verify(transport, short_address, &verified);
         if (err != DALI_OK) {
             out->last_error = err;
-            (void)commissioning_finish(transport);
-            return err;
+            goto cleanup;
         }
         if (!verified) {
-            out->last_error = DALI_ERR_MALFORMED;
-            (void)commissioning_finish(transport);
-            return DALI_ERR_MALFORMED;
+            err = DALI_ERR_MALFORMED;
+            out->last_error = err;
+            goto cleanup;
         }
 
         DaliCommissioningAssignment *assignment =
@@ -704,8 +876,7 @@ DaliError dali_commissioning_commission_unaddressed(
             err = dali_commissioning_query_short_address(transport, &encoded);
             if (err != DALI_OK) {
                 out->last_error = err;
-                (void)commissioning_finish(transport);
-                return err;
+                goto cleanup;
             }
 
             assignment->query_short_raw = encoded;
@@ -714,9 +885,9 @@ DaliError dali_commissioning_commission_unaddressed(
                 &assignment->query_short_address);
             if (err != DALI_OK ||
                 assignment->query_short_address != short_address) {
-                out->last_error = DALI_ERR_MALFORMED;
-                (void)commissioning_finish(transport);
-                return DALI_ERR_MALFORMED;
+                err = DALI_ERR_MALFORMED;
+                out->last_error = err;
+                goto cleanup;
             }
             assignment->has_query_short = true;
         }
@@ -724,8 +895,7 @@ DaliError dali_commissioning_commission_unaddressed(
         err = send_special_no_reply(transport, DALI_CMD_WITHDRAW, 0u, false);
         if (err != DALI_OK) {
             out->last_error = err;
-            (void)commissioning_finish(transport);
-            return err;
+            goto cleanup;
         }
 
         used_mask |= ((uint64_t)1u << short_address);
@@ -739,17 +909,48 @@ DaliError dali_commissioning_commission_unaddressed(
                       out->assigned_count);
     }
 
-    err = commissioning_finish(transport);
-    if (err != DALI_OK) {
-        out->last_error = err;
-        return err;
+cleanup:
+    if (out->termination_required) {
+        out->termination_attempted = true;
+        out->cleanup_error = commissioning_finish(transport);
+        out->terminate_tx_succeeded = out->cleanup_error == DALI_OK;
+        out->initialisation_state_unknown =
+            !out->terminate_tx_succeeded;
+        if (out->terminate_tx_succeeded) {
+            emit_progress(progress_cb,
+                          progress_ctx,
+                          DALI_COMMISSIONING_EVENT_TERMINATED,
+                          0u,
+                          0u,
+                          out->assigned_count);
+        }
     }
-    emit_progress(progress_cb,
-                  progress_ctx,
-                  DALI_COMMISSIONING_EVENT_TERMINATED,
-                  0u,
-                  0u,
-                  out->assigned_count);
 
+    /*
+     * Release after TERMINATE, and attempt it regardless of how TERMINATE went.
+     * Order matters only in that the gear's fifteen-minute initialisation state
+     * is the more dangerous one to leave set, so it is unwound first; both are
+     * attempted either way.
+     */
+    if (out->quiescence_requested) {
+        out->quiescence_release_attempted = true;
+        DaliError release_err = commissioning_release_quiescence(transport);
+        out->quiescent_state_unknown =
+            out->quiescence_started && release_err != DALI_OK;
+        if (out->quiescence_error == DALI_OK) {
+            out->quiescence_error = release_err;
+        }
+    }
+
+    /* A cleanup failure is secondary when another operation already failed.
+     * Keep that primary result as the return value and expose the unwind
+     * outcome independently in cleanup_error/initialisation_state_unknown. */
+    if (out->last_error != DALI_OK) {
+        return out->last_error;
+    }
+    if (out->cleanup_error != DALI_OK) {
+        out->last_error = out->cleanup_error;
+        return out->cleanup_error;
+    }
     return DALI_OK;
 }

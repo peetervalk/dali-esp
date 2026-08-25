@@ -130,8 +130,9 @@ dali:
 
 # ── Lights ────────────────────────────────────────────────────────────────────
 light:
-  # Group target: needs a representative gear address to query, and exercises
-  # the level clamps and the linear curve.
+  # Group target: query_address is not required — a cold node discovers a
+  # representative itself — but it is still accepted as an override, so this
+  # keeps it under test alongside the level clamps and the linear curve.
   - platform: dali
     dali_id: dali_bus
     name: "Test Group 0"

@@ -3,7 +3,7 @@
 /*
  * dali_shell.h — the diagnostic CLI as a reusable session
  *
- * dali_cli.c decides what a line *means*: tokenising, the verb table, argument
+ * dali_cli.c decides what a line *means*: tokenizing, the verb table, argument
  * validation, the named command tables, and response formatting. This module
  * decides what a line *does*: it owns the blocking transport, the caches a
  * workflow accumulates across commands, and the long-running walks (scan,
@@ -28,7 +28,7 @@
  * module state, not per-session state, and dali_shell_attach() refuses a second
  * caller while one holds the session. That is a deliberate limit rather than an
  * omission: the bus itself is single-tenant, so a second concurrent session
- * would serialise on the transport anyway while giving two operators an
+ * would serialize on the transport anyway while giving two operators an
  * inconsistent view of one capture ring. A front end that must survive an
  * abandoned session (a terminal window closed without a quit) is responsible
  * for its own idle timeout, and calls dali_shell_detach() when it fires.
@@ -117,6 +117,24 @@ typedef struct {
     /* Called after a workflow that invalidates cached device state, so the
      * integration can re-read what it holds. NULL when nothing caches. */
     void (*inventory_changed)(void *ctx, const DaliDiscoveryInventory *inventory);
+    /*
+     * Called after one addressed configuration command was accepted for
+     * transmission, naming what it was.
+     *
+     * A `config` verb is a single frame rather than a workflow, so it claims no
+     * bus and reaches none of the hooks above — which meant a group edit typed
+     * into a session left the integration's group-membership cache asserting
+     * the previous membership, and a group light polling a fixture that had
+     * left. The shell holds no such cache and cannot fix that itself; it can
+     * only say what it just sent.
+     *
+     * `id` is the shared DaliCommandId, so the integration decides what a given
+     * command invalidates rather than the shell deciding for it. Called on the
+     * session's task, and only when the send reported success: a refused frame
+     * changed nothing. NULL when nothing caches.
+     */
+    void (*config_applied)(void *ctx, DaliTarget target, DaliCommandId id,
+                           uint8_t param);
     /*
      * Print the integration's own configuration as the YAML block that would
      * produce it — what `export config` emits.

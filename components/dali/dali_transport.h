@@ -48,10 +48,33 @@ typedef DaliError (*DaliSequenceTransactionFn)(const DaliSequence *seq,
                                                DaliSequenceResult *result_out,
                                                void               *ctx);
 
+/*
+ * Block for at least ms milliseconds before the caller's next frame.
+ *
+ * Some protocol steps must let the bus or the gear settle — the post-RANDOMISE
+ * wait while every control gear generates its 24-bit random address is the one
+ * that exists today. A settle cannot be expressed as a DaliSequenceStep, which
+ * carries a frame and no duration, and the shared modules must not call an RTOS
+ * directly: that is what kept dali_commissioning.c dependent on FreeRTOS. The
+ * environment supplies the wait instead.
+ */
+typedef void (*DaliDelayFn)(uint32_t ms, void *ctx);
+
 typedef struct {
     DaliTransactionFn         transact;
     DaliSequenceTransactionFn transact_sequence; /* NULL = no atomic grouping */
     void                     *ctx;
+    /*
+     * Optional safety-unwind path. It must ignore front-end/user cancellation
+     * while preserving ordinary scheduler, PHY, timing, and bus errors.
+     * Shared workflows use it only for commands that restore protocol state.
+     */
+    DaliTransactionFn         transact_cleanup;
+    /*
+     * Optional settle wait. Workflows that need one reject a transport without
+     * it before transmitting anything, rather than silently skipping the wait.
+     */
+    DaliDelayFn               delay_ms;
 } DaliTransport;
 
 /* True when the transport can at least send single frames. */
@@ -63,6 +86,29 @@ bool dali_transport_valid(const DaliTransport *transport);
  * will be used.
  */
 bool dali_transport_supports_atomic_sequence(const DaliTransport *transport);
+
+/*
+ * True when the transport can perform a settle wait. A workflow whose protocol
+ * correctness depends on a wait must check this before it transmits.
+ */
+bool dali_transport_supports_delay(const DaliTransport *transport);
+
+/*
+ * Wait at least ms milliseconds. Returns DALI_ERR_INVALID when the transport
+ * supplies no wait, so a missing settle fails loudly instead of vanishing.
+ */
+DaliError dali_transport_delay_ms(const DaliTransport *transport, uint32_t ms);
+
+/*
+ * Send one safety-unwind frame. Prefer transact_cleanup when supplied and
+ * otherwise fall back to the ordinary transaction function.
+ */
+DaliError dali_transport_transact_cleanup(const DaliTransport *transport,
+                                          const DaliFrame *frame,
+                                          bool needs_reply,
+                                          uint8_t retries_left,
+                                          bool send_twice,
+                                          DaliFrame *reply_out);
 
 /*
  * Run a sequence with local atomicity when the transport supports it. On the

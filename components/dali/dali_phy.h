@@ -50,17 +50,32 @@ typedef struct {
 } DaliPhyRxDebugSnapshot;
 
 /* ---------------------------------------------------------------------------
- * Callback invoked from task context when a complete frame is received.
- * frame is valid only for the duration of the call.
+ * Timestamped RX observation delivered from task context.
+ *
+ * Timestamps share the PHY's wrapping 32-bit microsecond clock and are
+ * quantized to 2 us because the low storage bit carries the edge level.
+ * frame is meaningful only when result is DALI_OK. A decode error is still
+ * delivered: the scheduler needs to distinguish reply-window activity from
+ * true silence during commissioning.
  * --------------------------------------------------------------------------*/
-typedef void (*DaliPhyRxCallback)(const DaliFrame *frame, void *ctx);
+typedef struct {
+    DaliError result;
+    DaliFrame frame;
+    uint32_t  first_edge_us;
+    uint32_t  last_edge_us;
+    uint8_t   edge_count;
+    bool      has_timestamps;
+} DaliPhyRxObservation;
+
+typedef void (*DaliPhyRxCallback)(const DaliPhyRxObservation *observation,
+                                  void *ctx);
 
 /* ---------------------------------------------------------------------------
  * Public API — all functions run in task context unless noted
  * --------------------------------------------------------------------------*/
 
 /*
- * Initialise the PHY layer.
+ * Initialize the PHY layer.
  * tx_gpio: GPIO number connected to DALI-2 Click RST / DALI_TX pin.
  *          The Click transmit optocoupler is active-high; the PHY maps
  *          logical DALI idle/high to the inactive physical GPIO level.
@@ -72,8 +87,8 @@ typedef void (*DaliPhyRxCallback)(const DaliFrame *frame, void *ctx);
 DaliError dali_phy_init(uint8_t tx_gpio, uint8_t rx_gpio);
 
 /*
- * Register a callback invoked (from DALI task context) for each received
- * frame.  Pass NULL to disable.  ctx is forwarded to the callback.
+ * Register a callback invoked (from DALI task context) for each complete RX
+ * observation, including undecodable activity. Pass NULL to disable.
  */
 void dali_phy_set_rx_callback(DaliPhyRxCallback cb, void *ctx);
 
@@ -83,6 +98,13 @@ void dali_phy_set_rx_callback(DaliPhyRxCallback cb, void *ctx);
  * Returns DALI_ERR_BUSY if a TX is already in progress.
  */
 DaliError dali_phy_tx(const DaliFrame *frame);
+
+/*
+ * Return the ISR timestamp at which the most recent successful TX released the
+ * bus. The scheduler uses this rather than task wake-up time to attribute RX
+ * observations to the reply window.
+ */
+DaliError dali_phy_get_last_tx_end_us(uint32_t *timestamp_out);
 
 /*
  * Process pending RX events.  Must be called regularly from the DALI task
@@ -161,3 +183,11 @@ DaliError dali_phy_decode_manchester_edges(const uint32_t *intervals,
 DaliError dali_phy_decode_manchester(const uint32_t *intervals,
                                      uint8_t         num_intervals,
                                      DaliFrame       *frame_out);
+
+#ifdef DALI_HOST_BUILD
+/*
+ * Narrow test seam for the production edge assembler. Queue one logical bus
+ * edge; call dali_phy_rx_process() after the complete test waveform is queued.
+ */
+DaliError dali_phy_test_feed_rx_edge(uint32_t timestamp_us, uint8_t level);
+#endif

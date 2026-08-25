@@ -102,7 +102,7 @@ static void test_level_increases_with_requested_output(void)
 static void test_every_level_survives_a_round_trip(void)
 {
     /*
-     * The ESPHome light entity recognises the echo of a bus reading by
+     * The ESPHome light entity recognizes the echo of a bus reading by
      * converting the level it published back and comparing. A level that does
      * not come back unchanged would be read as an operator command and sent
      * to the bus, so this has to hold for all 254 of them, not just the ends.

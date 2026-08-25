@@ -1,6 +1,6 @@
 # DALI Capability Matrix
 
-**Last reviewed:** 2026-08-14
+**Last reviewed:** 2026-08-25
 
 One question per row: for a given DALI capability, what exists in the reusable C
 stack, whether the CLI exposes it, whether an independent host vector covers it,
@@ -55,7 +55,7 @@ verb by verb.
 | GO TO SCENE | `dali_control_build_go_to_scene` | `scene` | yes | no | yes (console) |
 | Addressed queries (34 names) | `dali_control_build_query` | `query`, `status` | yes | yes | yes (console) |
 | Configuration commands (19 names) | `dali_control_build_config` | `config` | yes | partial | yes (console) |
-| DTR0-consuming configuration | `dali_control_build_config` + sequence | `config-dtr0` | yes | no | yes (console) |
+| DTR0-consuming configuration | `dali_control_build_config` + sequence | `config-dtr0` | yes | no | yes (console, minus `set-short-address-dtr0`) |
 | DTR0/1/2 load | `dali_control_build_dtr` | `dtr` | yes | yes | yes (console) |
 | Special/broadcast commands (18 names) | `dali_build_special` | `special` | yes | partial | partial (console) |
 | Arbitrary frame | n/a | `raw` | yes (parse only) | yes | yes (`raw`) |
@@ -84,13 +84,29 @@ cached level profile and triggers a refresh.
 | Identify blink | n/a | `identify` | no | yes | yes (button, shell) |
 | Smoke check | n/a | `smoke` | no | yes | shell |
 
-Commissioning is dependable only with a single unaddressed device on the bus; the
-COMPARE collision inversion recorded in `current_status.md` is unfixed.
+The host suite now carries timestamped RX observations from the PHY into the
+scheduler. Frame-like undecodable activity in an active reply window becomes
+`DALI_ERR_RX_ACTIVITY`; COMPARE alone interprets it as YES, while ordinary
+queries retain the ambiguity as an error. The short-address scan is the one
+caller that does neither: it records the address as `has_undecodable_activity`,
+counts it, keeps walking, and holds the address out of the commissioning free
+pool without listing it as a device. The same host coverage asserts that a
+cancelled commissioning workflow uses a safety transport to attempt TERMINATE
+despite the latched front-end abort, and reports a failed cleanup separately.
+
+That is host evidence, not a real-bus multi-device result. Commissioning remains
+limited operationally to one unaddressed control gear at a time until the
+multi-device path is exercised on hardware. A run now brackets itself with
+broadcast START/STOP QUIESCENT MODE — host-tested for ordering, settle,
+release-on-every-exit, and the two failure modes, but never run on a bus, and it
+cannot reach a device that does not receive the broadcast. Equal-random-address
+recovery and arbitration against another bus master remain open.
 
 The shell rows are the same code the native CLI runs, reached through
-`esphome/components/dali/dali_shell_tcp.cpp`. `commission` and the nine
-commissioning primitives are refused there unless the YAML sets
-`allow_commissioning: true`, because the port is unauthenticated.
+`esphome/components/dali/dali_shell_tcp.cpp`. Its commissioning entry point is
+`commission unaddressed [first] [max]`; that verb and the nine commissioning
+primitives are refused over TCP unless the YAML sets `allow_commissioning: true`,
+because the port is unauthenticated.
 
 The shell was flashed and run against a real bus on 2026-08-14 in `v1.1.1`:
 discover, identify, live trace, rolling capture, and JSON export were exercised
@@ -157,6 +173,9 @@ a gap.
 | Multi-byte input polling | `dali_input_poll_build_value_sequence` | `sensor poll` | yes | yes | yes |
 | Event decode | `dali_event_*` | `events`, `capture`, `find switches` | yes | yes | yes |
 | Event dispatch rules | `dali_dispatch_*` | n/a | yes | yes | yes |
+| Quiescent mode | `dali_input_build_quiescent_mode[_broadcast]` | `quiescent on\|off <addr\|all>` | yes | no | yes (console) |
+| Commissioning quiescence bracket | `DaliCommissioningOptions.quiesce_control_devices` | automatic in `commission` | yes | no | n/a |
+| Device broadcast (0xFF) | `dali_build_device_broadcast_command` | via `quiescent ... all` | yes | no | yes (console) |
 
 Configuration writes are experimental everywhere. The native CLI says so on every
 `iconfig` success line: the result means transmitted, not applied.
@@ -173,7 +192,7 @@ Configuration writes are experimental everywhere. The native CLI says so on ever
 
 | Capability | Shared API | Native CLI verb | Host vector | Real bus | ESPHome |
 |---|---|---|---|---|---|
-| Tokenising and trailing-token rejection | `dali_cli_tokenize`, `dali_cli_resolve[_in]` | every verb | yes | no | yes |
+| Tokenizing and trailing-token rejection | `dali_cli_tokenize`, `dali_cli_resolve[_in]` | every verb | yes | no | yes |
 | Verb table / help parity | `dali_cli_command_*`, `dali_cli_print_help` | `help` | yes | n/a | n/a |
 | Argument validation | `dali_cli_parse_*` | every verb | yes | no | yes |
 | Named table listing | `dali_cli_print_table` | `list`, `*-list` | yes | n/a | n/a |
@@ -185,7 +204,7 @@ Configuration writes are experimental everywhere. The native CLI says so on ever
 | Frame capture | n/a | `capture` | no | yes | yes (bus monitor) |
 
 The console supplies its own verb table to `dali_cli_resolve_in()` — the subset
-that suits a Home Assistant text entity — but shares the tokeniser, argument
+that suits a Home Assistant text entity — but shares the tokenizer, argument
 parsers, arity checking, named tables, and reply decoding. None of the migrated
 console paths has been exercised on a real bus.
 
@@ -203,12 +222,20 @@ native-only, and why:
 | `scan`, `discover`, `inventory`, `export inventory`, `identify` | Exposed as buttons and text sensors instead |
 | `export config` | A whole config block; the scan's `yaml_result` sensor carries the group map the console can fit |
 | `commission unaddressed` | No guarded workflow here; `special` refuses its primitives for the same reason |
+| `config <t> set-short-address-dtr0` | Re-addresses gear from one typed line, the same reason `special program-short` is refused |
 | `meminfo`, `instances`, `sensor poll` | Each walks a device and decides the next query from the last reply, which needs a blocking transport. Covered by the scan and the sensor platform |
 | `smoke` | Composed of `devmem` write/read; run the parts |
 | `dt8` | Held until real DT8 gear is available to test against |
 
 `group forget` runs the other way: it is console-only, because the cache it edits
 belongs to the ESPHome component rather than to the protocol stack.
+
+The caches that cache is part of are now fed by both surfaces. A shell session's
+`discover` and `commission` publish their inventory through
+`DaliShellHooks::inventory_changed`, and a `config` verb reports what it sent
+through `DaliShellHooks::config_applied`, so the group-membership table and the
+level-profile cache no longer depend on which surface an operator happened to
+use. Host- and compile-verified only; no bus has run it.
 
 ## Known gaps this matrix is tracking
 
@@ -224,4 +251,8 @@ belongs to the ESPHome component rather than to the protocol stack.
   validation, and reply decoding are shared code with host vectors, but the
   dispatch in `dali_component.cpp` between them is ESPHome/FreeRTOS-bound and
   reachable only on the device.
+- Quiescent mode has frame-level host vectors but no bus result. Commissioning
+  releases what it started; the standalone verb does not, so a device left
+  quiescent by hand stays silent until `quiescent off`, which is
+  indistinguishable from a dead sensor.
 - Nothing here claims DALI Alliance certification or complete IEC 62386 coverage.

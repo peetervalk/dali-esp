@@ -74,5 +74,5 @@ void app_main(void)
         return;
     }
 
-    ESP_LOGI(TAG, "Initialisation complete");
+    ESP_LOGI(TAG, "Initialization complete");
 }

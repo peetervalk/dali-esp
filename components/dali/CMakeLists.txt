@@ -1,5 +1,6 @@
 idf_component_register(
     SRCS
+        "dali_error.c"
         "dali_ringbuf.c"
         "dali_phy.c"
         "dali_scheduler.c"

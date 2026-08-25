@@ -69,6 +69,8 @@ static DaliSequenceResult s_cancel_sequence_result;
 /* Reply notification — written by notify_rx, read by dali_sched_run */
 static volatile bool   s_reply_received;
 static volatile bool   s_reply_intervened;
+/* DALI_OK means that no undecodable reply-window observation is pending. */
+static volatile DaliError s_reply_error;
 static DaliFrame       s_reply_frame;
 
 /* Cross-task reset request; applied only by the scheduler owner task. */
@@ -133,6 +135,128 @@ static uint32_t sched_now_us(void)
     return s_ops.get_tick_ms() * 1000u;
 }
 
+/*
+ * `decoded_backward` says the observation is a complete, decoded 8-bit backward
+ * frame rather than activity of unknown shape. Only that case gets the earlier
+ * open edge; see DALI_REPLY_WINDOW_OPEN_DECODED_US for why the distinction is
+ * where the safety lives.
+ */
+static bool sched_observation_in_reply_window(
+    const DaliPhyRxObservation *observation,
+    bool decoded_backward)
+{
+    if (!observation->has_timestamps) {
+        return true;
+    }
+    if (!s_have_last_tx_us) {
+        return false;
+    }
+
+    uint32_t open_us = decoded_backward ? DALI_REPLY_WINDOW_OPEN_DECODED_US
+                                        : DALI_REPLY_WINDOW_OPEN_US;
+    uint32_t start_since_tx = observation->first_edge_us - s_last_tx_us;
+    uint32_t end_since_tx = observation->last_edge_us - s_last_tx_us;
+    return start_since_tx >= open_us &&
+           end_since_tx >= start_since_tx &&
+           end_since_tx <= DALI_REPLY_WINDOW_CLOSE_US;
+}
+
+static bool sched_observation_is_qualified_activity(
+    const DaliPhyRxObservation *observation)
+{
+    if (observation->result != DALI_ERR_MALFORMED ||
+        observation->edge_count < DALI_BACKWARD_ACTIVITY_MIN_EDGES) {
+        return false;
+    }
+    if (!observation->has_timestamps) {
+        return true;
+    }
+    return observation->last_edge_us - observation->first_edge_us >=
+           DALI_BACKWARD_ACTIVITY_MIN_SPAN_US;
+}
+
+static bool sched_observation_can_match_active_reply(
+    const DaliPhyRxObservation *observation,
+    bool decoded_backward)
+{
+    if (!s_active.needs_reply ||
+        (s_active.send_twice && s_send_count < 2u)) {
+        return false;
+    }
+
+    if (s_state == SCHED_WAIT_REPLY) {
+        return sched_observation_in_reply_window(observation, decoded_backward);
+    }
+
+    /*
+     * The owner task can wake after a physical reply has already arrived while
+     * the logical state is still WAIT_SETTLE. Only captured timestamps can
+     * prove that such an observation belongs to the final transmission.
+     */
+    return s_state == SCHED_WAIT_SETTLE &&
+           observation->has_timestamps &&
+           sched_observation_in_reply_window(observation, decoded_backward);
+}
+
+/*
+ * Which of two in-window errors survives: higher wins. RX_ACTIVITY ranks lowest
+ * because it is the one that carries meaning (COMPARE reads it as YES), so a
+ * later ambiguous observation overrides it rather than the reverse.
+ *
+ * This is the same fail-closed policy as the unconditional clear below, applied
+ * to error-versus-error instead of error-versus-frame: the most ambiguous thing
+ * seen in the window is what gets reported.
+ */
+static uint8_t sched_reply_error_priority(DaliError error)
+{
+    switch (error) {
+        case DALI_ERR_RX_ACTIVITY:
+            return 1u;
+        case DALI_ERR_MALFORMED:
+            return 2u;
+        case DALI_ERR_OVERFLOW:
+            return 3u;
+        default:
+            return 2u;
+    }
+}
+
+/*
+ * Latch an undecodable in-window observation, and deliberately invalidate any
+ * reply already decoded for this transaction.
+ *
+ * Note the asymmetry with the decoded-frame path in
+ * dali_sched_notify_rx_observation(), which refuses to latch a frame once an
+ * error is present: here the clear is unconditional, so in-window noise beats a
+ * clean reply whichever arrived first. SCHED_WAIT_REPLY then tests this error
+ * before the decoded frame, which is the same precedence a third time.
+ *
+ * That is intentional, not an oversight. An address that answers cleanly *and*
+ * puts frame-like activity into the same window is genuinely ambiguous — two
+ * devices sharing a short address is the obvious cause — and publishing the one
+ * clean value would present that as a confident single answer. The cost is real
+ * and worth knowing: for an ordinary query, a spike at 19 ms discards a good
+ * byte decoded at 8 ms. Since the reply-error path now spends a retry on
+ * MALFORMED and OVERFLOW, that case re-asks rather than failing outright, which
+ * either confirms the value or exposes the ambiguity.
+ *
+ * COMPARE is unaffected either way: a decoded 0xFF and qualified activity both
+ * mean YES.
+ */
+static void sched_latch_reply_error(DaliError error)
+{
+    if (error == DALI_OK) {
+        return;
+    }
+
+    if (s_reply_error == DALI_OK ||
+        sched_reply_error_priority(error) >
+            sched_reply_error_priority(s_reply_error)) {
+        s_reply_error = error;
+    }
+    s_reply_received = false;
+}
+
 static bool sched_tx_guard_active(uint32_t now_us)
 {
     if (s_tx_guard_duration_us == 0u) {
@@ -178,6 +302,34 @@ static void sched_arm_tx_gap(uint32_t frame_done_us, uint32_t gap_us)
     s_tx_guard_started_us = frame_done_us;
     s_tx_guard_started_ms = s_ops.get_tick_ms();
     s_tx_guard_duration_us = gap_us;
+}
+
+/*
+ * Spend one retry on the active step and go back to TX, or report that the
+ * budget is gone.
+ *
+ * Both callers reach here having waited out most or all of a reply window, so
+ * the TX guard armed at transmission expired long ago. Re-arm it from now: a
+ * reply that missed the window by a little is still on the wire, and the retry
+ * has to wait for the straggler instead of transmitting over it.
+ *
+ * Only commands whose response is retry-safe are ever given a budget —
+ * dali_command_response_retry_safe() gates it at enqueue — so spending one here
+ * is exactly as safe as spending it on the timeout path.
+ */
+static bool sched_retry_active_step(void)
+{
+    if (s_active.retries_left == 0u) {
+        return false;
+    }
+
+    s_active.retries_left--;
+    g_dali_stats.tx_retries++;
+    sched_arm_tx_gap(sched_now_us(), DALI_REPLY_TIMEOUT_BACKOFF_US);
+    s_send_count = 0u;
+    s_send_twice_first_started_us = 0u;
+    s_send_twice_first_started_ms = 0u;
+    return true;
 }
 
 static void sched_complete_transaction(DaliError result, const DaliFrame *reply)
@@ -249,6 +401,7 @@ static bool sched_finish_active_step(DaliError result, const DaliFrame *reply)
     s_send_twice_first_started_ms = 0u;
     s_reply_received = false;
     s_reply_intervened = false;
+    s_reply_error = DALI_OK;
     return true;
 }
 
@@ -406,6 +559,7 @@ static void sched_clear_active_for_reset(void)
     s_state_entered_ms = 0u;
     s_reply_received = false;
     s_reply_intervened = false;
+    s_reply_error = DALI_OK;
     s_active_is_sequence = false;
     s_active_sequence_step = 0u;
     s_active_step_started = false;
@@ -526,10 +680,10 @@ static bool sched_apply_reset_if_requested(void)
 /* ---------------------------------------------------------------------------
  * PHY RX callback — registered with PHY during init
  * --------------------------------------------------------------------------*/
-static void phy_rx_handler(const DaliFrame *frame, void *ctx)
+static void phy_rx_handler(const DaliPhyRxObservation *observation, void *ctx)
 {
     (void)ctx;
-    dali_sched_notify_rx(frame);
+    dali_sched_notify_rx_observation(observation);
 }
 
 /* ---------------------------------------------------------------------------
@@ -555,6 +709,7 @@ DaliError dali_sched_init(const DaliSchedOps *ops)
     s_send_count  = 0u;
     s_reply_received = false;
     s_reply_intervened = false;
+    s_reply_error = DALI_OK;
     s_active_is_sequence = false;
     s_active_sequence_step = 0u;
     s_active_step_started = false;
@@ -645,6 +800,7 @@ next:
             s_send_twice_first_started_ms = 0u;
             s_reply_received = false;
             s_reply_intervened = false;
+            s_reply_error = DALI_OK;
             s_state = SCHED_TX;
             goto next;
         }
@@ -687,6 +843,12 @@ next:
                 goto next;
             }
             uint32_t tx_done_us = sched_now_us();
+            if (s_ops.get_last_tx_end_us != NULL) {
+                uint32_t precise_tx_end_us = 0u;
+                if (s_ops.get_last_tx_end_us(&precise_tx_end_us) == DALI_OK) {
+                    tx_done_us = precise_tx_end_us;
+                }
+            }
             s_last_tx_us = tx_done_us;
             s_have_last_tx_us = true;
             sched_trace(DALI_SCHED_TRACE_TX, &s_active.frame, tx_done_us);
@@ -717,8 +879,10 @@ next:
                 goto next;
             }
             if (s_active.needs_reply) {
-                s_reply_received = false;
-                s_reply_intervened = false;
+                /*
+                 * Do not clear a timestamped observation latched while this
+                 * task was delayed in WAIT_SETTLE.
+                 */
                 s_state_entered_ms = s_ops.get_tick_ms();
                 s_state = SCHED_WAIT_REPLY;
                 return;
@@ -736,8 +900,40 @@ next:
             if (s_reply_intervened) {
                 s_reply_intervened = false;
                 s_reply_received = false;
+                s_reply_error = DALI_OK;
                 if (sched_finish_active_step(DALI_SCHED_INTERVENED_ERROR,
                                              NULL)) {
+                    s_state = SCHED_TX;
+                } else {
+                    s_state = SCHED_IDLE;
+                }
+                goto next;
+            }
+            if (s_reply_error != DALI_OK) {
+                DaliError reply_error = s_reply_error;
+                s_reply_error = DALI_OK;
+                s_reply_received = false;
+                /*
+                 * RX_ACTIVITY is an answer, not a failure: COMPARE reads
+                 * qualified in-window activity as YES. Re-sending it could meet
+                 * silence on the second attempt and turn a correct YES into a
+                 * NO, so it finishes on the result it already has.
+                 *
+                 * MALFORMED and OVERFLOW carry no such meaning. One is a
+                 * waveform the decoder could not read; the other is an event
+                 * dropped because the RX ring filled, which is a local resource
+                 * fault rather than a fact about the bus. They are precisely
+                 * what a retry budget exists to survive, and without one a
+                 * single blip anywhere in the reply window ends the step — and
+                 * with it the sequence that owns it, which for commissioning is
+                 * the whole run.
+                 */
+                if (reply_error != DALI_ERR_RX_ACTIVITY &&
+                    sched_retry_active_step()) {
+                    s_state = SCHED_TX;
+                    goto next;
+                }
+                if (sched_finish_active_step(reply_error, NULL)) {
                     s_state = SCHED_TX;
                 } else {
                     s_state = SCHED_IDLE;
@@ -756,18 +952,7 @@ next:
             }
             if (elapsed_ms(s_state_entered_ms) >= DALI_REPLY_TIMEOUT_MS) {
                 g_dali_stats.reply_timeouts++;
-                if (s_active.retries_left > 0u) {
-                    s_active.retries_left--;
-                    g_dali_stats.tx_retries++;
-                    /* A reply that missed the window by a little is still on the
-                     * wire. Re-arm the guard from now — the one armed at TX
-                     * expired a dozen ms ago — so the retry waits for the
-                     * straggler instead of transmitting over it. */
-                    sched_arm_tx_gap(sched_now_us(),
-                                     DALI_REPLY_TIMEOUT_BACKOFF_US);
-                    s_send_count = 0u;
-                    s_send_twice_first_started_us = 0u;
-                    s_send_twice_first_started_ms = 0u;
+                if (sched_retry_active_step()) {
                     s_state = SCHED_TX;
                     goto next;
                 }
@@ -786,16 +971,42 @@ next:
     }
 }
 
-void dali_sched_notify_rx(const DaliFrame *frame)
+void dali_sched_notify_rx_observation(
+    const DaliPhyRxObservation *observation)
 {
-    if (!s_initialized || frame == NULL) {
+    if (!s_initialized || observation == NULL) {
         return;
     }
 
-    sched_trace(DALI_SCHED_TRACE_RX, frame, sched_now_us());
+    if (observation->result != DALI_OK) {
+        /* Undecodable activity keeps the standard's open edge: this is the
+         * path where a wrong call becomes COMPARE=YES and invents gear. */
+        if (!s_reply_intervened &&
+            sched_observation_can_match_active_reply(observation, false)) {
+            DaliError reply_error = observation->result;
+            if (sched_observation_is_qualified_activity(observation)) {
+                reply_error = DALI_ERR_RX_ACTIVITY;
+                g_dali_stats.reply_rx_activity++;
+            }
+            /*
+             * Any observed in-window decode failure is distinct from silence.
+             * Only a frame-like malformed waveform becomes RX_ACTIVITY (and
+             * therefore COMPARE=YES); lesser ambiguity and overflow abort.
+             */
+            sched_latch_reply_error(reply_error);
+            return;
+        }
+        g_dali_stats.rx_ignored_outside_reply++;
+        return;
+    }
 
-    if (s_state == SCHED_WAIT_REPLY &&
-        s_active.needs_reply &&
+    const DaliFrame *frame = &observation->frame;
+    uint32_t trace_time_us = observation->has_timestamps
+                           ? observation->last_edge_us
+                           : sched_now_us();
+    sched_trace(DALI_SCHED_TRACE_RX, frame, trace_time_us);
+
+    if (sched_observation_can_match_active_reply(observation, false) &&
         (frame->bit_length == DALI_FORWARD_FRAME_BITS ||
          frame->bit_length == DALI_EXTENDED_FRAME_BITS)) {
         /*
@@ -804,22 +1015,42 @@ void dali_sched_notify_rx(const DaliFrame *frame)
          * later backward frame must not be accepted as the query's reply.
          */
         s_reply_received = false;
+        s_reply_error = DALI_OK;
         s_reply_intervened = true;
         sched_route_unsolicited_or_ignore(frame);
         return;
     }
 
-    if (s_state == SCHED_WAIT_REPLY &&
-        s_active.needs_reply &&
+    /* A complete decoded backward frame is the one unambiguous case, so it
+     * gets the earlier open edge — gear that settles fast is still gear. */
+    const bool decoded_backward =
+        (frame->bit_length == DALI_BACKWARD_FRAME_BITS);
+    if (sched_observation_can_match_active_reply(observation, decoded_backward) &&
         !s_reply_intervened &&
+        s_reply_error == DALI_OK &&
         !s_reply_received &&
-        frame->bit_length == DALI_BACKWARD_FRAME_BITS) {
+        decoded_backward &&
+        sched_observation_in_reply_window(observation, decoded_backward)) {
         s_reply_frame    = *frame;
         s_reply_received = true;
         return;
     }
 
     sched_route_unsolicited_or_ignore(frame);
+}
+
+void dali_sched_notify_rx(const DaliFrame *frame)
+{
+    if (frame == NULL) {
+        return;
+    }
+
+    DaliPhyRxObservation observation = {
+        .result = DALI_OK,
+        .frame = *frame,
+        .has_timestamps = false,
+    };
+    dali_sched_notify_rx_observation(&observation);
 }
 
 bool dali_sequence_result_reply(const DaliSequenceResult *result,
@@ -1092,7 +1323,7 @@ void dali_sched_reset_queue_stats(void)
 }
 
 /* ---------------------------------------------------------------------------
- * On-device convenience initialiser
+ * On-device convenience initializer
  * --------------------------------------------------------------------------*/
 #ifndef DALI_HOST_BUILD
 static uint32_t device_get_tick_ms(void)
@@ -1112,6 +1343,7 @@ DaliError dali_sched_init_device(void)
         .set_rx_callback = dali_phy_set_rx_callback,
         .get_tick_ms     = device_get_tick_ms,
         .get_time_us     = device_get_time_us,
+        .get_last_tx_end_us = dali_phy_get_last_tx_end_us,
     };
     return dali_sched_init(&ops);
 }

@@ -346,7 +346,7 @@ void emit_light_entity(const DaliCliOut *out, const DaliLightConfig *cfg)
     const char *type = target_type_name(cfg->target_type);
     if (type == nullptr) {
         dali_cli_write(out,
-                       "  # entity omitted: unrecognised target type\r\n");
+                       "  # entity omitted: unrecognized target type\r\n");
         return;
     }
 
@@ -473,9 +473,17 @@ void emit_discovered_lights(const DaliCliOut *out,
         dali_cli_printf(out, "%s  name: \"Group %u\"\r\n", lead, (unsigned) g);
         dali_cli_printf(out, "%s  target_type: group\r\n", lead);
         dali_cli_printf(out, "%s  target_address: %u\r\n", lead, (unsigned) g);
+        /*
+         * Deliberately no `query_address`. The scan that produced this draft
+         * has already told the component which addresses are in the group, and
+         * a cold node asks the bus for itself, so writing one here would bake a
+         * fact about today's bus into a file that outlives it. `a%u` is named
+         * only so the reader knows the group is not empty.
+         */
         if (group_query[g] != 0xFFu) {
-            dali_cli_printf(out, "%s  query_address: %u\r\n", lead,
-                            (unsigned) group_query[g]);
+            dali_cli_printf(out,
+                            "%s  # membership is discovered; a%u is one member\r\n",
+                            lead, (unsigned) group_query[g]);
         }
     }
 

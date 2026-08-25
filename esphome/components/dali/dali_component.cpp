@@ -96,6 +96,60 @@ struct ProfileRefreshQuery {
     bool               actual_level_pending;
 };
 
+/*
+ * Cold-start group seed sweep.
+ *
+ * A group light needs one member's short address to poll: QUERY ACTUAL LEVEL
+ * addressed to the group collides as soon as the group has two members. That
+ * representative used to have to be written into the YAML as `query_address`,
+ * which is a fact about the bus kept in a file the ESP32 never sees, and which
+ * goes stale silently the day the fixture is replaced.
+ *
+ * The bus can answer the question itself. QUERY GROUPS 0-7 / 8-15 against each
+ * short address says which groups it is in, which is the same data a scan
+ * collects — so this walks addresses until every group light has a
+ * representative and then stops. Usually that is a handful of addresses.
+ *
+ * It seeds rather than publishes a snapshot: the result is explicitly
+ * unverified, so a later scan supersedes it exactly as it supersedes a
+ * hand-written seed, and `dali_group_map_scan_covers_known_members()` keeps its
+ * meaning. Seeding only addresses that actually answered is also strictly safer
+ * than the YAML form, which could name an address that does not exist and block
+ * every future scan snapshot.
+ *
+ * Runs only when no snapshot was restored from flash — the same condition that
+ * used to select the YAML seed — so a commissioned installation never pays for
+ * it. Nothing here is persisted; only a scan or an explicit edit writes flash.
+ */
+struct GroupSeedSweep {
+    bool               active;
+    bool               in_flight;
+    uint8_t            address;       /* the address the in-flight query asks about */
+    uint16_t           wanted;        /* groups still without a representative */
+    /*
+     * Counters and the last failure, carried to the closing summary.
+     *
+     * The per-address lines below are DEBUG and are emitted in the first
+     * fractions of a second of loop(), which on this device is before a network
+     * log viewer has attached — so they are invisible unless someone is on the
+     * serial cable. The summary is the line that always survives, and it has to
+     * carry enough to act on without them.
+     *
+     * A silent address is the normal case on a sparse bus, not a fault: only
+     * `answered` against the gear you know is out there says whether a query
+     * path is working.
+     */
+    uint8_t            answered;      /* addresses that returned a group mask   */
+    uint8_t            silent;        /* addresses whose query did not decode   */
+    DaliError          last_error;
+    uint8_t            last_error_step;
+    uint8_t            last_error_address;
+    DaliSequenceResult result;
+    std::atomic<bool>  result_ready;
+};
+
+static GroupSeedSweep s_group_seed_sweep = {};
+
 static LevelProfileCacheEntry s_level_profile_cache[DALI_SHORT_ADDRESS_COUNT] = {};
 static ScanLevelProfileRecord
     s_scan_level_profile_snapshot[DALI_SHORT_ADDRESS_COUNT] = {};
@@ -253,28 +307,48 @@ static bool dt6_changes_level_profile(const DaliCliDtCommand *spec)
 }
 
 /*
+ * Which short addresses a target names, as one bit per address.
+ *
+ * A group resolves through the runtime membership table, so it is only as
+ * complete as the last scan; broadcast is every address by definition. Used
+ * both to drop caches a command invalidated and to say which addresses a
+ * warning is about.
+ */
+static uint64_t config_target_mask(DaliTarget target)
+{
+    if (target.type == DALI_ADDR_SHORT) {
+        return target.address < DALI_SHORT_ADDRESS_COUNT
+                   ? ((uint64_t) 1u << target.address)
+                   : 0ull;
+    }
+    if (target.type == DALI_ADDR_GROUP) {
+        return group_member_mask(target.address);
+    }
+    return ~0ull;
+}
+
+/*
  * Drop cached profiles the command just invalidated.
  *
  * The refresh that follows only re-reads addresses some entity queries, so a
  * group member that is not its group's representative would otherwise keep a
  * stale window in the union until the next scan. Dropping the entry makes that
  * member abstain from the union instead of skewing it.
+ *
+ * Core 0 owns s_level_profile_cache, so a caller on another task routes through
+ * external_profile_forget_mask_ rather than calling this.
  */
-static void forget_level_profile_cache(DaliTarget target)
+static void forget_level_profile_mask(uint64_t mask)
 {
-    if (target.type == DALI_ADDR_SHORT) {
-        if (target.address < DALI_SHORT_ADDRESS_COUNT)
-            s_level_profile_cache[target.address].valid = false;
-        return;
-    }
-
-    uint64_t mask = target.type == DALI_ADDR_GROUP
-                        ? group_member_mask(target.address)
-                        : ~0ull;
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         if (((mask >> addr) & 1ull) != 0ull)
             s_level_profile_cache[addr].valid = false;
     }
+}
+
+static void forget_level_profile_cache(DaliTarget target)
+{
+    forget_level_profile_mask(config_target_mask(target));
 }
 
 /* ── Input sensor registry ───────────────────────────────────────────────── */
@@ -390,11 +464,19 @@ static void notify_lights(const DaliDispatchResult *res)
         if (res->matched) arm_deferred_level_query();
         return;
     }
+    /*
+     * A broadcast result applies to every control gear on the bus, so it must
+     * reach every light entity regardless of how that entity is addressed. The
+     * previous form required the entity's own target type to equal the result's,
+     * which meant a broadcast only ever matched broadcast entities and ordinary
+     * short-address lights never saw it.
+     */
+    const bool broadcast = (res->target.type == DALI_ADDR_BROADCAST);
     for (uint8_t i = 0u; i < s_light_count; i++) {
         LightEntry &e = s_light_registry[i];
-        bool direct = (e.target_type == (uint8_t)res->target.type) &&
-                      (e.target_address == res->target.address ||
-                       res->target.type == DALI_ADDR_BROADCAST);
+        bool direct = broadcast ||
+                      ((e.target_type == (uint8_t)res->target.type) &&
+                       (e.target_address == res->target.address));
         bool via_group = (res->target.type == DALI_ADDR_GROUP) &&
                          (e.target_type == (uint8_t)DALI_ADDR_SHORT) &&
                          ((e.member_groups >> res->target.address) & 1u);
@@ -446,6 +528,25 @@ static void on_level_profile_query_done(const DaliSequenceResult *result,
                                         void * /*ctx*/)
 {
     publish_level_profile_query_result(result);
+}
+
+/*
+ * The seed sweep shares s_refresh_query_in_flight_ with the refresh pump on
+ * purpose: one component-issued query on the bus at a time, whichever stage
+ * asked for it.
+ */
+static void on_group_seed_query_done(const DaliSequenceResult *result,
+                                     void * /*ctx*/)
+{
+    if (result != nullptr) {
+        s_group_seed_sweep.result = *result;
+    } else {
+        s_group_seed_sweep.result = {};
+        s_group_seed_sweep.result.result = DALI_ERR_INVALID;
+        s_group_seed_sweep.result.failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
+    }
+    s_group_seed_sweep.result_ready.store(true, std::memory_order_release);
+    s_refresh_query_in_flight_.store(false, std::memory_order_release);
 }
 
 static void on_level_profile_device_type_done(DaliError result,
@@ -581,16 +682,14 @@ static void set_cmd_result(const char *str)
     portEXIT_CRITICAL(&s_string_mux);
 }
 
-static const char *cmd_enqueue_result_text(DaliError result)
-{
-    if (result == DALI_OK) return "OK";
-    if (result == DALI_ERR_QUEUE_FULL) return "queue full";
-    return "err";
-}
-
 static void set_cmd_enqueue_result(DaliError result)
 {
-    set_cmd_result(cmd_enqueue_result_text(result));
+    if (result == DALI_OK) {
+        set_cmd_result("OK");
+        return;
+    }
+    char buf[DALI_ERROR_TEXT_MAX];
+    set_cmd_result(dali_error_text(result, buf, sizeof(buf)));
 }
 
 static void set_cmd_enqueue_error(DaliError result)
@@ -675,10 +774,26 @@ static void set_cmd_reply_for_generation(const DaliFrame *reply, void *ctx)
     set_cmd_result_for_generation(line, ctx);
 }
 
+/*
+ * Publish what went wrong by name. "no reply" stays the wording for a timeout —
+ * it is what the documentation and existing automations expect — but every
+ * other code now says what it was instead of collapsing to "err", which is the
+ * difference between an operator seeing "rx activity" and seeing nothing.
+ */
+static void set_cmd_error_for_generation(DaliError err, void *ctx)
+{
+    if (err == DALI_ERR_TIMEOUT) {
+        set_cmd_result_for_generation("no reply", ctx);
+        return;
+    }
+    char buf[DALI_ERROR_TEXT_MAX];
+    set_cmd_result_for_generation(dali_error_text(err, buf, sizeof(buf)), ctx);
+}
+
 static void on_cmd_query_reply(DaliError result, const DaliFrame *reply, void *ctx)
 {
     if (result != DALI_OK || reply == nullptr) {
-        set_cmd_result_for_generation(result == DALI_ERR_TIMEOUT ? "no reply" : "err", ctx);
+        set_cmd_error_for_generation(result, ctx);
         return;
     }
     set_cmd_reply_for_generation(reply, ctx);
@@ -689,7 +804,7 @@ static void on_cmd_sequence_reply(const DaliSequenceResult *result, void *ctx)
 {
     if (result == nullptr || result->result != DALI_OK) {
         DaliError err = result != nullptr ? result->result : DALI_ERR_INVALID;
-        set_cmd_result_for_generation(err == DALI_ERR_TIMEOUT ? "no reply" : "err", ctx);
+        set_cmd_error_for_generation(err, ctx);
         return;
     }
 
@@ -722,8 +837,10 @@ static void set_raw_result(DaliError result, const DaliFrame *reply, bool sent_t
         return;
     }
 
-    char buf[20];
-    snprintf(buf, sizeof(buf), sent_twice ? "TX2 ERR %d" : "TX ERR %d", (int)result);
+    char ebuf[DALI_ERROR_TEXT_MAX];
+    char buf[40];
+    snprintf(buf, sizeof(buf), sent_twice ? "TX2 ERR %s" : "TX ERR %s",
+             dali_error_text(result, ebuf, sizeof(ebuf)));
     set_cmd_result_for_generation(buf, ctx);
 }
 
@@ -779,7 +896,7 @@ static void format_target(char *buf, size_t len, DaliTarget target)
 {
     const char *pfx = target.type == DALI_ADDR_GROUP ? "g"
                     : target.type == DALI_ADDR_BROADCAST ? "bc"
-                                                        : "s";
+                                                        : "a";
     if (target.type == DALI_ADDR_BROADCAST)
         snprintf(buf, len, "bc");
     else
@@ -791,7 +908,7 @@ static void format_event(char *buf, size_t len, const DaliInputEvent *e)
     if (e->frame_kind == DALI_EVENT_FRAME_LEGACY_16BIT) {
         const char *pfx = (e->address_kind == DALI_EVENT_ADDRESS_GROUP) ? "g"
                         : (e->address_kind == DALI_EVENT_ADDRESS_BROADCAST) ? "bc"
-                                                                             : "s";
+                                                                             : "a";
         if (!e->address_selector) {
             if (e->address_kind == DALI_EVENT_ADDRESS_BROADCAST)
                 snprintf(buf, len, "bc dapc %u", (unsigned)e->legacy_data);
@@ -809,12 +926,12 @@ static void format_event(char *buf, size_t len, const DaliInputEvent *e)
 
     if (e->frame_kind == DALI_EVENT_FRAME_POWER_NOTIFICATION_24BIT) {
         if (e->source.has_device_group && e->source.has_device_address) {
-            snprintf(buf, len, "power dg%u s%u", (unsigned)e->source.device_group,
+            snprintf(buf, len, "power dg%u a%u", (unsigned)e->source.device_group,
                      (unsigned)e->source.device_address);
         } else if (e->source.has_device_group) {
             snprintf(buf, len, "power dg%u", (unsigned)e->source.device_group);
         } else if (e->source.has_device_address) {
-            snprintf(buf, len, "power s%u", (unsigned)e->source.device_address);
+            snprintf(buf, len, "power a%u", (unsigned)e->source.device_address);
         } else {
             snprintf(buf, len, "power");
         }
@@ -824,13 +941,13 @@ static void format_event(char *buf, size_t len, const DaliInputEvent *e)
     if (e->frame_kind == DALI_EVENT_FRAME_INPUT_24BIT) {
         switch (e->source.scheme) {
             case DALI_EVENT_SOURCE_DEVICE:
-                snprintf(buf, len, "s%u type=%u evt=%u",
+                snprintf(buf, len, "a%u type=%u evt=%u",
                          (unsigned)e->source.device_address,
                          (unsigned)e->source.instance_type,
                          (unsigned)e->event_information);
                 break;
             case DALI_EVENT_SOURCE_DEVICE_INSTANCE:
-                snprintf(buf, len, "s%u inst=%u evt=%u",
+                snprintf(buf, len, "a%u inst=%u evt=%u",
                          (unsigned)e->source.device_address,
                          (unsigned)e->source.instance,
                          (unsigned)e->event_information);
@@ -1034,8 +1151,13 @@ void DaliComponent::setup()
 
     /* Group-membership table: prefer the persisted snapshot (from a prior scan
      * or console edits); it fully describes reality including empty groups. Only
-     * when nothing is persisted (first boot, flash erase, format change) do we
-     * fall back to seeding from each group light's static query_address.
+     * when nothing is persisted (first boot, flash erase, format change) is a
+     * cold-start seed needed at all.
+     *
+     * The seed comes from two places, in this order: an explicit `query_address`
+     * where the YAML gives one, and the bus itself for every group light left
+     * without a representative. The second is what makes the first optional —
+     * see GroupSeedSweep.
      *
      * Reading get_query_address() is safe here (unlike inside register_light()):
      * codegen emits set_query_address() after set_dali_component(), so the value
@@ -1058,6 +1180,7 @@ void DaliComponent::setup()
             dali_group_map_seed(&s_group_map, e.target_address, qa);
         }
         portEXIT_CRITICAL(&s_group_map_mux);
+        arm_group_seed_sweep();
     }
 
     /* Nothing below this point works without the task: it is what drives RX
@@ -1152,6 +1275,20 @@ void DaliComponent::loop()
         ESP_LOGD(TAG, "deferred level query firing");
         start_refresh();
     }
+
+    /* ── Drop profiles a config edit invalidated, before anything reads them ──
+     * Ordered ahead of pump_refresh() on purpose: the refresh is what re-reads
+     * the window, and reusing a cached one it was told to forget would make the
+     * edit invisible for a whole poll interval. */
+    uint64_t forget_mask =
+        external_profile_forget_mask_.exchange(0ull, std::memory_order_acq_rel);
+    if (forget_mask != 0ull) forget_level_profile_mask(forget_mask);
+
+    /* Ahead of the refresh: until a group light has a representative the
+     * refresh can only hand it a default profile and move on, so finding one is
+     * the more useful thing to spend the single query slot on. Disarmed for
+     * good once every group light has one. */
+    pump_group_seed_sweep();
 
     /* Admit full-refresh queries one at a time. Queue pressure and scans retain
      * the cursor, so no later light is silently dropped. */
@@ -1358,7 +1495,7 @@ void DaliComponent::loop()
 
 /*
  * The console and the native CLI reach the same bus through the same protocol
- * stack, so they share one tokeniser, one set of argument parsers, and one set
+ * stack, so they share one tokenizer, one set of argument parsers, and one set
  * of named command tables (dali_cli.h). What they do not share is the verb
  * list: there is no terminal here to print a scan, a capture, or an inventory
  * into, and the result of a command is a single Home Assistant text state.
@@ -1431,6 +1568,8 @@ static const DaliCliCommandSpec s_console_commands[] = {
     { DALI_CLI_CMD_DEVMEM,   "devmem",   "read|write <addr> <bank> <offset> [count|value]", "control-device memory (Part 103)", 4u, 5u, "read write" },
     { DALI_CLI_CMD_DTRCHECK, "dtrcheck", "<addr> <0|1|2> <0-255>", "load a control-device DTR and read it back", 3u, 3u, NULL },
 
+    { DALI_CLI_CMD_QUIESCENT, "quiescent", "on|off <addr|all>", "Part 103 quiescent mode: silence control-device events", 2u, 2u, "on off" },
+
     { DALI_CLI_CMD_COUNT, "group", "forget <addr> [group]", "retire a departed member from the group cache", 2u, 3u, "forget" },
 };
 
@@ -1465,7 +1604,7 @@ static void on_memory_read_done(const DaliSequenceResult *result, void *ctx)
 {
     if (result == nullptr || result->result != DALI_OK) {
         DaliError err = result != nullptr ? result->result : DALI_ERR_INVALID;
-        set_cmd_result_for_generation(err == DALI_ERR_TIMEOUT ? "no reply" : "err", ctx);
+        set_cmd_error_for_generation(err, ctx);
         return;
     }
 
@@ -1496,7 +1635,7 @@ static void on_dtrcheck_done(const DaliSequenceResult *result, void *ctx)
     if (result == nullptr || result->result != DALI_OK ||
         !dali_sequence_result_last_reply(result, &reply)) {
         DaliError err = result != nullptr ? result->result : DALI_ERR_INVALID;
-        set_cmd_result_for_generation(err == DALI_ERR_TIMEOUT ? "no reply" : "err", ctx);
+        set_cmd_error_for_generation(err, ctx);
         return;
     }
     char buf[24];
@@ -1563,9 +1702,9 @@ void DaliComponent::console_group_(const DaliCliTokens &t)
 
     char buf[48];
     if (group == DALI_GROUP_MAP_ALL_GROUPS) {
-        snprintf(buf, sizeof(buf), "forgot s%u (all groups)", (unsigned)addr);
+        snprintf(buf, sizeof(buf), "forgot a%u (all groups)", (unsigned)addr);
     } else {
-        snprintf(buf, sizeof(buf), "forgot s%u from g%u", (unsigned)addr, (unsigned)group);
+        snprintf(buf, sizeof(buf), "forgot a%u from g%u", (unsigned)addr, (unsigned)group);
     }
     ESP_LOGI(TAG, "%s", buf);
     set_cmd_result(buf);
@@ -1658,11 +1797,11 @@ void DaliComponent::console_devmem_(const DaliCliTokens &t, void *ctx)
 /*
  * Special (broadcast) commands.
  *
- * The commissioning primitives are refused here. This integration exposes
- * discovery, not a guarded commissioning workflow, and these are the commands
- * that can destroy the addressing of every device on the bus in one line typed
- * into a Home Assistant text box — RANDOMISE irreversibly. The native CLI runs
- * them inside `commission`, which sequences and checks them; use it.
+ * The commissioning primitives are refused on this Home Assistant text-command
+ * surface. They can destroy the addressing of every device on the bus in one
+ * line — RANDOMISE irreversibly. The shared native/TCP diagnostic shell runs
+ * them inside the guarded `commission` workflow, which sequences and checks
+ * them; use that surface instead.
  *
  * TERMINATE stays available on purpose: it is what closes an initialise window
  * another tool left open, and refusing it would leave an operator holding the
@@ -2326,6 +2465,19 @@ void DaliComponent::execute_command(const std::string &cmd_str)
                                          : "use config-dtr0 for this command");
                 return;
             }
+            /* Same reasoning as the commissioning specials below: this is the
+             * text box, and SET SHORT ADDRESS re-addresses an installation from
+             * one line. Held to the same rule as `special program-short` so the
+             * gate cannot be walked around by choosing the other spelling. */
+            if (dali_cli_config_is_commissioning(c->id)) {
+                set_cmd_result("commissioning config; use the native CLI");
+                return;
+            }
+            if (tgt.type == DALI_ADDR_BROADCAST &&
+                dali_cli_config_rejects_broadcast(c->id)) {
+                set_cmd_result(DALI_CLI_MSG_NO_BROADCAST_GROUP);
+                return;
+            }
 
             uint8_t first_param_tok = with_dtr0 ? 4u : 3u;
             uint8_t dtr0 = 0u;
@@ -2346,21 +2498,13 @@ void DaliComponent::execute_command(const std::string &cmd_str)
                 return;
             }
 
-            bool group_edit = (c->id == DALI_CMD_ADD_TO_GROUP ||
-                               c->id == DALI_CMD_REMOVE_FROM_GROUP);
-            if (group_edit && tgt.type == DALI_ADDR_BROADCAST) {
-                set_cmd_result("no broadcast group config");
-                return;
-            }
-
             DaliError err = with_dtr0
                                 ? dali_control_config_with_dtr0(tgt, c->id, dtr0, param)
                                 : dali_control_config(tgt, c->id, param);
-            if (err == DALI_OK) {
-                if (group_edit) update_group_members_from_config(tgt, c->id, param);
-                if (config_changes_level_profile(c->id)) forget_level_profile_cache(tgt);
-                if (group_edit || config_changes_level_profile(c->id)) start_refresh();
-            }
+            /* Everything a config command invalidates is decided in one place,
+             * so this surface and the shell cannot each remember a different
+             * half of it. */
+            if (err == DALI_OK) on_config_applied(tgt, c->id, param);
             set_cmd_enqueue_result(err);
             return;
         }
@@ -2392,6 +2536,58 @@ void DaliComponent::execute_command(const std::string &cmd_str)
         case DALI_CLI_CMD_DEVMEM:
             console_devmem_(tokens, cmd_ctx);
             return;
+
+        /*
+         * START/STOP QUIESCENT MODE, send-twice, no reply. `all` is address
+         * byte 0xFF — every control device, control gear untouched.
+         *
+         * A quiesced device reports no events, so anything an automation drives
+         * from one stops updating until it is released. The console can only
+         * say so in the result string; nothing here tracks the state.
+         */
+        case DALI_CLI_CMD_QUIESCENT: {
+            bool enable;
+            if (strcmp(tokens.tok[1], "on") == 0) {
+                enable = true;
+            } else if (strcmp(tokens.tok[1], "off") == 0) {
+                enable = false;
+            } else {
+                set_cmd_usage(spec);
+                return;
+            }
+
+            DaliFrame frame;
+            DaliError err;
+            uint8_t addr = 0u;
+            bool all = strcmp(tokens.tok[2], "all") == 0;
+            if (all) {
+                err = dali_input_build_quiescent_mode_broadcast(enable, &frame);
+            } else if (dali_cli_parse_short_addr(tokens.tok[2], &addr)) {
+                err = dali_input_build_quiescent_mode(addr, enable, &frame);
+            } else {
+                set_cmd_usage(spec);
+                return;
+            }
+            if (err != DALI_OK) {
+                set_cmd_enqueue_result(err);
+                return;
+            }
+
+            /* Send-twice expansion is the scheduler's job: one transaction,
+             * not two enqueues, so nothing can land between the pair. */
+            DaliTransaction txn = {};
+            txn.frame      = frame;
+            txn.send_twice = true;
+            err = dali_sched_enqueue(&txn);
+            if (err != DALI_OK) {
+                set_cmd_enqueue_result(err);
+                return;
+            }
+            set_cmd_result(enable ? (all ? "quiescent on: all, no events"
+                                         : "quiescent on: no events")
+                                  : "OK");
+            return;
+        }
 
         case DALI_CLI_CMD_DTRCHECK: {
             uint8_t addr, reg, value;
@@ -2524,6 +2720,70 @@ bool DaliComponent::set_group_membership_snapshot(const uint64_t masks[16],
     return true;
 }
 
+bool DaliComponent::apply_inventory_snapshot(const DaliDiscoveryInventory *inventory)
+{
+    if (inventory == nullptr) return false;
+
+    DaliGroupMap map;
+    if (!dali_group_map_rebuild_from_inventory(&map, inventory)) return false;
+
+    /* Which gear the walk actually saw *and* read groups from. An address it
+     * could not reach must not read as "left every group": that is the
+     * difference between an offline fixture and a removed one, and only
+     * `group forget` is entitled to make the second claim. */
+    uint64_t observed_gear = 0u;
+    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        const DaliDiscoveryDeviceInfo *device =
+            dali_discovery_inventory_get(inventory, addr);
+        if (device != nullptr && device->present &&
+            device->has_control_gear && device->has_groups) {
+            observed_gear |= (uint64_t) 1u << addr;
+        }
+    }
+    return set_group_membership_snapshot(map.members, map.verified, observed_gear);
+}
+
+void DaliComponent::on_config_applied(DaliTarget target, DaliCommandId id,
+                                      uint8_t param)
+{
+    bool notify = false;
+
+    if (id == DALI_CMD_ADD_TO_GROUP || id == DALI_CMD_REMOVE_FROM_GROUP) {
+        update_group_members_from_config(target, id, param);
+        notify = true;
+    }
+
+    if (config_changes_level_profile(id)) {
+        /* Deferred rather than applied here: this may be a shell session's
+         * task, and the cache belongs to Core 0's loop. */
+        uint64_t mask = config_target_mask(target);
+        external_profile_forget_mask_.fetch_or(mask, std::memory_order_acq_rel);
+        notify = true;
+    }
+
+    if (dali_cli_config_is_commissioning(id)) {
+        /*
+         * The gear now answers to a different short address, or to none. Which
+         * one is not knowable from here: the DTR0 form carries the new value
+         * out of band, and the plain `config` form consumes whatever DTR0
+         * already held. So drop what is keyed by the old address and say that
+         * only a scan can restore the rest — guessing would put a group light
+         * on a poll target that no longer exists.
+         */
+        external_profile_forget_mask_.fetch_or(config_target_mask(target),
+                                               std::memory_order_acq_rel);
+        ESP_LOGW(TAG,
+                 "short address changed (target type=%u addr=%u): group "
+                 "membership and poll targets are stale until the next scan",
+                 (unsigned) target.type, (unsigned) target.address);
+        notify = true;
+    }
+
+    /* Handed over as an atomic for the same reason the profile mask is: a
+     * config verb typed into a shell session does not run on Core 0. */
+    if (notify) external_refresh_request_.store(true, std::memory_order_release);
+}
+
 bool DaliComponent::load_group_membership()
 {
     GroupMembershipPersist st{};
@@ -2581,6 +2841,170 @@ void DaliComponent::add_dispatch_entry(uint8_t frame_kind, uint8_t address_kind,
 void DaliComponent::start_refresh()
 {
     dali_refresh_cursor_request(&refresh_cursor_);
+}
+
+void DaliComponent::arm_group_seed_sweep()
+{
+    uint16_t wanted = 0u;
+    for (uint8_t i = 0u; i < s_light_count; i++) {
+        const LightEntry &e = s_light_registry[i];
+        if (e.target_type != (uint8_t) DALI_ADDR_GROUP ||
+            e.target_address >= DALI_GROUP_COUNT) {
+            continue;
+        }
+        /* An explicit query_address already answered for this group. Asking the
+         * bus anyway would be traffic spent to re-derive what was configured. */
+        if (pick_group_member(e.target_address) != 0xFFu) continue;
+        wanted |= (uint16_t) 1u << e.target_address;
+    }
+
+    if (wanted == 0u) return;
+
+    /* Field by field: the struct holds an atomic, so it is not assignable. */
+    s_group_seed_sweep.in_flight = false;
+    s_group_seed_sweep.address = 0u;
+    s_group_seed_sweep.wanted = wanted;
+    s_group_seed_sweep.answered = 0u;
+    s_group_seed_sweep.silent = 0u;
+    s_group_seed_sweep.last_error = DALI_OK;
+    s_group_seed_sweep.last_error_step = 0u;
+    s_group_seed_sweep.last_error_address = 0u;
+    s_group_seed_sweep.result_ready.store(false, std::memory_order_relaxed);
+    s_group_seed_sweep.active = true;
+    ESP_LOGI(TAG, "group seed: no membership in flash; asking the bus for a "
+                  "representative of group mask 0x%04X", (unsigned) wanted);
+}
+
+/*
+ * One address per completion, never blocking. Shaped like pump_refresh() for
+ * the same reason: Core 0's loop may not block, so a walk here is a state
+ * machine advanced by whichever pass observes the previous answer.
+ */
+void DaliComponent::pump_group_seed_sweep()
+{
+    if (!s_group_seed_sweep.active) return;
+    /* A scan rebuilds the whole table from a better source; a shell workflow
+     * holds the bus through the same gate. Either way there is nothing to add
+     * here, and the scan's result will disarm this on its own. */
+    if (scan_running_.load(std::memory_order_acquire)) return;
+
+    if (s_group_seed_sweep.in_flight) {
+        if (!s_group_seed_sweep.result_ready.load(std::memory_order_acquire)) return;
+        s_group_seed_sweep.result_ready.store(false, std::memory_order_relaxed);
+        s_group_seed_sweep.in_flight = false;
+
+        const uint8_t address = s_group_seed_sweep.address;
+        uint16_t groups = 0u;
+        /* An address nothing answers for is the common case on a sparse bus and
+         * is not a fault: the sequence times out and the walk moves on. Which
+         * error it was is still worth keeping — gear that is demonstrably on the
+         * bus but never answers a query is a different problem from an empty
+         * address, and the two are indistinguishable from the counts alone. */
+        DaliError decoded =
+            dali_discovery_groups_from_sequence(&s_group_seed_sweep.result, &groups);
+
+        if (decoded != DALI_OK) {
+            s_group_seed_sweep.silent++;
+            s_group_seed_sweep.last_error = decoded;
+            s_group_seed_sweep.last_error_step = s_group_seed_sweep.result.failed_step;
+            s_group_seed_sweep.last_error_address = address;
+            ESP_LOGD(TAG, "group seed: a%u no group data (err=%d step=%u)",
+                     (unsigned) address, (int) decoded,
+                     (unsigned) s_group_seed_sweep.result.failed_step);
+        } else if (groups == 0u) {
+            /* Answered, and is in no group. Nothing to seed, but the query path
+             * to this address demonstrably works. */
+            s_group_seed_sweep.answered++;
+            ESP_LOGD(TAG, "group seed: a%u is in no group", (unsigned) address);
+        } else {
+            s_group_seed_sweep.answered++;
+            portENTER_CRITICAL(&s_group_map_mux);
+            for (uint8_t g = 0u; g < DALI_GROUP_COUNT; g++) {
+                if (((groups >> g) & 1u) != 0u) {
+                    dali_group_map_seed(&s_group_map, g, address);
+                }
+            }
+            portEXIT_CRITICAL(&s_group_map_mux);
+            ESP_LOGD(TAG, "group seed: a%u is in group mask 0x%04X",
+                     (unsigned) address, (unsigned) groups);
+            s_group_seed_sweep.wanted &= (uint16_t) ~groups;
+        }
+        s_group_seed_sweep.address++;
+
+        /* Something else may have answered the question meanwhile — a scan that
+         * completed, or a console `add-group`. Re-derive here rather than every
+         * pass: the check costs a lock per group, and one extra address is a
+         * cheaper way to notice than paying for it while idle. */
+        for (uint8_t g = 0u; g < DALI_GROUP_COUNT; g++) {
+            if (((s_group_seed_sweep.wanted >> g) & 1u) != 0u &&
+                pick_group_member(g) != 0xFFu) {
+                s_group_seed_sweep.wanted &= (uint16_t) ~((uint16_t) 1u << g);
+            }
+        }
+    }
+
+    if (s_group_seed_sweep.wanted == 0u ||
+        s_group_seed_sweep.address >= DALI_SHORT_ADDRESS_COUNT) {
+        s_group_seed_sweep.active = false;
+
+        /*
+         * Always printed, and printed first: the per-address lines above are
+         * DEBUG and land before a network log viewer attaches, so this is the
+         * only part of the walk most operators will ever see. `answered` is the
+         * number to read against the gear you know is on the bus — if it is far
+         * short, the query path failed rather than the groups being empty.
+         */
+        ESP_LOGI(TAG,
+                 "group seed: walked %u address(es), %u answered, %u silent"
+                 "%s",
+                 (unsigned) s_group_seed_sweep.address,
+                 (unsigned) s_group_seed_sweep.answered,
+                 (unsigned) s_group_seed_sweep.silent,
+                 s_group_seed_sweep.silent > 0u ? ";" : "");
+        if (s_group_seed_sweep.silent > 0u) {
+            ESP_LOGI(TAG, "group seed: last silent a%u err=%d step=%u",
+                     (unsigned) s_group_seed_sweep.last_error_address,
+                     (int) s_group_seed_sweep.last_error,
+                     (unsigned) s_group_seed_sweep.last_error_step);
+        }
+
+        if (s_group_seed_sweep.wanted == 0u) {
+            ESP_LOGI(TAG, "group seed: every group light has a representative");
+        } else {
+            /* Not an error: a group with no gear in it has no representative to
+             * find, and the entity still controls the group perfectly well. It
+             * just cannot read a level back. Gear that is present but never
+             * answers a query looks identical from here — the `answered` count
+             * above is what separates the two. */
+            ESP_LOGW(TAG, "group seed: no member found for group mask 0x%04X; "
+                          "those lights will not poll until a scan",
+                     (unsigned) s_group_seed_sweep.wanted);
+        }
+        /* Newly seeded groups have a poll target now; go and use it. */
+        dali_refresh_cursor_request(&refresh_cursor_);
+        return;
+    }
+
+    /* One component query on the bus at a time, shared with the refresh pump. */
+    if (s_refresh_query_in_flight_.load(std::memory_order_acquire)) return;
+
+    DaliSequence sequence;
+    if (dali_discovery_build_groups_sequence(s_group_seed_sweep.address,
+                                             &sequence) != DALI_OK) {
+        s_group_seed_sweep.address++;
+        return;
+    }
+    sequence.on_complete = on_group_seed_query_done;
+    sequence.cb_ctx = nullptr;
+    s_group_seed_sweep.result_ready.store(false, std::memory_order_relaxed);
+    s_refresh_query_in_flight_.store(true, std::memory_order_release);
+    if (dali_sched_enqueue_sequence(&sequence) != DALI_OK) {
+        /* Queue full or a reset barrier: retry the same address next pass
+         * rather than skipping it, since nothing was asked. */
+        s_refresh_query_in_flight_.store(false, std::memory_order_release);
+        return;
+    }
+    s_group_seed_sweep.in_flight = true;
 }
 
 void DaliComponent::pump_refresh()

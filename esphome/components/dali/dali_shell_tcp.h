@@ -72,6 +72,10 @@ class DaliShellServer : public Component {
   static void export_config_cb(void *ctx, const DaliCliOut *out,
                                const DaliDiscoveryInventory *inventory,
                                DaliShellInputLookupFn input_lookup);
+  static void inventory_changed_cb(void *ctx,
+                                   const DaliDiscoveryInventory *inventory);
+  static void config_applied_cb(void *ctx, DaliTarget target, DaliCommandId id,
+                                uint8_t param);
 
   DaliComponent *parent_{nullptr};
   uint16_t       port_{2323};

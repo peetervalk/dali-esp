@@ -139,6 +139,13 @@ class DaliComponent : public Component {
 
   void start_scan();
   void start_refresh();
+  // Cold-start group seed: ask the bus which addresses are in the groups the
+  // configured group lights target, so `query_address` does not have to be
+  // written into the YAML. Armed by setup() only when no membership snapshot
+  // was restored from flash, and only for groups an explicit query_address did
+  // not already answer for. Pumped from loop(); disarms itself.
+  void arm_group_seed_sweep();
+  void pump_group_seed_sweep();
   bool is_scan_running() const {
     return scan_running_.load(std::memory_order_acquire);
   }
@@ -207,6 +214,21 @@ class DaliComponent : public Component {
   // persist the previous known-good group map.
   bool set_group_membership_snapshot(const uint64_t masks[16], uint16_t verified,
                                      uint64_t observed_gear);
+  // Rebuild the group-membership table from a completed inventory. Called by
+  // the scan task and by a shell session after `discover` or `commission` —
+  // both produce the same inventory, so both are entitled to publish it, and a
+  // shell walk that changed which addresses exist no longer leaves the table
+  // asserting the previous bus. Returns false, changing nothing, when the
+  // inventory's group data is incomplete or does not cover what is already
+  // known; see set_group_membership_snapshot(). Callable from a worker task.
+  bool apply_inventory_snapshot(const DaliDiscoveryInventory *inventory);
+  // One addressed configuration command was accepted for transmission. Applies
+  // whatever it invalidated: group membership, a cached level profile, or —
+  // for a short address that moved — a warning that only a scan can resolve.
+  // Both command surfaces route through this, so neither can update a cache
+  // the other forgets. Callable from a worker task; cache writes Core 0 owns
+  // are deferred to loop().
+  void on_config_applied(DaliTarget target, DaliCommandId id, uint8_t param);
   // Called by the scan task before on_scan_complete(). Copies only control-gear
   // profile metadata; scan_done_'s release/acquire handoff publishes the copy.
   void set_scan_level_profile_snapshot(const DaliDiscoveryInventory *inventory);
@@ -288,6 +310,11 @@ class DaliComponent : public Component {
   // is what keeps refresh_cursor_ single-owner while still letting a shell
   // workflow ask for a re-read when it puts the bus down.
   std::atomic<bool> external_refresh_request_{false};
+  // Short addresses whose cached level profile a config edit invalidated, one
+  // bit per address. Set by on_config_applied() from whichever task ran the
+  // edit; drained by loop() before pump_refresh(), so the refresh that follows
+  // re-reads rather than reusing what the edit just made wrong.
+  std::atomic<uint64_t> external_profile_forget_mask_{0};
 
   // Deferred query after dim/scene (Core 0 only, signalled via module atomic).
   bool     deferred_query_armed_{false};

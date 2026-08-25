@@ -59,6 +59,7 @@ typedef void (*DaliSchedResetCompletionCb)(void *cb_ctx);
 /* Results used for reset cancellation and an externally invalidated reply. */
 #define DALI_SCHED_RESET_ERROR      DALI_ERR_CANCELLED
 #define DALI_SCHED_INTERVENED_ERROR DALI_ERR_INTERVENED
+#define DALI_SCHED_RX_ACTIVITY_ERROR DALI_ERR_RX_ACTIVITY
 
 /*
  * Unsolicited RX event callback — invoked from task context for raw DALI-2
@@ -162,14 +163,25 @@ typedef struct {
     DaliError (*tx)(const DaliFrame *frame);
     void      (*set_rx_callback)(DaliPhyRxCallback cb, void *ctx);
     uint32_t  (*get_tick_ms)(void);
-    uint32_t  (*get_time_us)(void); /* optional; device uses this for µs guards */
+    /*
+     * Optional wrapping microsecond clock for physical timing guards.
+     * Timestamped RX observations and get_last_tx_end_us(), when supplied,
+     * must use this same clock domain and epoch.
+     */
+    uint32_t  (*get_time_us)(void);
+    /*
+     * Optional exact bus-release time for the most recent successful TX.
+     * Timestamp-producing PHY implementations should provide it when tx()
+     * can return noticeably after the waveform ends.
+     */
+    DaliError (*get_last_tx_end_us)(uint32_t *timestamp_out);
 } DaliSchedOps;
 
 /* ---------------------------------------------------------------------------
  * API
  * --------------------------------------------------------------------------*/
 
-/* Initialise the scheduler with the given ops.  Must be called first. */
+/* Initialize the scheduler with the given ops.  Must be called first. */
 DaliError dali_sched_init(const DaliSchedOps *ops);
 
 /* Enqueue a transaction.  Thread-safe between tasks (not ISR-safe). */
@@ -202,8 +214,14 @@ bool dali_sequence_result_last_reply(const DaliSequenceResult *result,
 void dali_sched_run(void);
 
 /*
- * Notify the scheduler that a bus frame arrived.
- * Called by the PHY RX callback; also callable directly in host tests.
+ * Notify the scheduler that a timestamped PHY observation arrived.
+ */
+void dali_sched_notify_rx_observation(
+    const DaliPhyRxObservation *observation);
+
+/*
+ * Compatibility/test helper for a valid frame with no captured timestamps.
+ * Production PHY traffic uses dali_sched_notify_rx_observation().
  */
 void dali_sched_notify_rx(const DaliFrame *frame);
 
@@ -316,7 +334,7 @@ void dali_sched_reset_queue_stats(void);
 
 #ifndef DALI_HOST_BUILD
 /*
- * Convenience initialiser for on-device use.
+ * Convenience initializer for on-device use.
  * Wires the DALI PHY plus esp_timer millisecond and microsecond clocks.
  */
 DaliError dali_sched_init_device(void);

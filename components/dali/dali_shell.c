@@ -34,6 +34,8 @@
 #define ESP_LOGI(tag, fmt, ...) ((void)(tag))
 #endif
 
+static const char *TAG = "DALI-SHELL";
+
 static volatile bool s_trace_enabled;
 
 /* ---------------------------------------------------------------------------
@@ -120,7 +122,7 @@ static void shell_deferred_push(const char *text)
      * either allocating or holding the critical section any longer. The
      * terminator is restored for the same reason shell_printf() restores it: a
      * queued line that loses its "\r\n" is flushed into the stream ahead of a
-     * prompt and desynchronises a client reading up to one. */
+     * prompt and desynchronizes a client reading up to one. */
     size_t len = strlen(text);
     if (len >= SHELL_DEFERRED_LINE_MAX) {
         len = SHELL_DEFERRED_LINE_MAX - 3u;
@@ -203,6 +205,17 @@ static void shell_printf(const char *fmt, ...)
         buf[sizeof(buf) - 1u] = '\0';
     }
     shell_sink_write(NULL, buf);
+}
+
+/*
+ * Printable name for a DaliError. The shell serves one session from one task,
+ * and no output line carries two errors, so a single scratch buffer is enough
+ * for the unknown-code case and every call site stays a plain %s.
+ */
+static const char *shell_err(DaliError err)
+{
+    static char buf[DALI_ERROR_TEXT_MAX];
+    return dali_error_text(err, buf, sizeof(buf));
 }
 
 /*
@@ -559,9 +572,12 @@ static DaliError shell_reset_sync(void)
  * retries_left is the scheduler retry budget after the first attempt.
  * reply_out may be NULL when the reply data is not needed.
  */
-static DaliError shell_sched_sync(const DaliFrame *frame, bool needs_reply,
-                                  uint8_t retries_left, bool send_twice,
-                                  DaliFrame *reply_out)
+static DaliError shell_sched_sync_impl(const DaliFrame *frame,
+                                       bool needs_reply,
+                                       uint8_t retries_left,
+                                       bool send_twice,
+                                       DaliFrame *reply_out,
+                                       bool honor_abort)
 {
     if (frame == NULL) {
         return DALI_ERR_INVALID;
@@ -573,7 +589,7 @@ static DaliError shell_sched_sync(const DaliFrame *frame, bool needs_reply,
      * its next frame without that module needing to know a front end can
      * vanish, and a ten-second identify blink stops on its next step.
      */
-    if (shell_aborted()) {
+    if (honor_abort && shell_aborted()) {
         return DALI_ERR_CANCELLED;
     }
 
@@ -632,6 +648,18 @@ static DaliError shell_sched_sync(const DaliFrame *frame, bool needs_reply,
         *reply_out = reply;
     }
     return result;
+}
+
+static DaliError shell_sched_sync(const DaliFrame *frame, bool needs_reply,
+                                  uint8_t retries_left, bool send_twice,
+                                  DaliFrame *reply_out)
+{
+    return shell_sched_sync_impl(frame,
+                                 needs_reply,
+                                 retries_left,
+                                 send_twice,
+                                 reply_out,
+                                 true);
 }
 
 /* Fill an outcome that never reached a completion callback. */
@@ -744,6 +772,37 @@ static DaliError shell_discovery_transact(const DaliFrame *frame,
                            reply_out);
 }
 
+static DaliError shell_discovery_cleanup_transact(const DaliFrame *frame,
+                                                  bool needs_reply,
+                                                  uint8_t retries_left,
+                                                  bool send_twice,
+                                                  DaliFrame *reply_out,
+                                                  void *ctx)
+{
+    (void)ctx;
+    return shell_sched_sync_impl(frame,
+                                 needs_reply,
+                                 retries_left,
+                                 send_twice,
+                                 reply_out,
+                                 false);
+}
+
+/*
+ * Settle waits for shared protocol code. Sleeping the calling task is correct
+ * here: every shell workflow already holds the bus for its duration, so nothing
+ * else is waiting on this task to make progress.
+ */
+static void shell_discovery_delay_ms(uint32_t ms, void *ctx)
+{
+    (void)ctx;
+#ifndef DALI_HOST_BUILD
+    vTaskDelay(pdMS_TO_TICKS(ms));
+#else
+    (void)ms;
+#endif
+}
+
 /* Atomic-group half of the transport: shared protocol code that needs a DTR
  * setup and its consuming command to stay together gets that here too, not just
  * in the ESPHome scan task. */
@@ -772,6 +831,8 @@ const DaliTransport *dali_shell_device_transport(void)
         .transact          = shell_discovery_transact,
         .transact_sequence = shell_discovery_sequence_transact,
         .ctx               = NULL,
+        .transact_cleanup  = shell_discovery_cleanup_transact,
+        .delay_ms          = shell_discovery_delay_ms,
     };
     return &transport;
 }
@@ -1476,7 +1537,7 @@ void dali_shell_on_trace(const DaliSchedTraceEvent *event, void *ctx)
  * Command handlers
  *
  * Every handler drives the bus through the blocking scheduler helpers above, so
- * the whole section is device-only. The portable half of the CLI — tokenising,
+ * the whole section is device-only. The portable half of the CLI — tokenizing,
  * the verb table, argument validation, and response formatting — is in
  * dali_cli.c, which the host suite builds and exercises directly.
  * --------------------------------------------------------------------------*/
@@ -1493,6 +1554,7 @@ static void cmd_stats(void)
     shell_printf("RX overflow:      %" PRIu32 "\r\n", g_dali_stats.rx_overflow);
     shell_printf("TX retries:       %" PRIu32 "\r\n", g_dali_stats.tx_retries);
     shell_printf("Malformed frames: %" PRIu32 "\r\n", g_dali_stats.malformed_frames);
+    shell_printf("Reply RX activity: %" PRIu32 "\r\n", g_dali_stats.reply_rx_activity);
     shell_printf("Reply timeouts:   %" PRIu32 "\r\n", g_dali_stats.reply_timeouts);
     shell_printf("RX ignored:       %" PRIu32 "\r\n", g_dali_stats.rx_ignored_outside_reply);
     shell_printf("RX events routed: %" PRIu32 "\r\n", g_dali_stats.unsolicited_events_routed);
@@ -1571,7 +1633,7 @@ static void cmd_reset(void)
 #ifndef DALI_HOST_BUILD
     DaliError err = shell_reset_sync();
     if (err != DALI_OK) {
-        shell_printf("reset: ERR %d\r\n", (int)err);
+        shell_printf("reset: ERR %s\r\n", shell_err(err));
         return;
     }
 
@@ -1652,7 +1714,7 @@ static void cmd_rxdebug(void)
     DaliPhyRxDebugSnapshot snapshot;
     DaliError err = dali_phy_get_rx_debug(&snapshot);
     if (err != DALI_OK) {
-        shell_printf("rxdebug: ERR %d\r\n", (int)err);
+        shell_printf("rxdebug: ERR %s\r\n", shell_err(err));
         return;
     }
     if (!snapshot.valid) {
@@ -1822,7 +1884,7 @@ static void cmd_raw(const DaliCliTokens *t, bool send_twice)
         } else if (err == DALI_ERR_TIMEOUT) {
             shell_printf("RX: timeout\r\n");
         } else {
-            shell_printf("TX/RX: ERR %d\r\n", (int)err);
+            shell_printf("TX/RX: ERR %s\r\n", shell_err(err));
         }
         return;
     }
@@ -2041,6 +2103,44 @@ static void cmd_special(const DaliCliTokens *t)
     }
 }
 
+/*
+ * Policy and target checks shared by `config` and `config-dtr0`.
+ *
+ * The two verbs spell the same command with a different way of loading DTR0, so
+ * a check applied to only one of them is a hole rather than a difference: with
+ * DTR0 already holding 0xFF, `config <t> set-short-address-dtr0` de-addresses
+ * exactly as `config-dtr0 <t> set-short-address-dtr0 255` does.
+ */
+static bool shell_config_allowed(const char *verb,
+                                 const DaliCliGearCommand *spec,
+                                 DaliTarget target)
+{
+    if (dali_cli_config_is_commissioning(spec->id) &&
+        !shell_policy_allows(DALI_SHELL_ALLOW_COMMISSION, spec->name)) {
+        return false;
+    }
+    if (target.type == DALI_ADDR_BROADCAST &&
+        dali_cli_config_rejects_broadcast(spec->id)) {
+        shell_printf("%s: %s\r\n", verb, DALI_CLI_MSG_NO_BROADCAST_GROUP);
+        return false;
+    }
+    return true;
+}
+
+/*
+ * Tell the integration what a config verb just put on the bus, so a cache it
+ * keeps of device state does not go on asserting what was true before.
+ * See DaliShellHooks::config_applied.
+ */
+static void shell_notify_config_applied(DaliTarget target,
+                                        DaliCommandId id,
+                                        uint8_t param)
+{
+    if (s_session.hooks.config_applied != NULL) {
+        s_session.hooks.config_applied(s_session.hooks.ctx, target, id, param);
+    }
+}
+
 static void cmd_config(const DaliCliTokens *t)
 {
     const DaliCliCommandSpec *usage = dali_cli_command_for_id(DALI_CLI_CMD_CONFIG);
@@ -2055,6 +2155,10 @@ static void cmd_config(const DaliCliTokens *t)
     if (spec == NULL) {
         shell_printf("config: unknown config '%s'\r\n", t->tok[2]);
         shell_printf("use 'list config'\r\n");
+        return;
+    }
+
+    if (!shell_config_allowed("config", spec, target)) {
         return;
     }
 
@@ -2081,6 +2185,9 @@ static void cmd_config(const DaliCliTokens *t)
     const DaliCommandInfo *cmd = dali_command_lookup(spec->id);
     if (err == DALI_OK && cmd != NULL) {
         err = shell_send_no_reply(&frame, cmd->send_twice);
+        if (err == DALI_OK) {
+            shell_notify_config_applied(target, spec->id, param);
+        }
     }
     shell_print_tx_result(spec->name, err);
 }
@@ -2099,8 +2206,8 @@ static void shell_print_sequence_result(const char *name,
         return;
     }
     if (result != NULL && result->failed_step != DALI_SEQUENCE_NO_FAILED_STEP) {
-        shell_printf("%s: ERR %d at sequence step %u\r\n",
-               name, (int)err, (unsigned)result->failed_step);
+        shell_printf("%s: ERR %s at sequence step %u\r\n",
+               name, shell_err(err), (unsigned)result->failed_step);
         return;
     }
     dali_cli_print_error(&s_out, name, err);
@@ -2124,6 +2231,10 @@ static void cmd_config_dtr0(const DaliCliTokens *t)
     }
     if (!spec->uses_dtr0 || !dali_control_config_uses_dtr0(spec->id)) {
         shell_printf("config-dtr0: '%s' does not consume DTR0\r\n", spec->name);
+        return;
+    }
+
+    if (!shell_config_allowed("config-dtr0", spec, target)) {
         return;
     }
 
@@ -2174,6 +2285,9 @@ static void cmd_config_dtr0(const DaliCliTokens *t)
 
     DaliSequenceResult seq_result;
     err = shell_sched_sequence_sync(&seq, &seq_result);
+    if (err == DALI_OK) {
+        shell_notify_config_applied(target, spec->id, param);
+    }
     shell_print_sequence_result(spec->name, err, &seq_result);
 }
 
@@ -2222,7 +2336,7 @@ static void cmd_instances(const DaliCliTokens *t)
         return;
     }
     if (err != DALI_OK) {
-        shell_printf("instances: ERR %d\r\n", (int)err);
+        shell_printf("instances: ERR %s\r\n", shell_err(err));
         return;
     }
     shell_input_cache_store(&input);
@@ -2252,7 +2366,7 @@ static void cmd_instances(const DaliCliTokens *t)
             continue;
         }
         if (type_err != DALI_OK) {
-            shell_printf("  %2u: type ERR %d\r\n", (unsigned)instance, (int)type_err);
+            shell_printf("  %2u: type ERR %s\r\n", (unsigned)instance, shell_err(type_err));
             continue;
         }
 
@@ -2316,7 +2430,7 @@ static void shell_sensor_poll_instance(uint8_t addr,
     } else if (err == DALI_ERR_TIMEOUT) {
         shell_printf(" poll=timeout\r\n");
     } else {
-        shell_printf(" poll=ERR %d\r\n", (int)err);
+        shell_printf(" poll=ERR %s\r\n", shell_err(err));
     }
 }
 
@@ -2343,7 +2457,7 @@ static void cmd_sensor(const DaliCliTokens *t)
         return;
     }
     if (err != DALI_OK) {
-        shell_printf("sensor poll: ERR %d\r\n", (int)err);
+        shell_printf("sensor poll: ERR %s\r\n", shell_err(err));
         return;
     }
     shell_input_cache_store(&input);
@@ -2376,7 +2490,7 @@ static void cmd_sensor(const DaliCliTokens *t)
             continue;
         }
         if (type_err != DALI_OK) {
-            shell_printf("  %2u: type ERR %d\r\n", (unsigned)instance, (int)type_err);
+            shell_printf("  %2u: type ERR %s\r\n", (unsigned)instance, shell_err(type_err));
             continue;
         }
         shell_sensor_poll_instance(addr, &input.device.instances[instance]);
@@ -2581,13 +2695,12 @@ static uint8_t shell_discover_bus(bool detailed)
     }
 
     /*
-     * A backward frame that arrives after its reply window has closed is the one
-     * bus fault a scan cannot see: the transaction reports a plain timeout, and
-     * an address that answered a shade too late is indistinguishable from an
-     * empty one. Report the count so under-reporting a populated bus reads as a
-     * timing problem rather than as missing hardware.
+     * RX observations that cannot be attributed to an active reply window are
+     * the bus/timing fault a scan cannot otherwise see. They can be early, late,
+     * or malformed noise, so report the generic count without claiming each one
+     * was a decoded late backward reply.
      */
-    uint32_t late_replies_before = g_dali_stats.rx_ignored_outside_reply;
+    uint32_t ignored_rx_before = g_dali_stats.rx_ignored_outside_reply;
 
     shell_printf("Scanning short addresses 0-%u...\r\n", (unsigned)DALI_MAX_SHORT_ADDRESS);
     DaliError err = dali_discovery_scan(inventory,
@@ -2602,7 +2715,7 @@ static uint8_t shell_discover_bus(bool detailed)
         if (err == DALI_ERR_CANCELLED) {
             shell_printf("Scan aborted\r\n");
         } else {
-            shell_printf("Scan ERR %d\r\n", (int)err);
+            shell_printf("Scan ERR %s\r\n", shell_err(err));
         }
         return 0u;
     }
@@ -2636,26 +2749,30 @@ static uint8_t shell_discover_bus(bool detailed)
         s_session.hooks.inventory_changed(s_session.hooks.ctx, inventory);
     }
 
-    uint32_t late_replies =
-        g_dali_stats.rx_ignored_outside_reply - late_replies_before;
+    uint32_t ignored_rx =
+        g_dali_stats.rx_ignored_outside_reply - ignored_rx_before;
     shell_printf("Scan complete: %u device(s) found.\r\n", (unsigned)found);
-    if (late_replies > 0u) {
-        /* Not a failure on its own: the retry hold-off exists to cover exactly
-         * this, and a bus whose gear answers a shade late reports a steady count
-         * on every scan. It earns a line because it is the one condition that
-         * can drop a present device from the list above without any other trace.
-         *
-         * Two calls rather than one sentence: as a single line this ran past
-         * DALI_CLI_FORMAT_MAX and was clipped of its own terminator, which left
-         * the prompt written onto the end of it and hung every client that
-         * frames replies on the prompt. shell_printf() now restores a clipped
-         * terminator, but keeping each line inside the buffer is what stops the
-         * text being cut in the first place. */
-        shell_printf("  note: %" PRIu32 " backward frame(s) answered after the "
-                     "%u ms reply window.\r\n",
-                     late_replies, (unsigned)DALI_REPLY_TIMEOUT_MS);
-        shell_printf("  Marginal gear timing; retries cover it. If a known "
-                     "device is missing above, re-run.\r\n");
+    if (inventory->undecodable_count > 0u) {
+        /* Short lines on purpose; see the 128-byte TCP buffer note below. */
+        shell_printf("  note: %u address(es) answered undecodably.\r\n",
+                     (unsigned)inventory->undecodable_count);
+        shell_printf("  Likely gear sharing a short address; reserved, not "
+                     "listed, not free.\r\n");
+        for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+            const DaliDiscoveryDeviceInfo *entry =
+                dali_discovery_inventory_get(inventory, addr);
+            if (entry != NULL && entry->has_undecodable_activity) {
+                shell_printf("    a%u: contested\r\n", (unsigned)addr);
+            }
+        }
+    }
+    if (ignored_rx > 0u) {
+        /* Keep this copy deliberately short. The TCP shell owns a 128-byte
+         * output buffer (including NUL) and sends one buffer per callback. */
+        shell_printf("  note: %" PRIu32 " RX observation(s) fell outside active "
+                     "reply attribution.\r\n", ignored_rx);
+        shell_printf("  Early/late activity or noise; inspect timing if a known "
+                     "device is missing.\r\n");
     }
     return found;
 }
@@ -2687,6 +2804,13 @@ static void cmd_inventory(void)
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         const DaliDiscoveryDeviceInfo *entry =
             dali_discovery_inventory_get(inventory, addr);
+        if (entry != NULL && entry->has_undecodable_activity) {
+            /* Not counted as a device: the scan proved something is here but
+             * could not read what. Listed so the address is not read as free. */
+            shell_printf("%02u: contested (undecodable reply)\r\n",
+                         (unsigned)addr);
+            continue;
+        }
         if (entry != NULL && entry->present &&
             (entry->has_status || entry->has_input_device)) {
             if (entry->has_status) {
@@ -2725,7 +2849,11 @@ static void cmd_inventory(void)
         }
     }
 
-    shell_printf("Inventory: %u device(s)\r\n", (unsigned)found);
+    shell_printf("Inventory: %u device(s)", (unsigned)found);
+    if (inventory->undecodable_count > 0u) {
+        shell_printf(", %u contested", (unsigned)inventory->undecodable_count);
+    }
+    shell_printf("\r\n");
 #endif
 }
 
@@ -2744,7 +2872,7 @@ static void shell_commission_progress_cb(const DaliCommissioningEvent *event,
             break;
 
         case DALI_COMMISSIONING_EVENT_RANDOMISED:
-            shell_printf("commission: randomize\r\n");
+            shell_printf("commission: randomise\r\n");
             break;
 
         case DALI_COMMISSIONING_EVENT_SEARCH_FOUND:
@@ -2780,6 +2908,32 @@ static void shell_commission_progress_cb(const DaliCommissioningEvent *event,
     (void)event;
     (void)ctx;
 #endif
+}
+
+/*
+ * What the quiescence bracket did, on every exit path.
+ *
+ * Silence is the normal case and prints nothing: the operator asked to
+ * commission, not to hear about a hardening step that worked. The two states
+ * worth a line are a START that never went out — the run was noisier than it
+ * looked, which may explain a phantom device — and a release that failed, which
+ * leaves the installation's sensors quiet and is the one an operator has to act
+ * on.
+ */
+static void shell_report_quiescence(const DaliCommissioningResult *result)
+{
+    if (!result->quiescence_requested) {
+        return;
+    }
+    if (!result->quiescence_started) {
+        shell_printf("commission: quiescence not started (%s); control-device "
+                     "traffic was not suppressed\r\n",
+                     shell_err(result->quiescence_error));
+    }
+    if (result->quiescent_state_unknown) {
+        shell_printf("commission: STOP QUIESCENT MODE failed; control devices "
+                     "may still be silent - run 'quiescent off all'\r\n");
+    }
 }
 
 static void cmd_commission(const DaliCliTokens *t)
@@ -2822,7 +2976,7 @@ static void cmd_commission(const DaliCliTokens *t)
     if (err != DALI_OK) {
         shell_inventory_reset();
         shell_bus_release();
-        shell_printf("commission: pre-scan ERR %d\r\n", (int)err);
+        shell_printf("commission: pre-scan ERR %s\r\n", shell_err(err));
         return;
     }
     shell_inventory_replace(inventory);
@@ -2834,6 +2988,10 @@ static void cmd_commission(const DaliCliTokens *t)
         .used_address_mask =
             dali_commissioning_used_mask_from_inventory(inventory),
         .query_short_address = true,
+        /* Silence control devices for the run. An event frame landing in a
+         * COMPARE reply window reads as YES and invents gear that is not
+         * there; this is the cheap half of not letting that happen. */
+        .quiesce_control_devices = true,
     };
     DaliCommissioningResult result;
     err = dali_commissioning_commission_unaddressed(
@@ -2845,19 +3003,49 @@ static void cmd_commission(const DaliCliTokens *t)
 
     shell_bus_release();
 
-    /* Commissioning changes which short addresses exist, so the integration's
-     * cached view is stale on both the success and the partial-failure path. */
+    /*
+     * Commissioning changes which short addresses exist, so the integration's
+     * cached view is stale on both the success and the partial-failure path.
+     *
+     * What it gets here is the pre-scan: the only inventory that exists at this
+     * point, and still accurate about the gear that was already addressed —
+     * which is what group membership is made of. Freshly assigned gear belongs
+     * to no group, so its absence is not a wrong answer. The post-scan below
+     * supersedes it whenever the run got far enough to produce one, and every
+     * early return above leaves this as the last word.
+     */
     if (s_session.hooks.inventory_changed != NULL) {
         s_session.hooks.inventory_changed(s_session.hooks.ctx, inventory);
     }
 
     if (err != DALI_OK) {
-        shell_printf("commission: ERR %d after %u assignment(s)\r\n",
-               (int)err,
+        ESP_LOGW(TAG,
+                 "commission failed err=%d assignments=%u cleanup_attempted=%u "
+                 "terminate_tx=%u cleanup_err=%d init_state_unknown=%u",
+                 (int)err,
+                 (unsigned)result.assigned_count,
+                 result.termination_attempted ? 1u : 0u,
+                 result.terminate_tx_succeeded ? 1u : 0u,
+                 (int)result.cleanup_error,
+                 result.initialisation_state_unknown ? 1u : 0u);
+        if (result.termination_attempted &&
+            !result.terminate_tx_succeeded) {
+            shell_printf("commission: cleanup terminate ERR %s; "
+                         "initialisation state unknown\r\n",
+                         shell_err(result.cleanup_error));
+        }
+        shell_report_quiescence(&result);
+        shell_printf("commission: ERR %s after %u assignment(s)\r\n",
+               shell_err(err),
                (unsigned)result.assigned_count);
         return;
     }
 
+    ESP_LOGI(TAG,
+             "commission complete assignments=%u terminate_tx=%u",
+             (unsigned)result.assigned_count,
+             result.terminate_tx_succeeded ? 1u : 0u);
+    shell_report_quiescence(&result);
     shell_printf("commission: complete assigned=%u",
            (unsigned)result.assigned_count);
     if (result.no_more_devices) {
@@ -2891,10 +3079,16 @@ static void cmd_commission(const DaliCliTokens *t)
                                   &found);
         if (err != DALI_OK) {
             shell_inventory_reset();
-            shell_printf("commission: post-scan ERR %d\r\n", (int)err);
+            shell_printf("commission: post-scan ERR %s\r\n", shell_err(err));
             return;
         }
         shell_inventory_replace(inventory);
+
+        /* The authoritative view: taken after the walk, so it is the one that
+         * knows the addresses it just created. */
+        if (s_session.hooks.inventory_changed != NULL) {
+            s_session.hooks.inventory_changed(s_session.hooks.ctx, inventory);
+        }
         shell_printf("commission: post-scan found=%u\r\n", (unsigned)found);
     }
 }
@@ -3156,7 +3350,7 @@ static void cmd_bus(const DaliCliTokens *t)
                (unsigned)rx_level,
                rx_level != 0u ? "idle-high candidate" : "active-low/stuck-low candidate");
     } else {
-        shell_printf("  RX level: unavailable (ERR %d)\r\n", (int)rx_err);
+        shell_printf("  RX level: unavailable (ERR %s)\r\n", shell_err(rx_err));
     }
     shell_printf("  scheduler: %s\r\n",
            shell_sched_state_name(dali_sched_state()));
@@ -3176,10 +3370,12 @@ static void cmd_bus(const DaliCliTokens *t)
            capture_enabled ? "on" : "off",
            (unsigned)capture_count,
            capture_dropped);
-    shell_printf("  stats: malformed=%" PRIu32 ", timeouts=%" PRIu32
-           ", ignored=%" PRIu32 ", bus_idle_failures=%" PRIu32 "\r\n",
+    shell_printf("  stats: malformed=%" PRIu32 ", rx_activity=%" PRIu32
+           ", timeouts=%" PRIu32 "\r\n",
            g_dali_stats.malformed_frames,
-           g_dali_stats.reply_timeouts,
+           g_dali_stats.reply_rx_activity,
+           g_dali_stats.reply_timeouts);
+    shell_printf("         ignored=%" PRIu32 ", bus_idle_failures=%" PRIu32 "\r\n",
            g_dali_stats.rx_ignored_outside_reply,
            g_dali_stats.bus_idle_failures);
 }
@@ -3218,7 +3414,7 @@ static void cmd_smoke(const DaliCliTokens *t)
             shell_inventory_replace(inventory);
         }
     } else {
-        shell_printf("  status: ERR %d\r\n", (int)err);
+        shell_printf("  status: ERR %s\r\n", shell_err(err));
         fail++;
     }
 
@@ -3244,7 +3440,7 @@ static void cmd_smoke(const DaliCliTokens *t)
             shell_printf("  %s: timeout/skip\r\n", queries[i].name);
             skip++;
         } else {
-            shell_printf("  %s: ERR %d\r\n", queries[i].name, (int)err);
+            shell_printf("  %s: ERR %s\r\n", queries[i].name, shell_err(err));
             fail++;
         }
     }
@@ -3277,7 +3473,7 @@ static void cmd_smoke(const DaliCliTokens *t)
         shell_printf("  input instances: timeout/skip\r\n");
         skip++;
     } else {
-        shell_printf("  input instances: ERR %d\r\n", (int)err);
+        shell_printf("  input instances: ERR %s\r\n", shell_err(err));
         fail++;
     }
 
@@ -3314,14 +3510,14 @@ static void cmd_identify(const DaliCliTokens *t)
     for (uint8_t i = 0u; i < SHELL_IDENTIFY_CYCLES; i++) {
         DaliError err = shell_send_no_reply(&max_frame, false);
         if (err != DALI_OK) {
-            shell_printf("identify: max ERR %d\r\n", (int)err);
+            shell_printf("identify: max ERR %s\r\n", shell_err(err));
             return;
         }
         vTaskDelay(pdMS_TO_TICKS(SHELL_IDENTIFY_STEP_MS));
 
         err = shell_send_no_reply(&min_frame, false);
         if (err != DALI_OK) {
-            shell_printf("identify: min ERR %d\r\n", (int)err);
+            shell_printf("identify: min ERR %s\r\n", shell_err(err));
             return;
         }
         vTaskDelay(pdMS_TO_TICKS(SHELL_IDENTIFY_STEP_MS));
@@ -3645,6 +3841,66 @@ static void cmd_devmem(const DaliCliTokens *t)
  * from "the command that consumes it was ignored". Both frames go out as one
  * sequence, so no other locally scheduled DTR write can land between them.
  */
+/*
+ * quiescent on|off <addr|all>
+ *
+ * Part 103 device-level START/STOP QUIESCENT MODE. Both are send-twice, so the
+ * frame goes to the scheduler once with send_twice set rather than being
+ * enqueued twice — the pair has to land inside the 100 ms window with nothing
+ * between it.
+ *
+ * `all` is address byte 0xFF: every control device on the bus, which is the
+ * form worth having, since the point is a quiet bus rather than one quiet
+ * sensor. It reaches control devices only; control gear keeps working.
+ *
+ * The warning on `on` is not decoration. A quiesced device reports no events,
+ * so anything driven by one — an occupancy light, a wall switch — stops
+ * responding, and the operator gets no feedback that the bus went quiet on
+ * purpose. Nothing in this project tracks the state or releases it on exit.
+ */
+static void cmd_quiescent(const DaliCliTokens *t)
+{
+    const DaliCliCommandSpec *usage = dali_cli_command_for_id(DALI_CLI_CMD_QUIESCENT);
+    bool enable;
+
+    if (strcmp(t->tok[1], "on") == 0) {
+        enable = true;
+    } else if (strcmp(t->tok[1], "off") == 0) {
+        enable = false;
+    } else {
+        dali_cli_print_usage(&s_out, usage);
+        return;
+    }
+
+    DaliFrame frame;
+    DaliError err;
+    bool      all = strcmp(t->tok[2], "all") == 0;
+    uint8_t   addr = 0u;
+
+    if (all) {
+        err = dali_input_build_quiescent_mode_broadcast(enable, &frame);
+    } else if (dali_cli_parse_short_addr(t->tok[2], &addr)) {
+        err = dali_input_build_quiescent_mode(addr, enable, &frame);
+    } else {
+        dali_cli_print_usage(&s_out, usage);
+        return;
+    }
+
+    if (err != DALI_OK) {
+        dali_cli_print_error(&s_out, "quiescent", err);
+        return;
+    }
+
+    err = shell_send_no_reply(&frame, true);
+    shell_print_tx_result("quiescent", err);
+
+    if (err == DALI_OK && enable) {
+        shell_printf("quiescent: control device%s will report no events until "
+                     "'quiescent off %s'\r\n",
+                     all ? "s" : "", all ? "all" : t->tok[2]);
+    }
+}
+
 static void cmd_dtrcheck(const DaliCliTokens *t)
 {
     const DaliCliCommandSpec *usage = dali_cli_command_for_id(DALI_CLI_CMD_DTRCHECK);
@@ -4195,6 +4451,7 @@ static void shell_execute(DaliCliCommandId id, const DaliCliTokens *t)
         case DALI_CLI_CMD_FIND:         cmd_find(t); break;
         case DALI_CLI_CMD_EXPORT:       cmd_export(t); break;
         case DALI_CLI_CMD_IDENTIFY:     cmd_identify(t); break;
+        case DALI_CLI_CMD_QUIESCENT:    cmd_quiescent(t); break;
 
         case DALI_CLI_CMD_COUNT:
             break;
@@ -4358,7 +4615,7 @@ bool dali_shell_feed_byte(uint8_t ch)
      * Swallow the LF of a CRLF pair. Without this a client that ends lines the
      * usual network way dispatches twice per line — once for the CR, once for
      * an empty line — and a front end that writes a prompt per dispatched line
-     * emits two. That is invisible to a human, but it desynchronises any client
+     * emits two. That is invisible to a human, but it desynchronizes any client
      * that reads replies up to the prompt.
      */
     bool follows_cr = s_line_last_was_cr;

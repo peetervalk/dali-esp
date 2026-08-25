@@ -1,9 +1,17 @@
 # DALI Protocol Reference
 
+> **Spelling.** DALI command names follow IEC 62386, which spells them
+> **INITIALISE** and **RANDOMISE** — so those are the spellings used here, in
+> the command tables, the CLI verbs (`special initialise`, `special randomise`),
+> and the C identifiers that name them. Everything else in this project is
+> American English: `tokenize`, `recognize`, `quantize`, and ordinary software
+> initialization. The split is deliberate — a command name you cannot grep the
+> standard for is worth less than internal consistency of dialect.
+
 Frame layouts, opcode tables, and standard behaviour, mapped to what this
 project implements. It is not a replacement for IEC 62386.
 
-**Last reviewed:** 2026-08-14
+**Last reviewed:** 2026-08-25
 
 For the verbs that send these frames, see `dali_commands.md`. For what has been
 run against real gear, see `dali_capability_matrix.md`.
@@ -61,8 +69,63 @@ than as lines a user is expected to type quickly.
 
 All locally generated forward frames share the same rounded 22 Te minimum gap.
 This is not DALI-2 priority/backoff or multi-master arbitration: the scheduler
-cannot prove that an external command did not intervene, and it does not derive
-backward/external-frame gaps from a PHY frame-end timestamp.
+cannot prove that an external command did not intervene. The PHY now exports the
+precise ISR timestamp at which its own transmission released the bus, but the
+scheduler does not yet derive backward/external-frame gaps or full arbitration
+state from externally received frames.
+
+### Timestamped RX observations and reply outcomes
+
+The receive ISR still follows the buffer-first rule: it records edges into the
+fixed ring, and task context decodes them. The decoder now reports an observation
+containing the decode result, edge count, and first/last edge timestamps. Those
+timestamps are a wrapping 32-bit microsecond clock quantized to 2 us. A successful
+local transmission separately records its precise end timestamp in the TX ISR.
+Unsigned deltas make attribution wrap-safe; task scheduling latency does not move
+an observation into or out of a reply window.
+
+For a transaction that expects a backward reply, the whole observation must be
+attributable to a window measured from that precise TX end: its first edge
+cannot precede the opening and its last edge cannot exceed the 27,000 us
+closing. The opening is 5,500 us for undecodable activity and 2,000 us for an
+observation that decoded as a complete backward frame; see Bus Timing for why
+the two differ. The outcomes are deliberately three-way rather than treating
+every decode failure as either a reply or silence:
+
+| Observation in the attributed window | Scheduler result | Meaning |
+|---|---|---|
+| Valid 8-bit backward frame | `DALI_OK` | Decoded reply |
+| Qualified, response-like malformed waveform | `DALI_ERR_RX_ACTIVITY` | Something answered, but its byte could not be decoded |
+| Malformed activity that does not meet the response-like qualification, or RX overflow | The corresponding malformed/overflow error | Ambiguous observation; abort rather than inventing an answer |
+| No observation | `DALI_ERR_TIMEOUT` | Silence |
+| Valid 16- or 24-bit forward frame | Intervention error | Another forward transaction occupied the reply window |
+
+`DALI_ERR_RX_ACTIVITY` is not a general yes response. Only the Part 102 `COMPARE`
+operation maps it to YES, because overlapping affirmative backward replies may be
+undecodable; silence maps to NO. `VERIFY SHORT ADDRESS`, ordinary queries, and all
+other callers preserve it as an error.
+
+The short-address scan is the one caller that neither maps it to an answer nor
+aborts. IEC 62386 defines no scan of short addresses 0-63 — the standard's own
+device-finding procedure is the random-address binary search, which is
+collision-tolerant by construction — so the walk is this project's convention and
+its handling of an undecodable address is a local design decision. It follows the
+rule the standard applies to answers elsewhere: an invalid answer is neither a
+value nor a "no". Such an address is recorded as `has_undecodable_activity`,
+counted in `undecodable_count`, and left `present = false`:
+
+- It is **not** reported as a discovered device, because nothing is known about it.
+- It is **not** reported free. `dali_commissioning_used_mask_from_inventory()`
+  reserves it, so a commissioning run cannot assign a further device onto a
+  contested address.
+- It does **not** abort the walk. One contested address must not cost the other
+  sixty-three, and aborting would take the ESPHome boot scan and the `commission`
+  pre-scan down with it.
+
+Gear sharing a short address is the expected cause. The classification itself is
+still awaiting the physical collision captures noted below. The classification has host coverage, but
+the response-like thresholds and overlapping-reply behaviour have not yet been
+validated with physical collision captures or hardware-in-the-loop tests.
 
 ## Control Gear — IEC 62386-102
 
@@ -162,7 +225,7 @@ sees them.
 | `0xA1` | TERMINATE | Closes an initialise window |
 | `0xA3` | DTR0 DATA | |
 | `0xA5` | INITIALISE | Send twice |
-| `0xA7` | RANDOMIZE | Send twice |
+| `0xA7` | RANDOMISE | Send twice |
 | `0xA9` | COMPARE | Commissioning walk |
 | `0xAB` | WITHDRAW | Commissioning walk |
 | `0xAD` | PING | |
@@ -179,6 +242,10 @@ sees them.
 `ENABLE DEVICE TYPE` qualifies only the frame immediately after it. Any
 device-type-specific command must therefore travel with its enable in one
 sequence — two separately issued lines are not adjacent on the bus.
+
+Opcode `0xC1` is reused across parts: here it is a Part 102 special opcode, and
+as the first byte of a 24-bit frame it is the Part 103 special-command address.
+See Cross-Part Interference.
 
 ## Control Devices — IEC 62386-103
 
@@ -210,11 +277,11 @@ generic report-timer, hysteresis, or deadtime setters.
 
 ### Generic instance queries
 
-Single-send commands expecting an 8-bit backward frame.
+Single-send commands expecting an 8-bit backward frame. Queries addressed to the
+device rather than to one of its instances are under Device-level commands below.
 
 | Instance byte | Opcode | Query |
 |---:|---:|---|
-| `0xFE` | `0x35` | QUERY NUMBER OF INSTANCES |
 | instance | `0x80` | QUERY INSTANCE TYPE |
 | instance | `0x81` | QUERY RESOLUTION |
 | instance | `0x82` | QUERY INSTANCE ERROR |
@@ -240,6 +307,83 @@ Feature queries stay unexposed until the addressing layer can encode Part 103
 feature selectors. The `0x93` and `0x94` builders construct only the addressed
 query frame; a complete typed operation must keep the query and its dependent DTR
 reads atomic.
+
+### Device-level commands
+
+Instance byte `0xFE` addresses the control device itself rather than one of its
+instances. Configuration commands at this level are send-twice; queries are
+single-send.
+
+| Opcode | Command | Sends |
+|---:|---|---|
+| `0x10` | RESET — not implemented | twice |
+| `0x14` | SET SHORT ADDRESS DTR0 — not implemented | twice |
+| `0x15` | ENABLE WRITE MEMORY — not implemented | twice |
+| `0x1D` | START QUIESCENT MODE | twice |
+| `0x1E` | STOP QUIESCENT MODE | twice |
+| `0x30` | QUERY DEVICE STATUS — not implemented | reply |
+| `0x35` | QUERY NUMBER OF INSTANCES | reply |
+| `0x36`/`0x37`/`0x38` | QUERY CONTENT DTR0/DTR1/DTR2 | reply |
+
+Quiescent mode suppresses a control device's own bus activity — event frames
+above all — until `STOP QUIESCENT MODE` releases it. It matters beyond
+commissioning: any operation wanting a quiet bus, such as a scan, a memory block
+read, or DT8 bring-up, competes with sensor traffic otherwise. Espressif's
+`esp_dali` records that some Part 102 gear mis-decode 24-bit event frames as DAPC
+brightness commands, which would make an unquiesced sensor a visible fault rather
+than only noise. Unverified here.
+
+Device address byte `0xFF` addresses all control devices.
+`dali_build_device_broadcast_command()` builds that form;
+`dali_build_device_command()` still takes a short address and still rejects
+anything at or above 64, because 0xFF is an address *byte*, not an address.
+Both accept any 24-bit device command, queries included — a broadcast query
+collides by construction, which the operator surfaces warn about rather than the
+builder forbidding it.
+
+`quiescent on|off <addr|all>` is the verb on both front ends. Host-tested;
+no bus has run it.
+
+### Part 103 special commands
+
+Part 103 has its own special-command space, distinct from the Part 102 specials
+above. The frame is 24-bit with a fixed first byte, the opcode in the second, and
+the parameter in the third:
+
+```text
+data = (0xC1 << 16) | (special_opcode << 8) | parameter
+```
+
+| Opcode | Name | Notes |
+|---:|---|---|
+| `0x00` | TERMINATE | Closes a Part 103 initialise window |
+| `0x01` | INITIALISE | Send twice; parameter is a device address byte |
+| `0x02` | RANDOMISE | Send twice |
+| `0x03` | COMPARE | |
+| `0x04` | WITHDRAW | |
+| `0x05`/`0x06`/`0x07` | SEARCH ADDRH/M/L | |
+| `0x08` | PROGRAM SHORT ADDRESS | Raw 6-bit address |
+| `0x09` | VERIFY SHORT ADDRESS | |
+| `0x0A` | QUERY SHORT ADDRESS | |
+| `0x20` | WRITE MEMORY LOCATION | |
+| `0x30`/`0x31`/`0x32` | DTR0/DTR1/DTR2 DATA | |
+
+None of this is implemented. The command table has no 24-bit special frame kind,
+so control-device commissioning has no path here at all.
+
+Two encodings differ from their Part 102 namesakes and are worth stating plainly,
+because using the Part 102 form silently does the wrong thing:
+
+- `PROGRAM SHORT ADDRESS` takes the **raw 6-bit address** `0..63`. The Part 102
+  special of the same name takes `(short_addr << 1) | 1`. Sending the Part 102
+  encoding to a control device programs address `2n + 1`.
+- `INITIALISE`'s parameter is a device address byte, where `0xFF` selects all
+  control devices and `0x00` selects only those without a short address. This
+  reads inverted against Part 102, whose `INITIALISE` takes `0x00` for all gear
+  and `0xFF` for unaddressed gear.
+
+Opcode values are transcribed from Espressif's `esp_dali` and are not verified
+against the standard text or on a bus here.
 
 ### Part 301 push button — instance type 1
 
@@ -302,6 +446,34 @@ Occupancy output is bit-replicated: `0` unoccupied, `85` movement, `170` present
 Report and deadtime use 1 s and 50 ms units. Hysteresis is a percentage `0..25`;
 `hysteresisMin` is the absolute minimum band height in input-value units, not a
 generic deadband.
+
+## Cross-Part Interference
+
+Control gear and control devices share one bus, and each part's commissioning
+sequence can disturb the other's. Timestamped reply attribution does not solve
+this on its own. Gear commissioning now brackets itself with broadcast
+`START`/`STOP QUIESCENT MODE`, which stops a conforming control device from
+transmitting into a COMPARE reply window; the same commands are available by hand
+as the `quiescent` verb. What that does not cover: a device that never received
+the broadcast, and the reverse direction below. It is recorded because it is a
+plausible explanation for phantom devices in a mixed-installation binary search,
+and because it is separate from the COMPARE collision problem rather than another
+face of it. Host-tested only.
+
+`0xC1` means two things depending on frame width. As a Part 102 special opcode it
+is `ENABLE DEVICE TYPE`; as the first byte of a 24-bit frame it is the Part 103
+special-command address. Gear sitting in an initialise window can therefore act
+on the Part 103 special frames that a control-device commissioning run emits.
+
+The reverse also holds. A control device that observes a Part 102 `INITIALISE`
+can enter its own addressing state, generate a random address, and answer Part
+102 `COMPARE` — appearing in the search as gear that is not there.
+
+Espressif's `esp_dali` brackets each part's commissioning with the other part's
+`TERMINATE`, repeats that `TERMINATE` after `INITIALISE` because a device can
+re-enter the state, and holds control devices in quiescent mode across the whole
+run. Its comments name a Steinel DLS-203-P as the device that forced this
+handling. Unverified here.
 
 ## Event Frames
 
@@ -380,9 +552,34 @@ Steinel HF 360 II memory-bank layout and its tuning workflow are in
 | Bit period | ~833.3 us |
 | Half-bit period | ~416.7 us |
 | TX-to-RX settle suppression | 2 ms |
-| Reply window opens | 7 ms |
-| Reply timeout | 25 ms |
+| Attribution opens — undecodable activity | 5.5 ms after precise local TX end |
+| Attribution opens — decoded backward frame | 2 ms after precise local TX end |
+| Timestamped reply attribution closes | 27 ms after precise local TX end |
+| Scheduler reply wait after TX handoff | 25 ms |
 | Send-twice window | 100 ms |
+| Post-RANDOMISE settle, before the first COMPARE | 100 ms |
+
+Every row above except the last is frame-level timing the PHY and scheduler
+enforce. The 2 ms handoff suppression plus the 25 ms reply wait gives the precise
+TX-end-relative 27 ms attribution close; observations are accepted by their
+captured edge timestamps, not by when task context delivers them.
+
+The open edge has been two values since 2026-08-25, and which one applies is
+decided by whether the observation decoded. `DALI_REPLY_WINDOW_OPEN_US`
+(5,500 us) is the standard's minimum settling time and guards *undecodable*
+activity, because that is the path `COMPARE` reads as YES and where a wrong call
+invents gear. `DALI_REPLY_WINDOW_OPEN_DECODED_US` is derived from
+`DALI_SETTLE_MS` (2,000 us) and applies to a complete 8-bit backward frame,
+which carries none of that ambiguity while a query is outstanding: the local
+16-bit transmission cannot decode as one, ringing cannot, and another master's
+forward frame is caught by the intervening-frame branch. What is left is the
+PHY's own RX self-echo suppression. Deriving rather than choosing it is
+deliberate — a 1k-site DT6 driver answers between 4.12 and 5.85 ms on
+consecutive queries, so any hand-picked margin gets overtaken. The RANDOMISE
+settle is a commissioning-sequence delay in
+`dali_commissioning`, raised from 15 ms on 2026-08-24 to match the figure
+Espressif's `esp_dali` attributes to IEC 62386-102 §11.3. Unconfirmed against the
+standard text and unexercised on a bus since the change.
 
 ## Sources
 
@@ -395,6 +592,9 @@ Steinel HF 360 II memory-bank layout and its tuning workflow are in
 - Microchip TB3200 — https://ww1.microchip.com/downloads/en/Appnotes/90003200A.pdf
 - Espressif DALI driver timing notes —
   https://docs.espressif.com/projects/esp-iot-solution/en/latest/electrical_lighting_solution/dali.html
+- Espressif `esp_dali` component (Apache-2.0), source of the Part 103 device and
+  special opcode values and the cross-part interference notes —
+  https://github.com/espressif/esp-iot-solution/tree/master/components/dali
 - Beckhoff DALI frame timing and send-twice —
   https://infosys.beckhoff.com/content/1033/tcplclib_tc3_dali/12346803211.html
 - Beckhoff DALI-2 Query Input Value —

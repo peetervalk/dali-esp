@@ -9,7 +9,7 @@ A reusable C protocol stack (`components/dali`) drives the bus — PHY, schedule
 - Lights by group, short address, or broadcast, with query-based state readback; short-address entities query themselves by default and groups use a representative member (`QUERY ACTUAL LEVEL`)
 - Brightness maps through the DALI arc-power curve rather than a linear percentage. Each target's curve and MIN/MAX LEVEL window are queried from the gear and cached; a group entity uses the union of its members' windows. `dimming_curve`, `min_level`, and `max_level` override the queried values per light.
 - Multi-frame operations (DTR loads, ENABLE DEVICE TYPE, memory reads, send-twice config) run as atomic scheduler transactions, so locally scheduled traffic cannot interleave between the steps
-- Bus scan and discovery from Home Assistant; scan-verified group membership is persisted to flash and survives reboots; control-gear commissioning through the native CLI
+- Bus scan and discovery from Home Assistant; scan-verified group membership is persisted to flash and survives reboots; control-gear commissioning through the native serial CLI or the TCP diagnostic shell with `allow_commissioning: true`
 - DALI-2 input devices: occupancy, lux, temperature, humidity — authoritative polling, with matching Device/Instance events requesting an immediate poll (`poll_on_event`)
 - Passive observation of existing pushbutton couplers (`headless_dispatch`): couplers keep commanding the lamps, ESP32 keeps HA state in sync
 - Diagnostic shell over TCP (`shell:`): the full native CLI — discover, identify, commissioning, live trace, rolling capture, JSON export — from a terminal, with no serial cable. The same shell, running the same code, as the serial console on a native ESP-IDF build
@@ -32,7 +32,7 @@ Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The controller has
 ## Getting started
 
 1. Flash [dali-starter.yaml](dali-starter.yaml) (`esphome run dali-starter.yaml`).
-2. Commission the bus, either way round:
+2. Commission or inspect the bus:
    - **From a terminal.** Run [tools/dali-shell](tools/dali-shell) from any host
      that can reach the device — standard library only, nothing to install, and
      it drops straight into the HA "Advanced SSH & Web Terminal" add-on. Copy it
@@ -52,6 +52,13 @@ Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The controller has
      groups; `identify <addr>` blinks one fixture; `export inventory` writes the
      result as JSON. `help` lists every verb. With no client to hand,
      `nc <address> 2323` is a complete if unfriendly substitute.
+
+     The commissioning entry point is `commission unaddressed [first] [max]`.
+     Over TCP it is refused unless the firmware sets
+     `shell: { allow_commissioning: true }`; the native serial shell permits it.
+     Timestamped reply-activity handling and the safety `TERMINATE` cleanup path
+     are host-tested, not real-bus proof of multi-device commissioning. Use one
+     unaddressed control gear at a time for now.
 
      `export config` answers the other half: it prints the `dali:` block, and
      the `light:` and `sensor:` entries naming it, as YAML you can paste back.
@@ -81,7 +88,7 @@ Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The controller has
 
 A bus with two lamp groups, one individually addressed lamp, and a DALI-2 multi-sensor (e.g. Steinel HF 360 II) at short address 0:
 
-The example pins `v1.2.0`, the last tagged release. `dev` carries newer work;
+The example pins `v1.3.0`, the last tagged release. `dev` carries newer work;
 compile and test it separately before pointing an installation at it.
 
 ```yaml
@@ -94,7 +101,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/peetervalk/dali-esp.git
-      ref: v1.2.0
+      ref: v1.3.0
     components: [dali]
 
 dali:
@@ -125,14 +132,15 @@ light:
     name: "Living Room"
     target_type: group        # short | group | broadcast
     target_address: 0
-    query_address: 2          # cold-start seed: any group member; only a
-                              # complete scan replaces verified membership
+                              # No query_address: a group entity needs one
+                              # member's short address to poll for state, and
+                              # the component asks the bus for one rather than
+                              # being told. Set it only to pin a member.
   - platform: dali
     dali_id: dali_bus
     name: "Hallway"
     target_type: group
     target_address: 1
-    query_address: 5
 
   - platform: dali
     dali_id: dali_bus
@@ -193,6 +201,15 @@ text:
 - Control gear: DT6 (LED) and DT8 (colour) are implemented. Other device types (DT0 fluorescent, DT1 emergency, …) are not.
 - One DALI bus per controller. Direct-control couplers are additional transmitters;
   simultaneous traffic is not collision-safe.
+- Commissioning preserves frame-like, undecodable reply-window activity for
+  COMPARE and attempts an abort-bypassing safety `TERMINATE` if the workflow is
+  cancelled. Those paths are host-tested only: real-bus multi-device
+  commissioning remains unverified, so the supported operating procedure is one
+  unaddressed gear at a time. A run brackets itself with broadcast Part 103
+  START/STOP QUIESCENT MODE so control devices cannot transmit into a COMPARE
+  reply window, but that too is host-tested only and cannot reach a device that
+  missed the broadcast. Equal-random-address recovery, cross-part addressing
+  interference, and multi-master arbitration are not implemented.
 - Implemented does not mean verified on hardware. Several paths — the DT6/DT8
   command sets, memory writes, input-device configuration — have host vectors but
   no recorded real-bus result; [dali_capability_matrix.md](dali_capability_matrix.md)

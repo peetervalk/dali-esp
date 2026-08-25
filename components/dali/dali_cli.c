@@ -82,7 +82,7 @@ DaliCliOut dali_cli_buffer_out(DaliCliBufferSink *sink)
 }
 
 /* ---------------------------------------------------------------------------
- * Tokenising
+ * Tokenizing
  * --------------------------------------------------------------------------*/
 
 static bool cli_is_space(char c)
@@ -212,6 +212,8 @@ static const DaliCliCommandSpec s_commands[] = {
     { DALI_CLI_CMD_EXPORT, "export", "inventory|config", "inventory as JSON, or the dali: YAML block for this device", 1u, 1u,
       "inventory config" },
     { DALI_CLI_CMD_IDENTIFY, "identify", "<addr>", "blink one short-addressed lamp", 1u, 1u, NULL },
+    { DALI_CLI_CMD_QUIESCENT, "quiescent", "on|off <addr|all>", "Part 103 quiescent mode: silence control-device events", 2u, 2u,
+      "on off" },
 };
 
 #define CLI_COMMAND_COUNT ((uint8_t)(sizeof(s_commands) / sizeof(s_commands[0])))
@@ -474,7 +476,7 @@ bool dali_cli_parse_target(const char *text, DaliTarget *out)
         return true;
     }
 
-    const char *addr_text = text[0] == 's' ? text + 1 : text;
+    const char *addr_text = text[0] == 'a' ? text + 1 : text;
     uint8_t addr;
     if (!dali_cli_parse_u8(addr_text, DALI_MAX_SHORT_ADDRESS, &addr)) {
         return false;
@@ -488,9 +490,9 @@ bool dali_cli_parse_short_addr(const char *text, uint8_t *out)
     if (text == NULL) {
         return false;
     }
-    /* Accept the sN spelling here too, so a target and an address argument are
+    /* Accept the aN spelling here too, so a target and an address argument are
      * never written differently for the same device. */
-    return dali_cli_parse_u8(text[0] == 's' ? text + 1 : text,
+    return dali_cli_parse_u8(text[0] == 'a' ? text + 1 : text,
                              DALI_MAX_SHORT_ADDRESS,
                              out);
 }
@@ -628,7 +630,7 @@ static const DaliCliGearCommand s_special_commands[] = {
     { "terminate",       DALI_CMD_TERMINATE,                      false, 0u,   false },
     { "dtr0",            DALI_CMD_DTR0_DATA,                      true,  255u, false },
     { "initialise",      DALI_CMD_INITIALISE,                     true,  255u, false },
-    { "randomize",       DALI_CMD_RANDOMIZE,                      false, 0u,   false },
+    { "randomise",       DALI_CMD_RANDOMISE,                      false, 0u,   false },
     { "compare",         DALI_CMD_COMPARE,                        false, 0u,   false },
     { "withdraw",        DALI_CMD_WITHDRAW,                       false, 0u,   false },
     { "ping",            DALI_CMD_PING,                           false, 0u,   false },
@@ -708,7 +710,7 @@ bool dali_cli_special_is_commissioning(DaliCommandId id)
 {
     switch (id) {
         case DALI_CMD_INITIALISE:
-        case DALI_CMD_RANDOMIZE:
+        case DALI_CMD_RANDOMISE:
         case DALI_CMD_SEARCH_ADDRH:
         case DALI_CMD_SEARCH_ADDRM:
         case DALI_CMD_SEARCH_ADDRL:
@@ -730,6 +732,16 @@ const DaliCliGearCommand *dali_cli_config_at(uint8_t index)
 const DaliCliGearCommand *dali_cli_config_find(const char *name)
 {
     return gear_find(s_config_commands, dali_cli_config_count(), name);
+}
+
+bool dali_cli_config_is_commissioning(DaliCommandId id)
+{
+    return id == DALI_CMD_SET_SHORT_ADDRESS_DTR0;
+}
+
+bool dali_cli_config_rejects_broadcast(DaliCommandId id)
+{
+    return id == DALI_CMD_ADD_TO_GROUP || id == DALI_CMD_REMOVE_FROM_GROUP;
 }
 
 /* ---------------------------------------------------------------------------
@@ -1475,10 +1487,10 @@ void dali_cli_print_tx_result(const DaliCliOut *out, const char *name, DaliError
 
 void dali_cli_print_error(const DaliCliOut *out, const char *name, DaliError err)
 {
-    if (err == DALI_ERR_TIMEOUT) {
-        dali_cli_printf(out, "%s: timeout\r\n", name);
-    } else if (err == DALI_ERR_QUEUE_FULL) {
-        dali_cli_printf(out, "%s: queue full\r\n", name);
+    const char *text = dali_error_name(err);
+
+    if (text != NULL) {
+        dali_cli_printf(out, "%s: %s\r\n", name, text);
     } else {
         dali_cli_printf(out, "%s: ERR %d\r\n", name, (int)err);
     }

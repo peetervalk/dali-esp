@@ -8,6 +8,7 @@ typedef struct {
     uint8_t   status[DALI_SHORT_ADDRESS_COUNT];
     bool      malformed[DALI_SHORT_ADDRESS_COUNT];
     int       bus_error_addr;
+    DaliError bus_error;
     uint32_t  tx_count;
     uint32_t  sequence_count;
     uint32_t  query_next_device_type_count;
@@ -101,7 +102,7 @@ static DaliError mock_transact(const DaliFrame *frame,
     uint8_t addr = 0u;
     if (is_status_query(frame, &addr)) {
         if (bus->bus_error_addr == (int)addr) {
-            return DALI_ERR_BUS_STUCK;
+            return bus->bus_error;
         }
         if (bus->malformed[addr]) {
             *reply_out = (DaliFrame){
@@ -240,6 +241,7 @@ void setUp(void)
     memset(&s_bus, 0, sizeof(s_bus));
     memset(&s_script, 0, sizeof(s_script));
     s_bus.bus_error_addr = -1;
+    s_bus.bus_error = DALI_ERR_BUS_STUCK;
     s_script_count = 0u;
 }
 
@@ -317,6 +319,64 @@ void test_scan_aborts_on_bus_error(void)
     /* 5 status queries (0..4) + 4 instance probes for absent addresses 0..3
      * before the bus-error at address 4 terminates the scan. */
     TEST_ASSERT_EQUAL_UINT32(9u, s_bus.tx_count);
+}
+
+void test_scan_records_undecodable_activity_and_keeps_scanning(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 99u;
+
+    /* Address 0 answers with activity that cannot be decoded; address 5 holds a
+     * perfectly ordinary device that the walk must still reach. */
+    s_bus.bus_error_addr = 0;
+    s_bus.bus_error = DALI_ERR_RX_ACTIVITY;
+    s_bus.present[5] = true;
+    s_bus.status[5] = 0x80u;
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, found_cb, &s_bus, &found));
+
+    TEST_ASSERT_TRUE(inventory.valid);
+
+    /* Undecodable activity is neither a device nor silence. */
+    const DaliDiscoveryDeviceInfo *contested =
+        dali_discovery_inventory_get(&inventory, 0u);
+    TEST_ASSERT_NOT_NULL(contested);
+    TEST_ASSERT_TRUE(contested->has_undecodable_activity);
+    TEST_ASSERT_FALSE(contested->present);
+    TEST_ASSERT_FALSE(contested->has_status);
+    TEST_ASSERT_EQUAL_UINT8(1u, inventory.undecodable_count);
+
+    /* It is not published as a discovery result. */
+    TEST_ASSERT_EQUAL_UINT8(1u, found);
+    TEST_ASSERT_EQUAL_UINT8(1u, inventory.found_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, s_bus.found_cb_count);
+    TEST_ASSERT_EQUAL_UINT8(5u, s_bus.found_cb_last_addr);
+
+    /* The walk continued past the contested address. */
+    TEST_ASSERT_TRUE(dali_discovery_inventory_get(&inventory, 5u)->present);
+
+    /* 64 status queries, 62 instance probes for the absent addresses, and 25
+     * enrichment queries for the one device. Address 0 draws no instance probe:
+     * a second query into known-undecodable activity buys nothing. */
+    TEST_ASSERT_EQUAL_UINT32(64u + 62u + 25u, s_bus.tx_count);
+}
+
+void test_scan_still_aborts_on_a_real_bus_error(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 99u;
+
+    s_bus.bus_error_addr = 0;
+    s_bus.bus_error = DALI_ERR_BUS_STUCK;
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    TEST_ASSERT_FALSE(inventory.valid);
+    TEST_ASSERT_EQUAL_UINT8(99u, found);
+    TEST_ASSERT_EQUAL_UINT32(1u, s_bus.tx_count);
 }
 
 void test_query_status_rejects_bad_reply_width(void)
@@ -1805,6 +1865,8 @@ int main(void)
     RUN_TEST(test_scan_records_responders_and_callback);
     RUN_TEST(test_scan_ignores_timeouts_and_malformed_slots);
     RUN_TEST(test_scan_aborts_on_bus_error);
+    RUN_TEST(test_scan_records_undecodable_activity_and_keeps_scanning);
+    RUN_TEST(test_scan_still_aborts_on_a_real_bus_error);
     RUN_TEST(test_query_status_rejects_bad_reply_width);
     RUN_TEST(test_query_input_device_clamps_and_keeps_optional_timeouts);
     RUN_TEST(test_query_input_device_records_type_errors);

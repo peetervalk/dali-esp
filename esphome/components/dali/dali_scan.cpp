@@ -15,7 +15,6 @@ extern "C" {
 #include "../../../components/dali/dali_discovery.h"
 #include "../../../components/dali/dali_scheduler.h"
 #include "../../../components/dali/dali_transport.h"
-#include "../../../components/dali/dali_group_map.h"
 }
 
 namespace esphome {
@@ -305,23 +304,15 @@ static void log_inventory_json(const DaliDiscoveryInventory *inv) {
 // from bus-verified data, superseding any YAML-seeded or console-edited state.
 // ---------------------------------------------------------------------------
 
+/*
+ * The rebuild itself lives on DaliComponent now, because a shell session's
+ * `discover` and `commission` produce the same inventory and are entitled to
+ * publish it too. Keeping the walk here and the publish there is what stops the
+ * two paths from drifting into two definitions of a complete scan.
+ */
 static bool rebuild_group_membership(const DaliDiscoveryInventory *inv,
                                      DaliComponent *component) {
-    DaliGroupMap map;
-    bool complete = dali_group_map_rebuild_from_inventory(&map, inv);
-    if (!complete) return false;
-    uint64_t observed_gear = 0u;
-    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
-        const DaliDiscoveryDeviceInfo *device =
-            dali_discovery_inventory_get(inv, addr);
-        if (device != nullptr && device->present &&
-            device->has_control_gear && device->has_groups) {
-            observed_gear |= (uint64_t)1u << addr;
-        }
-    }
-    return component->set_group_membership_snapshot(map.members,
-                                                     map.verified,
-                                                     observed_gear);
+    return component->apply_inventory_snapshot(inv);
 }
 
 // ---------------------------------------------------------------------------
@@ -472,6 +463,22 @@ static void scan_task(void *arg) {
     }
 
     ESP_LOGI(TAG, "---[ DALI Scan Complete: %u device(s) found ]---", (unsigned)found);
+    if (inventory.undecodable_count > 0u) {
+        /*
+         * Not a scan failure: the walk completed and these addresses are held
+         * back from the free pool. It is worth a warning because gear sharing a
+         * short address is invisible in the device list above.
+         */
+        ESP_LOGW(TAG, "%u address(es) answered undecodably; likely gear sharing "
+                      "a short address", (unsigned)inventory.undecodable_count);
+        for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+            const DaliDiscoveryDeviceInfo *d =
+                dali_discovery_inventory_get(&inventory, addr);
+            if (d != nullptr && d->has_undecodable_activity) {
+                ESP_LOGW(TAG, "  a%u: contested, reserved", (unsigned)addr);
+            }
+        }
+    }
     log_inventory_json(&inventory);
     component->set_scan_level_profile_snapshot(&inventory);
     bool group_data_complete = rebuild_group_membership(&inventory, component);

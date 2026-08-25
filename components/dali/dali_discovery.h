@@ -41,6 +41,15 @@ typedef struct {
 
 typedef struct {
     bool                     present;
+    /*
+     * Something answered inside this address's reply window but its byte could
+     * not be decoded — overlapping replies from gear sharing the short address
+     * are the expected cause. The address is occupied, so commissioning must
+     * not offer it as free, but nothing is known about what occupies it, so the
+     * entry is deliberately not `present` and is not published as a discovery
+     * result.
+     */
+    bool                     has_undecodable_activity;
     bool                     has_status;
     uint8_t                  status;
     bool                     has_groups;
@@ -81,6 +90,8 @@ typedef struct {
 typedef struct {
     bool                    valid;
     uint8_t                 found_count;
+    /* Addresses whose gear query drew undecodable reply-window activity. */
+    uint8_t                 undecodable_count;
     DaliDiscoveryDeviceInfo devices[DALI_SHORT_ADDRESS_COUNT];
 } DaliDiscoveryInventory;
 

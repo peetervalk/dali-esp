@@ -25,6 +25,8 @@ static DaliPhyRxCallback g_mock_rx_cb;
 static void           *g_mock_rx_ctx;
 static uint32_t        g_mock_tick_ms;
 static uint32_t        g_mock_time_us;
+static DaliError       g_mock_last_tx_end_result;
+static uint32_t        g_mock_last_tx_end_us;
 
 static DaliError mock_tx(const DaliFrame *frame)
 {
@@ -57,6 +59,15 @@ static uint32_t mock_get_tick_ms(void)
 static uint32_t mock_get_time_us(void)
 {
     return g_mock_time_us;
+}
+
+static DaliError mock_get_last_tx_end_us(uint32_t *timestamp_out)
+{
+    if (timestamp_out == NULL || g_mock_last_tx_end_result != DALI_OK) {
+        return g_mock_last_tx_end_result;
+    }
+    *timestamp_out = g_mock_last_tx_end_us;
+    return DALI_OK;
 }
 
 /* ---------------------------------------------------------------------------
@@ -270,6 +281,27 @@ static void inject_reply(uint32_t data, uint8_t bits)
     dali_sched_notify_rx(&f);
 }
 
+static void inject_rx_activity(uint32_t first_edge_us,
+                               uint32_t last_edge_us,
+                               uint8_t edge_count,
+                               DaliError result)
+{
+    DaliPhyRxObservation observation = {
+        .result = result,
+        .first_edge_us = first_edge_us,
+        .last_edge_us = last_edge_us,
+        .edge_count = edge_count,
+        .has_timestamps = true,
+    };
+    dali_sched_notify_rx_observation(&observation);
+}
+
+static void inject_phy_observation(const DaliPhyRxObservation *observation)
+{
+    TEST_ASSERT_NOT_NULL(g_mock_rx_cb);
+    g_mock_rx_cb(observation, g_mock_rx_ctx);
+}
+
 static void inject_event(uint32_t data)
 {
     inject_reply(data, 24u);
@@ -292,6 +324,8 @@ void setUp(void)
     g_mock_tx_advance_us = 0u;
     g_mock_tick_ms   = 0u;
     g_mock_time_us   = 0u;
+    g_mock_last_tx_end_result = DALI_ERR_INVALID;
+    g_mock_last_tx_end_us = 0u;
     g_mock_rx_cb     = NULL;
     g_mock_rx_ctx    = NULL;
     memset(&g_mock_last_tx, 0, sizeof(g_mock_last_tx));
@@ -327,6 +361,7 @@ void setUp(void)
         .set_rx_callback = mock_set_rx_callback,
         .get_tick_ms     = mock_get_tick_ms,
         .get_time_us     = mock_get_time_us,
+        .get_last_tx_end_us = mock_get_last_tx_end_us,
     };
     TEST_ASSERT_EQUAL(DALI_OK, dali_sched_init(&ops));
 }
@@ -491,6 +526,529 @@ void test_reply_received(void)
     TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
 }
 
+void test_frame_like_rx_activity_completes_reply_with_distinct_error(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .retries_left = 2u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+
+    inject_rx_activity(DALI_REPLY_WINDOW_OPEN_US,
+                       DALI_REPLY_WINDOW_OPEN_US +
+                           DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+                       16u,
+                       DALI_ERR_MALFORMED);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_RX_ACTIVITY, g_cb_result);
+    TEST_ASSERT_EQUAL_UINT8(0u, g_cb_reply.bit_length);
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.reply_rx_activity);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_timeouts);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.tx_retries);
+}
+
+/*
+ * The reply window opens at the minimum forward-to-backward settling time, not
+ * the 7 ms nominal. Gear answering at the fast end of the range must be
+ * attributed to its own transaction; raising the opening back towards the
+ * nominal would silently time these replies out.
+ */
+void test_reply_between_minimum_and_nominal_settling_is_accepted(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+
+    TEST_ASSERT_EQUAL_UINT32(5500u, (uint32_t)DALI_REPLY_WINDOW_OPEN_US);
+
+    /* 6 ms: inside the settling range, below the 7 ms nominal. */
+    DaliPhyRxObservation observation = {
+        .result         = DALI_OK,
+        .frame          = { .data = 0xAFu, .bit_length = 8u },
+        .first_edge_us  = 6000u,
+        .last_edge_us   = 6000u + DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+        .edge_count     = 16u,
+        .has_timestamps = true,
+    };
+    dali_sched_notify_rx_observation(&observation);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+    TEST_ASSERT_EQUAL_HEX32(0xAFu, g_cb_reply.data);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_outside_reply);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_timeouts);
+}
+
+/*
+ * Gear that settles faster than the standard's 5.5 ms minimum still gets read,
+ * as long as what arrived decoded as a complete backward frame.
+ *
+ * Measured on a real installation: four LED-strip drivers reply at 5.24-5.62 ms
+ * and straddle the edge, so most of their replies were discarded and the caller
+ * saw a timeout while a correctly decoded byte sat in the buffer. Retries do
+ * not help gear sitting on a threshold, so the window has to give.
+ */
+void test_decoded_backward_frame_is_accepted_before_the_standard_open(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x1BC0u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+
+    /* The edge is the self-echo suppression itself, not a chosen margin above
+     * it: for a decoded frame there is no other floor with a physical meaning,
+     * and every fixed margin so far has been overtaken by the next device. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)DALI_SETTLE_MS * 1000u,
+                             (uint32_t)DALI_REPLY_WINDOW_OPEN_DECODED_US);
+    TEST_ASSERT_TRUE(DALI_REPLY_WINDOW_OPEN_DECODED_US < DALI_REPLY_WINDOW_OPEN_US);
+
+    /* 4.122 ms — the fastest reply actually observed on the 1k bus, from the
+     * a0 DT6 driver answering QUERY STATUS. 25% faster than the standard's
+     * minimum, and it decoded correctly. */
+    DaliPhyRxObservation observation = {
+        .result         = DALI_OK,
+        .frame          = { .data = 0x08u, .bit_length = 8u },
+        .first_edge_us  = 4122u,
+        .last_edge_us   = 4122u + DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+        .edge_count     = 16u,
+        .has_timestamps = true,
+    };
+    dali_sched_notify_rx_observation(&observation);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+    TEST_ASSERT_EQUAL_HEX32(0x08u, g_cb_reply.data);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_outside_reply);
+}
+
+/*
+ * The relaxation is for decoded frames only. Undecodable activity keeps the
+ * standard's edge, because that is the path COMPARE reads as YES: accepting it
+ * early would invent gear that is not there, which is the one error a
+ * commissioning walk must not make.
+ */
+void test_malformed_activity_keeps_the_standard_open_edge(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+
+    /* Same 4.122 ms the decoded frame above is accepted at. */
+    inject_rx_activity(4122u,
+                       4122u + DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+                       16u,
+                       DALI_ERR_MALFORMED);
+
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_rx_activity);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+
+    advance_time_ms(DALI_REPLY_TIMEOUT_MS);
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT, g_cb_result);
+}
+
+void test_early_and_late_malformed_activity_do_not_become_replies(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+
+    inject_rx_activity(DALI_REPLY_WINDOW_OPEN_US - 2u,
+                       DALI_REPLY_WINDOW_OPEN_US - 2u +
+                           DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+                       16u,
+                       DALI_ERR_MALFORMED);
+    inject_rx_activity(DALI_REPLY_WINDOW_CLOSE_US + 2u,
+                       DALI_REPLY_WINDOW_CLOSE_US + 2u +
+                           DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+                       16u,
+                       DALI_ERR_MALFORMED);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_rx_activity);
+    TEST_ASSERT_EQUAL_UINT32(2u, g_dali_stats.rx_ignored_outside_reply);
+
+    advance_time_ms(DALI_REPLY_TIMEOUT_MS);
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT, g_cb_result);
+}
+
+void test_in_window_short_malformed_activity_aborts_instead_of_becoming_no(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    inject_rx_activity(DALI_REPLY_WINDOW_OPEN_US + 1000u,
+                       DALI_REPLY_WINDOW_OPEN_US + 1200u,
+                       2u,
+                       DALI_ERR_MALFORMED);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED, g_cb_result);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_rx_activity);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_timeouts);
+}
+
+void test_in_window_ring_overflow_is_preserved_as_overflow(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    inject_rx_activity(DALI_REPLY_WINDOW_OPEN_US + 1000u,
+                       DALI_REPLY_WINDOW_OPEN_US + 1000u,
+                       DALI_PHY_RXDEBUG_MAX_EDGES,
+                       DALI_ERR_OVERFLOW);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_OVERFLOW, g_cb_result);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_rx_activity);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_timeouts);
+}
+
+/*
+ * A reply-window error is not automatically the end of the step.
+ *
+ * MALFORMED is one waveform the decoder could not read, and OVERFLOW is an
+ * event dropped because the RX ring filled — a local resource fault, not a fact
+ * about the bus. Neither carries meaning, and both are what a retry budget
+ * exists to survive. Before this split, either one ended the step outright, and
+ * with it the sequence that owned it.
+ *
+ * These anchor their injected timestamps on the microsecond clock reading at
+ * each TX. The default mock reports no precise TX end, so that reading is what
+ * the scheduler uses to open the reply window — and it moves on a retry, unlike
+ * the untimestamped inject_reply() the older retry tests use.
+ */
+void test_in_window_malformed_spends_a_retry_and_second_attempt_succeeds(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .retries_left = 1u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    uint32_t tx1_us = g_mock_time_us;
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+
+    /* Short/ambiguous activity: stays MALFORMED rather than being promoted to
+     * RX_ACTIVITY, so it is a candidate for the retry. */
+    inject_rx_activity(tx1_us + DALI_REPLY_WINDOW_OPEN_US + 1000u,
+                       tx1_us + DALI_REPLY_WINDOW_OPEN_US + 1200u,
+                       2u,
+                       DALI_ERR_MALFORMED);
+    dali_sched_run();
+
+    /* The retry is booked but held behind the same backoff a timeout uses: a
+     * straggling reply may still be on the wire. */
+    TEST_ASSERT_EQUAL(0, g_cb_count);
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.tx_retries);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_timeouts);
+
+    advance_past_retry_backoff();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+
+    advance_past_settle();
+    dali_sched_run();
+    inject_reply(0xAFu, 8u);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+    TEST_ASSERT_EQUAL_HEX32(0xAFu, g_cb_reply.data);
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+}
+
+void test_in_window_overflow_spends_a_retry(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .retries_left = 1u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    uint32_t tx1_us = g_mock_time_us;
+    advance_past_settle();
+    dali_sched_run();
+
+    inject_rx_activity(tx1_us + DALI_REPLY_WINDOW_OPEN_US + 1000u,
+                       tx1_us + DALI_REPLY_WINDOW_OPEN_US + 1000u,
+                       DALI_PHY_RXDEBUG_MAX_EDGES,
+                       DALI_ERR_OVERFLOW);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(0, g_cb_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.tx_retries);
+
+    advance_past_retry_backoff();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+}
+
+/* The budget is finite: a bus that keeps producing noise still terminates, and
+ * reports the error rather than a timeout. */
+void test_in_window_malformed_reports_error_once_the_budget_is_gone(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .retries_left = 1u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    uint32_t tx1_us = g_mock_time_us;
+    advance_past_settle();
+    dali_sched_run();
+    inject_rx_activity(tx1_us + DALI_REPLY_WINDOW_OPEN_US + 1000u,
+                       tx1_us + DALI_REPLY_WINDOW_OPEN_US + 1200u,
+                       2u,
+                       DALI_ERR_MALFORMED);
+    dali_sched_run();
+
+    advance_past_retry_backoff();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    uint32_t tx2_us = g_mock_time_us;
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+
+    /* Same noise on the second attempt, with nothing left to spend. */
+    inject_rx_activity(tx2_us + DALI_REPLY_WINDOW_OPEN_US + 1000u,
+                       tx2_us + DALI_REPLY_WINDOW_OPEN_US + 1200u,
+                       2u,
+                       DALI_ERR_MALFORMED);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED, g_cb_result);
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.tx_retries);
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+}
+
+void test_timestamped_activity_survives_delayed_wait_settle_state(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_SETTLE, dali_sched_state());
+    advance_time_ms(8u);
+    inject_rx_activity(DALI_REPLY_WINDOW_OPEN_US,
+                       DALI_REPLY_WINDOW_OPEN_US +
+                           DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+                       16u,
+                       DALI_ERR_MALFORMED);
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_RX_ACTIVITY, g_cb_result);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_timeouts);
+}
+
+void test_precise_phy_tx_end_is_preferred_over_delayed_task_clock(void)
+{
+    g_mock_time_us = 50000u;
+    g_mock_last_tx_end_us = 10000u;
+    g_mock_last_tx_end_result = DALI_OK;
+
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    inject_rx_activity(g_mock_last_tx_end_us + DALI_REPLY_WINDOW_OPEN_US,
+                       g_mock_last_tx_end_us + DALI_REPLY_WINDOW_OPEN_US +
+                           DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+                       16u,
+                       DALI_ERR_MALFORMED);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_RX_ACTIVITY, g_cb_result);
+}
+
+void test_timestamped_reply_survives_delayed_wait_settle_state(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_SETTLE, dali_sched_state());
+    advance_time_ms(8u);
+    DaliPhyRxObservation observation = {
+        .result = DALI_OK,
+        .frame = { .data = 0xA5u, .bit_length = DALI_BACKWARD_FRAME_BITS },
+        .first_edge_us = DALI_REPLY_WINDOW_OPEN_US,
+        .last_edge_us = DALI_REPLY_WINDOW_OPEN_US + DALI_BIT_US * 9u,
+        .edge_count = 16u,
+        .has_timestamps = true,
+    };
+    dali_sched_notify_rx_observation(&observation);
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+    TEST_ASSERT_EQUAL_HEX8(0xA5u, g_cb_reply.data);
+}
+
+void test_timestamped_phy_callback_delivers_normal_backward_reply(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    DaliPhyRxObservation observation = {
+        .result = DALI_OK,
+        .frame = { .data = 0x5Au, .bit_length = DALI_BACKWARD_FRAME_BITS },
+        .first_edge_us = DALI_REPLY_WINDOW_OPEN_US,
+        .last_edge_us = DALI_REPLY_WINDOW_OPEN_US + DALI_BIT_US * 9u,
+        .edge_count = 16u,
+        .has_timestamps = true,
+    };
+    inject_phy_observation(&observation);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+    TEST_ASSERT_EQUAL_HEX8(0x5Au, g_cb_reply.data);
+}
+
+/*
+ * The open edge a decoded backward frame is held to is
+ * DALI_REPLY_WINDOW_OPEN_DECODED_US, not the standard's
+ * DALI_REPLY_WINDOW_OPEN_US — see the constant for why the two differ. This
+ * test is about frames outside the window at all, so it uses the edge that
+ * actually applies to a decoded frame.
+ */
+void test_timestamped_phy_callback_rejects_early_and_late_backward_frames(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    DaliPhyRxObservation observation = {
+        .result = DALI_OK,
+        .frame = { .data = 0x5Au, .bit_length = DALI_BACKWARD_FRAME_BITS },
+        .first_edge_us = DALI_REPLY_WINDOW_OPEN_DECODED_US - 2u,
+        .last_edge_us = DALI_REPLY_WINDOW_OPEN_DECODED_US + DALI_BIT_US * 9u,
+        .edge_count = 16u,
+        .has_timestamps = true,
+    };
+    inject_phy_observation(&observation);
+    observation.first_edge_us = DALI_REPLY_WINDOW_CLOSE_US + 2u;
+    observation.last_edge_us =
+        observation.first_edge_us + DALI_BIT_US * 9u;
+    inject_phy_observation(&observation);
+
+    advance_time_ms(DALI_REPLY_TIMEOUT_MS);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT, g_cb_result);
+    TEST_ASSERT_EQUAL_UINT32(2u, g_dali_stats.rx_ignored_outside_reply);
+}
+
 /* 4. Stray RX while idle must not complete the next transaction */
 void test_stray_rx_while_idle_is_ignored(void)
 {
@@ -577,6 +1135,59 @@ void test_reply_accepted_when_run_delayed_past_window(void)
     TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
     TEST_ASSERT_EQUAL_HEX32(0xAFu, g_cb_reply.data);
     TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_timeouts);
+}
+
+void test_timestamped_activity_captured_in_window_survives_delayed_run(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    advance_time_ms(DALI_REPLY_TIMEOUT_MS);
+
+    inject_rx_activity(DALI_REPLY_WINDOW_OPEN_US,
+                       DALI_REPLY_WINDOW_OPEN_US +
+                           DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+                       16u,
+                       DALI_ERR_MALFORMED);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_RX_ACTIVITY, g_cb_result);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_timeouts);
+}
+
+void test_rx_activity_window_handles_microsecond_clock_wrap(void)
+{
+    const uint32_t tx_end_us = 0xFFFFF000u;
+    g_mock_time_us = tx_end_us;
+    g_mock_tick_ms = 1000u;
+
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    inject_rx_activity(tx_end_us + DALI_REPLY_WINDOW_OPEN_US,
+                       tx_end_us + DALI_REPLY_WINDOW_OPEN_US +
+                           DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+                       16u,
+                       DALI_ERR_MALFORMED);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_RX_ACTIVITY, g_cb_result);
 }
 
 /* 6b. RX arriving after run() has already fired the timeout must be ignored */
@@ -2261,9 +2872,26 @@ int main(void)
     RUN_TEST(test_reset_preserves_active_forward_gap);
     RUN_TEST(test_coarse_clock_rejects_ambiguous_100ms_repeat);
     RUN_TEST(test_reply_received);
+    RUN_TEST(test_frame_like_rx_activity_completes_reply_with_distinct_error);
+    RUN_TEST(test_reply_between_minimum_and_nominal_settling_is_accepted);
+    RUN_TEST(test_decoded_backward_frame_is_accepted_before_the_standard_open);
+    RUN_TEST(test_malformed_activity_keeps_the_standard_open_edge);
+    RUN_TEST(test_early_and_late_malformed_activity_do_not_become_replies);
+    RUN_TEST(test_in_window_short_malformed_activity_aborts_instead_of_becoming_no);
+    RUN_TEST(test_in_window_ring_overflow_is_preserved_as_overflow);
+    RUN_TEST(test_in_window_malformed_spends_a_retry_and_second_attempt_succeeds);
+    RUN_TEST(test_in_window_overflow_spends_a_retry);
+    RUN_TEST(test_in_window_malformed_reports_error_once_the_budget_is_gone);
+    RUN_TEST(test_timestamped_activity_survives_delayed_wait_settle_state);
+    RUN_TEST(test_precise_phy_tx_end_is_preferred_over_delayed_task_clock);
+    RUN_TEST(test_timestamped_reply_survives_delayed_wait_settle_state);
+    RUN_TEST(test_timestamped_phy_callback_delivers_normal_backward_reply);
+    RUN_TEST(test_timestamped_phy_callback_rejects_early_and_late_backward_frames);
     RUN_TEST(test_stray_rx_while_idle_is_ignored);
     RUN_TEST(test_stale_duplicate_rx_does_not_overwrite_latched_reply);
     RUN_TEST(test_reply_accepted_when_run_delayed_past_window);
+    RUN_TEST(test_timestamped_activity_captured_in_window_survives_delayed_run);
+    RUN_TEST(test_rx_activity_window_handles_microsecond_clock_wrap);
     RUN_TEST(test_late_rx_after_reply_timeout_is_ignored);
     RUN_TEST(test_unsolicited_24bit_idle_routes_event);
     RUN_TEST(test_init_starts_with_no_subscribers);

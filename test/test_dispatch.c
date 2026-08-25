@@ -142,10 +142,12 @@ void test_observe_recall_max_infers_on_without_tx(void)
     dali_sched_run();
 
     TEST_ASSERT_EQUAL_UINT8(0u, s_tx_count);
+    /* Known on, for toggle bookkeeping... */
     TEST_ASSERT_TRUE((state.group_on >> 6u) & 1u);
-    TEST_ASSERT_TRUE(result.has_state);
-    TEST_ASSERT_TRUE(result.is_on);
-    TEST_ASSERT_EQUAL_UINT8(254u, result.level);
+    /* ...but the resulting level is the gear's MAX LEVEL, which is not
+     * knowable here and is only 254 when MAX LEVEL was never reduced. */
+    TEST_ASSERT_TRUE(result.matched);
+    TEST_ASSERT_FALSE(result.has_state);
     TEST_ASSERT_EQUAL_INT(DALI_ADDR_GROUP, result.target.type);
     TEST_ASSERT_EQUAL_UINT8(6u, result.target.address);
 }
@@ -424,8 +426,11 @@ void test_broadcast_toggle_flips_between_recall_max_and_off(void)
     dali_sched_run();
     TEST_ASSERT_EQUAL_UINT8(1u, s_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0xFF05u, s_last_tx.data);
+    /* The toggle knows it turned things on; the published state does not claim
+     * a level, because the on branch is RECALL MAX. */
     TEST_ASSERT_TRUE(state.broadcast_on);
-    TEST_ASSERT_TRUE(result.is_on);
+    TEST_ASSERT_TRUE(result.matched);
+    TEST_ASSERT_FALSE(result.has_state);
 
     TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(table, 1u, &ev, &state, &result));
     advance_to_next_forward();
@@ -433,7 +438,10 @@ void test_broadcast_toggle_flips_between_recall_max_and_off(void)
     TEST_ASSERT_EQUAL_UINT8(2u, s_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0xFF00u, s_last_tx.data);
     TEST_ASSERT_FALSE(state.broadcast_on);
+    /* OFF is exactly level 0, so this half still publishes a state. */
+    TEST_ASSERT_TRUE(result.has_state);
     TEST_ASSERT_FALSE(result.is_on);
+    TEST_ASSERT_EQUAL_UINT8(0u, result.level);
 }
 
 void test_dali2_device_instance_matches_canonical_address_and_instance(void)
@@ -593,7 +601,7 @@ void test_first_matching_entry_wins(void)
 
 /* ── Result inference tests ──────────────────────────────────────────────── */
 
-void test_result_mirror_recall_max_infers_on_level_254(void)
+void test_result_mirror_recall_max_does_not_claim_a_level(void)
 {
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 6, true, 0x05u);
     DaliDispatchEntry table[] = {
@@ -604,11 +612,39 @@ void test_result_mirror_recall_max_infers_on_level_254(void)
     DaliDispatchResult result = { .has_state = false };
 
     TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(table, 1u, &ev, NULL, &result));
-    TEST_ASSERT_TRUE(result.has_state);
-    TEST_ASSERT_TRUE(result.is_on);
-    TEST_ASSERT_EQUAL_UINT8(254u, result.level);
+    TEST_ASSERT_TRUE(result.matched);
+    TEST_ASSERT_FALSE(result.has_state);
     TEST_ASSERT_EQUAL_INT(DALI_ADDR_GROUP, result.target.type);
     TEST_ASSERT_EQUAL_UINT8(6u, result.target.address);
+}
+
+/*
+ * STEP DOWN AND OFF switches off only if the gear was already at its minimum;
+ * otherwise it steps down one point and stays on. Claiming "off, level 0" was
+ * wrong for every gear above minimum.
+ */
+void test_result_step_down_and_off_claims_neither_state_nor_level(void)
+{
+    DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 6, true, 0x07u);
+    DaliDispatchEntry table[] = {
+        { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 6,
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+          { DALI_ADDR_GROUP, 6 }, DALI_DISPATCH_ACTION_OBSERVE, 0 },
+    };
+    DaliDispatchToggleState state = {};
+    DaliDispatchResult result = {};
+
+    /* Seed the toggle on, as a prior RECALL MAX would have. */
+    dali_dispatch_seed_toggle(&state, (DaliTarget){ DALI_ADDR_GROUP, 6 }, true);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(table, 1u, &ev, &state, &result));
+
+    TEST_ASSERT_EQUAL_UINT8(0u, s_tx_count);
+    TEST_ASSERT_TRUE(result.matched);
+    TEST_ASSERT_FALSE(result.has_state);
+    /* The toggle is left as it was rather than being flipped to off on a guess;
+     * the deferred actual-level query is what settles it. */
+    TEST_ASSERT_TRUE((state.group_on >> 6u) & 1u);
 }
 
 void test_result_mirror_off_infers_off(void)
@@ -658,7 +694,7 @@ void test_result_action_off_infers_off(void)
     TEST_ASSERT_EQUAL_UINT8(3u, result.target.address);
 }
 
-void test_result_action_recall_max_infers_on(void)
+void test_result_action_recall_max_does_not_claim_a_level(void)
 {
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 0, true, 0x00u);
     DaliDispatchEntry table[] = {
@@ -669,9 +705,8 @@ void test_result_action_recall_max_infers_on(void)
     DaliDispatchResult result = {};
 
     TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(table, 1u, &ev, NULL, &result));
-    TEST_ASSERT_TRUE(result.has_state);
-    TEST_ASSERT_TRUE(result.is_on);
-    TEST_ASSERT_EQUAL_UINT8(254u, result.level);
+    TEST_ASSERT_TRUE(result.matched);
+    TEST_ASSERT_FALSE(result.has_state);
     TEST_ASSERT_EQUAL_UINT8(5u, result.target.address);
 }
 
@@ -685,13 +720,13 @@ void test_result_toggle_infers_state(void)
     DaliDispatchToggleState state = {};
     DaliDispatchResult result = {};
 
-    /* First press: off → on */
+    /* First press: off → on. The on branch is RECALL MAX, so the level is the
+     * gear's own MAX LEVEL and is left for the deferred query to report. */
     TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(table, 1u, &ev, &state, &result));
-    TEST_ASSERT_TRUE(result.has_state);
-    TEST_ASSERT_TRUE(result.is_on);
-    TEST_ASSERT_EQUAL_UINT8(254u, result.level);
+    TEST_ASSERT_TRUE(result.matched);
+    TEST_ASSERT_FALSE(result.has_state);
 
-    /* Second press: on → off */
+    /* Second press: on → off. OFF is exactly level 0 on any gear. */
     TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(table, 1u, &ev, &state, &result));
     TEST_ASSERT_TRUE(result.has_state);
     TEST_ASSERT_FALSE(result.is_on);
@@ -738,11 +773,12 @@ int main(void)
     RUN_TEST(test_mirror_updates_toggle_state);
     RUN_TEST(test_first_matching_entry_wins);
     /* DaliDispatchResult inference */
-    RUN_TEST(test_result_mirror_recall_max_infers_on_level_254);
+    RUN_TEST(test_result_mirror_recall_max_does_not_claim_a_level);
+    RUN_TEST(test_result_step_down_and_off_claims_neither_state_nor_level);
     RUN_TEST(test_result_mirror_off_infers_off);
     RUN_TEST(test_result_mirror_dim_has_no_state);
     RUN_TEST(test_result_action_off_infers_off);
-    RUN_TEST(test_result_action_recall_max_infers_on);
+    RUN_TEST(test_result_action_recall_max_does_not_claim_a_level);
     RUN_TEST(test_result_toggle_infers_state);
     RUN_TEST(test_result_null_result_out_does_not_crash);
     return UNITY_END();

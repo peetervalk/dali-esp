@@ -78,7 +78,7 @@ static void toggle_set(DaliDispatchToggleState *state, DaliTarget out, bool on)
  * entries on overlapping targets stay consistent.
  *
  * Returns DALI_ERR_INVALID for DAPC frames (address_selector = 0) or
- * unrecognised opcodes — caller treats these as no-match.
+ * unrecognized opcodes — caller treats these as no-match.
  */
 static DaliError apply_mirror(const DaliInputEvent    *event,
                               DaliTarget               out,
@@ -183,17 +183,21 @@ static DaliError observe_legacy(const DaliInputEvent    *event,
         case 0x04u:
             result_unknown(result_out, out);
             return DALI_OK;
-        case 0x05u:
+        case 0x05u:   /* RECALL MAX LEVEL */
+            /* On, at the gear's MAX LEVEL — not necessarily 254. */
             toggle_set(state, out, true);
-            result_set(result_out, out, true, 254u);
+            result_unknown(result_out, out);
             return DALI_OK;
         case 0x06u:
             toggle_set(state, out, true);
             result_unknown(result_out, out);
             return DALI_OK;
-        case 0x07u:
-            toggle_set(state, out, false);
-            result_set(result_out, out, false, 0u);
+        case 0x07u:   /* STEP DOWN AND OFF */
+            /* Switches off only if the gear was already at its minimum;
+             * otherwise it steps down and stays on. Neither the level nor the
+             * on/off state can be known here, so leave the toggle alone and let
+             * the deferred actual-level query settle both. */
+            result_unknown(result_out, out);
             return DALI_OK;
         case 0x08u:
             toggle_set(state, out, true);
@@ -245,7 +249,11 @@ DaliError dali_dispatch(const DaliDispatchEntry  *table,
                 err = dali_control_recall_max(e->output);
                 if (err == DALI_OK) {
                     toggle_set(toggle_state, e->output, true);
-                    result_set(result_out, e->output, true, 254u);
+                    /* The gear lands on its own MAX LEVEL, which is 254 only
+                     * when MAX LEVEL was never reduced. Assert that it is on
+                     * and let the deferred actual-level query supply the
+                     * number, as RECALL MIN already does. */
+                    result_unknown(result_out, e->output);
                 }
                 return err;
 
@@ -291,7 +299,13 @@ DaliError dali_dispatch(const DaliDispatchEntry  *table,
                          : dali_control_recall_max(e->output);
                 if (err == DALI_OK) {
                     toggle_set(toggle_state, e->output, !on);
-                    result_set(result_out, e->output, !on, !on ? 254u : 0u);
+                    if (on) {
+                        /* OFF is exactly level 0 whatever the gear limits. */
+                        result_set(result_out, e->output, false, 0u);
+                    } else {
+                        /* The on branch is RECALL MAX; see above. */
+                        result_unknown(result_out, e->output);
+                    }
                 }
                 return err;
             }

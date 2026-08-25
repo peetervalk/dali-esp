@@ -28,10 +28,23 @@ typedef struct {
     uint16_t   log_count;
     uint32_t   search_address;
     uint8_t    initialise_count;
-    uint8_t    randomize_count;
+    uint8_t    randomise_count;
     uint8_t    withdraw_count;
     uint8_t    fail_opcode;   /* 0 = no injected fault */
     DaliError  fail_err;
+    bool       cancelled;
+    uint8_t    cleanup_count;
+    DaliError  cleanup_error;
+    bool       sequence_timeout_with_unknown_progress;
+    uint8_t    delay_count;
+    uint32_t   delay_total_ms;
+    uint8_t    quiescent_start_count;
+    uint8_t    quiescent_stop_count;
+    /* Injected failure for the Part 103 broadcasts, by opcode (0x1D/0x1E). */
+    uint8_t    quiescent_fail_opcode;
+    DaliError  quiescent_fail_err;
+    /* Frame most recently on the bus when a settle wait was requested. */
+    uint32_t   delay_last_frame_data;
 } MockCommissioningBus;
 
 static MockCommissioningBus s_bus;
@@ -114,7 +127,7 @@ static DaliError mock_special_no_reply(uint8_t opcode, uint8_t param)
             return DALI_OK;
 
         case 0xA7u:
-            s_bus.randomize_count++;
+            s_bus.randomise_count++;
             return DALI_OK;
 
         case 0xABu:
@@ -218,6 +231,39 @@ static DaliError mock_special_reply(uint8_t opcode,
     }
 }
 
+/*
+ * Part 103 device-level broadcasts. The only ones commissioning sends are the
+ * quiescent pair; anything else 24-bit reaching this mock is a bug in the code
+ * under test, so it fails loudly rather than being counted.
+ */
+static DaliError mock_device_broadcast(const DaliFrame *frame,
+                                       bool needs_reply,
+                                       bool send_twice)
+{
+    uint8_t addr_byte = (uint8_t)((frame->data >> 16u) & 0xFFu);
+    uint8_t inst_byte = (uint8_t)((frame->data >> 8u) & 0xFFu);
+    uint8_t opcode    = (uint8_t)(frame->data & 0xFFu);
+
+    TEST_ASSERT_EQUAL_HEX8(DALI_BROADCAST_COMMAND_ADDRESS, addr_byte);
+    TEST_ASSERT_EQUAL_HEX8(DALI_DEVICE_INSTANCE, inst_byte);
+    TEST_ASSERT_FALSE(needs_reply);
+    TEST_ASSERT_TRUE_MESSAGE(send_twice,
+                             "quiescent mode is a send-twice command");
+
+    if (opcode == 0x1Du) {
+        s_bus.quiescent_start_count++;
+    } else if (opcode == 0x1Eu) {
+        s_bus.quiescent_stop_count++;
+    } else {
+        TEST_FAIL_MESSAGE("unexpected 24-bit device broadcast");
+    }
+
+    if (s_bus.quiescent_fail_opcode == opcode) {
+        return s_bus.quiescent_fail_err;
+    }
+    return DALI_OK;
+}
+
 static DaliError mock_transact(const DaliFrame *frame,
                                bool needs_reply,
                                uint8_t retries_left,
@@ -226,7 +272,14 @@ static DaliError mock_transact(const DaliFrame *frame,
                                void *ctx)
 {
     (void)ctx;
+    if (s_bus.cancelled) {
+        return DALI_ERR_CANCELLED;
+    }
     TEST_ASSERT_NOT_NULL(frame);
+    if (frame->bit_length == DALI_EXTENDED_FRAME_BITS) {
+        mock_log_tx(frame, needs_reply, retries_left, send_twice);
+        return mock_device_broadcast(frame, needs_reply, send_twice);
+    }
     TEST_ASSERT_EQUAL_UINT8(DALI_FORWARD_FRAME_BITS, frame->bit_length);
     mock_log_tx(frame, needs_reply, retries_left, send_twice);
 
@@ -243,9 +296,42 @@ static DaliError mock_transact(const DaliFrame *frame,
     return mock_special_no_reply(opcode, param);
 }
 
+static DaliError mock_cleanup_transact(const DaliFrame *frame,
+                                       bool needs_reply,
+                                       uint8_t retries_left,
+                                       bool send_twice,
+                                       DaliFrame *reply_out,
+                                       void *ctx)
+{
+    (void)ctx;
+    TEST_ASSERT_NOT_NULL(frame);
+    TEST_ASSERT_FALSE(needs_reply);
+    TEST_ASSERT_EQUAL_UINT8(0u, retries_left);
+    TEST_ASSERT_NULL(reply_out);
+
+    /* STOP QUIESCENT MODE unwinds through here too, and unlike TERMINATE it is
+     * send-twice and 24-bit. It must not be gated on cleanup_error, which
+     * exists to fail the gear-side TERMINATE. */
+    if (frame->bit_length == DALI_EXTENDED_FRAME_BITS) {
+        mock_log_tx(frame, false, 0u, send_twice);
+        return mock_device_broadcast(frame, false, send_twice);
+    }
+
+    TEST_ASSERT_FALSE(send_twice);
+    s_bus.cleanup_count++;
+    mock_log_tx(frame, false, 0u, false);
+    if (s_bus.cleanup_error != DALI_OK) {
+        return s_bus.cleanup_error;
+    }
+
+    uint8_t opcode = (uint8_t)((frame->data >> 8u) & 0xFFu);
+    uint8_t param = (uint8_t)(frame->data & 0xFFu);
+    return mock_special_no_reply(opcode, param);
+}
+
 static DaliError mock_transact_sequence(const DaliSequence *seq,
-                                        DaliSequenceResult *result_out,
-                                        void *ctx)
+                                         DaliSequenceResult *result_out,
+                                         void *ctx)
 {
     if (seq == NULL) {
         return DALI_ERR_INVALID;
@@ -255,6 +341,13 @@ static DaliError mock_transact_sequence(const DaliSequence *seq,
         .result = DALI_OK,
         .failed_step = DALI_SEQUENCE_NO_FAILED_STEP,
     };
+    if (s_bus.sequence_timeout_with_unknown_progress) {
+        result.result = DALI_ERR_TIMEOUT;
+        if (result_out != NULL) {
+            *result_out = result;
+        }
+        return result.result;
+    }
     for (uint8_t i = 0u; i < seq->step_count; i++) {
         const DaliSequenceStep *step = &seq->steps[i];
         DaliFrame reply = {0u, 0u};
@@ -285,13 +378,61 @@ static DaliError mock_transact_sequence(const DaliSequence *seq,
     return DALI_OK;
 }
 
+static void mock_delay_ms(uint32_t ms, void *ctx)
+{
+    (void)ctx;
+    s_bus.delay_count++;
+    s_bus.delay_total_ms += ms;
+    s_bus.delay_last_frame_data =
+        s_bus.log_count > 0u ? s_bus.log[s_bus.log_count - 1u].data : 0u;
+}
+
 static DaliDiscoveryTransport transport(void)
 {
     return (DaliDiscoveryTransport){
         .transact = mock_transact,
         .transact_sequence = mock_transact_sequence,
         .ctx = NULL,
+        .transact_cleanup = mock_cleanup_transact,
+        .delay_ms = mock_delay_ms,
     };
+}
+
+static DaliError mock_rx_activity_transact(const DaliFrame *frame,
+                                           bool needs_reply,
+                                           uint8_t retries_left,
+                                           bool send_twice,
+                                           DaliFrame *reply_out,
+                                           void *ctx)
+{
+    (void)ctx;
+    TEST_ASSERT_NOT_NULL(frame);
+    TEST_ASSERT_TRUE(needs_reply);
+    TEST_ASSERT_EQUAL_UINT8(DALI_COMMISSIONING_QUERY_RETRIES_LEFT,
+                            retries_left);
+    TEST_ASSERT_FALSE(send_twice);
+    TEST_ASSERT_NOT_NULL(reply_out);
+    return DALI_ERR_RX_ACTIVITY;
+}
+
+static DaliError mock_non_yes_transact(const DaliFrame *frame,
+                                       bool needs_reply,
+                                       uint8_t retries_left,
+                                       bool send_twice,
+                                       DaliFrame *reply_out,
+                                       void *ctx)
+{
+    (void)frame;
+    (void)retries_left;
+    (void)send_twice;
+    (void)ctx;
+    TEST_ASSERT_TRUE(needs_reply);
+    TEST_ASSERT_NOT_NULL(reply_out);
+    *reply_out = (DaliFrame){
+        .data = 0x00u,
+        .bit_length = DALI_BACKWARD_FRAME_BITS,
+    };
+    return DALI_OK;
 }
 
 void setUp(void)
@@ -410,6 +551,12 @@ void test_commission_unaddressed_assigns_free_short_addresses_in_order(void)
     TEST_ASSERT_TRUE(result.no_more_devices);
     TEST_ASSERT_FALSE(result.address_space_full);
     TEST_ASSERT_EQUAL(DALI_OK, result.last_error);
+    TEST_ASSERT_TRUE(result.termination_required);
+    TEST_ASSERT_TRUE(result.termination_attempted);
+    TEST_ASSERT_TRUE(result.terminate_tx_succeeded);
+    TEST_ASSERT_FALSE(result.initialisation_state_unknown);
+    TEST_ASSERT_EQUAL(DALI_OK, result.cleanup_error);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.cleanup_count);
 
     TEST_ASSERT_EQUAL_HEX32(0x010203u, result.assignments[0].random_address);
     TEST_ASSERT_EQUAL_UINT8(2u, result.assignments[0].short_address);
@@ -422,7 +569,7 @@ void test_commission_unaddressed_assigns_free_short_addresses_in_order(void)
     TEST_ASSERT_EQUAL_UINT8(3u, result.assignments[1].short_address);
 
     TEST_ASSERT_EQUAL_UINT8(1u, s_bus.initialise_count);
-    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.randomize_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.randomise_count);
     TEST_ASSERT_EQUAL_UINT8(2u, s_bus.withdraw_count);
     TEST_ASSERT_EQUAL_UINT8(2u, s_bus.devices[0].short_address);
     TEST_ASSERT_EQUAL_UINT8(3u, s_bus.devices[1].short_address);
@@ -485,6 +632,36 @@ void test_commission_unaddressed_returns_without_tx_when_address_space_full(void
 
     TEST_ASSERT_EQUAL_UINT8(0u, result.assigned_count);
     TEST_ASSERT_TRUE(result.address_space_full);
+    TEST_ASSERT_FALSE(result.termination_required);
+    TEST_ASSERT_FALSE(result.termination_attempted);
+    TEST_ASSERT_FALSE(result.terminate_tx_succeeded);
+    TEST_ASSERT_FALSE(result.initialisation_state_unknown);
+    TEST_ASSERT_EQUAL(DALI_OK, result.cleanup_error);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_bus.cleanup_count);
+    TEST_ASSERT_EQUAL_UINT16(0u, s_bus.log_count);
+}
+
+void test_commission_unaddressed_rejects_frame_only_transport_without_traffic(void)
+{
+    DaliDiscoveryTransport frame_only = {
+        .transact = mock_transact,
+        .transact_cleanup = mock_cleanup_transact,
+    };
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 1u,
+        .used_address_mask = 0u,
+        .query_short_address = false,
+    };
+    DaliCommissioningResult result;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_commissioning_commission_unaddressed(
+                          &frame_only, &options, &result, NULL, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID, result.last_error);
+    TEST_ASSERT_FALSE(result.termination_required);
+    TEST_ASSERT_FALSE(result.termination_attempted);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_bus.cleanup_count);
     TEST_ASSERT_EQUAL_UINT16(0u, s_bus.log_count);
 }
 
@@ -516,6 +693,118 @@ void test_inventory_used_mask_marks_control_gear_only(void)
     TEST_ASSERT_NOT_EQUAL(0u, (mask & ((uint64_t)1u << 4u)));
     TEST_ASSERT_NOT_EQUAL(0u, (mask & ((uint64_t)1u << 63u)));
     TEST_ASSERT_EQUAL(0u, (mask & ((uint64_t)1u << 5u)));
+}
+
+void test_inventory_used_mask_reserves_undecodable_addresses(void)
+{
+    DaliDiscoveryInventory inventory;
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_discovery_inventory_reset(&inventory));
+
+    /*
+     * An address that answered a gear QUERY STATUS with undecodable activity is
+     * occupied even though nothing could be read from it. Handing it back as
+     * free would let a run assign a further device onto a contested address.
+     */
+    inventory.devices[9u].has_undecodable_activity = true;
+    inventory.undecodable_count = 1u;
+
+    uint64_t mask = dali_commissioning_used_mask_from_inventory(&inventory);
+    TEST_ASSERT_NOT_EQUAL(0u, (mask & ((uint64_t)1u << 9u)));
+    TEST_ASSERT_EQUAL(0u, (mask & ((uint64_t)1u << 10u)));
+}
+
+void test_commission_skips_undecodable_addresses(void)
+{
+    DaliDiscoveryInventory inventory;
+    TEST_ASSERT_EQUAL(DALI_OK, dali_discovery_inventory_reset(&inventory));
+    inventory.devices[0u].has_undecodable_activity = true;
+
+    DaliDiscoveryTransport t = transport();
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 1u,
+        .used_address_mask = dali_commissioning_used_mask_from_inventory(&inventory),
+        .query_short_address = false,
+    };
+    DaliCommissioningResult result;
+
+    mock_add_device(0u, 0x000123u);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_commission_unaddressed(&t,
+                                                                &options,
+                                                                &result,
+                                                                NULL,
+                                                                NULL));
+
+    /* Address 0 is contested, so the first assignment lands on 1. */
+    TEST_ASSERT_EQUAL_UINT8(1u, result.assigned_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, result.assignments[0].short_address);
+}
+
+void test_opening_settles_after_randomise_before_first_compare(void)
+{
+    DaliDiscoveryTransport t = transport();
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 1u,
+        .used_address_mask = 0u,
+        .query_short_address = false,
+    };
+    DaliCommissioningResult result;
+
+    mock_add_device(0u, 0x000123u);
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_commission_unaddressed(&t,
+                                                                &options,
+                                                                &result,
+                                                                NULL,
+                                                                NULL));
+
+    /*
+     * Exactly one settle, of the documented duration, and taken while RANDOMISE
+     * was the last frame on the bus. Gear that has not finished generating its
+     * random address answers no COMPARE, which reads as an empty bus rather than
+     * as an error — so the wait existing is not enough, it has to land here.
+     */
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.delay_count);
+    TEST_ASSERT_EQUAL_UINT32(DALI_COMMISSIONING_RANDOMISE_SETTLE_MS,
+                             s_bus.delay_total_ms);
+    TEST_ASSERT_EQUAL_HEX32(0xA700u, s_bus.delay_last_frame_data);
+}
+
+void test_commission_rejects_transport_without_settle_wait_and_sends_nothing(void)
+{
+    /* Atomic sequences, cleanup, everything but the settle wait. */
+    DaliDiscoveryTransport no_delay = {
+        .transact = mock_transact,
+        .transact_sequence = mock_transact_sequence,
+        .ctx = NULL,
+        .transact_cleanup = mock_cleanup_transact,
+    };
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 1u,
+        .used_address_mask = 0u,
+        .query_short_address = false,
+    };
+    DaliCommissioningResult result;
+
+    mock_add_device(0u, 0x000123u);
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_commissioning_commission_unaddressed(&no_delay,
+                                                                &options,
+                                                                &result,
+                                                                NULL,
+                                                                NULL));
+
+    /* Refused before INITIALISE, so no gear is left in initialisation state. */
+    TEST_ASSERT_EQUAL_UINT16(0u, s_bus.log_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_bus.initialise_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_bus.cleanup_count);
+    TEST_ASSERT_FALSE(result.termination_required);
+    TEST_ASSERT_FALSE(result.initialisation_state_unknown);
 }
 
 void test_invalid_arguments_are_rejected(void)
@@ -603,7 +892,7 @@ void test_build_start_sequence_layout(void)
                             seq.step_count);
 
     /* TERMINATE 0xA1, INITIALISE 0xA5 with the unaddressed parameter,
-     * RANDOMIZE 0xA7. */
+     * RANDOMISE 0xA7. */
     const DaliSequenceStep *terminate =
         &seq.steps[DALI_COMMISSIONING_START_STEP_TERMINATE];
     TEST_ASSERT_EQUAL_HEX32(0xA100u, terminate->frame.data);
@@ -616,16 +905,16 @@ void test_build_start_sequence_layout(void)
         initialise->frame.data);
     TEST_ASSERT_TRUE(initialise->send_twice);
 
-    const DaliSequenceStep *randomize =
-        &seq.steps[DALI_COMMISSIONING_START_STEP_RANDOMIZE];
-    TEST_ASSERT_EQUAL_HEX32(0xA700u, randomize->frame.data);
-    TEST_ASSERT_TRUE(randomize->send_twice);
+    const DaliSequenceStep *randomise =
+        &seq.steps[DALI_COMMISSIONING_START_STEP_RANDOMISE];
+    TEST_ASSERT_EQUAL_HEX32(0xA700u, randomise->frame.data);
+    TEST_ASSERT_TRUE(randomise->send_twice);
 
     for (uint8_t i = 0u; i < DALI_COMMISSIONING_START_SEQUENCE_STEPS; i++) {
         TEST_ASSERT_EQUAL_UINT8(DALI_FORWARD_FRAME_BITS,
                                 seq.steps[i].frame.bit_length);
         TEST_ASSERT_FALSE(seq.steps[i].needs_reply);
-        /* A repeated RANDOMIZE would hand out fresh random addresses. */
+        /* A repeated RANDOMISE would hand out fresh random addresses. */
         TEST_ASSERT_EQUAL_UINT8(0u, seq.steps[i].retries_left);
     }
 
@@ -644,12 +933,165 @@ static uint16_t count_frames_with_opcode(uint8_t opcode)
     return count;
 }
 
+static void cancel_after_randomised(const DaliCommissioningEvent *event,
+                                    void *ctx)
+{
+    (void)ctx;
+    TEST_ASSERT_NOT_NULL(event);
+    if (event->kind == DALI_COMMISSIONING_EVENT_RANDOMISED) {
+        s_bus.cancelled = true;
+    }
+}
+
+void test_cancellation_after_start_uses_safety_terminate(void)
+{
+    DaliDiscoveryTransport t = transport();
+    mock_add_device(0u, 0x000010u);
+
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 1u,
+        .used_address_mask = 0u,
+        .query_short_address = false,
+    };
+    DaliCommissioningResult result;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_CANCELLED,
+                      dali_commissioning_commission_unaddressed(
+                          &t,
+                          &options,
+                          &result,
+                          cancel_after_randomised,
+                          NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_CANCELLED, result.last_error);
+    TEST_ASSERT_TRUE(result.termination_required);
+    TEST_ASSERT_TRUE(result.termination_attempted);
+    TEST_ASSERT_TRUE(result.terminate_tx_succeeded);
+    TEST_ASSERT_FALSE(result.initialisation_state_unknown);
+    TEST_ASSERT_EQUAL(DALI_OK, result.cleanup_error);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.cleanup_count);
+    TEST_ASSERT_EQUAL_UINT16(2u, count_frames_with_opcode(0xA1u));
+    TEST_ASSERT_FALSE(s_bus.devices[0].active);
+}
+
+void test_opening_sequence_unknown_progress_still_uses_safety_terminate(void)
+{
+    DaliDiscoveryTransport t = transport();
+    s_bus.sequence_timeout_with_unknown_progress = true;
+
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 1u,
+        .used_address_mask = 0u,
+        .query_short_address = false,
+    };
+    DaliCommissioningResult result;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT,
+                      dali_commissioning_commission_unaddressed(
+                          &t, &options, &result, NULL, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT, result.last_error);
+    TEST_ASSERT_TRUE(result.termination_required);
+    TEST_ASSERT_TRUE(result.termination_attempted);
+    TEST_ASSERT_TRUE(result.terminate_tx_succeeded);
+    TEST_ASSERT_FALSE(result.initialisation_state_unknown);
+    TEST_ASSERT_EQUAL(DALI_OK, result.cleanup_error);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.cleanup_count);
+    TEST_ASSERT_EQUAL_UINT16(1u, count_frames_with_opcode(0xA1u));
+}
+
+void test_cancelled_fallback_cleanup_reports_unconfirmed_initialisation_state(void)
+{
+    DaliDiscoveryTransport t = transport();
+    t.transact_cleanup = NULL;
+    mock_add_device(0u, 0x000010u);
+
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 1u,
+        .used_address_mask = 0u,
+        .query_short_address = false,
+    };
+    DaliCommissioningResult result;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_CANCELLED,
+                      dali_commissioning_commission_unaddressed(
+                          &t,
+                          &options,
+                          &result,
+                          cancel_after_randomised,
+                          NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_CANCELLED, result.last_error);
+    TEST_ASSERT_TRUE(result.termination_attempted);
+    TEST_ASSERT_FALSE(result.terminate_tx_succeeded);
+    TEST_ASSERT_TRUE(result.initialisation_state_unknown);
+    TEST_ASSERT_EQUAL(DALI_ERR_CANCELLED, result.cleanup_error);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_bus.cleanup_count);
+}
+
+void test_cleanup_failure_preserves_primary_and_marks_initialisation_unknown(void)
+{
+    DaliDiscoveryTransport t = transport();
+    mock_add_device(0u, 0x000010u);
+    s_bus.cleanup_error = DALI_ERR_BUS_STUCK;
+
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 1u,
+        .used_address_mask = 0u,
+        .query_short_address = false,
+    };
+    DaliCommissioningResult result;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_CANCELLED,
+                      dali_commissioning_commission_unaddressed(
+                          &t,
+                          &options,
+                          &result,
+                          cancel_after_randomised,
+                          NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_CANCELLED, result.last_error);
+    TEST_ASSERT_TRUE(result.termination_required);
+    TEST_ASSERT_TRUE(result.termination_attempted);
+    TEST_ASSERT_FALSE(result.terminate_tx_succeeded);
+    TEST_ASSERT_TRUE(result.initialisation_state_unknown);
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK, result.cleanup_error);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.cleanup_count);
+    TEST_ASSERT_EQUAL_UINT16(2u, count_frames_with_opcode(0xA1u));
+    TEST_ASSERT_TRUE(s_bus.devices[0].active);
+}
+
+void test_cleanup_failure_is_primary_after_otherwise_successful_workflow(void)
+{
+    DaliDiscoveryTransport t = transport();
+    s_bus.cleanup_error = DALI_ERR_BUS_STUCK;
+
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 1u,
+        .used_address_mask = 0u,
+        .query_short_address = false,
+    };
+    DaliCommissioningResult result;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK,
+                      dali_commissioning_commission_unaddressed(
+                          &t, &options, &result, NULL, NULL));
+    TEST_ASSERT_TRUE(result.no_more_devices);
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK, result.last_error);
+    TEST_ASSERT_TRUE(result.termination_attempted);
+    TEST_ASSERT_FALSE(result.terminate_tx_succeeded);
+    TEST_ASSERT_TRUE(result.initialisation_state_unknown);
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK, result.cleanup_error);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.cleanup_count);
+}
+
 void test_failed_start_closes_initialisation_state(void)
 {
     DaliDiscoveryTransport t = transport();
     mock_add_device(0u, 0x000010u);
 
-    /* RANDOMIZE fails after INITIALISE has already been accepted. */
+    /* RANDOMISE fails after INITIALISE has already been accepted. */
     s_bus.fail_opcode = 0xA7u;
     s_bus.fail_err    = DALI_ERR_BUS_STUCK;
 
@@ -666,6 +1108,12 @@ void test_failed_start_closes_initialisation_state(void)
                                                                 &result, NULL, NULL));
     TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK, result.last_error);
     TEST_ASSERT_EQUAL_UINT8(0u, result.assigned_count);
+    TEST_ASSERT_TRUE(result.termination_required);
+    TEST_ASSERT_TRUE(result.termination_attempted);
+    TEST_ASSERT_TRUE(result.terminate_tx_succeeded);
+    TEST_ASSERT_FALSE(result.initialisation_state_unknown);
+    TEST_ASSERT_EQUAL(DALI_OK, result.cleanup_error);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.cleanup_count);
 
     /* Gear left in initialisation state stays there for fifteen minutes, so the
      * opening TERMINATE must be followed by a second one on the way out. */
@@ -673,13 +1121,14 @@ void test_failed_start_closes_initialisation_state(void)
     TEST_ASSERT_EQUAL_UINT16(2u, count_frames_with_opcode(0xA1u));
 }
 
-void test_failed_terminate_does_not_add_a_second_terminate(void)
+void test_failed_opening_terminate_still_attempts_safety_terminate(void)
 {
     DaliDiscoveryTransport t = transport();
     mock_add_device(0u, 0x000010u);
 
-    /* The opening TERMINATE itself fails, so INITIALISE never went out and
-     * there is no initialisation state to close. */
+    /* A transport error cannot prove that no partial waveform or later admitted
+     * sequence step reached the bus. A second TERMINATE is harmless and keeps
+     * the failure path conservative. */
     s_bus.fail_opcode = 0xA1u;
     s_bus.fail_err    = DALI_ERR_BUS_STUCK;
 
@@ -695,7 +1144,13 @@ void test_failed_terminate_does_not_add_a_second_terminate(void)
                       dali_commissioning_commission_unaddressed(&t, &options,
                                                                 &result, NULL, NULL));
     TEST_ASSERT_EQUAL_UINT8(0u, s_bus.initialise_count);
-    TEST_ASSERT_EQUAL_UINT16(1u, count_frames_with_opcode(0xA1u));
+    TEST_ASSERT_EQUAL_UINT16(2u, count_frames_with_opcode(0xA1u));
+    TEST_ASSERT_TRUE(result.termination_required);
+    TEST_ASSERT_TRUE(result.termination_attempted);
+    TEST_ASSERT_FALSE(result.terminate_tx_succeeded);
+    TEST_ASSERT_TRUE(result.initialisation_state_unknown);
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK, result.cleanup_error);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.cleanup_count);
 }
 
 static void assert_search_steps(const DaliSequence *seq)
@@ -845,14 +1300,14 @@ void test_compare_from_sequence_reads_yes_and_no(void)
                       dali_commissioning_compare_from_sequence(&result, &yes));
     TEST_ASSERT_TRUE(yes);
 
-    /* Any other value is not YES. */
+    /* NO is silence. A decoded non-YES byte is invalid/ambiguous traffic. */
     result_reset(&result, DALI_COMMISSIONING_SEARCH_COMPARE_SEQUENCE_STEPS);
     seed_reply(&result, DALI_COMMISSIONING_SEARCH_COMPARE_STEP_COMPARE,
                0x00u, DALI_BACKWARD_FRAME_BITS);
     yes = true;
-    TEST_ASSERT_EQUAL(DALI_OK,
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
                       dali_commissioning_compare_from_sequence(&result, &yes));
-    TEST_ASSERT_FALSE(yes);
+    TEST_ASSERT_TRUE(yes);
 
     /* A silent reply window on the COMPARE step is the standard NO. */
     result_reset(&result, 0u);
@@ -862,6 +1317,67 @@ void test_compare_from_sequence_reads_yes_and_no(void)
     TEST_ASSERT_EQUAL(DALI_OK,
                       dali_commissioning_compare_from_sequence(&result, &yes));
     TEST_ASSERT_FALSE(yes);
+}
+
+void test_rx_activity_means_yes_only_for_compare(void)
+{
+    DaliSequenceResult result;
+    bool answer = false;
+
+    result_reset(&result, 0u);
+    result_fail(&result,
+                DALI_ERR_RX_ACTIVITY,
+                DALI_COMMISSIONING_SEARCH_COMPARE_STEP_COMPARE);
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_compare_from_sequence(&result,
+                                                                &answer));
+    TEST_ASSERT_TRUE(answer);
+
+    result_reset(&result, 0u);
+    result_fail(&result,
+                DALI_ERR_RX_ACTIVITY,
+                DALI_COMMISSIONING_SEARCH_STEP_ADDRM);
+    TEST_ASSERT_EQUAL(DALI_ERR_RX_ACTIVITY,
+                      dali_commissioning_compare_from_sequence(&result,
+                                                                &answer));
+
+    result_reset(&result, 0u);
+    result_fail(&result,
+                DALI_ERR_RX_ACTIVITY,
+                DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_VERIFY);
+    TEST_ASSERT_EQUAL(DALI_ERR_RX_ACTIVITY,
+                      dali_commissioning_verify_from_sequence(&result,
+                                                               &answer));
+
+    DaliDiscoveryTransport activity_transport = {
+        .transact = mock_rx_activity_transact,
+    };
+    answer = false;
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_compare(&activity_transport, &answer));
+    TEST_ASSERT_TRUE(answer);
+
+    answer = false;
+    TEST_ASSERT_EQUAL(DALI_ERR_RX_ACTIVITY,
+                      dali_commissioning_verify_short_address(
+                          &activity_transport,
+                          7u,
+                          &answer));
+}
+
+void test_decoded_non_yes_reply_is_never_commissioning_no(void)
+{
+    DaliDiscoveryTransport non_yes_transport = {
+        .transact = mock_non_yes_transact,
+    };
+    bool answer = true;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_commissioning_compare(&non_yes_transport, &answer));
+    TEST_ASSERT_TRUE(answer);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_commissioning_verify_short_address(
+                          &non_yes_transport, 7u, &answer));
 }
 
 void test_compare_from_sequence_does_not_mistake_a_failed_write_for_no(void)
@@ -923,6 +1439,12 @@ void test_verify_from_sequence_reads_confirmation_and_failures(void)
                       dali_commissioning_verify_from_sequence(&result, &verified));
     TEST_ASSERT_FALSE(verified);
 
+    result_reset(&result, DALI_COMMISSIONING_PROGRAM_VERIFY_SEQUENCE_STEPS);
+    seed_reply(&result, DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_VERIFY,
+               0x00u, DALI_BACKWARD_FRAME_BITS);
+    TEST_ASSERT_EQUAL(DALI_ERR_MALFORMED,
+                      dali_commissioning_verify_from_sequence(&result, &verified));
+
     /* A PROGRAM that never went out must not be reported as "not confirmed",
      * which would look like a device problem rather than a transport one. */
     result_reset(&result, 0u);
@@ -932,17 +1454,280 @@ void test_verify_from_sequence_reads_confirmation_and_failures(void)
                       dali_commissioning_verify_from_sequence(&result, &verified));
 }
 
+/* ---------------------------------------------------------------------------
+ * Quiescence bracketing
+ * --------------------------------------------------------------------------*/
+
+/* Index in the TX log of the first frame matching data, or -1. */
+static int mock_log_index_of(uint32_t data)
+{
+    for (uint16_t i = 0u; i < s_bus.log_count; i++) {
+        if (s_bus.log[i].data == data) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+#define QUIESCENT_START_FRAME 0xFFFE1Du
+#define QUIESCENT_STOP_FRAME  0xFFFE1Eu
+
+void test_commissioning_without_quiescence_sends_neither_broadcast(void)
+{
+    DaliDiscoveryTransport t = transport();
+    DaliCommissioningResult result;
+
+    mock_add_device(0u, 0x010203u);
+
+    /* The option is off in a zero-initialized struct, which is what keeps an
+     * out-of-tree caller on the behaviour it already had. */
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .query_short_address = true,
+    };
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_commission_unaddressed(&t, &options,
+                                                                &result, NULL,
+                                                                NULL));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_bus.quiescent_start_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_bus.quiescent_stop_count);
+    TEST_ASSERT_FALSE(result.quiescence_requested);
+    TEST_ASSERT_FALSE(result.quiescence_started);
+    TEST_ASSERT_FALSE(result.quiescence_release_attempted);
+    TEST_ASSERT_FALSE(result.quiescent_state_unknown);
+}
+
+void test_quiescence_brackets_the_run_around_initialise_and_terminate(void)
+{
+    DaliDiscoveryTransport t = transport();
+    DaliCommissioningResult result;
+
+    mock_add_device(0u, 0x010203u);
+
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .query_short_address = true,
+        .quiesce_control_devices = true,
+    };
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_commission_unaddressed(&t, &options,
+                                                                &result, NULL,
+                                                                NULL));
+
+    TEST_ASSERT_TRUE(result.quiescence_requested);
+    TEST_ASSERT_TRUE(result.quiescence_started);
+    TEST_ASSERT_TRUE(result.quiescence_release_attempted);
+    TEST_ASSERT_FALSE(result.quiescent_state_unknown);
+    TEST_ASSERT_EQUAL(DALI_OK, result.quiescence_error);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.quiescent_start_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.quiescent_stop_count);
+
+    /* Ordering is the whole point: START must precede INITIALISE, or an event
+     * frame can still reach the first COMPARE window, and STOP must follow
+     * TERMINATE so the release is the last thing on the bus. */
+    int start = mock_log_index_of(QUIESCENT_START_FRAME);
+    int stop  = mock_log_index_of(QUIESCENT_STOP_FRAME);
+    int initialise = mock_log_index_of(0xA500u | DALI_INITIALISE_UNADDRESSED_PARAM);
+    int terminate  = mock_log_index_of(0xA100u);
+
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, start);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, stop);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, initialise);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, terminate);
+    TEST_ASSERT_LESS_THAN_INT(initialise, start);
+    TEST_ASSERT_GREATER_THAN_INT(terminate, stop);
+    TEST_ASSERT_EQUAL_INT((int)s_bus.log_count - 1, stop);
+}
+
+void test_quiescence_settle_waits_after_the_start_broadcast(void)
+{
+    DaliDiscoveryTransport t = transport();
+    DaliCommissioningResult result;
+
+    mock_add_device(0u, 0x010203u);
+
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .quiesce_control_devices = true,
+    };
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_commission_unaddressed(&t, &options,
+                                                                &result, NULL,
+                                                                NULL));
+
+    /* Two settles now: one after START QUIESCENT MODE, one after RANDOMISE. */
+    TEST_ASSERT_EQUAL_UINT8(2u, s_bus.delay_count);
+    TEST_ASSERT_EQUAL_UINT32(DALI_COMMISSIONING_QUIESCENT_SETTLE_MS +
+                                 DALI_COMMISSIONING_RANDOMISE_SETTLE_MS,
+                             s_bus.delay_total_ms);
+
+    /* The settle is derived from a 24-bit frame's duration, so it must be at
+     * least one frame long or it cannot do what it claims. */
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(
+        (DALI_EXTENDED_FRAME_BITS * DALI_BIT_US) / 1000u,
+        DALI_COMMISSIONING_QUIESCENT_SETTLE_MS);
+}
+
+void test_failed_quiescence_start_does_not_abort_the_run(void)
+{
+    DaliDiscoveryTransport t = transport();
+    DaliCommissioningResult result;
+
+    mock_add_device(0u, 0x010203u);
+    s_bus.quiescent_fail_opcode = 0x1Du;
+    s_bus.quiescent_fail_err = DALI_ERR_QUEUE_FULL;
+
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .quiesce_control_devices = true,
+    };
+
+    /* Quiescence is hardening, not a precondition. The run still commissions;
+     * the result is what says the bus was not silenced. */
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_commission_unaddressed(&t, &options,
+                                                                &result, NULL,
+                                                                NULL));
+    TEST_ASSERT_EQUAL_UINT8(1u, result.assigned_count);
+    TEST_ASSERT_TRUE(result.quiescence_requested);
+    TEST_ASSERT_FALSE(result.quiescence_started);
+    TEST_ASSERT_EQUAL(DALI_ERR_QUEUE_FULL, result.quiescence_error);
+
+    /* The release still runs: a START that reported an error may still have
+     * reached the bus. But nothing was proven quiesced, so a release that
+     * itself failed would not be the sensors-are-silent hazard. */
+    TEST_ASSERT_TRUE(result.quiescence_release_attempted);
+    TEST_ASSERT_FALSE(result.quiescent_state_unknown);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.quiescent_stop_count);
+}
+
+void test_failed_quiescence_release_is_reported_as_state_unknown(void)
+{
+    DaliDiscoveryTransport t = transport();
+    DaliCommissioningResult result;
+
+    mock_add_device(0u, 0x010203u);
+    s_bus.quiescent_fail_opcode = 0x1Eu;
+    s_bus.quiescent_fail_err = DALI_ERR_BUS_STUCK;
+
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .quiesce_control_devices = true,
+    };
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_commission_unaddressed(&t, &options,
+                                                                &result, NULL,
+                                                                NULL));
+
+    /* Quiesced and not released: the installation's sensors stay silent, which
+     * is the one outcome an operator has to be told about. It does not fail the
+     * commissioning result, because the addresses really were assigned. */
+    TEST_ASSERT_TRUE(result.quiescence_started);
+    TEST_ASSERT_TRUE(result.quiescence_release_attempted);
+    TEST_ASSERT_TRUE(result.quiescent_state_unknown);
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK, result.quiescence_error);
+    TEST_ASSERT_EQUAL_UINT8(1u, result.assigned_count);
+}
+
+void test_quiescence_is_released_when_the_run_fails(void)
+{
+    DaliDiscoveryTransport t = transport();
+    DaliCommissioningResult result;
+
+    mock_add_device(0u, 0x010203u);
+    /* Fail PROGRAM SHORT ADDRESS, well after the bracket opened. */
+    s_bus.fail_opcode = 0xB7u;
+    s_bus.fail_err = DALI_ERR_BUS_STUCK;
+
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .quiesce_control_devices = true,
+    };
+
+    TEST_ASSERT_NOT_EQUAL(DALI_OK,
+                          dali_commissioning_commission_unaddressed(&t, &options,
+                                                                    &result,
+                                                                    NULL, NULL));
+    TEST_ASSERT_TRUE(result.quiescence_started);
+    TEST_ASSERT_TRUE(result.quiescence_release_attempted);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.quiescent_stop_count);
+    TEST_ASSERT_FALSE(result.quiescent_state_unknown);
+}
+
+void test_quiescence_is_released_after_a_cancelled_run(void)
+{
+    DaliDiscoveryTransport t = transport();
+    DaliCommissioningResult result;
+
+    mock_add_device(0u, 0x010203u);
+
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .quiesce_control_devices = true,
+    };
+
+    /* Cancellation latches in the ordinary transport only. The release goes
+     * through transact_cleanup for the same reason TERMINATE does: an aborted
+     * run must not be what leaves the sensors quiet. */
+    s_bus.cancelled = true;
+
+    TEST_ASSERT_NOT_EQUAL(DALI_OK,
+                          dali_commissioning_commission_unaddressed(&t, &options,
+                                                                    &result,
+                                                                    NULL, NULL));
+    TEST_ASSERT_TRUE(result.quiescence_requested);
+    TEST_ASSERT_FALSE(result.quiescence_started);
+    TEST_ASSERT_TRUE(result.quiescence_release_attempted);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.quiescent_stop_count);
+}
+
+void test_quiescence_requires_a_transport_that_can_wait(void)
+{
+    DaliDiscoveryTransport t = transport();
+    DaliCommissioningResult result;
+
+    mock_add_device(0u, 0x010203u);
+    t.delay_ms = NULL;
+
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .quiesce_control_devices = true,
+    };
+
+    /* Refused before anything is transmitted. The run needs the settle either
+     * way, but the check has to happen before the START rather than inside
+     * commissioning_start_unaddressed(), or the broadcast would already be on
+     * the bus when the run is rejected. */
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_commissioning_commission_unaddressed(&t, &options,
+                                                                &result, NULL,
+                                                                NULL));
+    TEST_ASSERT_EQUAL_UINT16(0u, s_bus.log_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_bus.quiescent_start_count);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_build_start_sequence_layout);
     RUN_TEST(test_failed_start_closes_initialisation_state);
-    RUN_TEST(test_failed_terminate_does_not_add_a_second_terminate);
+    RUN_TEST(test_failed_opening_terminate_still_attempts_safety_terminate);
+    RUN_TEST(test_cancellation_after_start_uses_safety_terminate);
+    RUN_TEST(test_opening_sequence_unknown_progress_still_uses_safety_terminate);
+    RUN_TEST(test_cancelled_fallback_cleanup_reports_unconfirmed_initialisation_state);
+    RUN_TEST(test_cleanup_failure_preserves_primary_and_marks_initialisation_unknown);
+    RUN_TEST(test_cleanup_failure_is_primary_after_otherwise_successful_workflow);
     RUN_TEST(test_build_search_sequence_layout);
     RUN_TEST(test_build_search_compare_sequence_layout);
     RUN_TEST(test_build_program_verify_sequence_layout);
     RUN_TEST(test_sequence_builders_reject_bad_arguments);
     RUN_TEST(test_compare_from_sequence_reads_yes_and_no);
+    RUN_TEST(test_rx_activity_means_yes_only_for_compare);
+    RUN_TEST(test_decoded_non_yes_reply_is_never_commissioning_no);
     RUN_TEST(test_compare_from_sequence_does_not_mistake_a_failed_write_for_no);
     RUN_TEST(test_verify_from_sequence_reads_confirmation_and_failures);
     RUN_TEST(test_short_address_encoding_round_trip);
@@ -953,7 +1738,20 @@ int main(void)
     RUN_TEST(test_commission_unaddressed_assigns_free_short_addresses_in_order);
     RUN_TEST(test_commission_unaddressed_respects_max_devices);
     RUN_TEST(test_commission_unaddressed_returns_without_tx_when_address_space_full);
+    RUN_TEST(test_commission_unaddressed_rejects_frame_only_transport_without_traffic);
     RUN_TEST(test_inventory_used_mask_marks_control_gear_only);
+    RUN_TEST(test_inventory_used_mask_reserves_undecodable_addresses);
+    RUN_TEST(test_commission_skips_undecodable_addresses);
+    RUN_TEST(test_opening_settles_after_randomise_before_first_compare);
+    RUN_TEST(test_commission_rejects_transport_without_settle_wait_and_sends_nothing);
     RUN_TEST(test_invalid_arguments_are_rejected);
+    RUN_TEST(test_commissioning_without_quiescence_sends_neither_broadcast);
+    RUN_TEST(test_quiescence_brackets_the_run_around_initialise_and_terminate);
+    RUN_TEST(test_quiescence_settle_waits_after_the_start_broadcast);
+    RUN_TEST(test_failed_quiescence_start_does_not_abort_the_run);
+    RUN_TEST(test_failed_quiescence_release_is_reported_as_state_unknown);
+    RUN_TEST(test_quiescence_is_released_when_the_run_fails);
+    RUN_TEST(test_quiescence_is_released_after_a_cancelled_run);
+    RUN_TEST(test_quiescence_requires_a_transport_that_can_wait);
     return UNITY_END();
 }

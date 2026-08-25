@@ -952,6 +952,22 @@ DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
             }
             continue;
         }
+        if (err == DALI_ERR_RX_ACTIVITY) {
+            /*
+             * Reply-window activity that could not be decoded. This is not
+             * silence, so the address must not be reported free, and it is not
+             * an answer, so no device may be invented from it. Record the
+             * ambiguity, leave the entry absent, and keep scanning: one
+             * contested address must not cost the other sixty-three.
+             *
+             * Skipping the input-device probe below is deliberate. The bus at
+             * this address is already known to be undecodable, so a second
+             * query buys no information.
+             */
+            inventory->devices[addr].has_undecodable_activity = true;
+            inventory->undecodable_count++;
+            continue;
+        }
         if (!scan_error_is_absent(err)) {
             return err;
         }

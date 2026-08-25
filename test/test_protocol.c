@@ -166,7 +166,7 @@ void test_command_lookup_send_twice_metadata(void)
         DALI_CMD_SET_SHORT_ADDRESS_DTR0,
         DALI_CMD_ENABLE_WRITE_MEMORY,
         DALI_CMD_INITIALISE,
-        DALI_CMD_RANDOMIZE,
+        DALI_CMD_RANDOMISE,
     };
 
     for (uint8_t i = 0u;
@@ -360,7 +360,7 @@ void test_command_lookup_special_commands_are_builder_implemented(void)
         DALI_CMD_TERMINATE,
         DALI_CMD_DTR0_DATA,
         DALI_CMD_INITIALISE,
-        DALI_CMD_RANDOMIZE,
+        DALI_CMD_RANDOMISE,
         DALI_CMD_COMPARE,
         DALI_CMD_WITHDRAW,
         DALI_CMD_PING,
@@ -1127,6 +1127,105 @@ static void test_build_dapc_mask_rejects_invalid_args(void)
 /* ---------------------------------------------------------------------------
  * Main
  * --------------------------------------------------------------------------*/
+/* ---------------------------------------------------------------------------
+ * DaliError names
+ * --------------------------------------------------------------------------*/
+
+void test_error_name_covers_every_enumerator(void)
+{
+    /* The point of the helper is that no defined code reaches an operator as a
+     * bare number, so a new enumerator without a name has to fail here. */
+    for (int err = DALI_OK; err <= DALI_ERR_RX_ACTIVITY; err++) {
+        const char *name = dali_error_name((DaliError)err);
+        TEST_ASSERT_NOT_NULL_MESSAGE(name, "DaliError enumerator has no name");
+        TEST_ASSERT_TRUE_MESSAGE(name[0] != '\0', "DaliError name is empty");
+    }
+}
+
+void test_error_name_spells_the_operator_visible_codes(void)
+{
+    TEST_ASSERT_EQUAL_STRING("ok", dali_error_name(DALI_OK));
+    TEST_ASSERT_EQUAL_STRING("timeout", dali_error_name(DALI_ERR_TIMEOUT));
+    TEST_ASSERT_EQUAL_STRING("queue full", dali_error_name(DALI_ERR_QUEUE_FULL));
+    /* The code the commissioning rebuild made reachable: it used to read as
+     * "ERR 12" in the shell and as "err" in a Home Assistant text state. */
+    TEST_ASSERT_EQUAL_STRING("rx activity", dali_error_name(DALI_ERR_RX_ACTIVITY));
+}
+
+void test_error_name_returns_null_for_unknown_codes(void)
+{
+    TEST_ASSERT_NULL(dali_error_name((DaliError)(DALI_ERR_RX_ACTIVITY + 1)));
+    TEST_ASSERT_NULL(dali_error_name((DaliError)99));
+    TEST_ASSERT_NULL(dali_error_name((DaliError)-1));
+}
+
+void test_error_text_is_always_printable(void)
+{
+    char buf[DALI_ERROR_TEXT_MAX];
+
+    /* A known code ignores the buffer and returns the shared name. */
+    TEST_ASSERT_EQUAL_STRING("rx activity",
+                             dali_error_text(DALI_ERR_RX_ACTIVITY, buf, sizeof(buf)));
+
+    /* An unknown one still says something, and says which one. */
+    TEST_ASSERT_EQUAL_STRING("error 99", dali_error_text((DaliError)99, buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("error 99", buf);
+
+    /* No buffer is not a crash — call sites pass one, but the shell's static
+     * scratch is the only thing standing between this and a NULL %s. */
+    TEST_ASSERT_EQUAL_STRING("error", dali_error_text((DaliError)99, NULL, 0u));
+    TEST_ASSERT_EQUAL_STRING("error", dali_error_text((DaliError)99, buf, 0u));
+}
+
+
+void test_build_device_broadcast_command_and_rejections(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_device_broadcast_command(
+                          DALI_CMD_START_QUIESCENT_MODE, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xFFFE1Du, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(DALI_EXTENDED_FRAME_BITS, frame.bit_length);
+
+    /* Queries are accepted here for the same reason dali_build_command() accepts
+     * a broadcast query: the collision is the operator's to be warned about,
+     * not the builder's to forbid. */
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_device_broadcast_command(
+                          DALI_CMD_QUERY_NUMBER_OF_INSTANCES, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xFFFE35u, frame.data);
+
+    /* Only 24-bit device commands. A Part 102 gear command shares neither the
+     * frame shape nor the opcode space. */
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_device_broadcast_command(DALI_CMD_OFF, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_device_broadcast_command(
+                          DALI_CMD_QUERY_INSTANCE_TYPE, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_device_broadcast_command(DALI_CMD_COUNT, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_device_broadcast_command(
+                          DALI_CMD_START_QUIESCENT_MODE, NULL));
+}
+
+void test_device_broadcast_differs_from_every_short_address(void)
+{
+    DaliFrame broadcast;
+    DaliFrame addressed;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_device_broadcast_command(
+                          DALI_CMD_STOP_QUIESCENT_MODE, &broadcast));
+    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        TEST_ASSERT_EQUAL(DALI_OK,
+                          dali_build_device_command(
+                              addr, DALI_CMD_STOP_QUIESCENT_MODE, &addressed));
+        TEST_ASSERT_NOT_EQUAL(broadcast.data, addressed.data);
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1200,5 +1299,13 @@ int main(void)
     RUN_TEST(test_input_value_accumulator_combines_16bit_and_multibyte_values);
     RUN_TEST(test_input_value_accumulator_rejects_invalid_args);
     RUN_TEST(test_parse_rejects_invalid_args_and_none_response);
+    /* DaliError names */
+    RUN_TEST(test_error_name_covers_every_enumerator);
+    RUN_TEST(test_error_name_spells_the_operator_visible_codes);
+    RUN_TEST(test_error_name_returns_null_for_unknown_codes);
+    RUN_TEST(test_error_text_is_always_printable);
+    /* Part 103 device broadcast */
+    RUN_TEST(test_build_device_broadcast_command_and_rejections);
+    RUN_TEST(test_device_broadcast_differs_from_every_short_address);
     return UNITY_END();
 }

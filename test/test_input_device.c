@@ -242,6 +242,78 @@ void test_build_dtr_check_sequence_rejects_invalid_args(void)
                       dali_input_build_dtr_check_sequence(64u, DALI_DTR0, 0u, &seq));
 }
 
+/* ---------------------------------------------------------------------------
+ * Part 103 quiescent mode (device level, instance byte 0xFE)
+ * --------------------------------------------------------------------------*/
+
+void test_build_quiescent_mode_addressed(void)
+{
+    DaliFrame frame;
+
+    /* Address 5 -> address byte 0x0B, device instance 0xFE, opcode 0x1D/0x1E. */
+    TEST_ASSERT_EQUAL(DALI_OK, dali_input_build_quiescent_mode(5u, true, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x0BFE1Du, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(24u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_input_build_quiescent_mode(5u, false, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x0BFE1Eu, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(24u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_input_build_quiescent_mode(0u, true, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x01FE1Du, frame.data);
+    TEST_ASSERT_EQUAL(DALI_OK, dali_input_build_quiescent_mode(63u, true, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x7FFE1Du, frame.data);
+}
+
+void test_build_quiescent_mode_broadcast(void)
+{
+    DaliFrame frame;
+
+    /* Address byte 0xFF is every control device. This is the case that had no
+     * builder at all: dali_build_device_command() rejects anything at or above
+     * 64, so nothing could address all control devices at once. */
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_input_build_quiescent_mode_broadcast(true, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xFFFE1Du, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(24u, frame.bit_length);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_input_build_quiescent_mode_broadcast(false, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xFFFE1Eu, frame.data);
+}
+
+void test_quiescent_mode_is_send_twice_in_the_command_table(void)
+{
+    /* The verb hands the frame to the scheduler with send_twice set; if the
+     * table ever said otherwise, a single transmission would be ignored by
+     * conforming devices and the bus would stay noisy with no error. */
+    const DaliCommandInfo *start = dali_command_lookup(DALI_CMD_START_QUIESCENT_MODE);
+    const DaliCommandInfo *stop  = dali_command_lookup(DALI_CMD_STOP_QUIESCENT_MODE);
+
+    TEST_ASSERT_NOT_NULL(start);
+    TEST_ASSERT_NOT_NULL(stop);
+    TEST_ASSERT_TRUE(start->send_twice);
+    TEST_ASSERT_TRUE(stop->send_twice);
+    TEST_ASSERT_TRUE(start->implemented);
+    TEST_ASSERT_TRUE(stop->implemented);
+    TEST_ASSERT_EQUAL_HEX8(0x1Du, start->opcode_first);
+    TEST_ASSERT_EQUAL_HEX8(0x1Eu, stop->opcode_first);
+    TEST_ASSERT_EQUAL(DALI_RESP_NONE, start->response_kind);
+    TEST_ASSERT_EQUAL(DALI_RESP_NONE, stop->response_kind);
+}
+
+void test_build_quiescent_mode_rejects_invalid_args(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_input_build_quiescent_mode(64u, true, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_input_build_quiescent_mode(5u, true, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_input_build_quiescent_mode_broadcast(true, NULL));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -253,6 +325,10 @@ int main(void)
     RUN_TEST(test_build_extended_standard_instance_queries);
     RUN_TEST(test_extended_standard_instance_queries_reject_invalid_args);
     RUN_TEST(test_build_queries_reject_invalid_args);
+    RUN_TEST(test_build_quiescent_mode_addressed);
+    RUN_TEST(test_build_quiescent_mode_broadcast);
+    RUN_TEST(test_quiescent_mode_is_send_twice_in_the_command_table);
+    RUN_TEST(test_build_quiescent_mode_rejects_invalid_args);
     RUN_TEST(test_classify_standard_light_and_occupancy);
     RUN_TEST(test_classify_generic_and_unknown_are_unverified);
     RUN_TEST(test_classify_rejects_invalid_args);

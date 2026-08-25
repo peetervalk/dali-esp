@@ -79,7 +79,7 @@ static const DaliCommandInfo s_command_table[] = {
     CMD(DALI_CMD_TERMINATE, "TERMINATE", 0xA1u, 0xA1u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, true),
     CMD(DALI_CMD_DTR0_DATA, "DTR0 DATA", 0xA3u, 0xA3u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, true),
     CMD(DALI_CMD_INITIALISE, "INITIALISE", 0xA5u, 0xA5u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, true, true),
-    CMD(DALI_CMD_RANDOMIZE, "RANDOMIZE", 0xA7u, 0xA7u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, true, true),
+    CMD(DALI_CMD_RANDOMISE, "RANDOMISE", 0xA7u, 0xA7u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, true, true),
     CMD(DALI_CMD_COMPARE, "COMPARE", 0xA9u, 0xA9u, DALI_CMD_FRAME_SPECIAL, DALI_RESP_YES_NO, false, true),
     CMD(DALI_CMD_WITHDRAW, "WITHDRAW", 0xABu, 0xABu, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, true),
     CMD(DALI_CMD_PING, "PING", 0xADu, 0xADu, DALI_CMD_FRAME_SPECIAL, DALI_RESP_NONE, false, true),
@@ -99,6 +99,8 @@ static const DaliCommandInfo s_command_table[] = {
     CMD(DALI_CMD_QUERY_DEVICE_CONTENT_DTR0, "QUERY CONTENT DTR0 (device)", 0x36u, 0x36u, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_UINT8, false, true),
     CMD(DALI_CMD_QUERY_DEVICE_CONTENT_DTR1, "QUERY CONTENT DTR1 (device)", 0x37u, 0x37u, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_UINT8, false, true),
     CMD(DALI_CMD_QUERY_DEVICE_CONTENT_DTR2, "QUERY CONTENT DTR2 (device)", 0x38u, 0x38u, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_UINT8, false, true),
+    CMD(DALI_CMD_START_QUIESCENT_MODE, "START QUIESCENT MODE", 0x1Du, 0x1Du, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_NONE, true, true),
+    CMD(DALI_CMD_STOP_QUIESCENT_MODE, "STOP QUIESCENT MODE", 0x1Eu, 0x1Eu, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_NONE, true, true),
 
     CMD(DALI_CMD_QUERY_INSTANCE_TYPE, "QUERY INSTANCE TYPE", 0x80u, 0x80u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
     CMD(DALI_CMD_QUERY_RESOLUTION, "QUERY RESOLUTION", 0x81u, 0x81u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
@@ -379,6 +381,22 @@ DaliError dali_build_device_command(uint8_t addr,
     return DALI_OK;
 }
 
+DaliError dali_build_device_broadcast_command(DaliCommandId id, DaliFrame *out)
+{
+    if (out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    const DaliCommandInfo *cmd = dali_command_lookup(id);
+    if (cmd == NULL || cmd->frame_kind != DALI_CMD_FRAME_24BIT_DEV ||
+        cmd->opcode_first != cmd->opcode_last) {
+        return DALI_ERR_INVALID;
+    }
+
+    *out = dali_cmd_device_broadcast(cmd->opcode_first);
+    return DALI_OK;
+}
+
 static DaliCommandId dtr_data_command_id(DaliDtrRegister reg)
 {
     switch (reg) {
@@ -538,10 +556,10 @@ DaliFrame dali_cmd_initialise(uint8_t param)
     return f;
 }
 
-DaliFrame dali_cmd_randomize(void)
+DaliFrame dali_cmd_randomise(void)
 {
     DaliFrame f = {0u, 0u};
-    (void)dali_build_special(DALI_CMD_RANDOMIZE, 0u, &f);
+    (void)dali_build_special(DALI_CMD_RANDOMISE, 0u, &f);
     return f;
 }
 
@@ -704,6 +722,11 @@ DaliFrame dali_cmd_instance(uint8_t addr, uint8_t instance, uint8_t cmd)
 DaliFrame dali_cmd_device(uint8_t addr, uint8_t cmd)
 {
     return make_frame24(short_addr_byte(addr, 1u), DALI_DEVICE_INSTANCE, cmd);
+}
+
+DaliFrame dali_cmd_device_broadcast(uint8_t cmd)
+{
+    return make_frame24(DALI_BROADCAST_COMMAND_ADDRESS, DALI_DEVICE_INSTANCE, cmd);
 }
 
 DaliFrame dali_cmd_instance_group(uint8_t group, uint8_t instance, uint8_t cmd)

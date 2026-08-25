@@ -151,7 +151,7 @@ iquery 0 0 type           # instance 0 should report type 4 (light sensor)
 
 ## Caveats
 
-- **DALI `RESET` wipes Bank 2.** Do not issue `config s0 reset` while tuning.
+- **DALI `RESET` wipes Bank 2.** Do not issue `config a0 reset` while tuning.
 - **Allow ~1 s after a write before cutting bus power** — the NVM commit is
   asynchronous.
 - **Only one device should be write-enabled at a time.** WRITE MEMORY LOCATION is

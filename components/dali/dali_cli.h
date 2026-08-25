@@ -10,7 +10,7 @@
  *
  * The split is:
  *
- *   dali_cli.c   tokenising, the verb table, argument validation, the named
+ *   dali_cli.c   tokenizing, the verb table, argument validation, the named
  *                command tables, and response formatting
  *   dali_diag.c  transports, blocking waits, caches, and the long-running
  *                workflows (scan, commissioning, capture, find switches)
@@ -75,7 +75,7 @@ void       dali_cli_buffer_sink_init(DaliCliBufferSink *sink, char *buf, size_t 
 DaliCliOut dali_cli_buffer_out(DaliCliBufferSink *sink);
 
 /* ---------------------------------------------------------------------------
- * Tokenising
+ * Tokenizing
  * --------------------------------------------------------------------------*/
 
 #define DALI_CLI_MAX_TOKENS     8u
@@ -171,6 +171,7 @@ typedef enum {
     DALI_CLI_CMD_FIND,
     DALI_CLI_CMD_EXPORT,
     DALI_CLI_CMD_IDENTIFY,
+    DALI_CLI_CMD_QUIESCENT,
 
     /*
      * Also the marker a front end with its own table (see dali_cli_resolve_in)
@@ -183,7 +184,7 @@ typedef enum {
 } DaliCliCommandId;
 
 /* How a target is spelled, so every usage line says it the same way. */
-#define DALI_CLI_TARGET_ARG "<addr|sN|gN|b>"
+#define DALI_CLI_TARGET_ARG "<addr|aN|gN|b>"
 
 typedef struct {
     DaliCliCommandId id;
@@ -223,7 +224,7 @@ typedef enum {
 } DaliCliResolveResult;
 
 /*
- * Tokenise, look the verb up, and check the argument count. On DALI_CLI_RESOLVE_OK
+ * Tokenize, look the verb up, and check the argument count. On DALI_CLI_RESOLVE_OK
  * both tokens and *spec_out are filled; on DALI_CLI_RESOLVE_ARITY tokens and
  * *spec_out are filled so the caller can print the verb's usage.
  */
@@ -238,7 +239,7 @@ DaliCliResolveResult dali_cli_resolve(const char                *line,
  * offers a deliberately smaller surface: it has no terminal to print a scan or
  * a capture into, and its result is a single Home Assistant text state. It
  * therefore brings its own table of the verbs it actually implements, and gets
- * this module's tokenising, arity checking, argument parsing, and named command
+ * this module's tokenizing, arity checking, argument parsing, and named command
  * tables for free — which is what keeps one spelling of a command name and one
  * definition of what counts as a well-formed line across both front ends.
  */
@@ -333,6 +334,40 @@ bool dali_cli_special_is_commissioning(DaliCommandId id);
 uint8_t                   dali_cli_config_count(void);
 const DaliCliGearCommand *dali_cli_config_at(uint8_t index);
 const DaliCliGearCommand *dali_cli_config_find(const char *name);
+
+/*
+ * True for the config commands that carry the same risk as the commissioning
+ * specials, and must be gated the same way.
+ *
+ * SET SHORT ADDRESS (DTR0) is the whole set. It is spelled as an ordinary
+ * addressed configuration command, but what it configures is which address the
+ * gear answers to, and a broadcast target de-addresses an entire installation
+ * from one line. Gating `special program-short` while leaving this open refuses
+ * the harder spelling of the operation and permits the easier one.
+ *
+ * The other DTR0 names change how a device behaves at an address it keeps, so
+ * they stay outside the set: a wrong fade time is visible and reversible, while
+ * a lost short address takes a commissioning walk to recover.
+ */
+bool dali_cli_config_is_commissioning(DaliCommandId id);
+
+/*
+ * True for the config commands a broadcast target must not carry.
+ *
+ * ADD TO GROUP and REMOVE FROM GROUP qualify because the runtime group-query
+ * cache cannot represent the result: an integration that tracks which short
+ * address to poll for a group's state has no way to record "every device on the
+ * bus" as a membership change, and the undo is not symmetric — a broadcast
+ * REMOVE empties the group, including the members that were there first.
+ *
+ * Refused in the shared layer rather than per surface, so that the console and
+ * the shell cannot disagree about what the verb does. `raw2` remains the way to
+ * send the frame deliberately.
+ */
+bool dali_cli_config_rejects_broadcast(DaliCommandId id);
+
+/* The one wording for that refusal, so both front ends report it identically. */
+#define DALI_CLI_MSG_NO_BROADCAST_GROUP  "no broadcast group config"
 
 /* ---------------------------------------------------------------------------
  * Device-type (DT6/DT8) command tables

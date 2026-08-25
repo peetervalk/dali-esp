@@ -136,7 +136,7 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   //
   // suppress_initial_write_ covers ESPHome's one restore/default write at
   // setup. The echo_* trio is the exact state apply_bus_state() last pushed
-  // into ESPHome, so the write it schedules is recognised by its value rather
+  // into ESPHome, so the write it schedules is recognized by its value rather
   // than by a one-shot flag that the wrong call could consume.
   bool              suppress_initial_write_{true};
   bool              echo_valid_{false};
