@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-08-25
+**Last updated:** 2026-08-26
 
 **Known-working deployment/component baseline:** `v1.1.1` (`76cede1`), hardware
 tested; this is not a conformance claim.
@@ -270,6 +270,50 @@ result. `dali_capability_matrix.md` states which is which per capability.
   single-unaddressed-device envelope until HIL proves overlapping replies. Part
   103 quiescence, equal-random-address recovery, external-master arbitration, and
   the 100 ms post-RANDOMISE value still need standards/hardware validation.
+
+### Verified locally on 2026-08-26 (commissioning post-scan verification)
+
+Prompted by a documentation-currency pass that turned into an audit of what the
+commissioning walk can and cannot detect. The audit's findings are the P0 item
+"Equal random address and mixed-device commissioning" below; this entry is the
+one piece of it that needed no protocol work and shipped immediately.
+
+`commission`'s post-scan printed a device count and nothing else. That is the
+exact shape that hides an equal-random-address collision: two gear that RANDOMISE
+to the same 24-bit value are selected together, programmed together, and
+withdrawn together, so the walk reports one assignment, one short address ends up
+with two gear on it, and every step returns `DALI_OK`. The post-scan already saw
+it — QUERY STATUS to that address draws two overlapping replies and lands as
+`has_undecodable_activity` — the result was simply never read.
+
+- `cmd_commission` now snapshots the pre-scan as two 64-bit masks (gear present,
+  answered undecodably) before the walk touches the bus, and diffs the post-scan
+  against them. Masks rather than a second inventory because the shell keeps one
+  4868-byte scratch buffer that the post-scan overwrites, and a second copy on
+  the shell task's stack is the crash this project already fixed once.
+- Every assignment is now classified: confirmed, contested, or silent. The run
+  prints `post-scan confirmed N of M assignment(s)`, names each address that
+  failed, and explains the contested case as the equal-random-address collision
+  it almost certainly is — both gear hold the address, neither can be reached
+  alone, and separating them is a physical job.
+- Diffing against the pre-scan is what makes the report honest. A contested
+  address that was already there is held out of the free pool and never
+  assigned, so it must not be reported as damage this run did. Addresses that
+  became contested without being assigned are named separately, because a run
+  cannot program an address it never allocated: that is a bus that changed
+  underneath the walk.
+- Detection only. Recovery still needs the walk to notice co-selection at VERIFY
+  and re-open a per-address INITIALISE window on the pair; see the P0 item.
+- The failed-run path still returns before any post-scan. That is where a
+  collision is most likely — an `RX_ACTIVITY` abort on VERIFY is the twin case —
+  but the bus state after a failed TERMINATE is not one to scan without thinking
+  about it first. Left as-is deliberately, recorded in the P0 item.
+
+`dali_shell.c` compiles clean against the ESP-IDF flag set (`-Wall -Werror
+-Wextra`). It is not in the host suite, so there is no vector for this and no bus
+has run it: an equal-random-address collision is roughly a 1-in-10^5 event on a
+20-device bus, which is precisely why it needs a mocked vector rather than a
+hardware session.
 
 ### Verified locally on 2026-08-25 (reconfiguration surface)
 
@@ -1494,8 +1538,93 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   been unsearchable at the first COMPARE, which presents exactly like the former
   silence/collision inversion — so a visible improvement here would look like a
   partial fix for that and would not be one.
-- Strengthen commissioning collision handling, equal-random-address recovery, and
-  the separation of gear and control-device address spaces.
+- **Equal random address and mixed-device commissioning.** Audited 2026-08-26;
+  this is the ordered plan, with the first step already done.
+
+  *Equal random address.* Two gear sharing a 24-bit random value are selected,
+  programmed, verified, and withdrawn as one. The run ends one of two ways
+  depending on how the two backward frames happen to overlap: they decode, and
+  the run reports success with one assignment missing and two gear on one short
+  address; or they collide, and `dali_commissioning_verify_from_sequence()`
+  propagates `DALI_ERR_RX_ACTIVITY` so the run aborts with an undiagnosed bus
+  error *after* the duplicate has been programmed. `test_commissioning.c`'s
+  `test_rx_activity_means_yes_only_for_compare` pins that propagation
+  deliberately.
+
+  1. **Post-scan verification. Done 2026-08-26** — see the verification entry
+     above. Turns the silent-success failure into a visible one with no protocol
+     change. Still open within it: the failed-run path returns before any
+     post-scan, which is where a collision is most likely.
+  2. **A detection point in the walk.** COMPARE cannot distinguish one responder
+     from two — it is a wired-OR. VERIFY and QUERY SHORT ADDRESS can: exactly one
+     device is selected there, so undecodable activity proves co-selection.
+     `verify_from_sequence()` needs a third outcome instead of collapsing
+     `RX_ACTIVITY` into "error", the same three-way split COMPARE already got.
+     Note the asymmetry that makes it safe: for COMPARE, activity→YES risks
+     inventing gear; for VERIFY, activity can only mean multiple responders.
+  3. **Recovery.** No new opcodes needed. `INITIALISE` takes `0x00` (all gear),
+     `0xFF` (unaddressed), or `(addr << 1) | 1` for one short address. Both twins
+     hold the just-programmed address, so a per-address INITIALISE opens a window
+     containing exactly them; RANDOMISE plus the settle re-rolls both with a
+     2^-24 chance of colliding again; the same binary search then places them on
+     two distinct free addresses. Re-enter `INITIALISE(0xFF)` afterwards and
+     continue — everything already programmed has a short address and stays out,
+     which is what makes the outer walk restartable. The pre-scan mask guarantees
+     the address held nothing else, which is what makes the nested window safe.
+     The cheaper alternative is a second pass after TERMINATE, but that leaves
+     two gear sharing an address across the gap.
+  4. **Somewhere to report it.** `DaliCommissioningResult` has no collision
+     field and `DaliCommissioningEventKind` no event, so a detected collision
+     currently has no way to reach the progress callback or the shell.
+  5. **Host vectors.** None of the 40 tests in `test_commissioning.c` models a
+     twin. A mock transport answering YES to COMPARE at R and `RX_ACTIVITY` to
+     the following VERIFY is the whole fixture. This must be a vector: at
+     roughly 1.2e-5 for a 20-device bus it will never appear in testing.
+
+  *Mixed device — Part 102 gear and Part 103 control devices on one bus.* Six
+  distinct gaps, only one of which quiescence touches.
+
+  1. **Cross-part TERMINATE bracketing is not implemented.** Described under
+     Cross-Part Interference in `dali_protocol.md` and never built. The walk
+     sends Part 102 TERMINATE/INITIALISE/RANDOMISE only; a control device that
+     acts on the Part 102 INITIALISE enters its own addressing state and can
+     answer Part 102 COMPARE — a phantom device that gets a short address
+     programmed into nothing. `esp_dali` sends the other part's TERMINATE too and
+     repeats it after INITIALISE, because a device can re-enter the state.
+     Blocked on a small protocol addition: there is no Part 103 TERMINATE in
+     `DaliCommandId`. `make_control_device_special()` exists in
+     `dali_protocol.c` but is static, used only by DTR0/1/2 and quiescent mode.
+     This is the contained change that closes the phantom-device path.
+  2. **Quiescence does not close that path.** START QUIESCENT MODE suppresses a
+     device's own bus activity — event frames. It does not stop the device
+     entering initialisation state on INITIALISE, and a backward reply to a query
+     it was addressed with is arguably not "own activity" at all. Quiescence
+     removes the unsolicited-event class of phantom; the addressing-state class
+     needs item 1. Do not let the docs imply otherwise.
+  3. **There is no control-device commissioning surface at all.** No device
+     INITIALISE / RANDOMISE / COMPARE / SEARCHADDRH-M-L / PROGRAM SHORT ADDRESS /
+     VERIFY / WITHDRAW in `DaliCommandId`, no device-space counterpart to
+     `dali_commissioning`, no verb. A bus of new sensors cannot be addressed by
+     this tool — that is a Cockpit job today. Project-sized, and the largest of
+     the six.
+  4. **The interference is symmetric.** `0xC1` is Part 102 ENABLE DEVICE TYPE and
+     the Part 103 special-command address byte, so gear in an open Part 102
+     initialise window can act on the Part 103 special frames a device run emits.
+     Whenever item 3 is built it must bracket with a Part 102 TERMINATE for the
+     same reason — design the guard once, in both directions.
+  5. **Discovery has a device-space blind spot.** The gear path classifies
+     undecodable activity properly and reserves the address. The control-device
+     probe below it treats anything but `DALI_OK` as absent, `DALI_ERR_RX_ACTIVITY`
+     included, so two control devices sharing a device short address are
+     invisible. Correctly not reserved today —
+     `dali_commissioning_used_mask_from_inventory()` is explicitly gear-only and
+     the spaces are independent — but item 3 needs a device-space `used_mask` and
+     there is nothing to build one from.
+  6. **Hybrid units have no pairing model.** One physical device can be both
+     control gear and control device, with two independent short addresses. The
+     gear walk can move its gear address without touching its device address,
+     nothing records that they belong together, and nothing warns. Relevant to
+     the Steinel units specifically; see "Observed Steinel instance layout".
 
 ### P0 — Transaction and runtime reliability
 

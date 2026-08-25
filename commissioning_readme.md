@@ -7,7 +7,7 @@ another room, an address that has to be freed, gear coming off the wall — skip
 to [Change a bus that is already
 commissioned](#5-change-a-bus-that-is-already-commissioned).
 
-**Last reviewed:** 2026-08-25
+**Last reviewed:** 2026-08-26
 
 `dali-starter.yaml` is mostly a shim: it brings up the bus and opens the
 diagnostic shell on a TCP port. The shell is the tool. The buttons and the
@@ -186,6 +186,46 @@ A failed cleanup reports `cleanup terminate ERR ... initialisation state
 unknown`; the firmware also logs the final primary and cleanup state, so a TCP
 disconnect does not make that result disappear with the socket.
 
+#### Reading the post-scan
+
+A run that assigned anything re-scans the bus afterwards and checks the result
+against what it thinks it did:
+
+```text
+commission: verifying with post-scan
+commission: post-scan found=18
+commission: post-scan confirmed 3 of 3 assignment(s)
+```
+
+`confirmed` counts assigned addresses that answered QUERY STATUS as control
+gear. Anything else is named:
+
+```text
+    a7: contested - two gear answered as one
+commission: post-scan confirmed 2 of 3 assignment(s)
+  note: 1 assigned address(es) answered undecodably.
+  Two gear generated the same random address and were programmed together;
+  both hold that short address now and neither can be reached alone.
+  Separate them physically, then re-run 'commission unaddressed'.
+```
+
+That is the equal-random-address case, and the post-scan is the only place it
+becomes visible — every command in the walk succeeded. The remedy is a hardware
+pass: pull one fixture, commission it alone, put it back.
+
+`assigned but silent in the post-scan` is the other failure. VERIFY confirmed the
+write, so the gear took the address and then did not answer the scan — a reply
+landing outside the attribution window, or gear that left the bus.
+
+Addresses that became contested *without* being assigned are listed separately.
+A run cannot program an address it never allocated, so that means the bus changed
+underneath the walk: another master, or gear that was mid-boot during the
+pre-scan. Contested addresses that were already there before the run are not
+reported here at all — they were held out of the free pool and never touched.
+
+A failed run returns before the post-scan, so none of this is available when it
+is arguably most wanted. `discover` after a failure does the same walk.
+
 The remaining commissioning work is explicit:
 
 - The cross-part TERMINATE guard is not implemented: a control device that
@@ -193,8 +233,11 @@ The remaining commissioning work is explicit:
   START/STOP QUIESCENT bracketing now runs, which stops a control device from
   *transmitting* into the run, but a device that never received the broadcast is
   unaffected and none of it is HIL-validated.
-- Two gear that generate the same 24-bit random address are not separated or
-  recovered today; they can be programmed and withdrawn together.
+- Two gear that generate the same 24-bit random address are detected after the
+  fact but not separated or recovered. They are selected, programmed, verified,
+  and withdrawn as one, so the walk itself reports a single assignment and no
+  error. The post-scan is what catches it: an assigned address that answers
+  undecodably held two gear all along. See "Reading the post-scan" above.
 - DALI-2 priority/backoff and complete multi-master intervention handling remain
   open. Local atomic sequences do not stop another physical master.
 - Multi-gear, mixed Part 102/Part 103, cancellation-fault, and external-master

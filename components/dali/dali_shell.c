@@ -2936,6 +2936,145 @@ static void shell_report_quiescence(const DaliCommissioningResult *result)
     }
 }
 
+/*
+ * Snapshot the two facts about an inventory that a post-scan has to diff
+ * against: which addresses hold control gear, and which answered undecodably.
+ *
+ * Masks rather than a copy because the shell keeps one DaliDiscoveryInventory
+ * scratch buffer, which the post-scan overwrites. Eight bytes of stack say
+ * what a run created rather than what it inherited; a second 4868-byte
+ * inventory is what made these buffers file-scope in the first place.
+ */
+static void shell_inventory_occupancy_masks(const DaliDiscoveryInventory *inventory,
+                                            uint64_t *gear_mask_out,
+                                            uint64_t *contested_mask_out)
+{
+    uint64_t gear = 0u;
+    uint64_t contested = 0u;
+
+    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        const DaliDiscoveryDeviceInfo *device =
+            dali_discovery_inventory_get(inventory, addr);
+        if (device == NULL) {
+            continue;
+        }
+        if (device->has_undecodable_activity) {
+            contested |= ((uint64_t)1u << addr);
+        } else if (device->present && device->has_control_gear) {
+            gear |= ((uint64_t)1u << addr);
+        }
+    }
+
+    if (gear_mask_out != NULL) {
+        *gear_mask_out = gear;
+    }
+    if (contested_mask_out != NULL) {
+        *contested_mask_out = contested;
+    }
+}
+
+/*
+ * Check the post-scan against what the walk claims it did.
+ *
+ * Until this existed the post-scan printed a device count and nothing else,
+ * which is exactly the shape that hides an equal-random-address collision. Two
+ * gear that RANDOMISE to the same 24-bit value are selected together, programmed
+ * together, and withdrawn together: the walk reports one assignment, the bus
+ * ends up with two gear on one short address, and every step returns DALI_OK.
+ * The post-scan already sees it -- QUERY STATUS to that address draws two
+ * overlapping replies and lands as has_undecodable_activity -- it simply was
+ * not being read.
+ *
+ * Diffing against the pre-scan is what separates a collision this run
+ * created from one that was already there. A pre-existing contested address is
+ * held out of the free pool and never assigned, so it must not be reported here
+ * as damage.
+ *
+ * This detects; it does not recover. Recovery needs the walk itself to notice
+ * co-selection at VERIFY and re-open a per-address INITIALISE window on the
+ * pair. See current_status.md.
+ */
+static void shell_report_commission_post_scan(
+    const DaliDiscoveryInventory *inventory,
+    const DaliCommissioningResult *result,
+    uint64_t pre_contested_mask)
+{
+    uint64_t post_gear_mask = 0u;
+    uint64_t post_contested_mask = 0u;
+    shell_inventory_occupancy_masks(inventory,
+                                    &post_gear_mask,
+                                    &post_contested_mask);
+
+    uint8_t confirmed = 0u;
+    uint8_t contested = 0u;
+    uint8_t silent = 0u;
+
+    for (uint8_t i = 0u; i < result->assigned_count; i++) {
+        uint8_t addr = result->assignments[i].short_address;
+        uint64_t bit = (uint64_t)1u << addr;
+
+        if ((post_contested_mask & bit) != 0u) {
+            contested++;
+            shell_printf("    a%u: contested - two gear answered as one\r\n",
+                         (unsigned)addr);
+        } else if ((post_gear_mask & bit) != 0u) {
+            confirmed++;
+        } else {
+            silent++;
+            shell_printf("    a%u: assigned but silent in the post-scan\r\n",
+                         (unsigned)addr);
+        }
+    }
+
+    shell_printf("commission: post-scan confirmed %u of %u assignment(s)\r\n",
+                 (unsigned)confirmed,
+                 (unsigned)result->assigned_count);
+
+    if (contested > 0u) {
+        shell_printf("  note: %u assigned address(es) answered undecodably.\r\n"
+                     "  Two gear generated the same random address and were "
+                     "programmed together;\r\n"
+                     "  both hold that short address now and neither can be "
+                     "reached alone.\r\n"
+                     "  Separate them physically, then re-run 'commission "
+                     "unaddressed'.\r\n",
+                     (unsigned)contested);
+    }
+    if (silent > 0u) {
+        shell_printf("  note: %u assigned address(es) did not answer QUERY "
+                     "STATUS.\r\n"
+                     "  VERIFY confirmed the write, so the gear took it and then "
+                     "went quiet -\r\n"
+                     "  a reply landing outside the window, or gear that left "
+                     "the bus.\r\n",
+                     (unsigned)silent);
+    }
+
+    /*
+     * Contested addresses this run did not assign. A run only ever programs an
+     * address the pre-scan proved free, so it cannot have caused these: the bus
+     * changed underneath the walk. Another master, gear that was mid-boot during
+     * the pre-scan, or a single device answering undecodably this time and not
+     * last time. Worth naming apart from the collision case, and worth naming
+     * even when the address held healthy gear before -- gear that stops being
+     * readable is the same finding whichever direction it came from.
+     */
+    uint64_t unassigned_contested = post_contested_mask & ~pre_contested_mask;
+    for (uint8_t i = 0u; i < result->assigned_count; i++) {
+        unassigned_contested &=
+            ~((uint64_t)1u << result->assignments[i].short_address);
+    }
+    if (unassigned_contested != 0u) {
+        shell_printf("  note: address(es) newly contested that this run did not "
+                     "assign:\r\n");
+        for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+            if ((unassigned_contested & ((uint64_t)1u << addr)) != 0u) {
+                shell_printf("    a%u: contested\r\n", (unsigned)addr);
+            }
+        }
+    }
+}
+
 static void cmd_commission(const DaliCliTokens *t)
 {
     uint8_t first_address = 0u;
@@ -2981,6 +3120,15 @@ static void cmd_commission(const DaliCliTokens *t)
     }
     shell_inventory_replace(inventory);
     shell_printf("commission: occupied=%u\r\n", (unsigned)found);
+
+    /*
+     * Taken before the walk touches the bus, and kept as a mask because the
+     * post-scan reuses this same inventory buffer. Without it the post-scan
+     * cannot tell a contested address this run created from one it inherited
+     * and correctly refused to assign.
+     */
+    uint64_t pre_contested_mask = 0u;
+    shell_inventory_occupancy_masks(inventory, NULL, &pre_contested_mask);
 
     DaliCommissioningOptions options = {
         .first_short_address = first_address,
@@ -3090,6 +3238,9 @@ static void cmd_commission(const DaliCliTokens *t)
             s_session.hooks.inventory_changed(s_session.hooks.ctx, inventory);
         }
         shell_printf("commission: post-scan found=%u\r\n", (unsigned)found);
+        shell_report_commission_post_scan(inventory,
+                                          &result,
+                                          pre_contested_mask);
     }
 }
 
