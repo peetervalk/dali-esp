@@ -79,8 +79,11 @@ result. `dali_capability_matrix.md` states which is which per capability.
 - The PHY now exports task-context RX observations for decoded frames, malformed
   waveforms, and ring overflow, including wrapping first/last-edge timestamps and
   an edge count. The scheduler anchors the reply window to the ISR-captured TX bus
-  release and attributes observations from 5.5 through 27 ms after that point,
-  including replies decoded while the owner task still says `WAIT_SETTLE`.
+  release and attributes observations through 27 ms after that point, including
+  replies decoded while the owner task still says `WAIT_SETTLE`. The open edge
+  was 5.5 ms for every observation in this slice; it was later split per
+  observation kind — see "1k bus: gear that replies just before the attribution
+  window opens" for the two edges now in force.
 - Commissioning COMPARE now has three outcomes instead of treating every missing
   byte as NO. Silence is NO; a decoded `0xFF` or qualified undecodable backward
   activity is YES; short/ambiguous malformed activity and overflow abort with an
@@ -1404,9 +1407,26 @@ standard's minimum. This is what moved `DALI_REPLY_WINDOW_OPEN_DECODED_US` from
 a chosen 4500 us to the derived `DALI_SETTLE_MS`; any fixed margin is one sloppy
 driver away from being overtaken.
 
-Not yet re-run on the bus with the derived edge. What it should produce: a0
-readable, the seed sweep seeding all seven groups, and 16 answered rather than
-15.
+Not yet re-run on the bus with the derived edge — and it may not need to be for
+this installation. On the 4500 us build all seven groups now read from the bus:
+group 0 via a5, 2 via a4, 3 via a13, 4 via a1, 5 via a0, 6 via a2, 7 via a15,
+with no `query_address` anywhere in the YAML. a0 answered on that build too;
+its 4.12 ms samples would still be rejected there, so the derived edge is about
+making it dependable rather than possible.
+
+That boot ran no seed sweep, correctly: the membership had been restored from
+flash. Which is itself evidence the window change worked, because
+`dali_discovery_inventory_has_complete_group_data()` returns false if any present
+control gear lacks group data, and `set_group_membership_snapshot()` refuses an
+incomplete snapshot. Before the change no `discover` on this bus could ever be
+complete — a0, a1, a13 or a15 were always missing some — so nothing was ever
+persisted and the sweep armed every boot. One complete run afterwards persisted
+a verified map and the sweep has had nothing to do since. The cold-start seed is
+a fallback this node has now outgrown, which is the intended shape.
+
+A consequence for verification: the sweep will not re-run here without a flash
+erase, so the "16 answered" reading is not obtainable on this node. The verified
+map supersedes it anyway.
 
 
 The entire `_local` directory is deliberately ignored by Git. This checkout also
@@ -1441,8 +1461,9 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
 
 - Complete and prove bus timing beyond the local own-forward-frame guard. Precise
   TX-end and backward/malformed observation timestamps are now exported and
-  host-tested; HIL must validate their 5.5--27 ms attribution, physical collision
-  behavior, and external-frame cases. DALI-2 priority/backoff remains open, as
+  host-tested; HIL must validate both attribution edges (5.5 ms undecodable,
+  2 ms decoded) against the 27 ms close, physical collision behavior, and
+  external-frame cases. DALI-2 priority/backoff remains open, as
   does a deadline-aware PHY call when a repeat would cross the 100 ms limit.
 - Validate the COMPARE collision fix on hardware. Qualified undecodable activity
   in the reply window now reaches commissioning as `DALI_ERR_RX_ACTIVITY` and
@@ -1460,7 +1481,10 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   one. Attributing early is recoverable; attributing late discards real replies.
   Guard against the regression this closed: before timestamped attribution, any
   decoded backward frame in `WAIT_REPLY` was accepted regardless of arrival time,
-  so too high a value presents as gear that used to answer going quiet.
+  so too high a value presents as gear that used to answer going quiet. Only
+  this constant is owed a citation: `DALI_REPLY_WINDOW_OPEN_DECODED_US`, added
+  the same day for observations that decoded as a complete backward frame, is
+  derived from `DALI_SETTLE_MS` rather than quoted from anything.
 - Confirm the post-RANDOMISE settle time against the standard text, then verify a
   commissioning run on a bus. `DALI_COMMISSIONING_RANDOMISE_SETTLE_MS` was raised
   from 15 ms to 100 ms on 2026-08-24 on the strength of Espressif's `esp_dali`

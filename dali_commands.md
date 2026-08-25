@@ -749,9 +749,10 @@ established here — treat `off` as the only thing that reliably releases it.
 Host-tested; no bus has run it.
 
 Commissioning remains hardware-dependable only with a single unaddressed device
-on the bus. The receive path now attributes observations to the precise
-TX-end-relative 5.5–27 ms reply window and distinguishes three cases during
-`COMPARE`:
+on the bus. The receive path now attributes observations to a precise
+TX-end-relative reply window — opening at 5.5 ms for undecodable activity, which
+is the case `COMPARE` turns on, and closing at 27 ms — and distinguishes three
+cases during `COMPARE`:
 
 - silence is NO;
 - qualified, response-like malformed activity is `DALI_ERR_RX_ACTIVITY`, which

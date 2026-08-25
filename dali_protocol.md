@@ -85,10 +85,12 @@ Unsigned deltas make attribution wrap-safe; task scheduling latency does not mov
 an observation into or out of a reply window.
 
 For a transaction that expects a backward reply, the whole observation must be
-attributable to the interval from 5,500 us through 27,000 us after that precise
-TX end: its first edge cannot precede the opening and its last edge cannot exceed
-the closing. The outcomes are deliberately three-way rather than treating every
-decode failure as either a reply or silence:
+attributable to a window measured from that precise TX end: its first edge
+cannot precede the opening and its last edge cannot exceed the 27,000 us
+closing. The opening is 5,500 us for undecodable activity and 2,000 us for an
+observation that decoded as a complete backward frame; see Bus Timing for why
+the two differ. The outcomes are deliberately three-way rather than treating
+every decode failure as either a reply or silence:
 
 | Observation in the attributed window | Scheduler result | Meaning |
 |---|---|---|
@@ -550,7 +552,8 @@ Steinel HF 360 II memory-bank layout and its tuning workflow are in
 | Bit period | ~833.3 us |
 | Half-bit period | ~416.7 us |
 | TX-to-RX settle suppression | 2 ms |
-| Timestamped reply attribution opens | 5.5 ms after precise local TX end |
+| Attribution opens — undecodable activity | 5.5 ms after precise local TX end |
+| Attribution opens — decoded backward frame | 2 ms after precise local TX end |
 | Timestamped reply attribution closes | 27 ms after precise local TX end |
 | Scheduler reply wait after TX handoff | 25 ms |
 | Send-twice window | 100 ms |
@@ -559,7 +562,20 @@ Steinel HF 360 II memory-bank layout and its tuning workflow are in
 Every row above except the last is frame-level timing the PHY and scheduler
 enforce. The 2 ms handoff suppression plus the 25 ms reply wait gives the precise
 TX-end-relative 27 ms attribution close; observations are accepted by their
-captured edge timestamps, not by when task context delivers them. The RANDOMISE
+captured edge timestamps, not by when task context delivers them.
+
+The open edge has been two values since 2026-08-25, and which one applies is
+decided by whether the observation decoded. `DALI_REPLY_WINDOW_OPEN_US`
+(5,500 us) is the standard's minimum settling time and guards *undecodable*
+activity, because that is the path `COMPARE` reads as YES and where a wrong call
+invents gear. `DALI_REPLY_WINDOW_OPEN_DECODED_US` is derived from
+`DALI_SETTLE_MS` (2,000 us) and applies to a complete 8-bit backward frame,
+which carries none of that ambiguity while a query is outstanding: the local
+16-bit transmission cannot decode as one, ringing cannot, and another master's
+forward frame is caught by the intervening-frame branch. What is left is the
+PHY's own RX self-echo suppression. Deriving rather than choosing it is
+deliberate — a 1k-site DT6 driver answers between 4.12 and 5.85 ms on
+consecutive queries, so any hand-picked margin gets overtaken. The RANDOMISE
 settle is a commissioning-sequence delay in
 `dali_commissioning`, raised from 15 ms on 2026-08-24 to match the figure
 Espressif's `esp_dali` attributes to IEC 62386-102 §11.3. Unconfirmed against the
