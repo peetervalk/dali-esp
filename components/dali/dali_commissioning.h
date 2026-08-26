@@ -118,6 +118,29 @@ typedef struct {
      * happened instead.
      */
     bool quiesce_control_devices;
+    /*
+     * Bracket the run with IEC 62386-103 TERMINATE, so a control device cannot
+     * sit in its own addressing state while Part 102 COMPARE is being asked.
+     *
+     * This is the other half of the cross-part problem, and quiescent mode does
+     * not cover it. Quiescence stops a device transmitting on its own
+     * initiative; it does not stop the device entering addressing state when it
+     * observes the Part 102 INITIALISE, generating a random address, and then
+     * answering a COMPARE it was addressed with. Such a device appears in the
+     * search as gear that is not there and gets a short address programmed into
+     * nothing.
+     *
+     * Sent three times: before INITIALISE, again immediately after the opening
+     * sequence, and once more in the cleanup unwind. The second is the one that
+     * matters -- the first only closes a window someone else left open, and the
+     * state this guards against is entered by the INITIALISE itself.
+     *
+     * Off when the struct is zero-initialized, for the same reason
+     * quiesce_control_devices is: an out-of-tree caller keeps the frames it
+     * already sent. Like quiescence it is hardening rather than a precondition,
+     * so a failure is recorded and the run continues.
+     */
+    bool terminate_control_devices;
 } DaliCommissioningOptions;
 
 typedef struct {
@@ -162,6 +185,19 @@ typedef struct {
      * duplicate_count can exceed DALI_COMMISSIONING_MAX_DUPLICATES; the array
      * holds the first few.
      */
+    /*
+     * Cross-part TERMINATE, reported the way quiescence and the Part 102
+     * TERMINATE are: what was transmitted, never what was applied. No control
+     * device acknowledges it, so a bus with none present and a bus that ignored
+     * it are indistinguishable from here.
+     *
+     * cross_part_error keeps the first failure across all three sends. A
+     * failure does not end the run -- it means the phantom-device hardening may
+     * not be in force, not that the addressing is wrong.
+     */
+    bool     cross_part_terminate_requested;
+    bool     cross_part_terminate_attempted;
+    DaliError cross_part_error;
     uint8_t  duplicate_count;
     uint32_t duplicate_random_addresses[DALI_COMMISSIONING_MAX_DUPLICATES];
     /*

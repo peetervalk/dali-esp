@@ -101,6 +101,7 @@ static const DaliCommandInfo s_command_table[] = {
     CMD(DALI_CMD_QUERY_DEVICE_CONTENT_DTR2, "QUERY CONTENT DTR2 (device)", 0x38u, 0x38u, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_UINT8, false, true),
     CMD(DALI_CMD_START_QUIESCENT_MODE, "START QUIESCENT MODE", 0x1Du, 0x1Du, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_NONE, true, true),
     CMD(DALI_CMD_STOP_QUIESCENT_MODE, "STOP QUIESCENT MODE", 0x1Eu, 0x1Eu, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_NONE, true, true),
+    CMD(DALI_CMD_DEVICE_TERMINATE, "TERMINATE (device)", 0x00u, 0x00u, DALI_CMD_FRAME_24BIT_SPECIAL, DALI_RESP_NONE, false, true),
 
     CMD(DALI_CMD_QUERY_INSTANCE_TYPE, "QUERY INSTANCE TYPE", 0x80u, 0x80u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
     CMD(DALI_CMD_QUERY_RESOLUTION, "QUERY RESOLUTION", 0x81u, 0x81u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
@@ -405,6 +406,25 @@ static DaliCommandId dtr_data_command_id(DaliDtrRegister reg)
         case DALI_DTR2: return DALI_CMD_DTR2_DATA;
         default:        return DALI_CMD_COUNT;
     }
+}
+
+DaliError dali_build_device_special(DaliCommandId id,
+                                    uint8_t param,
+                                    DaliFrame *out)
+{
+    if (out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    const DaliCommandInfo *cmd = dali_command_lookup(id);
+    if (cmd == NULL ||
+        cmd->frame_kind != DALI_CMD_FRAME_24BIT_SPECIAL ||
+        cmd->opcode_first != cmd->opcode_last) {
+        return DALI_ERR_INVALID;
+    }
+
+    *out = make_control_device_special(cmd->opcode_first, param);
+    return DALI_OK;
 }
 
 DaliError dali_build_special(DaliCommandId id,

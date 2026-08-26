@@ -27,6 +27,12 @@ typedef enum {
     DALI_CMD_FRAME_SPECIAL    = 2,
     DALI_CMD_FRAME_24BIT_INST = 3,
     DALI_CMD_FRAME_24BIT_DEV  = 4,
+    /*
+     * IEC 62386-103 special commands: a 24-bit frame whose first byte is the
+     * fixed 0xC1 special-command address rather than a device address.
+     * Distinct from DALI_CMD_FRAME_24BIT_DEV, which addresses devices.
+     */
+    DALI_CMD_FRAME_24BIT_SPECIAL = 5,
 } DaliCommandFrameKind;
 
 typedef enum {
@@ -173,6 +179,19 @@ typedef enum {
     DALI_CMD_START_QUIESCENT_MODE,
     DALI_CMD_STOP_QUIESCENT_MODE,
 
+    /*
+     * IEC 62386-103 TERMINATE, the Part 103 special-command counterpart of
+     * DALI_CMD_TERMINATE. Closes a control device's own addressing state.
+     *
+     * It exists so that control-gear commissioning can close a window it opened
+     * by accident: a control device that observes the Part 102 INITIALISE can
+     * enter its own addressing state, generate a random address, and answer
+     * Part 102 COMPARE as gear that is not there. Quiescent mode does not cover
+     * that -- it stops a device transmitting on its own initiative, not
+     * responding to a query it was addressed with.
+     */
+    DALI_CMD_DEVICE_TERMINATE,
+
     DALI_CMD_COUNT,
 } DaliCommandId;
 
@@ -259,6 +278,17 @@ DaliError dali_build_dapc_mask(DaliAddressType type,
                                DaliFrame *out);
 
 /* Build a special command frame. */
+/*
+ * Build an IEC 62386-103 special command: (0xC1 << 16) | (opcode << 8) | param.
+ *
+ * Separate from dali_build_special(), which builds the 16-bit Part 102 form.
+ * The two spaces share names and even opcode numbers while meaning different
+ * things, so they deliberately do not share a builder.
+ */
+DaliError dali_build_device_special(DaliCommandId id,
+                                    uint8_t param,
+                                    DaliFrame *out);
+
 DaliError dali_build_special(DaliCommandId id,
                              uint8_t param,
                              DaliFrame *out);

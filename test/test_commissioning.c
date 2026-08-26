@@ -50,6 +50,11 @@ typedef struct {
      * duplicate path could loop forever. */
     bool       withdraw_is_noop;
     uint8_t    deaddress_count;
+    /* Part 103 TERMINATE (0xC1 0x00 0x00), and the log index of each send so a
+     * test can pin where in the run it landed. */
+    uint8_t    device_terminate_count;
+    uint16_t   device_terminate_at[4];
+    bool       device_terminate_fails;
 } MockCommissioningBus;
 
 static MockCommissioningBus s_bus;
@@ -269,6 +274,27 @@ static DaliError mock_device_broadcast(const DaliFrame *frame,
     uint8_t addr_byte = (uint8_t)((frame->data >> 16u) & 0xFFu);
     uint8_t inst_byte = (uint8_t)((frame->data >> 8u) & 0xFFu);
     uint8_t opcode    = (uint8_t)(frame->data & 0xFFu);
+
+    /*
+     * Part 103 special commands share the 24-bit frame width with device
+     * commands and are told apart by the fixed 0xC1 first byte, not by an
+     * address. TERMINATE is the only one commissioning sends.
+     */
+    if (addr_byte == 0xC1u) {
+        TEST_ASSERT_EQUAL_HEX8(0x00u, inst_byte);
+        TEST_ASSERT_EQUAL_HEX8(0x00u, opcode);
+        TEST_ASSERT_FALSE(needs_reply);
+        TEST_ASSERT_FALSE_MESSAGE(send_twice,
+                                  "Part 103 TERMINATE is not send-twice");
+        if (s_bus.device_terminate_count <
+            (sizeof(s_bus.device_terminate_at) /
+             sizeof(s_bus.device_terminate_at[0]))) {
+            s_bus.device_terminate_at[s_bus.device_terminate_count] =
+                (uint16_t)(s_bus.log_count - 1u);
+        }
+        s_bus.device_terminate_count++;
+        return s_bus.device_terminate_fails ? DALI_ERR_BUS_STUCK : DALI_OK;
+    }
 
     TEST_ASSERT_EQUAL_HEX8(DALI_BROADCAST_COMMAND_ADDRESS, addr_byte);
     TEST_ASSERT_EQUAL_HEX8(DALI_DEVICE_INSTANCE, inst_byte);
@@ -1597,6 +1623,157 @@ void test_duplicate_that_will_not_leave_the_search_stops_instead_of_looping(void
     TEST_ASSERT_TRUE(result.termination_attempted);
 }
 
+/* ---------------------------------------------------------------------------
+ * Cross-part TERMINATE
+ *
+ * A control device that observes the Part 102 INITIALISE can enter its own
+ * addressing state and answer Part 102 COMPARE, appearing in the search as gear
+ * that is not there. Quiescent mode does not stop that: it stops a device
+ * transmitting on its own initiative, not responding to a query.
+ * --------------------------------------------------------------------------*/
+
+/* Where a 16-bit special first appears in the TX log. Its opcode is the high
+ * byte; the low byte is the parameter. */
+static uint16_t mock_log_index_of_special(uint8_t opcode)
+{
+    for (uint16_t i = 0u; i < s_bus.log_count; i++) {
+        if (s_bus.log[i].bit_length == DALI_FORWARD_FRAME_BITS &&
+            (uint8_t)((s_bus.log[i].data >> 8u) & 0xFFu) == opcode) {
+            return i;
+        }
+    }
+    TEST_FAIL_MESSAGE("expected special never reached the bus");
+    return 0u;
+}
+
+void test_cross_part_terminate_brackets_the_run(void)
+{
+    DaliDiscoveryTransport t = transport();
+    DaliCommissioningResult result;
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 0u,
+        .used_address_mask = 0u,
+        .query_short_address = false,
+        .quiesce_control_devices = true,
+        .terminate_control_devices = true,
+    };
+
+    mock_add_device(0u, 0x010203u);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_commission_unaddressed(&t,
+                                                                &options,
+                                                                &result,
+                                                                NULL,
+                                                                NULL));
+
+    /* Before INITIALISE, after INITIALISE, and in the cleanup unwind. */
+    TEST_ASSERT_EQUAL_UINT8(3u, s_bus.device_terminate_count);
+    TEST_ASSERT_TRUE(result.cross_part_terminate_requested);
+    TEST_ASSERT_TRUE(result.cross_part_terminate_attempted);
+    TEST_ASSERT_EQUAL(DALI_OK, result.cross_part_error);
+
+    /*
+     * The second send is the one that earns its place: the addressing state it
+     * closes is one the Part 102 INITIALISE itself opens, so a send before
+     * INITIALISE cannot have closed it.
+     */
+    uint16_t initialise_at = mock_log_index_of_special(0xA5u);
+    TEST_ASSERT_LESS_THAN_UINT16(initialise_at, s_bus.device_terminate_at[0]);
+    TEST_ASSERT_GREATER_THAN_UINT16(initialise_at, s_bus.device_terminate_at[1]);
+
+    /* Addressing is unaffected by the extra frames. */
+    TEST_ASSERT_EQUAL_UINT8(1u, result.assigned_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, result.assignments[0].short_address);
+}
+
+void test_cross_part_terminate_is_off_for_a_zero_initialised_caller(void)
+{
+    DaliDiscoveryTransport t = transport();
+    DaliCommissioningResult result;
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 0u,
+        .used_address_mask = 0u,
+        .query_short_address = false,
+    };
+
+    mock_add_device(0u, 0x010203u);
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_commission_unaddressed(&t,
+                                                                &options,
+                                                                &result,
+                                                                NULL,
+                                                                NULL));
+
+    /* An out-of-tree caller keeps the frames it already sent. */
+    TEST_ASSERT_EQUAL_UINT8(0u, s_bus.device_terminate_count);
+    TEST_ASSERT_FALSE(result.cross_part_terminate_requested);
+    TEST_ASSERT_FALSE(result.cross_part_terminate_attempted);
+    TEST_ASSERT_EQUAL_UINT8(1u, result.assigned_count);
+}
+
+void test_cross_part_terminate_failure_is_recorded_but_does_not_end_the_run(void)
+{
+    DaliDiscoveryTransport t = transport();
+    DaliCommissioningResult result;
+    DaliCommissioningOptions options = {
+        .first_short_address = 0u,
+        .max_devices = 0u,
+        .used_address_mask = 0u,
+        .query_short_address = false,
+        .terminate_control_devices = true,
+    };
+
+    mock_add_device(0u, 0x010203u);
+    s_bus.device_terminate_fails = true;
+
+    /*
+     * Hardening, not a precondition. Refusing to address a bus because an
+     * optional guard could not be sent would trade a working operation for a
+     * risk the installation may not even have.
+     */
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_commissioning_commission_unaddressed(&t,
+                                                                &options,
+                                                                &result,
+                                                                NULL,
+                                                                NULL));
+
+    TEST_ASSERT_EQUAL_UINT8(1u, result.assigned_count);
+    TEST_ASSERT_TRUE(result.cross_part_terminate_attempted);
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK, result.cross_part_error);
+    /* The run's own result stays clean: the addressing worked. */
+    TEST_ASSERT_EQUAL(DALI_OK, result.last_error);
+    /* Every send was still attempted, including the unwind. */
+    TEST_ASSERT_EQUAL_UINT8(3u, s_bus.device_terminate_count);
+}
+
+void test_device_terminate_frame_is_the_part_103_special_form(void)
+{
+    DaliFrame frame = {0u, 0u};
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_device_special(DALI_CMD_DEVICE_TERMINATE,
+                                                0u,
+                                                &frame));
+    TEST_ASSERT_EQUAL_HEX32(0xC10000u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(DALI_EXTENDED_FRAME_BITS, frame.bit_length);
+
+    /* The Part 102 TERMINATE is a different command in a different space, and
+     * the two must not be reachable through each other's builder. */
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_device_special(DALI_CMD_TERMINATE, 0u, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_special(DALI_CMD_DEVICE_TERMINATE, 0u, &frame));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_device_special(DALI_CMD_DEVICE_TERMINATE,
+                                                0u,
+                                                NULL));
+}
+
 void test_verify_from_sequence_reads_confirmation_and_failures(void)
 {
     DaliSequenceResult result;
@@ -1913,6 +2090,10 @@ int main(void)
     RUN_TEST(test_rx_activity_is_yes_for_compare_and_multiple_for_verify);
     RUN_TEST(test_decoded_non_yes_reply_is_never_commissioning_no);
     RUN_TEST(test_compare_from_sequence_does_not_mistake_a_failed_write_for_no);
+    RUN_TEST(test_device_terminate_frame_is_the_part_103_special_form);
+    RUN_TEST(test_cross_part_terminate_brackets_the_run);
+    RUN_TEST(test_cross_part_terminate_is_off_for_a_zero_initialised_caller);
+    RUN_TEST(test_cross_part_terminate_failure_is_recorded_but_does_not_end_the_run);
     RUN_TEST(test_duplicate_random_address_is_taken_back_and_the_walk_continues);
     RUN_TEST(test_duplicate_recovery_reports_a_withdraw_that_did_not_transmit);
     RUN_TEST(test_duplicate_that_will_not_leave_the_search_stops_instead_of_looping);

@@ -50,6 +50,20 @@ typedef struct {
      * result.
      */
     bool                     has_undecodable_activity;
+    /*
+     * The same thing one address space over: the Part 103 control-device probe
+     * drew reply-window activity that did not decode. Two control devices
+     * sharing a device short address is the expected cause.
+     *
+     * Tracked separately because the two spaces are independent -- a control
+     * device at numeric address 7 and control gear at numeric address 7 are
+     * different devices -- so this must never reach the control-gear free-address
+     * mask. It reserves nothing today; control-device commissioning does not
+     * exist yet. It is recorded so the address stops being invisible: before
+     * this, a contested device address was dropped as "absent" and reported
+     * nowhere.
+     */
+    bool                     has_undecodable_device_activity;
     bool                     has_status;
     uint8_t                  status;
     bool                     has_groups;
@@ -92,6 +106,10 @@ typedef struct {
     uint8_t                 found_count;
     /* Addresses whose gear query drew undecodable reply-window activity. */
     uint8_t                 undecodable_count;
+    /* The same for the control-device probe, in the separate device address
+     * space. Counted apart from undecodable_count so neither number implies
+     * anything about the other space. */
+    uint8_t                 undecodable_device_count;
     DaliDiscoveryDeviceInfo devices[DALI_SHORT_ADDRESS_COUNT];
 } DaliDiscoveryInventory;
 

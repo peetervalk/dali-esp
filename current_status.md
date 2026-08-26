@@ -271,6 +271,64 @@ result. `dali_capability_matrix.md` states which is which per capability.
   103 quiescence, equal-random-address recovery, external-master arbitration, and
   the 100 ms post-RANDOMISE value still need standards/hardware validation.
 
+### Verified locally on 2026-08-26 (cross-part TERMINATE, device-space contested)
+
+Gaps 1, 2, and 5 of the mixed-device list. Gaps 3, 4, and 6 are untouched.
+
+- **A Part 103 special-command path exists.** `DALI_CMD_FRAME_24BIT_SPECIAL` is a
+  new frame kind — a 24-bit frame whose first byte is the fixed `0xC1`
+  special-command address rather than a device address, which is what
+  distinguishes it from the existing `DALI_CMD_FRAME_24BIT_DEV`.
+  `DALI_CMD_DEVICE_TERMINATE` (opcode `0x00`) is the first and so far only
+  command in it, built by `dali_build_device_special()`. The two TERMINATEs are
+  deliberately not reachable through each other's builder; a vector pins that.
+- **Gear commissioning brackets itself with it.** Three sends: before
+  `INITIALISE`, immediately after the opening sequence, and in the cleanup
+  unwind. Only the second one addresses the actual fault — a control device
+  enters its own addressing state *because of* the Part 102 `INITIALISE`, so a
+  send before it closes nothing relevant. The other two are hygiene and
+  symmetry with the quiescence bracket.
+- **The one judgment call, recorded rather than hidden.** That second send is a
+  `0xC1`-prefixed frame transmitted while control gear sits in an initialise
+  window, which is the cross-part interference direction `dali_protocol.md`
+  warns about. Gear that mis-frames the 24-bit special as 16-bit reads `ENABLE
+  DEVICE TYPE 0`, which qualifies only the next frame; the frames that follow
+  are specials and are not device-type-qualified, so the stray enable expires
+  without effect. Bounded argued risk against a phantom device that gets a short
+  address programmed into nothing. If that trade is judged wrong, deleting the
+  second send is a one-line change.
+- **Opt-in and non-fatal**, matching quiescence exactly.
+  `DaliCommissioningOptions.terminate_control_devices` is off in a
+  zero-initialized struct, so an out-of-tree caller keeps the frames it already
+  sent; the shell sets it. A failure records `cross_part_error` and the run
+  continues — hardening is not a precondition. The shell prints a line only on
+  failure, because nothing acknowledges a Part 103 TERMINATE and a success line
+  would claim more than the bus said.
+- **Quiescence does not cover this and the docs no longer imply it might.**
+  Quiescent mode stops a control device transmitting on its own initiative. It
+  does not stop the device entering addressing state on an `INITIALISE` it
+  observed, nor answering a `COMPARE` it was addressed with.
+- **The device address space stops being invisible.** The Part 103 instance
+  probe in `dali_discovery_scan()` treated everything that was not `DALI_OK` as
+  "no device", `DALI_ERR_RX_ACTIVITY` included — so two control devices sharing
+  a device short address were dropped entirely rather than merely unreadable.
+  Now recorded as `has_undecodable_device_activity` and counted in
+  `undecodable_device_count`, reported by both `discover` surfaces as `dN:
+  contested`.
+- **Kept out of the gear mask on purpose.** The two address spaces are
+  independent, so the device-space flag is separate from
+  `has_undecodable_activity` and reserves nothing:
+  `dali_commissioning_used_mask_from_inventory()` is unchanged and still
+  gear-only. Reserving a gear address because a control device collided at the
+  same number would be a different bug from the one this fixes. A vector asserts
+  both flags and both counters independently.
+
+Four new commissioning vectors and one new discovery vector; `test_commissioning`
+goes 43 → 47, `test_discovery` 56 → 57, all 26 suites pass. Mutation-checked:
+removing the post-`INITIALISE` TERMINATE fails two of the four. `dali_shell.c`
+and all four ESPHome translation units compile clean against their real flag
+sets. No bus has run any of it.
+
 ### Verified locally on 2026-08-26 (equal-random-address detection)
 
 Step 2 and step 3 of the equal-random-address plan, which collapsed into one
@@ -1281,6 +1339,18 @@ write fits in one queue entry. This changes the public `DaliSequence` layout and
 requires all callers to rebuild. In the ESP32 build, the active-sequence and
 16-entry scheduler queue storage increase by 612 bytes in total.
 
+`DaliCommandFrameKind` gains `DALI_CMD_FRAME_24BIT_SPECIAL = 5` and
+`DaliCommandId` gains `DALI_CMD_DEVICE_TERMINATE`, both appended, so existing
+numeric values are unchanged. A `switch` over `DaliCommandFrameKind` compiled
+with `-Wswitch` will newly warn. `DaliCommissioningOptions` gains
+`terminate_control_devices` and `DaliCommissioningResult` gains
+`cross_part_terminate_requested`, `cross_part_terminate_attempted`, and
+`cross_part_error`; the option is off in a zero-initialized struct, so an
+out-of-tree caller keeps the frames it already sent.
+`DaliDiscoveryDeviceInfo` gains `has_undecodable_device_activity` and
+`DaliDiscoveryInventory` gains `undecodable_device_count`, changing both
+layouts — anything persisting either struct raw must be rebuilt.
+
 `dali_commissioning_verify_from_sequence()` and
 `dali_commissioning_verify_short_address()` replace their `bool *verified_out`
 with `DaliCommissioningVerifyOutcome *outcome_out`. The compiler catches the
@@ -1655,23 +1725,14 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
   *Mixed device — Part 102 gear and Part 103 control devices on one bus.* Six
   distinct gaps, only one of which quiescence touches.
 
-  1. **Cross-part TERMINATE bracketing is not implemented.** Described under
-     Cross-Part Interference in `dali_protocol.md` and never built. The walk
-     sends Part 102 TERMINATE/INITIALISE/RANDOMISE only; a control device that
-     acts on the Part 102 INITIALISE enters its own addressing state and can
-     answer Part 102 COMPARE — a phantom device that gets a short address
-     programmed into nothing. `esp_dali` sends the other part's TERMINATE too and
-     repeats it after INITIALISE, because a device can re-enter the state.
-     Blocked on a small protocol addition: there is no Part 103 TERMINATE in
-     `DaliCommandId`. `make_control_device_special()` exists in
-     `dali_protocol.c` but is static, used only by DTR0/1/2 and quiescent mode.
-     This is the contained change that closes the phantom-device path.
-  2. **Quiescence does not close that path.** START QUIESCENT MODE suppresses a
-     device's own bus activity — event frames. It does not stop the device
-     entering initialisation state on INITIALISE, and a backward reply to a query
-     it was addressed with is arguably not "own activity" at all. Quiescence
-     removes the unsolicited-event class of phantom; the addressing-state class
-     needs item 1. Do not let the docs imply otherwise.
+  1. **Cross-part TERMINATE bracketing. Done 2026-08-26** — see the
+     verification entry above. `DALI_CMD_FRAME_24BIT_SPECIAL`,
+     `DALI_CMD_DEVICE_TERMINATE`, `dali_build_device_special()`, and a
+     three-send bracket around the gear walk. Host vectors only.
+  2. **Quiescence does not close that path. Documented 2026-08-26**, and item 1
+     is what closes it. Quiescent mode suppresses a device's own bus activity —
+     event frames. It does not stop the device entering addressing state on an
+     INITIALISE it observed, nor answering a COMPARE it was addressed with.
   3. **There is no control-device commissioning surface at all.** No device
      INITIALISE / RANDOMISE / COMPARE / SEARCHADDRH-M-L / PROGRAM SHORT ADDRESS /
      VERIFY / WITHDRAW in `DaliCommandId`, no device-space counterpart to
@@ -1683,14 +1744,14 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
      initialise window can act on the Part 103 special frames a device run emits.
      Whenever item 3 is built it must bracket with a Part 102 TERMINATE for the
      same reason — design the guard once, in both directions.
-  5. **Discovery has a device-space blind spot.** The gear path classifies
-     undecodable activity properly and reserves the address. The control-device
-     probe below it treats anything but `DALI_OK` as absent, `DALI_ERR_RX_ACTIVITY`
-     included, so two control devices sharing a device short address are
-     invisible. Correctly not reserved today —
-     `dali_commissioning_used_mask_from_inventory()` is explicitly gear-only and
-     the spaces are independent — but item 3 needs a device-space `used_mask` and
-     there is nothing to build one from.
+  5. **Discovery's device-space blind spot. Done 2026-08-26** — the Part 103
+     instance probe records `DALI_ERR_RX_ACTIVITY` as
+     `has_undecodable_device_activity` and counts it in
+     `undecodable_device_count` instead of dropping it as "absent". Reported as
+     `dN: contested` by both `discover` surfaces. Deliberately reserves nothing:
+     `dali_commissioning_used_mask_from_inventory()` stays gear-only, because the
+     spaces are independent. Item 3 still needs a device-space `used_mask`, but
+     there is now something to build one from.
   6. **Hybrid units have no pairing model.** One physical device can be both
      control gear and control device, with two independent short addresses. The
      gear walk can move its gear address without touching its device address,

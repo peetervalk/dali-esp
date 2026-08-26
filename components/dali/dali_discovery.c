@@ -975,9 +975,30 @@ DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
          * pure DALI-2 input device that has no control gear (Part 303). */
         DaliFrame inst_q;
         uint8_t count = 0u;
-        if (dali_input_build_query_number_of_instances(addr, &inst_q) == DALI_OK &&
-            dali_discovery_query_u8(transport, &inst_q, &count) == DALI_OK &&
-            count > 0u) {
+        if (dali_input_build_query_number_of_instances(addr, &inst_q) != DALI_OK) {
+            continue;
+        }
+
+        DaliError inst_err = dali_discovery_query_u8(transport, &inst_q, &count);
+        if (inst_err == DALI_ERR_RX_ACTIVITY) {
+            /*
+             * Something answered in the device address space and could not be
+             * decoded — two control devices sharing a short address is the
+             * expected cause. Recorded rather than dropped: every other
+             * outcome here is silently treated as "no device", which made a
+             * contested device address invisible instead of merely unreadable.
+             *
+             * It deliberately does not set `present` and does not touch
+             * anything the control-gear free-address mask reads. The two
+             * address spaces are independent, and reserving a gear address
+             * because a control device collided at the same number would be a
+             * different bug from the one this fixes.
+             */
+            inventory->devices[addr].has_undecodable_device_activity = true;
+            inventory->undecodable_device_count++;
+            continue;
+        }
+        if (inst_err == DALI_OK && count > 0u) {
             DaliDiscoveryDeviceInfo *device = &inventory->devices[addr];
             if (!device->present) {
                 inventory->found_count++;

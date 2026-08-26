@@ -769,6 +769,15 @@ unconditional, so a run also releases a quiescence started by hand with
 `quiescent on all`; if the release fails, the shell says so and `quiescent off
 all` is the fix.
 
+A Part 103 `TERMINATE` is bracketed with it — before `INITIALISE`, again
+immediately after, and in the cleanup unwind. It covers the half quiescence does
+not: quiescent mode stops a control device transmitting on its own initiative,
+but does not stop one entering its own addressing state when it observes the
+Part 102 `INITIALISE`, nor answering a `COMPARE` it was addressed with. Nothing
+acknowledges it, so the shell prints a line only when it could not be sent.
+There is no verb for it; the Part 102 `special terminate` is unrelated and
+addresses gear.
+
 Over TCP, `commission` and the nine commissioning specials are refused unless the
 YAML sets `allow_commissioning: true`, because the port is unauthenticated. See
 `commissioning_readme.md` for the workflow.
@@ -781,7 +790,15 @@ gate and attempts a final Part 102 `TERMINATE` before returning. The original
 operation error remains primary; if the cleanup transmission also fails, the
 shell reports that separately and warns that the initialisation state is unknown.
 `TERMINATE` is cancellation-safe in the sense that it is still attempted, not
-that delivery can be guaranteed after a bus or transport failure.
+that delivery can be guaranteed after a bus or transport failure. The Part 103
+`TERMINATE` and the quiescence release run through the same unwind and carry the
+same meaning.
+
+A run that assigned anything then re-scans and checks itself. `post-scan
+confirmed N of M assignment(s)` is the line to read; an assigned address that
+comes back `contested` means two gear hold it. See `commissioning_readme.md` for
+that output and for what an equal random address looks like while the run is
+still going.
 
 ## Diagnostics
 

@@ -108,6 +108,16 @@ continues -- a second run places them. Host vectors only, and it rests on the sa
 undecodable-activity classification that has no physical collision capture behind
 it. Arbitration against another bus master remains open.
 
+Cross-part interference is guarded in the gear direction as of 2026-08-26: a run
+sends IEC 62386-103 TERMINATE before INITIALISE, again immediately after, and in
+the cleanup unwind, so a control device that entered its own addressing state on
+seeing the Part 102 INITIALISE cannot answer COMPARE as gear. Opt-in through
+`DaliCommissioningOptions.terminate_control_devices`, non-fatal on failure, host
+vectors only. The reverse guard is not implemented because control-device
+commissioning is not. Discovery now also records undecodable activity in the
+control-device address space (`has_undecodable_device_activity`), which reserves
+nothing — the two address spaces are independent.
+
 The shell rows are the same code the native CLI runs, reached through
 `esphome/components/dali/dali_shell_tcp.cpp`. Its commissioning entry point is
 `commission unaddressed [first] [max]`; that verb and the nine commissioning
@@ -181,6 +191,8 @@ a gap.
 | Event dispatch rules | `dali_dispatch_*` | n/a | yes | yes | yes |
 | Quiescent mode | `dali_input_build_quiescent_mode[_broadcast]` | `quiescent on\|off <addr\|all>` | yes | no | yes (console) |
 | Commissioning quiescence bracket | `DaliCommissioningOptions.quiesce_control_devices` | automatic in `commission` | yes | no | n/a |
+| Cross-part TERMINATE bracket | `DaliCommissioningOptions.terminate_control_devices` | automatic in `commission` | yes | no | n/a |
+| Part 103 TERMINATE frame | `dali_build_device_special` / `DALI_CMD_DEVICE_TERMINATE` | via `commission` | yes | no | n/a |
 | Device broadcast (0xFF) | `dali_build_device_broadcast_command` | via `quiescent ... all` | yes | no | yes (console) |
 
 Configuration writes are experimental everywhere. The native CLI says so on every

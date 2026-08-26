@@ -105,6 +105,13 @@ occupancy sensor or wall switch cannot put an event frame into a COMPARE reply
 window, where frame-like activity reads as YES and invents gear that is not
 there. Only control devices are affected; lights keep working throughout.
 
+A Part 103 `TERMINATE` goes out with it — before `INITIALISE`, again just after,
+and once more on the way out. Quiescence stops a sensor talking; this stops one
+that quietly entered its own addressing state when it saw the gear `INITIALISE`
+go past, and would then answer `COMPARE` as a fixture that does not exist. It is
+never acknowledged by anything, so the shell mentions it only if it could not be
+sent.
+
 Two consequences worth knowing. The release is unconditional, so a run also
 releases a quiescence you started by hand with `quiescent on all`. And if the
 release cannot be transmitted, the shell says so explicitly — control devices may
@@ -284,11 +291,15 @@ is arguably most wanted. `discover` after a failure does the same walk.
 
 The remaining commissioning work is explicit:
 
-- The cross-part TERMINATE guard is not implemented: a control device that
-  observes the Part 102 INITIALISE can still enter its own addressing state.
-  START/STOP QUIESCENT bracketing now runs, which stops a control device from
-  *transmitting* into the run, but a device that never received the broadcast is
-  unaffected and none of it is HIL-validated.
+- The cross-part TERMINATE guard now runs, alongside the START/STOP QUIESCENT
+  bracketing. The two cover different halves of the same problem: quiescence
+  stops a control device *transmitting* into the run, and the Part 103 TERMINATE
+  stops one sitting in its own addressing state and answering COMPARE as gear
+  that is not there — which is a state the Part 102 INITIALISE itself can put it
+  in. Neither reaches a device that never received the broadcast, and none of it
+  is HIL-validated. The reverse guard, bracketing control-device commissioning
+  with a Part 102 TERMINATE, does not exist because control-device commissioning
+  does not.
 - Two gear that generate the same 24-bit random address are detected during the
   run and sent back to being unaddressed, but they are not placed for you: a
   second run is what gives them addresses. See "When two gear share a random

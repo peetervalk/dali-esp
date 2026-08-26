@@ -363,6 +363,55 @@ void test_scan_records_undecodable_activity_and_keeps_scanning(void)
     TEST_ASSERT_EQUAL_UINT32(64u + 62u + 25u, s_bus.tx_count);
 }
 
+void test_scan_records_undecodable_control_device_activity(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 99u;
+
+    /*
+     * Address 7 has no control gear -- QUERY STATUS times out -- and then draws
+     * undecodable activity from the Part 103 instance probe. Two control devices
+     * sharing a device short address is the expected cause.
+     *
+     * Before this was recorded, the probe treated anything that was not DALI_OK
+     * as "no device", so a contested device address was invisible rather than
+     * merely unreadable.
+     */
+    DaliFrame probe;
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_input_build_query_number_of_instances(7u, &probe));
+    add_reply(probe.data, probe.bit_length, DALI_ERR_RX_ACTIVITY, 0u, 0u);
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    TEST_ASSERT_TRUE(inventory.valid);
+
+    const DaliDiscoveryDeviceInfo *entry =
+        dali_discovery_inventory_get(&inventory, 7u);
+    TEST_ASSERT_NOT_NULL(entry);
+    TEST_ASSERT_TRUE(entry->has_undecodable_device_activity);
+    TEST_ASSERT_EQUAL_UINT8(1u, inventory.undecodable_device_count);
+
+    /* Not a device, and not present. */
+    TEST_ASSERT_FALSE(entry->present);
+    TEST_ASSERT_FALSE(entry->has_input_device);
+    TEST_ASSERT_EQUAL_UINT8(0u, found);
+
+    /*
+     * And emphatically not a gear-space finding. The two address spaces are
+     * independent, so this must not reserve gear address 7 -- commissioning
+     * reads the gear flag, and reserving on the device flag would refuse a free
+     * address for no reason.
+     */
+    TEST_ASSERT_FALSE(entry->has_undecodable_activity);
+    TEST_ASSERT_EQUAL_UINT8(0u, inventory.undecodable_count);
+
+    /* The walk carried on to the end. */
+    TEST_ASSERT_EQUAL_UINT32(64u + 64u, s_bus.tx_count);
+}
+
 void test_scan_still_aborts_on_a_real_bus_error(void)
 {
     DaliDiscoveryInventory inventory;
@@ -1866,6 +1915,7 @@ int main(void)
     RUN_TEST(test_scan_ignores_timeouts_and_malformed_slots);
     RUN_TEST(test_scan_aborts_on_bus_error);
     RUN_TEST(test_scan_records_undecodable_activity_and_keeps_scanning);
+    RUN_TEST(test_scan_records_undecodable_control_device_activity);
     RUN_TEST(test_scan_still_aborts_on_a_real_bus_error);
     RUN_TEST(test_query_status_rejects_bad_reply_width);
     RUN_TEST(test_query_input_device_clamps_and_keeps_optional_timeouts);

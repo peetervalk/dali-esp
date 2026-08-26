@@ -210,8 +210,10 @@ text:
   reply window, but that too is host-tested only and cannot reach a device that
   missed the broadcast. Two gear that draw the same random address are detected
   at VERIFY, de-addressed, and left for a second run to place -- host-tested,
-  same caveat. Cross-part addressing interference and multi-master arbitration
-  are not implemented.
+  same caveat. Cross-part addressing interference is guarded in one direction —
+  a run brackets itself with Part 103 TERMINATE so a control device cannot sit in
+  its own addressing state and answer COMPARE as gear — but control-device
+  commissioning itself, and multi-master arbitration, are not implemented.
 - Implemented does not mean verified on hardware. Several paths — the DT6/DT8
   command sets, memory writes, input-device configuration — have host vectors but
   no recorded real-bus result; [dali_capability_matrix.md](dali_capability_matrix.md)

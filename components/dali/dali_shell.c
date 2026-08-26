@@ -2766,6 +2766,25 @@ static uint8_t shell_discover_bus(bool detailed)
             }
         }
     }
+    if (inventory->undecodable_device_count > 0u) {
+        /*
+         * The control-device address space, which is independent of the gear
+         * one: a contested device address does not make the same numeric gear
+         * address unavailable, and is not reserved by anything. Named because
+         * it used to be dropped as "absent" and reported nowhere at all.
+         */
+        shell_printf("  note: %u device address(es) answered undecodably.\r\n",
+                     (unsigned)inventory->undecodable_device_count);
+        shell_printf("  Likely control devices sharing an address; separate "
+                     "space from gear.\r\n");
+        for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+            const DaliDiscoveryDeviceInfo *entry =
+                dali_discovery_inventory_get(inventory, addr);
+            if (entry != NULL && entry->has_undecodable_device_activity) {
+                shell_printf("    d%u: contested\r\n", (unsigned)addr);
+            }
+        }
+    }
     if (ignored_rx > 0u) {
         /* Keep this copy deliberately short. The TCP shell owns a 128-byte
          * output buffer (including NUL) and sends one buffer per callback. */
@@ -2852,6 +2871,10 @@ static void cmd_inventory(void)
     shell_printf("Inventory: %u device(s)", (unsigned)found);
     if (inventory->undecodable_count > 0u) {
         shell_printf(", %u contested", (unsigned)inventory->undecodable_count);
+    }
+    if (inventory->undecodable_device_count > 0u) {
+        shell_printf(", %u contested (device space)",
+                     (unsigned)inventory->undecodable_device_count);
     }
     shell_printf("\r\n");
 #endif
@@ -2942,6 +2965,26 @@ static void shell_report_quiescence(const DaliCommissioningResult *result)
         shell_printf("commission: STOP QUIESCENT MODE failed; control devices "
                      "may still be silent - run 'quiescent off all'\r\n");
     }
+}
+
+/*
+ * The cross-part guard, reported only when it failed.
+ *
+ * Silence on success is right: nothing acknowledges a Part 103 TERMINATE, so a
+ * line saying it worked would claim more than the bus said. A failure earns a
+ * line because it names what is no longer being prevented.
+ */
+static void shell_report_cross_part(const DaliCommissioningResult *result)
+{
+    if (!result->cross_part_terminate_attempted ||
+        result->cross_part_error == DALI_OK) {
+        return;
+    }
+    shell_printf("commission: Part 103 TERMINATE failed (%s); a control device "
+                 "in its own\r\n"
+                 "  addressing state could have answered COMPARE as gear - "
+                 "check the post-scan.\r\n",
+                 shell_err(result->cross_part_error));
 }
 
 /*
@@ -3193,6 +3236,10 @@ static void cmd_commission(const DaliCliTokens *t)
          * COMPARE reply window reads as YES and invents gear that is not
          * there; this is the cheap half of not letting that happen. */
         .quiesce_control_devices = true,
+        /* The other half of the same problem: quiescence stops a control device
+         * transmitting, this stops one sitting in its own addressing state and
+         * answering COMPARE as gear that is not there. */
+        .terminate_control_devices = true,
     };
     DaliCommissioningResult result;
     err = dali_commissioning_commission_unaddressed(
@@ -3237,6 +3284,7 @@ static void cmd_commission(const DaliCliTokens *t)
         }
         shell_report_quiescence(&result);
         shell_report_duplicates(&result);
+        shell_report_cross_part(&result);
         shell_printf("commission: ERR %s after %u assignment(s)\r\n",
                shell_err(err),
                (unsigned)result.assigned_count);
@@ -3249,6 +3297,7 @@ static void cmd_commission(const DaliCliTokens *t)
              result.terminate_tx_succeeded ? 1u : 0u);
     shell_report_quiescence(&result);
     shell_report_duplicates(&result);
+    shell_report_cross_part(&result);
     shell_printf("commission: complete assigned=%u",
            (unsigned)result.assigned_count);
     if (result.no_more_devices) {

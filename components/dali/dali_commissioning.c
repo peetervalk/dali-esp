@@ -100,6 +100,57 @@ static DaliError commissioning_start_quiescence(
 }
 
 /*
+ * IEC 62386-103 TERMINATE, closing any control-device addressing state.
+ *
+ * No reply and nothing to acknowledge it, so this reports transmission only.
+ * cleanup selects the transport that ignores a latched front-end cancellation,
+ * for the same reason the Part 102 unwind does: the send that matters most is
+ * the one after everything has gone wrong.
+ */
+static DaliError commissioning_terminate_control_devices(
+    const DaliDiscoveryTransport *transport,
+    bool cleanup)
+{
+    DaliFrame frame;
+    DaliError err = dali_build_device_special(DALI_CMD_DEVICE_TERMINATE,
+                                              0u,
+                                              &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    if (cleanup) {
+        return dali_transport_transact_cleanup(transport, &frame, false, 0u,
+                                               false, NULL);
+    }
+    return transact_frame(transport, &frame, false, 0u, false, NULL);
+}
+
+/*
+ * Record a cross-part TERMINATE attempt without letting it end the run.
+ *
+ * Hardening, not a precondition: commissioning worked before any of it existed,
+ * and refusing to address a bus because an optional guard could not be sent
+ * would trade a working operation for a risk the installation may not even
+ * have. Same call quiescence makes.
+ */
+static void commissioning_try_terminate_control_devices(
+    const DaliDiscoveryTransport *transport,
+    DaliCommissioningResult *out,
+    bool cleanup)
+{
+    if (!out->cross_part_terminate_requested) {
+        return;
+    }
+
+    out->cross_part_terminate_attempted = true;
+    DaliError err = commissioning_terminate_control_devices(transport, cleanup);
+    if (err != DALI_OK && out->cross_part_error == DALI_OK) {
+        out->cross_part_error = err;
+    }
+}
+
+/*
  * Broadcast STOP QUIESCENT MODE through the cleanup path.
  *
  * Same reasoning as the TERMINATE unwind: this has to be attempted even when a
@@ -864,6 +915,14 @@ DaliError dali_commissioning_commission_unaddressed(
          */
     }
 
+    /*
+     * Close any control-device addressing state that was already open before
+     * this run started -- another tool's abandoned Part 103 INITIALISE. Sent
+     * after quiescence, so the bus is already as quiet as it is going to get.
+     */
+    out->cross_part_terminate_requested = options->terminate_control_devices;
+    commissioning_try_terminate_control_devices(transport, out, false);
+
     bool termination_required = false;
     DaliError err = commissioning_start_unaddressed(
         transport,
@@ -874,6 +933,24 @@ DaliError dali_commissioning_commission_unaddressed(
         goto cleanup;
     }
     out->termination_required = true;
+
+    /*
+     * And again, now that INITIALISE has been on the wire. This is the send
+     * that earns its place: the state being closed is one the Part 102
+     * INITIALISE itself can open in a control device, so closing it beforehand
+     * proves nothing.
+     *
+     * It carries a known tension. A Part 103 special frame begins 0xC1, which
+     * is also the Part 102 ENABLE DEVICE TYPE opcode, and control gear is in an
+     * initialise window at this moment. Gear that mis-frames the 24-bit special
+     * as a 16-bit forward frame would read ENABLE DEVICE TYPE 0, which
+     * qualifies only the frame immediately after it -- the next frames here are
+     * specials, which are not device-type-qualified, so the stray enable
+     * expires without effect. Accepted deliberately: a phantom device in the
+     * search is a real fault with a real cost, and this is the documented
+     * remedy. Neither half has been seen on a bus.
+     */
+    commissioning_try_terminate_control_devices(transport, out, false);
     emit_progress(progress_cb,
                   progress_ctx,
                   DALI_COMMISSIONING_EVENT_INITIALISED,
@@ -1061,6 +1138,13 @@ cleanup:
                           out->assigned_count);
         }
     }
+
+    /*
+     * The cross-part unwind sits between the two, and for the same reason both
+     * of them exist: a control device left in addressing state answers the next
+     * tool's COMPARE. Attempted however the Part 102 TERMINATE went.
+     */
+    commissioning_try_terminate_control_devices(transport, out, true);
 
     /*
      * Release after TERMINATE, and attempt it regardless of how TERMINATE went.
