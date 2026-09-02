@@ -1,13 +1,21 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-08-26
+**Last updated:** 2026-09-02
 
 **Known-working deployment/component baseline:** `v1.1.1` (`76cede1`), hardware
 tested; this is not a conformance claim.
 
-**Deployed now:** both sites run `v1.1.1`, so the last release known good and
-what is on the hardware are the same statement again. The `_local` deploy copies
-do not say so themselves; see Installation State.
+**Latest release:** `v1.3.0` (`ce0a72c`, the PR #4 merge, which is what `main`
+points at). It carries the commissioning rebuild through `a811d56` but not the
+three commits after it — post-scan verification, VERIFY-based duplicate
+detection, and the mixed-device work — which exist only on `dev`. No release has
+been hardware-tested since `v1.1.1`.
+
+**Deployed now:** not recorded here, and this file is not the place to look. The
+authoritative site configurations live in Home Assistant, not in this repository.
+The `_local/` copies are snapshots taken when convenient, are not kept in step
+with the running configurations, and are therefore not evidence of what any
+device is running or of which ref it was built from. See Installation State.
 
 **Status:** The ESPHome controller is operational on the two known installations.
 The repository has a strong reusable C foundation, but CLI completeness, several
@@ -73,6 +81,22 @@ and it clears four items recorded as unverified under 2026-08-12:
 Unchanged by this pass: the DT6 and DT8 command sets, memory writes, and
 input-device configuration writes still have host vectors and no real-bus
 result. `dali_capability_matrix.md` states which is which per capability.
+
+### Verified locally on 2026-09-02 (ESPHome 2026.8.1 schema, suite re-run)
+
+Working tree at `dev` `e26f442`, clean.
+
+- All 26 host suites build and pass (`mingw32-make --directory build test`).
+  No change from the 2026-08-26 pass; this is a re-run, not new coverage.
+- `dali_test.yaml` passes `esphome config` on **ESPHome 2026.8.1**, one minor
+  release above the 2026.7.4 recorded on 2026-08-26. Because that config is
+  `type: local`, this validates the Python schema in
+  `esphome/components/dali/__init__.py` against the working-tree component.
+- Scope, stated precisely: `esphome config` exercises the Python schema only. It
+  does not compile the ESPHome C++ layer or the vendored C stack, so 2026.8.1
+  has no compile result here and the `manifest.json` floor of `>=2026.6.0`
+  remains advisory. `esphome compile` under 2026.8.1 is the missing half.
+- Not a hardware pass. No COM6, no flash, no bus.
 
 ### Verified locally on 2026-08-25 (commissioning P0 slice)
 
@@ -1105,7 +1129,11 @@ These results predate the 2026-08-10 static audit and were not re-tested during 
 
 ### Not yet verified
 
-- ESPHome schema/C++ compatibility across the stated supported ESPHome versions.
+- ESPHome C++ compatibility on 2026.8.1, and schema or C++ compatibility on any
+  version other than the one most recently exercised. The schema validates on
+  2026.8.1 and the C++ layer compiled under 2026.7.4; no single version has
+  had both, and the `>=2026.6.0` floor in `manifest.json` is tested against
+  nothing but whatever `pip install esphome` last resolved to.
 - Independent conformance of every protocol constant, timing boundary, memory
   layout, discovery path, and commissioning collision case.
 - Hardware round-trip behavior of all input-device configuration writes, DT6/DT8
@@ -1432,26 +1460,38 @@ its pure frame builders now also sees the scheduler and transport types.
 
 ## Installation State
 
-Sites live only under ignored `_local/` now. What the repo root tracks is about
-the component rather than about a site. Check the source column before reasoning
-about what is running on a device — the pin, not the working tree, decides what
-gets built.
+**The live site configurations are in Home Assistant, not here.** They are
+edited there and are not routinely copied back, so nothing in this repository
+establishes what a site is running or which ref it was built from. The `_local/`
+files below are stale snapshots kept for reference; read them as history, not as
+deployment state. To learn what a device actually runs, ask Home Assistant or
+the device.
 
-| Configuration | Component source | Role |
-|---|---|---|
-| `dali-starter.yaml` | `ref: dev` | Tracked starter/commissioning firmware; node `dali-starter` |
-| `dali_test.yaml` | `type: local` | Tracked CI coverage config; fictitious layout, never flashed |
-| `_local/dali-1k.yaml` | `ref: v1.0.5-dev` | Deploy copy; 16 control gear and group entities for groups 0/2/3/4/5/6/7 |
-| `_local/dali-2k.yaml` | `ref: v1.0.5-dev` | Deploy copy; group 0 lighting, HA console, and Steinel HF 360 II polling |
+What the repo root tracks is about the component rather than about a site.
 
-The tracked site copies `dali_1k.yaml` and `dali_2k.yaml` are gone. Tracking a
-real deployment to obtain CI coverage was the wrong trade: they carried an
-address layout nobody else could use, and they had to be edited whenever the
-site changed. `dali_test.yaml` replaces them and keeps the property that
-mattered — `type: local` with `path: esphome/components`, so a configuration and
-the component it configures always agree within a commit — while owing nothing
-to any hardware. The `_local` copies keep the git pin because they are what gets
-flashed and the operator chooses when to move.
+| Configuration | Component source | Tracked | Role |
+|---|---|---|---|
+| `dali-starter.yaml` | `ref: v1.3.0` | yes | Starter/commissioning firmware; node `dali-starter` |
+| `dali_test.yaml` | `type: local` | yes | CI coverage config; fictitious layout, never flashed |
+| `_local/dali-1k.yaml` | `ref: v1.1.1` | no | Stale snapshot, 2026-08-14; 16 control gear and group entities for groups 0/2/3/4/5/6/7 |
+| `_local/dali-2k.yaml` | `ref: dev` | no | Stale snapshot, 2026-08-14; group 0 lighting, HA console, and Steinel HF 360 II polling |
+
+`_local/` also holds older underscore-named leftovers (`dali_1k.yaml`,
+`dali_2k.yaml`) that predate the hyphenated pair and should not be read as
+current.
+
+`dali-starter.yaml` pins the last tagged release rather than `dev`, matching the
+README example. `dev` carries commissioning work that no tag does — see the
+release note at the top of this file — so an operator who wants that work must
+move the pin deliberately.
+
+The tracked site copies `dali_1k.yaml` and `dali_2k.yaml` are gone from the repo
+root. Tracking a real deployment to obtain CI coverage was the wrong trade: they
+carried an address layout nobody else could use, and they had to be edited
+whenever the site changed. `dali_test.yaml` replaces them and keeps the property
+that mattered — `type: local` with `path: esphome/components`, so a
+configuration and the component it configures always agree within a commit —
+while owing nothing to any hardware.
 
 ### 1k bus: gear that replies just before the attribution window opens
 
@@ -1738,7 +1778,11 @@ the debounced occupancy state returned by `QUERY INPUT VALUE`.
      VERIFY / WITHDRAW in `DaliCommandId`, no device-space counterpart to
      `dali_commissioning`, no verb. A bus of new sensors cannot be addressed by
      this tool — that is a Cockpit job today. Project-sized, and the largest of
-     the six.
+     the six. The encoding half is no longer part of the cost: item 1 added
+     `DALI_CMD_FRAME_24BIT_SPECIAL` and `dali_build_device_special()`, which is
+     generic over the command table rather than specific to TERMINATE, so each
+     further device special command is a table row. What is owed is the opcode
+     set, the walk, a device-space `used_mask`, and the verb.
   4. **The interference is symmetric.** `0xC1` is Part 102 ENABLE DEVICE TYPE and
      the Part 103 special-command address byte, so gear in an open Part 102
      initialise window can act on the Part 103 special frames a device run emits.
@@ -1948,12 +1992,6 @@ below for what changed for an operator.
   collisions, queue pressure, bus faults, and power restoration.
 - Add DT1 and other device types only when an installation requires them, following
   the shared DT6/DT8 module pattern.
-- Add Part 103 special-command frames — `0xC1` first byte, opcode in the second —
-  as a command-table frame kind. Control-device commissioning needs it, and it
-  would let gear commissioning expel control devices with a Part 103 TERMINATE
-  rather than only quiescing them. `dali_protocol.md` records the opcode space
-  and the two encodings that differ from their Part 102 namesakes. Worth doing
-  when device commissioning is actually wanted, not before.
 
 ## Operational Constraints
 
