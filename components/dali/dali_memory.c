@@ -167,12 +167,20 @@ DaliError dali_memory_read_byte(const DaliMemoryTransport *transport,
     return dali_memory_read_bytes(transport, short_addr, bank, offset, out, 1u);
 }
 
-DaliError dali_memory_read_bytes(const DaliMemoryTransport *transport,
-                                 uint8_t short_addr,
-                                 uint8_t bank,
-                                 uint8_t offset,
-                                 uint8_t *buf,
-                                 uint8_t count)
+/*
+ * Shared block read. `control_device` selects the Part 103 24-bit framing over
+ * the Part 102 16-bit form; everything else about the two is identical,
+ * including the two DTR setup steps dali_memory_read_from_sequence() skips past.
+ * One loop rather than two, so a fix to the chunking cannot reach only one
+ * address space.
+ */
+static DaliError memory_read_bytes(const DaliMemoryTransport *transport,
+                                   uint8_t short_addr,
+                                   uint8_t bank,
+                                   uint8_t offset,
+                                   uint8_t *buf,
+                                   uint8_t count,
+                                   bool    control_device)
 {
     if (!dali_transport_valid(transport) ||
         short_addr >= DALI_SHORT_ADDRESS_COUNT ||
@@ -198,8 +206,11 @@ DaliError dali_memory_read_bytes(const DaliMemoryTransport *transport,
         }
 
         DaliSequence seq;
-        DaliError err = dali_memory_build_read_sequence(
-            short_addr, bank, (uint8_t)(offset + done), chunk, &seq);
+        DaliError err = control_device
+            ? dali_memory_build_control_device_read_sequence(
+                  short_addr, bank, (uint8_t)(offset + done), chunk, &seq)
+            : dali_memory_build_read_sequence(
+                  short_addr, bank, (uint8_t)(offset + done), chunk, &seq);
         if (err != DALI_OK) {
             return err;
         }
@@ -221,6 +232,42 @@ DaliError dali_memory_read_bytes(const DaliMemoryTransport *transport,
     return DALI_OK;
 }
 
+DaliError dali_memory_read_bytes(const DaliMemoryTransport *transport,
+                                 uint8_t short_addr,
+                                 uint8_t bank,
+                                 uint8_t offset,
+                                 uint8_t *buf,
+                                 uint8_t count)
+{
+    return memory_read_bytes(transport, short_addr, bank, offset, buf, count, false);
+}
+
+DaliError dali_memory_read_device_bytes(const DaliMemoryTransport *transport,
+                                        uint8_t short_addr,
+                                        uint8_t bank,
+                                        uint8_t offset,
+                                        uint8_t *buf,
+                                        uint8_t count)
+{
+    return memory_read_bytes(transport, short_addr, bank, offset, buf, count, true);
+}
+
+/* Bank 0 has one layout, whichever space it was read from. */
+static void memory_unpack_bank0_identity(const uint8_t           *raw,
+                                         DaliMemoryBank0Identity *out)
+{
+    memcpy(out->gtin,
+           &raw[BANK0_IDENTITY_INDEX(DALI_MEMORY_BANK0_OFFSET_GTIN)],
+           DALI_MEMORY_BANK0_GTIN_LEN);
+    out->fw_major = raw[BANK0_IDENTITY_INDEX(DALI_MEMORY_BANK0_OFFSET_FW_MAJOR)];
+    out->fw_minor = raw[BANK0_IDENTITY_INDEX(DALI_MEMORY_BANK0_OFFSET_FW_MINOR)];
+    memcpy(out->serial,
+           &raw[BANK0_IDENTITY_INDEX(DALI_MEMORY_BANK0_OFFSET_IDENTIFICATION)],
+           DALI_MEMORY_BANK0_IDENTIFICATION_LEN);
+    out->hw_major = raw[BANK0_IDENTITY_INDEX(DALI_MEMORY_BANK0_OFFSET_HW_MAJOR)];
+    out->hw_minor = raw[BANK0_IDENTITY_INDEX(DALI_MEMORY_BANK0_OFFSET_HW_MINOR)];
+}
+
 DaliError dali_memory_read_bank0_identity(const DaliMemoryTransport *transport,
                                           uint8_t short_addr,
                                           DaliMemoryBank0Identity *out)
@@ -239,15 +286,28 @@ DaliError dali_memory_read_bank0_identity(const DaliMemoryTransport *transport,
         return err;
     }
 
-    memcpy(out->gtin,
-           &raw[BANK0_IDENTITY_INDEX(DALI_MEMORY_BANK0_OFFSET_GTIN)],
-           DALI_MEMORY_BANK0_GTIN_LEN);
-    out->fw_major = raw[BANK0_IDENTITY_INDEX(DALI_MEMORY_BANK0_OFFSET_FW_MAJOR)];
-    out->fw_minor = raw[BANK0_IDENTITY_INDEX(DALI_MEMORY_BANK0_OFFSET_FW_MINOR)];
-    memcpy(out->serial,
-           &raw[BANK0_IDENTITY_INDEX(DALI_MEMORY_BANK0_OFFSET_IDENTIFICATION)],
-           DALI_MEMORY_BANK0_IDENTIFICATION_LEN);
-    out->hw_major = raw[BANK0_IDENTITY_INDEX(DALI_MEMORY_BANK0_OFFSET_HW_MAJOR)];
-    out->hw_minor = raw[BANK0_IDENTITY_INDEX(DALI_MEMORY_BANK0_OFFSET_HW_MINOR)];
+    memory_unpack_bank0_identity(raw, out);
+    return DALI_OK;
+}
+
+DaliError dali_memory_read_device_bank0_identity(const DaliMemoryTransport *transport,
+                                                 uint8_t short_addr,
+                                                 DaliMemoryBank0Identity *out)
+{
+    if (!dali_transport_valid(transport) || out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    uint8_t raw[DALI_MEMORY_BANK0_IDENTITY_SIZE];
+    DaliError err = dali_memory_read_device_bytes(transport, short_addr,
+                                                  DALI_MEMORY_BANK0,
+                                                  DALI_MEMORY_BANK0_IDENTITY_FIRST,
+                                                  raw,
+                                                  DALI_MEMORY_BANK0_IDENTITY_SIZE);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    memory_unpack_bank0_identity(raw, out);
     return DALI_OK;
 }

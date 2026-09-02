@@ -870,6 +870,22 @@ static void discovery_enrich_device(const DaliDiscoveryTransport *transport,
         }
     }
 
+    /*
+     * The control device's own Bank 0, read from the device address space. Read
+     * whenever an input device answered, independently of whether control gear
+     * did: the two spaces are independent, and a unit answering both is not
+     * thereby one physical device — the identification numbers decide that, and
+     * this is what supplies them.
+     */
+    if (device->has_input_device) {
+        DaliMemoryBank0Identity device_identity;
+        if (dali_memory_read_device_bank0_identity(transport, addr,
+                                                   &device_identity) == DALI_OK) {
+            device->has_device_identity = true;
+            device->device_identity = device_identity;
+        }
+    }
+
     /* Scene levels — 0xFF means scene not configured ("MASK"). */
     for (uint8_t scene = 0u; scene < DALI_SCENE_COUNT; scene++) {
         DaliFrame scene_q;

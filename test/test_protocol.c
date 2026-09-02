@@ -1178,6 +1178,42 @@ void test_error_text_is_always_printable(void)
 }
 
 
+void test_device_set_short_address_dtr0_is_a_device_level_send_twice(void)
+{
+    DaliFrame frame;
+
+    /* Device-level command: address byte (a << 1) | 1, instance byte 0xFE,
+     * opcode 0x14. Addressing device 5 gives 0x0B 0xFE 0x14. */
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_device_command(
+                          5u, DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x0BFE14u, frame.data);
+    TEST_ASSERT_EQUAL_UINT8(DALI_EXTENDED_FRAME_BITS, frame.bit_length);
+
+    const DaliCommandInfo *cmd =
+        dali_command_lookup(DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0);
+    TEST_ASSERT_NOT_NULL(cmd);
+    /* A configuration command: it must go twice or the device ignores it. */
+    TEST_ASSERT_TRUE(cmd->send_twice);
+    TEST_ASSERT_EQUAL_UINT8(0x14u, cmd->opcode_first);
+
+    /* It is a device-level command, not a Part 103 *special*. The special space
+     * is reached through dali_build_device_special() and its PROGRAM SHORT
+     * ADDRESS takes the raw 6-bit address rather than the encoded byte this one
+     * reads from DTR0 — mixing the two programs the wrong address silently. */
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_device_special(
+                          DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0, 0u, &frame));
+
+    /* And it is not reachable through the Part 102 gear builders. */
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_build_command(DALI_ADDR_BROADCAST,
+                                         0u,
+                                         DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0,
+                                         0u,
+                                         &frame));
+}
+
 void test_build_device_broadcast_command_and_rejections(void)
 {
     DaliFrame frame;
@@ -1305,6 +1341,7 @@ int main(void)
     RUN_TEST(test_error_name_returns_null_for_unknown_codes);
     RUN_TEST(test_error_text_is_always_printable);
     /* Part 103 device broadcast */
+    RUN_TEST(test_device_set_short_address_dtr0_is_a_device_level_send_twice);
     RUN_TEST(test_build_device_broadcast_command_and_rejections);
     RUN_TEST(test_device_broadcast_differs_from_every_short_address);
     return UNITY_END();

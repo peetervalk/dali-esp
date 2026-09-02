@@ -158,6 +158,26 @@ typedef struct {
     void (*export_config)(void *ctx, const DaliCliOut *out,
                           const DaliDiscoveryInventory *inventory,
                           DaliShellInputLookupFn input_lookup);
+    /*
+     * Persist and reload the address backup across a reboot.
+     *
+     * These are hooks rather than shell code because durable storage belongs to
+     * the integration: the ESPHome component has the preferences API and the
+     * Core 0 affinity rule that comes with it, and the native firmware has
+     * neither. The shell owns the snapshot, its codec and its verbs; the
+     * integration owns only the bytes.
+     *
+     * `save` receives an encoded blob of `len` bytes, never more than
+     * DALI_SNAPSHOT_BLOB_MAX, and returns true when it is stored. `load` fills
+     * `buf` and writes the byte count to `*len`, returning false when nothing
+     * is stored — which is a normal cold start, not a fault.
+     *
+     * Both NULL is legitimate and means backups live only in RAM and in
+     * whatever the operator did with `backup export`. The shell says so rather
+     * than implying a durability it does not have.
+     */
+    bool (*snapshot_save)(void *ctx, const uint8_t *buf, uint32_t len);
+    bool (*snapshot_load)(void *ctx, uint8_t *buf, uint32_t *len);
     void  *ctx;
 } DaliShellHooks;
 

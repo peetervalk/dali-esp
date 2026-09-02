@@ -172,6 +172,9 @@ typedef enum {
     DALI_CLI_CMD_EXPORT,
     DALI_CLI_CMD_IDENTIFY,
     DALI_CLI_CMD_QUIESCENT,
+    DALI_CLI_CMD_BACKUP,
+    DALI_CLI_CMD_RESTORE,
+    DALI_CLI_CMD_DEVINFO,
 
     /*
      * Also the marker a front end with its own table (see dali_cli_resolve_in)

@@ -187,6 +187,7 @@ static const DaliCliCommandSpec s_commands[] = {
 
     { DALI_CLI_CMD_MEMREAD, "memread", "<addr> <bank> <offset> [count]", "control-gear memory read (Part 102)", 3u, 4u, NULL },
     { DALI_CLI_CMD_MEMINFO, "meminfo", "<addr>", "control-gear Bank 0 identity", 1u, 1u, NULL },
+    { DALI_CLI_CMD_DEVINFO, "devinfo", "<addr>", "control-device Bank 0 identity (Part 103)", 1u, 1u, NULL },
     { DALI_CLI_CMD_DEVMEM, "devmem", "read|write <addr> <bank> <offset> [count|value]", "control-device memory (Part 103)", 4u, 5u,
       "read write" },
     { DALI_CLI_CMD_DTRCHECK, "dtrcheck", "<addr> <0|1|2> <0-255>", "load a control-device DTR and read it back", 3u, 3u, NULL },
@@ -214,6 +215,10 @@ static const DaliCliCommandSpec s_commands[] = {
     { DALI_CLI_CMD_IDENTIFY, "identify", "<addr>", "blink one short-addressed lamp", 1u, 1u, NULL },
     { DALI_CLI_CMD_QUIESCENT, "quiescent", "on|off <addr|all>", "Part 103 quiescent mode: silence control-device events", 2u, 2u,
       "on off" },
+    { DALI_CLI_CMD_BACKUP, "backup", "save|export|status", "record which physical unit holds which short address", 1u, 1u,
+      "save export status" },
+    { DALI_CLI_CMD_RESTORE, "restore", "plan|apply", "put short addresses back the way the backup recorded them", 1u, 1u,
+      "plan apply" },
 };
 
 #define CLI_COMMAND_COUNT ((uint8_t)(sizeof(s_commands) / sizeof(s_commands[0])))

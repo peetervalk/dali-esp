@@ -202,6 +202,24 @@ struct GroupMembershipPersist {
     DaliGroupMap map;
 };
 
+/*
+ * Address backup (see the shell's `backup`/`restore`). The blob is opaque here:
+ * the shell built it, the shell decodes it, and this layer only owns the flash.
+ *
+ * Staged rather than written where it is produced, for the same reason group
+ * membership is: `backup save` runs on the shell task and the preferences API
+ * is Core 0 only, so loop() performs the write.
+ */
+static constexpr uint32_t ADDRESS_BACKUP_MAGIC = 0x44414231u;  /* "DAB1" */
+struct AddressBackupPersist {
+    uint32_t magic;
+    uint32_t len;
+    uint8_t  blob[DALI_SNAPSHOT_BLOB_MAX];
+};
+static AddressBackupPersist s_address_backup{};
+static portMUX_TYPE         s_address_backup_mux = portMUX_INITIALIZER_UNLOCKED;
+static std::atomic<bool>    s_address_backup_dirty_{false};
+
 static uint8_t pick_group_member(uint8_t group)
 {
     portENTER_CRITICAL(&s_group_map_mux);
@@ -1167,6 +1185,7 @@ void DaliComponent::setup()
      * Note: a group light added to YAML after the last scan won't be in the
      * persisted snapshot and so won't be polled until the next scan. */
     group_pref_ = global_preferences->make_preference<GroupMembershipPersist>(GROUP_MEMBERSHIP_MAGIC);
+    backup_pref_ = global_preferences->make_preference<AddressBackupPersist>(ADDRESS_BACKUP_MAGIC);
     if (load_group_membership()) {
         ESP_LOGI(TAG, "group membership restored from flash");
     } else {
@@ -1257,6 +1276,10 @@ void DaliComponent::loop()
     /* ── Persist group membership when a scan/console edit dirtied it ── */
     if (s_group_members_dirty_.exchange(false, std::memory_order_acq_rel))
         save_group_membership();
+
+    /* ── Persist an address backup staged by `backup save` on the shell task ── */
+    if (s_address_backup_dirty_.exchange(false, std::memory_order_acq_rel))
+        backup_pref_.save(&s_address_backup);
 
     /* ── Input sensor: publish dirty values ── */
     for (uint8_t i = 0u; i < s_sensor_count; i++)
@@ -2802,6 +2825,64 @@ void DaliComponent::save_group_membership()
     st.map = s_group_map;
     portEXIT_CRITICAL(&s_group_map_mux);
     group_pref_.save(&st);
+}
+
+bool DaliComponent::save_address_backup(const uint8_t *buf, uint32_t len)
+{
+    if (buf == nullptr || len == 0u || len > DALI_SNAPSHOT_BLOB_MAX) return false;
+
+    portENTER_CRITICAL(&s_address_backup_mux);
+    s_address_backup.magic = ADDRESS_BACKUP_MAGIC;
+    s_address_backup.len   = len;
+    memcpy(s_address_backup.blob, buf, len);
+    portEXIT_CRITICAL(&s_address_backup_mux);
+
+    s_address_backup_dirty_.store(true, std::memory_order_release);
+    /*
+     * True means staged, not yet on flash: loop() performs the write on its next
+     * pass. The shell says "stored" on this, which is the same promise every
+     * other persisted item here makes, and the alternative — blocking the shell
+     * task on a Core 0 API it must not call — is worse than the imprecision.
+     */
+    return true;
+}
+
+bool DaliComponent::load_address_backup(uint8_t *buf, uint32_t *len)
+{
+    if (buf == nullptr || len == nullptr) return false;
+
+    /*
+     * Served from the staged copy when one exists, so a `backup save` followed
+     * immediately by a `restore` in the same session sees what was just taken
+     * rather than what survived the last reboot.
+     */
+    bool have_staged = false;
+    portENTER_CRITICAL(&s_address_backup_mux);
+    have_staged = (s_address_backup.magic == ADDRESS_BACKUP_MAGIC &&
+                   s_address_backup.len > 0u &&
+                   s_address_backup.len <= DALI_SNAPSHOT_BLOB_MAX);
+    portEXIT_CRITICAL(&s_address_backup_mux);
+
+    if (!have_staged) {
+        AddressBackupPersist stored{};
+        if (!backup_pref_.load(&stored) || stored.magic != ADDRESS_BACKUP_MAGIC ||
+            stored.len == 0u || stored.len > DALI_SNAPSHOT_BLOB_MAX) {
+            return false;
+        }
+        portENTER_CRITICAL(&s_address_backup_mux);
+        s_address_backup = stored;
+        portEXIT_CRITICAL(&s_address_backup_mux);
+    }
+
+    portENTER_CRITICAL(&s_address_backup_mux);
+    const uint32_t stored_len = s_address_backup.len;
+    const bool     fits       = (*len >= stored_len);
+    if (fits) memcpy(buf, s_address_backup.blob, stored_len);
+    portEXIT_CRITICAL(&s_address_backup_mux);
+
+    if (!fits) return false;
+    *len = stored_len;
+    return true;
 }
 
 void DaliComponent::register_input_sensor(DaliBusSensor *sensor)

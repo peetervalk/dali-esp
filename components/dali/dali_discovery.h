@@ -87,6 +87,18 @@ typedef struct {
     uint8_t                  instance_count;
     bool                     has_identity;  /* Part 102 control-gear Bank 0 */
     DaliMemoryBank0Identity  identity;
+    /*
+     * Part 103 control-device Bank 0, read from the device address space.
+     *
+     * Separate from `identity` and never a fallback for it. A unit that is both
+     * control gear and a control device answers each space from its own Bank 0,
+     * and the two were observed reporting different GTINs and different
+     * identification numbers on the 2k bus — so these two fields at one array
+     * index are not evidence of one physical unit, and a restore must match each
+     * space against its own.
+     */
+    bool                     has_device_identity;
+    DaliMemoryBank0Identity  device_identity;
     bool                     has_scene_levels;
     uint8_t                  scene_levels[DALI_SCENE_COUNT];
     bool                     has_dt6;

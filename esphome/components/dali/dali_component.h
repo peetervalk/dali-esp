@@ -8,6 +8,7 @@ extern "C" {
 #include "../../../components/dali/dali_frame.h"  // DaliError
 #include "../../../components/dali/dali_cli.h"    // DaliCliTokens
 #include "../../../components/dali/dali_discovery.h"
+#include "../../../components/dali/dali_snapshot.h"  // DALI_SNAPSHOT_BLOB_MAX
 }
 
 #include <atomic>
@@ -267,6 +268,18 @@ class DaliComponent : public Component {
                           const DaliDiscoveryInventory *inventory,
                           DaliShellInputLookupFn input_lookup);
 
+  // Address-backup persistence for the shell's `backup`/`restore` verbs. The
+  // shell owns the snapshot and its codec; these store and return the opaque
+  // blob. `len` is at most DALI_SNAPSHOT_BLOB_MAX on save, and on load carries
+  // the buffer size in and the stored size out. False from load means nothing
+  // is stored, which is an ordinary cold start rather than a fault.
+  //
+  // Both run on the shell task. The preferences API is Core 0 only, so the
+  // write is handed to loop() the way group membership is rather than being
+  // issued from here.
+  bool save_address_backup(const uint8_t *buf, uint32_t len);
+  bool load_address_backup(uint8_t *buf, uint32_t *len);
+
  protected:
   uint8_t tx_pin_{18};
   uint8_t rx_pin_{19};
@@ -342,6 +355,8 @@ class DaliComponent : public Component {
   // verified mask, saved to flash whenever a scan or console group edit dirties
   // the table so it survives reboots. Loaded once in setup().
   ESPPreferenceObject group_pref_;
+  // Address backup for `backup`/`restore`. Opaque blob owned by the shell.
+  ESPPreferenceObject backup_pref_;
   // Load persisted membership into the runtime table; true if valid data applied.
   bool load_group_membership();
   // Write the current runtime table to flash.

@@ -192,6 +192,20 @@ typedef enum {
      */
     DALI_CMD_DEVICE_TERMINATE,
 
+    /*
+     * Part 103 device-level SET SHORT ADDRESS DTR0 (opcode 0x14, instance byte
+     * 0xFE, send-twice). The control-device counterpart of the Part 102 command
+     * of the same name, and what lets a control device be re-addressed without
+     * opening an addressing window — which is what makes a device-space restore
+     * possible at all.
+     *
+     * Its parameter is the *encoded* address (a << 1) | 1, matching the Part 102
+     * form. Do not confuse it with the Part 103 special PROGRAM SHORT ADDRESS,
+     * which takes the raw 6-bit value; sending one encoding to the other command
+     * programs the wrong address and reports nothing.
+     */
+    DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0,
+
     DALI_CMD_COUNT,
 } DaliCommandId;
 

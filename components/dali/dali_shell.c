@@ -11,6 +11,8 @@
 #include "dali_discovery.h"
 #include "dali_transport.h"
 #include "dali_commissioning.h"
+#include "dali_snapshot.h"
+#include "dali_restore.h"
 #include "dali_memory.h"
 #include "dali_gear_dt6.h"
 #include "dali_gear_dt8.h"
@@ -3378,6 +3380,14 @@ static void cmd_export_config(void)
                                   shell_input_cache_lookup);
 }
 
+/* Bare uppercase hex, no separators: the form `backup import` parses back. */
+static void shell_print_json_hex(const uint8_t *data, uint8_t count)
+{
+    for (uint8_t i = 0u; i < count; i++) {
+        shell_printf("%02X", (unsigned)data[i]);
+    }
+}
+
 static void cmd_export_inventory(void)
 {
     DaliDiscoveryInventory *inventory = &s_inventory_scratch;
@@ -3389,7 +3399,10 @@ static void cmd_export_inventory(void)
     mapping_count = shell_switch_mappings_snapshot(mappings, SHELL_SWITCH_MAPPING_MAX);
 
     shell_printf("{\r\n");
-    shell_printf("  \"schema_version\": 1,\r\n");
+    /* 2 adds the Bank 0 identity block, level window, dimming curve and scene
+     * levels — the fields a restore needs. A version-1 consumer sees only new
+     * optional keys, but a restore reading a version-1 export has no anchor. */
+    shell_printf("  \"schema_version\": 2,\r\n");
     shell_printf("  \"devices\": [\r\n");
     bool first_device = true;
     if (has_inventory) {
@@ -3440,6 +3453,65 @@ static void cmd_export_inventory(void)
                 }
                 shell_printf("]");
             }
+            /*
+             * The Bank 0 identity. This is what makes the export a backup
+             * rather than a listing: the identification number is the only
+             * property of a unit that a re-address cannot change, so it is the
+             * anchor `restore` matches on. GTIN is reporting only — every
+             * driver of one product line reports the same one.
+             */
+            if (entry->has_identity) {
+                shell_printf(", \"gtin\": \"");
+                shell_print_json_hex(entry->identity.gtin,
+                                     DALI_MEMORY_BANK0_GTIN_LEN);
+                shell_printf("\", \"identification\": \"");
+                shell_print_json_hex(entry->identity.serial,
+                                     DALI_MEMORY_BANK0_IDENTIFICATION_LEN);
+                shell_printf("\"");
+                shell_printf(", \"firmware\": \"%u.%u\"",
+                       (unsigned)entry->identity.fw_major,
+                       (unsigned)entry->identity.fw_minor);
+                shell_printf(", \"hardware\": \"%u.%u\"",
+                       (unsigned)entry->identity.hw_major,
+                       (unsigned)entry->identity.hw_minor);
+            }
+
+            /*
+             * The control device's own Bank 0, from the device address space.
+             * Emitted under its own keys because it describes a different unit
+             * than `identification` does whenever both are present.
+             */
+            if (entry->has_device_identity) {
+                shell_printf(", \"device_gtin\": \"");
+                shell_print_json_hex(entry->device_identity.gtin,
+                                     DALI_MEMORY_BANK0_GTIN_LEN);
+                shell_printf("\", \"device_identification\": \"");
+                shell_print_json_hex(entry->device_identity.serial,
+                                     DALI_MEMORY_BANK0_IDENTIFICATION_LEN);
+                shell_printf("\"");
+            }
+
+            if (entry->has_level_limits) {
+                shell_printf(", \"min_level\": %u, \"max_level\": %u",
+                       (unsigned)entry->min_level,
+                       (unsigned)entry->max_level);
+            }
+            if (entry->has_dimming_curve) {
+                shell_printf(", \"dimming_curve\": \"%s\"",
+                       entry->dimming_curve == DALI_DIM_CURVE_LINEAR ? "linear"
+                                                                     : "standard");
+            }
+            if (entry->has_scene_levels) {
+                shell_printf(", \"scene_levels\": [");
+                for (uint8_t scene = 0u; scene < DALI_SCENE_COUNT; scene++) {
+                    if (scene > 0u) {
+                        shell_printf(", ");
+                    }
+                    shell_printf("%u", (unsigned)entry->scene_levels[scene]);
+                }
+                shell_printf("]");
+            }
+
             if (entry->has_control_gear && entry->has_input_device) {
                 shell_printf(", \"kind\": \"hybrid\"");
                 if (entry->has_instance_count) {
@@ -4005,6 +4077,40 @@ static void cmd_meminfo(const DaliCliTokens *t)
 }
 
 /*
+ * The control-device counterpart of meminfo. Separate verb, not a flag, for the
+ * same reason devmem is separate from memread: it addresses a different unit.
+ * A physical device answering in both spaces reports a Bank 0 per space, and on
+ * the bus this was written against those differed in both GTIN and
+ * identification number — so `meminfo 0` and `devinfo 0` are two questions about
+ * two devices, not one question asked twice.
+ */
+static void cmd_devinfo(const DaliCliTokens *t)
+{
+    uint8_t addr;
+    if (!dali_cli_parse_short_addr(t->tok[1], &addr)) {
+        dali_cli_print_usage(&s_out, dali_cli_command_for_id(DALI_CLI_CMD_DEVINFO));
+        return;
+    }
+
+    DaliDiscoveryTransport transport = shell_discovery_transport();
+    DaliMemoryBank0Identity identity;
+    DaliError err = dali_memory_read_device_bank0_identity(&transport, addr, &identity);
+    if (err != DALI_OK) {
+        dali_cli_print_error(&s_out, "devinfo", err);
+        return;
+    }
+
+    shell_printf("devinfo %u (control device, bank 0):\r\n", (unsigned)addr);
+    shell_print_hex_bytes("GTIN          ", identity.gtin, DALI_MEMORY_BANK0_GTIN_LEN);
+    shell_printf("  firmware      : %u.%u\r\n",
+           (unsigned)identity.fw_major, (unsigned)identity.fw_minor);
+    shell_print_hex_bytes("identification", identity.serial,
+                         DALI_MEMORY_BANK0_IDENTIFICATION_LEN);
+    shell_printf("  hardware      : %u.%u\r\n",
+           (unsigned)identity.hw_major, (unsigned)identity.hw_minor);
+}
+
+/*
  * Part 103 control devices use different DTR and memory opcodes than Part 102
  * control gear, so they get their own verb rather than a flag on memread. A
  * bank 0 write is refused by the builder: bank 0 is read-only.
@@ -4153,6 +4259,481 @@ static void cmd_quiescent(const DaliCliTokens *t)
         shell_printf("quiescent: control device%s will report no events until "
                      "'quiescent off %s'\r\n",
                      all ? "s" : "", all ? "all" : t->tok[2]);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * backup / restore
+ *
+ * The pair exists so commissioning is survivable. A commissioning run destroys
+ * short addresses and nothing else, and the Bank 0 identification number is the
+ * one property of a unit no addressing operation can change — so a snapshot
+ * taken beforehand is enough to put every address back afterwards, using
+ * ordinary addressed SET SHORT ADDRESS commands rather than a second walk.
+ *
+ * `restore` deliberately opens no initialise window. Nothing it sends can leave
+ * the bus in a state that needs terminating, which is what makes it safe to run
+ * on a live installation and safe to interrupt half way.
+ * --------------------------------------------------------------------------*/
+
+static DaliSnapshot s_backup;
+static bool         s_backup_valid;
+/* True when the in-RAM backup came from flash rather than from a `backup save`
+ * in this session. Reported so an operator knows whether it describes the bus
+ * as it is now or as it was before the last reboot. */
+static bool         s_backup_from_storage;
+static uint8_t      s_backup_blob[DALI_SNAPSHOT_BLOB_MAX];
+
+static void shell_backup_load_from_storage(void)
+{
+    if (s_backup_valid || s_session.hooks.snapshot_load == NULL) {
+        return;
+    }
+
+    uint32_t len = (uint32_t)sizeof(s_backup_blob);
+    if (!s_session.hooks.snapshot_load(s_session.hooks.ctx, s_backup_blob, &len)) {
+        return;
+    }
+    if (dali_snapshot_decode(&s_backup, s_backup_blob, len) != DALI_OK) {
+        shell_printf("backup: stored snapshot did not decode; ignoring it\r\n");
+        s_backup_valid = false;
+        return;
+    }
+    s_backup_valid        = true;
+    s_backup_from_storage = true;
+}
+
+/*
+ * Top up any Bank 0 identity the scan did not capture, in both address spaces.
+ *
+ * Discovery reads these already; this re-tries the ones that failed, because a
+ * backup or a plan is only as good as its anchors and a single missed read is
+ * the difference between a unit that can be put back and one that cannot. Each
+ * space is read from its own Bank 0 and neither substitutes for the other.
+ */
+static void shell_fill_missing_identities(DaliDiscoveryInventory       *inventory,
+                                          const DaliDiscoveryTransport *transport)
+{
+    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        DaliDiscoveryDeviceInfo *entry = &inventory->devices[addr];
+        if (!entry->present) {
+            continue;
+        }
+
+        DaliMemoryBank0Identity identity;
+        if (entry->has_control_gear && !entry->has_identity &&
+            dali_memory_read_bank0_identity(transport, addr, &identity) == DALI_OK) {
+            entry->has_identity = true;
+            entry->identity     = identity;
+        }
+        if (entry->has_input_device && !entry->has_device_identity &&
+            dali_memory_read_device_bank0_identity(transport, addr,
+                                                   &identity) == DALI_OK) {
+            entry->has_device_identity = true;
+            entry->device_identity     = identity;
+        }
+    }
+}
+
+static void shell_backup_print_entry(const DaliSnapshotEntry *entry)
+{
+    shell_printf("  %s %s%u:",
+           dali_restore_space_name(entry->space),
+           entry->space == DALI_SNAPSHOT_SPACE_GEAR ? "a" : "d",
+           (unsigned)entry->short_address);
+    if (entry->has_identification) {
+        shell_printf(" id=");
+        for (uint8_t i = 0u; i < DALI_MEMORY_BANK0_IDENTIFICATION_LEN; i++) {
+            shell_printf("%02X", (unsigned)entry->identification[i]);
+        }
+    } else {
+        shell_printf(" id=unknown");
+    }
+    if (entry->has_groups) {
+        shell_printf(" groups=0x%04X", (unsigned)entry->groups);
+    }
+    shell_printf("\r\n");
+}
+
+static void cmd_backup(const DaliCliTokens *t)
+{
+    const DaliCliCommandSpec *usage = dali_cli_command_for_id(DALI_CLI_CMD_BACKUP);
+
+    if (strcmp(t->tok[1], "status") == 0) {
+        shell_backup_load_from_storage();
+        if (!s_backup_valid) {
+            shell_printf("backup: none held; run 'backup save'\r\n");
+            if (s_session.hooks.snapshot_save == NULL) {
+                shell_printf("backup: this front end has no persistent store, so a "
+                             "saved backup lives only until reboot - keep a copy "
+                             "with 'backup export'\r\n");
+            }
+            return;
+        }
+        shell_printf("backup: %u entr%s, %s\r\n",
+               (unsigned)s_backup.entry_count,
+               s_backup.entry_count == 1u ? "y" : "ies",
+               s_backup_from_storage ? "loaded from storage" : "saved this session");
+        for (uint8_t i = 0u; i < s_backup.entry_count; i++) {
+            shell_backup_print_entry(&s_backup.entries[i]);
+        }
+        return;
+    }
+
+    if (strcmp(t->tok[1], "export") == 0) {
+        shell_backup_load_from_storage();
+        if (!s_backup_valid) {
+            shell_printf("backup: none held; run 'backup save'\r\n");
+            return;
+        }
+        uint32_t len = 0u;
+        DaliError err = dali_snapshot_encode(&s_backup,
+                                             s_backup_blob,
+                                             (uint32_t)sizeof(s_backup_blob),
+                                             &len);
+        if (err != DALI_OK) {
+            dali_cli_print_error(&s_out, "backup export", err);
+            return;
+        }
+        /*
+         * One hex line, not JSON. `export inventory` already prints the same
+         * facts in a readable form; what this produces is the exact blob the
+         * decoder accepts, so a copy of it is a restorable backup rather than a
+         * document someone has to re-key. Printed on its own line so it can be
+         * redirected straight to a file.
+         */
+        shell_printf("backup blob %u bytes:\r\n", (unsigned)len);
+        for (uint32_t i = 0u; i < len; i++) {
+            shell_printf("%02X", (unsigned)s_backup_blob[i]);
+        }
+        shell_printf("\r\n");
+        return;
+    }
+
+    if (strcmp(t->tok[1], "save") != 0) {
+        dali_cli_print_usage(&s_out, usage);
+        return;
+    }
+
+    DaliDiscoveryInventory *inventory = &s_inventory_scratch;
+    DaliDiscoveryTransport  transport = shell_discovery_transport();
+    uint8_t                 found     = 0u;
+
+    if (!shell_bus_claim("backup")) {
+        shell_printf("backup: bus busy\r\n");
+        return;
+    }
+
+    shell_printf("backup: scanning\r\n");
+    DaliError err = dali_discovery_scan(inventory, &transport, NULL, NULL, &found);
+    if (err != DALI_OK) {
+        shell_inventory_reset();
+        shell_bus_release();
+        shell_printf("backup: scan ERR %s\r\n", shell_err(err));
+        return;
+    }
+
+    /*
+     * A unit that will not give up an identity is recorded without one and named
+     * below: an operator who cannot restore one fixture should learn it now,
+     * not during the restore.
+     */
+    uint8_t unanchored = 0u;
+    shell_fill_missing_identities(inventory, &transport);
+
+    shell_inventory_replace(inventory);
+    shell_bus_release();
+
+    err = dali_snapshot_from_inventory(&s_backup, inventory);
+    if (err != DALI_OK) {
+        s_backup_valid = false;
+        dali_cli_print_error(&s_out, "backup save", err);
+        return;
+    }
+    s_backup_valid        = true;
+    s_backup_from_storage = false;
+
+    for (uint8_t i = 0u; i < s_backup.entry_count; i++) {
+        if (!s_backup.entries[i].has_identification) {
+            unanchored++;
+        }
+    }
+
+    shell_printf("backup: recorded %u entr%s from %u address(es)\r\n",
+           (unsigned)s_backup.entry_count,
+           s_backup.entry_count == 1u ? "y" : "ies",
+           (unsigned)found);
+
+    if (unanchored > 0u) {
+        shell_printf("backup: %u entr%s have no identification number and cannot "
+                     "be restored\r\n",
+               (unsigned)unanchored,
+               unanchored == 1u ? "y" : "ies");
+        for (uint8_t i = 0u; i < s_backup.entry_count; i++) {
+            if (!s_backup.entries[i].has_identification) {
+                shell_backup_print_entry(&s_backup.entries[i]);
+            }
+        }
+    }
+
+    uint32_t len = 0u;
+    if (dali_snapshot_encode(&s_backup,
+                             s_backup_blob,
+                             (uint32_t)sizeof(s_backup_blob),
+                             &len) != DALI_OK) {
+        shell_printf("backup: encode failed; held in RAM only\r\n");
+        return;
+    }
+
+    if (s_session.hooks.snapshot_save == NULL) {
+        shell_printf("backup: held in RAM only - this front end has no persistent "
+                     "store; keep a copy with 'backup export'\r\n");
+    } else if (s_session.hooks.snapshot_save(s_session.hooks.ctx, s_backup_blob, len)) {
+        shell_printf("backup: stored (%u bytes)\r\n", (unsigned)len);
+    } else {
+        shell_printf("backup: could not be stored; held in RAM only - keep a copy "
+                     "with 'backup export'\r\n");
+    }
+}
+
+static void shell_restore_print_plan(const DaliRestorePlan *plan)
+{
+    shell_printf("restore: %u matched, %u already correct, %u move(s)\r\n",
+           (unsigned)plan->matched_count,
+           (unsigned)plan->already_correct_count,
+           (unsigned)plan->move_count);
+
+    for (uint8_t i = 0u; i < plan->move_count; i++) {
+        const DaliRestoreMove *move = &plan->moves[i];
+        shell_printf("  %u. %s %s%u -> %s%u%s\r\n",
+               (unsigned)(i + 1u),
+               dali_restore_space_name(move->space),
+               move->space == DALI_SNAPSHOT_SPACE_GEAR ? "a" : "d",
+               (unsigned)move->from,
+               move->space == DALI_SNAPSHOT_SPACE_GEAR ? "a" : "d",
+               (unsigned)move->to,
+               move->is_staging ? "  (staging, placed by a later step)" : "");
+    }
+
+    if (plan->conflict_total > 0u) {
+        shell_printf("restore: %u conflict(s)%s\r\n",
+               (unsigned)plan->conflict_total,
+               plan->conflict_total > plan->conflict_count ? ", first few:" : ":");
+        for (uint8_t i = 0u; i < plan->conflict_count; i++) {
+            const DaliRestoreConflict *conflict = &plan->conflicts[i];
+            shell_printf("  %s %s%u: %s",
+                   dali_restore_space_name(conflict->space),
+                   conflict->space == DALI_SNAPSHOT_SPACE_GEAR ? "a" : "d",
+                   (unsigned)conflict->address,
+                   dali_restore_conflict_name(conflict->kind));
+            if (conflict->other_address < DALI_SHORT_ADDRESS_COUNT) {
+                shell_printf(" (%u)", (unsigned)conflict->other_address);
+            }
+            shell_printf("\r\n");
+        }
+    }
+
+    if (plan->incomplete) {
+        shell_printf("restore: plan is incomplete and must not be applied\r\n");
+    }
+}
+
+/* Build the plan against a fresh scan. Returns false having printed why not. */
+static bool shell_restore_build_plan(const char *verb, DaliRestorePlan *plan)
+{
+    shell_backup_load_from_storage();
+    if (!s_backup_valid) {
+        shell_printf("%s: no backup held; run 'backup save' first\r\n", verb);
+        return false;
+    }
+
+    DaliDiscoveryInventory *inventory = &s_inventory_scratch;
+    DaliDiscoveryTransport  transport = shell_discovery_transport();
+    uint8_t                 found     = 0u;
+
+    if (!shell_bus_claim(verb)) {
+        shell_printf("%s: bus busy\r\n", verb);
+        return false;
+    }
+
+    shell_printf("%s: scanning\r\n", verb);
+    DaliError err = dali_discovery_scan(inventory, &transport, NULL, NULL, &found);
+    if (err != DALI_OK) {
+        shell_inventory_reset();
+        shell_bus_release();
+        shell_printf("%s: scan ERR %s\r\n", verb, shell_err(err));
+        return false;
+    }
+
+    shell_fill_missing_identities(inventory, &transport);
+
+    shell_inventory_replace(inventory);
+    shell_bus_release();
+
+    err = dali_restore_plan(plan, &s_backup, inventory);
+    if (err != DALI_OK) {
+        dali_cli_print_error(&s_out, verb, err);
+        return false;
+    }
+    return true;
+}
+
+/* One move: DTR0 = encoded destination, then SET SHORT ADDRESS DTR0 to the unit
+ * at its current address, as one contiguous sequence so nothing can redirect
+ * DTR0 between the two frames. */
+static DaliError shell_restore_apply_move(const DaliRestoreMove *move)
+{
+    if (move->to >= DALI_SHORT_ADDRESS_COUNT ||
+        move->from >= DALI_SHORT_ADDRESS_COUNT) {
+        return DALI_ERR_INVALID;
+    }
+
+    /*
+     * Both spaces take the address encoded as (a << 1) | 1 here, because both
+     * SET SHORT ADDRESS DTR0 commands read it from DTR0. The Part 103 *special*
+     * PROGRAM SHORT ADDRESS takes the raw 6-bit value instead — a different
+     * command, used only inside an addressing window, and not this path.
+     */
+    const uint8_t encoded = dali_commissioning_encode_short_address(move->to);
+    const bool    is_gear = (move->space == DALI_SNAPSHOT_SPACE_GEAR);
+
+    const DaliCommandId cmd_id = is_gear ? DALI_CMD_SET_SHORT_ADDRESS_DTR0
+                                         : DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0;
+    const DaliCommandInfo *cmd = dali_command_lookup(cmd_id);
+    if (cmd == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = move->from };
+    DaliFrame  dtr_frame;
+    DaliFrame  config_frame;
+    DaliError  err;
+
+    if (is_gear) {
+        err = dali_control_build_dtr(DALI_DTR0, encoded, &dtr_frame);
+        if (err == DALI_OK) {
+            err = dali_control_build_config(target, cmd_id, 0u, &config_frame);
+        }
+    } else {
+        /* The device space has its own DTR0: a 24-bit control-device special,
+         * not the 16-bit gear one. Loading the gear DTR0 and then addressing a
+         * control device would send the command with whatever the device's own
+         * DTR0 happened to hold. */
+        err = dali_build_control_device_dtr_data(DALI_DTR0, encoded, &dtr_frame);
+        if (err == DALI_OK) {
+            err = dali_build_device_command(move->from, cmd_id, &config_frame);
+        }
+    }
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    DaliSequence seq = {
+        .steps = {
+            { .frame = dtr_frame },
+            { .frame = config_frame, .send_twice = cmd->send_twice },
+        },
+        .step_count = 2u,
+    };
+
+    DaliSequenceResult seq_result;
+    err = shell_sched_sequence_sync(&seq, &seq_result);
+    if (err == DALI_OK && is_gear) {
+        /* Only the gear space has a cache on the other side of this hook; a
+         * device short address is not something the integration tracks. */
+        shell_notify_config_applied(target, cmd_id, encoded);
+    }
+    return err;
+}
+
+static void cmd_restore(const DaliCliTokens *t)
+{
+    const DaliCliCommandSpec *usage = dali_cli_command_for_id(DALI_CLI_CMD_RESTORE);
+    const bool apply = (strcmp(t->tok[1], "apply") == 0);
+
+    if (!apply && strcmp(t->tok[1], "plan") != 0) {
+        dali_cli_print_usage(&s_out, usage);
+        return;
+    }
+
+    /*
+     * `plan` is read-only and needs no policy. `apply` moves short addresses,
+     * which is the same authority `commission` needs and is refused on a
+     * surface that has not opted in.
+     */
+    if (apply && !shell_policy_allows(DALI_SHELL_ALLOW_COMMISSION, "restore apply")) {
+        return;
+    }
+
+    static DaliRestorePlan plan;
+    if (!shell_restore_build_plan(apply ? "restore apply" : "restore plan", &plan)) {
+        return;
+    }
+
+    shell_restore_print_plan(&plan);
+
+    if (!apply) {
+        if (dali_restore_plan_is_clean(&plan)) {
+            shell_printf("restore: bus matches the backup; nothing to do\r\n");
+        } else if (plan.move_count > 0u && !plan.incomplete) {
+            shell_printf("restore: run 'restore apply' to execute\r\n");
+        }
+        return;
+    }
+
+    if (plan.incomplete) {
+        return;
+    }
+    if (plan.move_count == 0u) {
+        shell_printf("restore: nothing to apply\r\n");
+        return;
+    }
+
+    if (!shell_bus_claim("restore apply")) {
+        shell_printf("restore apply: bus busy\r\n");
+        return;
+    }
+
+    uint8_t applied = 0u;
+    for (uint8_t i = 0u; i < plan.move_count; i++) {
+        const DaliRestoreMove *move = &plan.moves[i];
+        DaliError err = shell_restore_apply_move(move);
+        shell_printf("  %u/%u %s%u -> %s%u: %s\r\n",
+               (unsigned)(i + 1u),
+               (unsigned)plan.move_count,
+               move->space == DALI_SNAPSHOT_SPACE_GEAR ? "a" : "d",
+               (unsigned)move->from,
+               move->space == DALI_SNAPSHOT_SPACE_GEAR ? "a" : "d",
+               (unsigned)move->to,
+               err == DALI_OK ? "OK" : shell_err(err));
+        if (err != DALI_OK) {
+            /*
+             * Stop at the first failure. The plan's later moves assume this one
+             * landed, so continuing would send a unit onto an address the plan
+             * believes was vacated and this one proves was not. Re-running
+             * `restore plan` against the bus as it now stands is the recovery,
+             * and it is safe because nothing here opened an addressing window.
+             */
+            shell_printf("restore apply: stopped after %u of %u move(s); "
+                         "re-run 'restore plan' to see what remains\r\n",
+                   (unsigned)applied,
+                   (unsigned)plan.move_count);
+            break;
+        }
+        applied++;
+    }
+
+    shell_bus_release();
+
+    if (applied == plan.move_count) {
+        shell_printf("restore apply: %u move(s) applied\r\n", (unsigned)applied);
+        shell_printf("restore apply: verify with 'restore plan' or 'discover'\r\n");
+    }
+
+    /* Short addresses moved, so every cached view of the bus is stale. */
+    DaliDiscoveryInventory *inventory = &s_inventory_scratch;
+    if (s_session.hooks.inventory_changed != NULL && shell_inventory_snapshot(inventory)) {
+        s_session.hooks.inventory_changed(s_session.hooks.ctx, inventory);
     }
 }
 
@@ -4707,6 +5288,9 @@ static void shell_execute(DaliCliCommandId id, const DaliCliTokens *t)
         case DALI_CLI_CMD_EXPORT:       cmd_export(t); break;
         case DALI_CLI_CMD_IDENTIFY:     cmd_identify(t); break;
         case DALI_CLI_CMD_QUIESCENT:    cmd_quiescent(t); break;
+        case DALI_CLI_CMD_BACKUP:       cmd_backup(t); break;
+        case DALI_CLI_CMD_RESTORE:      cmd_restore(t); break;
+        case DALI_CLI_CMD_DEVINFO:      cmd_devinfo(t); break;
 
         case DALI_CLI_CMD_COUNT:
             break;

@@ -126,6 +126,24 @@ void DaliShellServer::bus_release_cb(void *ctx)
     }
 }
 
+bool DaliShellServer::snapshot_save_cb(void *ctx, const uint8_t *buf, uint32_t len)
+{
+    auto *self = static_cast<DaliShellServer *>(ctx);
+    if (self == nullptr || self->parent_ == nullptr || buf == nullptr) {
+        return false;
+    }
+    return self->parent_->save_address_backup(buf, len);
+}
+
+bool DaliShellServer::snapshot_load_cb(void *ctx, uint8_t *buf, uint32_t *len)
+{
+    auto *self = static_cast<DaliShellServer *>(ctx);
+    if (self == nullptr || self->parent_ == nullptr || buf == nullptr || len == nullptr) {
+        return false;
+    }
+    return self->parent_->load_address_backup(buf, len);
+}
+
 /*
  * `export config`. The `shell:` sub-block is this object's own configuration,
  * so it is filled in here rather than looked up: DaliComponent has no
@@ -264,6 +282,8 @@ void DaliShellServer::serve(int client_fd)
     session.hooks.inventory_changed = inventory_changed_cb;
     session.hooks.config_applied = config_applied_cb;
     session.hooks.export_config = export_config_cb;
+    session.hooks.snapshot_save = snapshot_save_cb;
+    session.hooks.snapshot_load = snapshot_load_cb;
     session.hooks.ctx = this;
     session.policy = allow_commissioning_ ? DALI_SHELL_ALLOW_ALL : DALI_SHELL_ALLOW_RESET;
     session.aborted = aborted_cb;
