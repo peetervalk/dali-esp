@@ -29,6 +29,7 @@ set(DALI_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_event.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_discovery.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_commissioning.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_device_commissioning.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_snapshot.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_restore.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_lunatone.c
@@ -99,6 +100,7 @@ add_dali_test(test_input_poll test_input_poll.c)
 add_dali_test(test_event test_event.c)
 add_dali_test(test_discovery test_discovery.c)
 add_dali_test(test_commissioning test_commissioning.c)
+add_dali_test(test_device_commissioning test_device_commissioning.c)
 add_dali_test(test_snapshot   test_snapshot.c)
 add_dali_test(test_restore_plan test_restore_plan.c)
 add_dali_test(test_vendor     test_vendor.c)

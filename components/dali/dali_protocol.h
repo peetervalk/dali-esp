@@ -206,6 +206,40 @@ typedef enum {
      */
     DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0,
 
+    /*
+     * The Part 103 addressing specials, opcodes 0x01..0x0A. Built with
+     * dali_build_device_special(), never dali_build_special(): the two spaces
+     * share command *names* and even some opcode numbers while meaning
+     * different things, which is why they deliberately do not share a builder.
+     *
+     * Two encodings differ from their Part 102 namesakes, and both fail quietly
+     * rather than loudly — the frame is well formed, it just addresses or
+     * programs something other than what was meant:
+     *
+     *  - DALI_CMD_DEVICE_INITIALISE takes a device *address byte*, where 0xFF
+     *    selects every control device and 0x00 selects only those without a
+     *    short address. That is inverted against Part 102 INITIALISE, whose
+     *    0x00 means all gear and 0xFF means unaddressed gear.
+     *
+     *  - DALI_CMD_DEVICE_PROGRAM_SHORT_ADDRESS takes the raw 6-bit address
+     *    0..63. The Part 102 special of the same name takes (a << 1) | 1, so
+     *    sending the Part 102 encoding here programs address 2n+1. Note that
+     *    DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0 above *does* use the encoded
+     *    form, because it reads DTR0 rather than carrying the address itself —
+     *    the two device commands disagree with each other, not just with
+     *    Part 102.
+     */
+    DALI_CMD_DEVICE_INITIALISE,
+    DALI_CMD_DEVICE_RANDOMISE,
+    DALI_CMD_DEVICE_COMPARE,
+    DALI_CMD_DEVICE_WITHDRAW,
+    DALI_CMD_DEVICE_SEARCH_ADDRH,
+    DALI_CMD_DEVICE_SEARCH_ADDRM,
+    DALI_CMD_DEVICE_SEARCH_ADDRL,
+    DALI_CMD_DEVICE_PROGRAM_SHORT_ADDRESS,
+    DALI_CMD_DEVICE_VERIFY_SHORT_ADDRESS,
+    DALI_CMD_DEVICE_QUERY_SHORT_ADDRESS,
+
     DALI_CMD_COUNT,
 } DaliCommandId;
 

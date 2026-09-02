@@ -11,6 +11,7 @@
 #include "dali_discovery.h"
 #include "dali_transport.h"
 #include "dali_commissioning.h"
+#include "dali_device_commissioning.h"
 #include "dali_snapshot.h"
 #include "dali_restore.h"
 #include "dali_memory.h"
@@ -3173,6 +3174,106 @@ static void shell_report_duplicates(const DaliCommissioningResult *result)
                  "event.\r\n");
 }
 
+/*
+ * `commission devices` — the Part 103 walk.
+ *
+ * A separate handler rather than a flag through the gear one: the two share a
+ * shape but nothing else, and the addresses, encodings and guards they use are
+ * exactly what must not get crossed.
+ */
+static void cmd_commission_devices(uint8_t first_address, uint8_t max_devices)
+{
+    DaliDiscoveryTransport transport = shell_discovery_transport();
+    DaliDiscoveryInventory *inventory = &s_inventory_scratch;
+    uint8_t found = 0u;
+
+    /* Claimed across the pre-scan and the walk together: the used-address mask
+     * is only valid while nothing else has touched the bus since the scan. */
+    if (!shell_bus_claim("commission devices")) {
+        shell_printf("commission devices: bus busy\r\n");
+        return;
+    }
+
+    shell_printf("commission devices: pre-scan occupied device addresses\r\n");
+    DaliError err = dali_discovery_scan(inventory, &transport, NULL, NULL, &found);
+    if (err != DALI_OK) {
+        shell_inventory_reset();
+        shell_bus_release();
+        shell_printf("commission devices: pre-scan ERR %s\r\n", shell_err(err));
+        return;
+    }
+    shell_inventory_replace(inventory);
+
+    const uint64_t used_mask =
+        dali_device_commissioning_used_mask_from_inventory(inventory);
+    uint8_t occupied = 0u;
+    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        if ((used_mask & ((uint64_t)1u << addr)) != 0u) {
+            occupied++;
+        }
+    }
+    shell_printf("commission devices: occupied=%u\r\n", (unsigned)occupied);
+
+    DaliDeviceCommissioningOptions options = {
+        .first_short_address = first_address,
+        .max_devices         = max_devices,
+        .used_address_mask   = used_mask,
+        .query_short_address = true,
+        /* The mirror of the gear run's Part 103 bracket: control gear left in
+         * an initialise window can answer the specials this walk emits. */
+        .terminate_control_gear = true,
+    };
+
+    DaliDeviceCommissioningResult result;
+    err = dali_device_commissioning_commission_unaddressed(
+        &transport, &options, &result, shell_commission_progress_cb, NULL);
+
+    shell_bus_release();
+
+    if (s_session.hooks.inventory_changed != NULL) {
+        s_session.hooks.inventory_changed(s_session.hooks.ctx, inventory);
+    }
+
+    if (result.cross_part_error != DALI_OK) {
+        shell_printf("commission devices: Part 102 TERMINATE failed (%s); control "
+                     "gear left in an addressing window may have answered as a "
+                     "device\r\n",
+               shell_err(result.cross_part_error));
+    }
+
+    if (result.duplicate_count > 0u) {
+        shell_printf("commission devices: %u random address(es) held by two "
+                     "devices; left unaddressed for a later run\r\n",
+               (unsigned)result.duplicate_count);
+    }
+
+    if (err != DALI_OK) {
+        shell_printf("commission devices: ERR %s after %u assignment(s)\r\n",
+               shell_err(err), (unsigned)result.assigned_count);
+        if (result.initialisation_state_unknown) {
+            shell_printf("commission devices: TERMINATE not confirmed; control "
+                         "devices may still be in addressing state\r\n");
+        }
+        return;
+    }
+
+    shell_printf("commission devices: complete assigned=%u",
+           (unsigned)result.assigned_count);
+    if (result.no_more_devices) {
+        shell_printf(", no more unaddressed devices");
+    }
+    if (result.address_space_full) {
+        shell_printf(", address space full");
+    }
+    shell_printf("\r\n");
+
+    for (uint8_t i = 0u; i < result.assigned_count; i++) {
+        shell_printf("  d%u <- random=0x%06" PRIX32 "\r\n",
+               (unsigned)result.assignments[i].short_address,
+               result.assignments[i].random_address);
+    }
+}
+
 static void cmd_commission(const DaliCliTokens *t)
 {
     uint8_t first_address = 0u;
@@ -3184,9 +3285,14 @@ static void cmd_commission(const DaliCliTokens *t)
          !dali_cli_parse_u8(t->tok[2], DALI_MAX_SHORT_ADDRESS, &first_address)) ||
         (t->count == 4u &&
          !dali_cli_parse_u8(t->tok[3], DALI_SHORT_ADDRESS_COUNT, &max_devices))) {
-        shell_printf("usage: commission unaddressed [0-%u] [0-%u]\r\n",
+        shell_printf("usage: commission unaddressed|devices [0-%u] [0-%u]\r\n",
                (unsigned)DALI_MAX_SHORT_ADDRESS,
                (unsigned)DALI_SHORT_ADDRESS_COUNT);
+        return;
+    }
+
+    if (strcmp(t->tok[1], "devices") == 0) {
+        cmd_commission_devices(first_address, max_devices);
         return;
     }
 

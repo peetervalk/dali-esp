@@ -11,6 +11,7 @@ idf_component_register(
         "dali_event.c"
         "dali_discovery.c"
         "dali_commissioning.c"
+        "dali_device_commissioning.c"
         "dali_snapshot.c"
         "dali_restore.c"
         "dali_lunatone.c"
