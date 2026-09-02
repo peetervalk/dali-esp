@@ -464,6 +464,83 @@ void test_trace_callback_reports_rx_time_since_last_tx(void)
     TEST_ASSERT_EQUAL_PTR(&g_trace_marker, g_trace_ctx);
 }
 
+/*
+ * An RX frame whose edges predate the last TX is ordinary, not a fault: edges
+ * are stamped in the ISR and decoded in a task, so the next transmission can
+ * complete first. Observed on the 2k bus, where a Steinel event frame decoded
+ * 24.7 ms "before" the TX that had already gone out reported since_tx_us as
+ * 4294942572 — about 71 minutes, and indistinguishable from a real reading.
+ */
+void test_trace_rx_stamped_before_last_tx_reports_no_offset(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_set_trace_callback(on_trace, &g_trace_marker));
+
+    g_mock_time_us = 200000u;
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = false,
+        .send_twice   = false,
+        .retries_left = 0u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_trace_count);
+    TEST_ASSERT_EQUAL(DALI_SCHED_TRACE_TX, g_trace_event.direction);
+
+    /* Decoded 24.7 ms before the TX above, handed over after it. */
+    DaliPhyRxObservation observation = {
+        .result         = DALI_OK,
+        .frame          = { .data = 0x00840Fu,
+                            .bit_length = DALI_EXTENDED_FRAME_BITS },
+        .first_edge_us  = 175300u - DALI_BIT_US * 24u,
+        .last_edge_us   = 175300u,
+        .edge_count     = 48u,
+        .has_timestamps = true,
+    };
+    dali_sched_notify_rx_observation(&observation);
+
+    TEST_ASSERT_EQUAL(2, g_trace_count);
+    TEST_ASSERT_EQUAL(DALI_SCHED_TRACE_RX, g_trace_event.direction);
+    TEST_ASSERT_EQUAL_HEX32(0x00840Fu, g_trace_event.frame.data);
+    TEST_ASSERT_EQUAL_UINT32(175300u, g_trace_event.timestamp_us);
+    TEST_ASSERT_FALSE(g_trace_event.has_since_tx);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_trace_event.since_tx_us);
+}
+
+/* A frame stamped exactly at the TX end still reports an offset, of zero. */
+void test_trace_rx_stamped_at_last_tx_reports_zero_offset(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_set_trace_callback(on_trace, &g_trace_marker));
+
+    g_mock_time_us = 200000u;
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = false,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+    dali_sched_run();
+
+    DaliPhyRxObservation observation = {
+        .result         = DALI_OK,
+        .frame          = { .data = 0x00840Fu,
+                            .bit_length = DALI_EXTENDED_FRAME_BITS },
+        .first_edge_us  = 200000u - DALI_BIT_US * 24u,
+        .last_edge_us   = 200000u,
+        .edge_count     = 48u,
+        .has_timestamps = true,
+    };
+    dali_sched_notify_rx_observation(&observation);
+
+    TEST_ASSERT_EQUAL(2, g_trace_count);
+    TEST_ASSERT_TRUE(g_trace_event.has_since_tx);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_trace_event.since_tx_us);
+}
+
 /* 2. Send-twice — frame must be transmitted exactly twice */
 void test_send_twice(void)
 {
@@ -2852,6 +2929,8 @@ int main(void)
     RUN_TEST(test_simple_send);
     RUN_TEST(test_trace_callback_reports_tx_from_task_context);
     RUN_TEST(test_trace_callback_reports_rx_time_since_last_tx);
+    RUN_TEST(test_trace_rx_stamped_before_last_tx_reports_no_offset);
+    RUN_TEST(test_trace_rx_stamped_at_last_tx_reports_zero_offset);
     RUN_TEST(test_send_twice);
     RUN_TEST(test_next_forward_waits_for_minimum_gap);
     RUN_TEST(test_forward_gap_handles_microsecond_clock_wrap);

@@ -432,8 +432,26 @@ static void sched_trace(DaliSchedTraceDirection direction,
     };
 
     if (direction == DALI_SCHED_TRACE_RX && s_have_last_tx_us) {
-        event.since_tx_us  = timestamp_us - s_last_tx_us;
-        event.has_since_tx = true;
+        /*
+         * RX edges are stamped in the ISR but decoded later in a task, so the
+         * scheduler can finish the next TX before this frame is handed over:
+         * timestamp_us then legitimately precedes s_last_tx_us. The subtraction
+         * is modular, so that wraps to near 2^32 and reports as a frame that
+         * arrived ~71 minutes after a transmission — worse than no answer,
+         * because it reads as a real measurement. A frame that is not after the
+         * transmission has no offset to report, so leave has_since_tx false and
+         * let every consumer take the path it already takes before the first TX.
+         *
+         * Signed compare rather than an invented ceiling: same modular
+         * discipline as elapsed_ms(). A frame landing within a microsecond or
+         * two of the TX end sorts as "before" here, which is honest — a reply
+         * cannot arrive that early.
+         */
+        int32_t since_tx = (int32_t)(timestamp_us - s_last_tx_us);
+        if (since_tx >= 0) {
+            event.since_tx_us  = (uint32_t)since_tx;
+            event.has_since_tx = true;
+        }
     }
 
     /* Every subscriber gets the same event value. Passing the same pointer is
