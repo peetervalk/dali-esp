@@ -73,32 +73,6 @@ static DaliError send_special_cleanup_no_reply(
  * the two into one result would lose exactly the case that leaves an
  * installation silent.
  */
-static DaliError commissioning_start_quiescence(
-    const DaliDiscoveryTransport *transport,
-    bool *transmitted_out)
-{
-    if (transmitted_out == NULL) {
-        return DALI_ERR_INVALID;
-    }
-    *transmitted_out = false;
-
-    DaliFrame frame;
-    DaliError err = dali_build_device_broadcast_command(
-        DALI_CMD_START_QUIESCENT_MODE, &frame);
-    if (err != DALI_OK) {
-        return err;
-    }
-
-    err = transact_frame(transport, &frame, false, 0u, true, NULL);
-    if (err != DALI_OK) {
-        return err;
-    }
-    *transmitted_out = true;
-
-    return dali_transport_delay_ms(transport,
-                                   DALI_COMMISSIONING_QUIESCENT_SETTLE_MS);
-}
-
 /*
  * IEC 62386-103 TERMINATE, closing any control-device addressing state.
  *
@@ -148,27 +122,6 @@ static void commissioning_try_terminate_control_devices(
     if (err != DALI_OK && out->cross_part_error == DALI_OK) {
         out->cross_part_error = err;
     }
-}
-
-/*
- * Broadcast STOP QUIESCENT MODE through the cleanup path.
- *
- * Same reasoning as the TERMINATE unwind: this has to be attempted even when a
- * front-end cancellation is latched, because the alternative is an installation
- * whose sensors stay silent after an aborted run. No settle follows — the
- * caller is on its way out and nothing else is about to transmit.
- */
-static DaliError commissioning_release_quiescence(
-    const DaliDiscoveryTransport *transport)
-{
-    DaliFrame frame;
-    DaliError err = dali_build_device_broadcast_command(
-        DALI_CMD_STOP_QUIESCENT_MODE, &frame);
-    if (err != DALI_OK) {
-        return err;
-    }
-    return dali_transport_transact_cleanup(transport, &frame, false, 0u, true,
-                                           NULL);
 }
 
 static DaliError query_special_u8(const DaliDiscoveryTransport *transport,
@@ -899,7 +852,7 @@ DaliError dali_commissioning_commission_unaddressed(
         }
         out->quiescence_requested = true;
         bool started = false;
-        out->quiescence_error = commissioning_start_quiescence(transport,
+        out->quiescence_error = dali_discovery_quiescence_start(transport,
                                                                &started);
         out->quiescence_started = started;
         /*
@@ -1154,7 +1107,7 @@ cleanup:
      */
     if (out->quiescence_requested) {
         out->quiescence_release_attempted = true;
-        DaliError release_err = commissioning_release_quiescence(transport);
+        DaliError release_err = dali_discovery_quiescence_release(transport);
         out->quiescent_state_unknown =
             out->quiescence_started && release_err != DALI_OK;
         if (out->quiescence_error == DALI_OK) {

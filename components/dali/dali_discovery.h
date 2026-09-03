@@ -285,11 +285,92 @@ DaliError dali_discovery_query_dt6_dimming_curve(
     uint8_t addr,
     DaliDimCurve *curve_out);
 const char *dali_discovery_device_type_name(uint8_t type);
+/*
+ * Settle after a broadcast START QUIESCENT MODE: two extended frame durations,
+ * long enough for an event already on the wire to finish before the caller
+ * starts transmitting.
+ *
+ * Defined here rather than in dali_commissioning.h because the commissioning
+ * walk and the scan take the same bracket, and one copy is what stops them
+ * drifting. DALI_COMMISSIONING_QUIESCENT_SETTLE_MS is kept as an alias.
+ */
+#define DALI_DISCOVERY_QUIESCENT_SETTLE_MS \
+    ((2u * DALI_EXTENDED_FRAME_BITS * DALI_BIT_US) / 1000u)
+
+/*
+ * Optional scan behaviour. A NULL options pointer means "exactly as before",
+ * which is what every existing caller passes.
+ */
+typedef struct {
+    /*
+     * Broadcast START QUIESCENT MODE for the duration of the walk and STOP on
+     * the way out.
+     *
+     * A 64-address scan is minutes of back-to-back TX, and a control-device
+     * event arriving inside that is dropped for the state it arrived in. On a
+     * bus with a live occupancy sensor that is most of them, which is what made
+     * the scan's ignored-RX note track whether anyone was in the room.
+     * Silencing the devices for the walk removes the traffic rather than
+     * counting it.
+     *
+     * Off by default, and deliberately: while it is on the installation reports
+     * no occupancy at all, so it belongs to an operator-driven scan with
+     * somebody standing there, not to an unattended periodic one. Requires a
+     * transport that can delay; without one the bracket is refused rather than
+     * applied without its settle, and the result says so.
+     */
+    bool quiesce_control_devices;
+} DaliDiscoveryScanOptions;
+
+/*
+ * What the quiescence bracket did, filled in on every exit path.
+ *
+ * The fields mirror the ones DaliCommissioningResult carries for the same
+ * bracket so that one reporting routine can serve both. Silence is the normal
+ * case: the two worth a line are a START that never went out, and a release
+ * that failed and so left the installation's sensors quiet.
+ */
+typedef struct {
+    bool      quiescence_requested;
+    bool      quiescence_started;
+    bool      quiescence_release_attempted;
+    bool      quiescent_state_unknown;
+    DaliError quiescence_error;
+} DaliDiscoveryScanResult;
+
+/*
+ * The quiescence bracket on its own. Exposed because the commissioning walk
+ * takes the same one, and because the release has to be reachable from a
+ * caller's own cleanup path.
+ *
+ * Nothing acknowledges either frame, so success means transmitted, not
+ * quiesced: a bus with no control devices reports exactly the same.
+ * transmitted_out is set separately from the return value because the settle
+ * that follows can fail on its own, and the release must still run.
+ */
+DaliError dali_discovery_quiescence_start(
+    const DaliDiscoveryTransport *transport,
+    bool *transmitted_out);
+DaliError dali_discovery_quiescence_release(
+    const DaliDiscoveryTransport *transport);
+
 DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
                               const DaliDiscoveryTransport *transport,
                               DaliDiscoveryFoundCb found_cb,
                               void *found_ctx,
                               uint8_t *found_out);
+
+/*
+ * The same walk with options. `options` and `result_out` may both be NULL, in
+ * which case this is dali_discovery_scan().
+ */
+DaliError dali_discovery_scan_ex(DaliDiscoveryInventory *inventory,
+                                 const DaliDiscoveryTransport *transport,
+                                 DaliDiscoveryFoundCb found_cb,
+                                 void *found_ctx,
+                                 uint8_t *found_out,
+                                 const DaliDiscoveryScanOptions *options,
+                                 DaliDiscoveryScanResult *result_out);
 
 DaliError dali_discovery_query_input_device(const DaliDiscoveryTransport *transport,
                                             uint8_t addr,

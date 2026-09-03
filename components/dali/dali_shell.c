@@ -3102,6 +3102,66 @@ static void shell_discovery_found_cb(uint8_t addr,
     }
 }
 
+/*
+ * The quiescence bracket's report, shared by the commissioning walks and by
+ * every scan.
+ *
+ * Silence is the normal case and prints nothing: the operator asked to scan,
+ * not to hear about a hardening step that worked. The two states worth a line
+ * are a START that never went out — the bus was noisier than the walk assumed,
+ * which may explain a phantom result — and a release that failed, which leaves
+ * the installation's sensors quiet and is the one an operator has to act on.
+ */
+static void shell_report_quiescence_bracket(const char *verb,
+                                            bool requested,
+                                            bool started,
+                                            bool state_unknown,
+                                            DaliError err)
+{
+    if (!requested) {
+        return;
+    }
+    if (!started) {
+        shell_printf("%s: quiescence not started (%s); control-device traffic "
+                     "was not suppressed\r\n",
+                     verb, shell_err(err));
+    }
+    if (state_unknown) {
+        shell_printf("%s: STOP QUIESCENT MODE failed; control devices may "
+                     "still be silent - run 'quiescent off all'\r\n",
+                     verb);
+    }
+}
+
+static void shell_report_scan_quiescence(const char *verb,
+                                         const DaliDiscoveryScanResult *result)
+{
+    shell_report_quiescence_bracket(verb,
+                                    result->quiescence_requested,
+                                    result->quiescence_started,
+                                    result->quiescent_state_unknown,
+                                    result->quiescence_error);
+}
+
+/*
+ * Every operator-driven walk in this shell takes the bracket, and they all take
+ * the same one. The rule is worth keeping that simple: the alternative is a
+ * reader working out which walks quiesce and which do not, and a pre-scan whose
+ * used-address mask is wrong is worse than a discover that missed a lamp.
+ *
+ * Two things are deliberately outside it. `find switches` never scans at all —
+ * listening for events is that verb's entire purpose. And the integration's own
+ * periodic scan passes no options, because an unattended walk that silences
+ * occupancy for minutes is a trade nobody is present to accept.
+ */
+static const DaliDiscoveryScanOptions *shell_scan_options(void)
+{
+    static const DaliDiscoveryScanOptions options = {
+        .quiesce_control_devices = true,
+    };
+    return &options;
+}
+
 static uint8_t shell_discover_bus(bool detailed)
 {
     uint8_t found = 0u;
@@ -3137,11 +3197,19 @@ static uint8_t shell_discover_bus(bool detailed)
                                g_dali_stats.rx_ignored_unclassified;
 
     shell_printf("Scanning short addresses 0-%u...\r\n", (unsigned)DALI_MAX_SHORT_ADDRESS);
-    DaliError err = dali_discovery_scan(inventory,
-                                        &transport,
-                                        shell_discovery_found_cb,
-                                        &print_ctx,
-                                        &found);
+    DaliDiscoveryScanResult scan_result;
+    DaliError err = dali_discovery_scan_ex(inventory,
+                                           &transport,
+                                           shell_discovery_found_cb,
+                                           &print_ctx,
+                                           &found,
+                                           shell_scan_options(),
+                                           &scan_result);
+    /*
+     * Reported before the error branch, so it covers the aborted and errored
+     * exits as well as the clean one. It prints nothing when the bracket worked.
+     */
+    shell_report_scan_quiescence("scan", &scan_result);
     if (err != DALI_OK) {
         shell_inventory_reset();
         shell_bus_release();
@@ -3402,18 +3470,11 @@ static void shell_commission_progress_cb(const DaliCommissioningEvent *event,
  */
 static void shell_report_quiescence(const DaliCommissioningResult *result)
 {
-    if (!result->quiescence_requested) {
-        return;
-    }
-    if (!result->quiescence_started) {
-        shell_printf("commission: quiescence not started (%s); control-device "
-                     "traffic was not suppressed\r\n",
-                     shell_err(result->quiescence_error));
-    }
-    if (result->quiescent_state_unknown) {
-        shell_printf("commission: STOP QUIESCENT MODE failed; control devices "
-                     "may still be silent - run 'quiescent off all'\r\n");
-    }
+    shell_report_quiescence_bracket("commission",
+                                    result->quiescence_requested,
+                                    result->quiescence_started,
+                                    result->quiescent_state_unknown,
+                                    result->quiescence_error);
 }
 
 /*
@@ -3588,7 +3649,15 @@ static void shell_commission_post_scan(const char *verb,
     shell_printf("%s: verifying with post-scan\r\n", verb);
 
     uint8_t found = 0u;
-    DaliError err = dali_discovery_scan(inventory, transport, NULL, NULL, &found);
+    DaliDiscoveryScanResult scan_result;
+    DaliError err = dali_discovery_scan_ex(inventory, transport, NULL, NULL,
+                                           &found, shell_scan_options(),
+                                           &scan_result);
+    /*
+     * The commissioning walk released its own quiescence before returning, so
+     * this verification walk needs its own bracket rather than inheriting one.
+     */
+    shell_report_scan_quiescence(verb, &scan_result);
     if (err != DALI_OK) {
         shell_inventory_reset();
         shell_printf("%s: post-scan ERR %s\r\n", verb, shell_err(err));
@@ -3684,7 +3753,11 @@ static void cmd_commission_devices(uint8_t first_address, uint8_t max_devices)
     }
 
     shell_printf("commission devices: pre-scan occupied device addresses\r\n");
-    DaliError err = dali_discovery_scan(inventory, &transport, NULL, NULL, &found);
+    DaliDiscoveryScanResult scan_result;
+    DaliError err = dali_discovery_scan_ex(inventory, &transport, NULL, NULL,
+                                           &found, shell_scan_options(),
+                                           &scan_result);
+    shell_report_scan_quiescence("commission devices", &scan_result);
     if (err != DALI_OK) {
         shell_inventory_reset();
         shell_bus_release();
@@ -3836,11 +3909,15 @@ static void cmd_commission(const DaliCliTokens *t)
     }
 
     shell_printf("commission: pre-scan occupied short addresses\r\n");
-    DaliError err = dali_discovery_scan(inventory,
-                                        &transport,
-                                        NULL,
-                                        NULL,
-                                        &found);
+    DaliDiscoveryScanResult scan_result;
+    DaliError err = dali_discovery_scan_ex(inventory,
+                                           &transport,
+                                           NULL,
+                                           NULL,
+                                           &found,
+                                           shell_scan_options(),
+                                           &scan_result);
+    shell_report_scan_quiescence("commission", &scan_result);
     if (err != DALI_OK) {
         shell_inventory_reset();
         shell_bus_release();
@@ -5295,7 +5372,11 @@ static void cmd_backup(const DaliCliTokens *t)
     }
 
     shell_printf("backup: scanning\r\n");
-    DaliError err = dali_discovery_scan(inventory, &transport, NULL, NULL, &found);
+    DaliDiscoveryScanResult scan_result;
+    DaliError err = dali_discovery_scan_ex(inventory, &transport, NULL, NULL,
+                                           &found, shell_scan_options(),
+                                           &scan_result);
+    shell_report_scan_quiescence("backup", &scan_result);
     if (err != DALI_OK) {
         shell_inventory_reset();
         shell_bus_release();
@@ -5454,7 +5535,11 @@ static bool shell_restore_refresh(const char *verb)
     }
 
     shell_printf("%s: scanning\r\n", verb);
-    DaliError err = dali_discovery_scan(inventory, &transport, NULL, NULL, &found);
+    DaliDiscoveryScanResult scan_result;
+    DaliError err = dali_discovery_scan_ex(inventory, &transport, NULL, NULL,
+                                           &found, shell_scan_options(),
+                                           &scan_result);
+    shell_report_scan_quiescence(verb, &scan_result);
     if (err != DALI_OK) {
         shell_inventory_reset();
         shell_bus_release();

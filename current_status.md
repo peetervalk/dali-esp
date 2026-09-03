@@ -455,13 +455,22 @@ The typed verb surface is in place; what is missing is evidence. Keep
   Host-covered and mutation-checked; no bus has seen it. The experiment it was
   built for: on 2k, `rx_event_unroutable` should account for almost all of the
   11-39 the old note reported while early and late stay near zero — which is
-  what settles the 2026-08-13 reading that is currently in doubt. Run it before
-  bracketing the scan in quiescence, which would suppress the evidence.
-- **Assert quiescent for the duration of a scan.** The scan already enumerates
-  which addresses are input devices, in the same function that prints the note.
-  Two constraints: the release must cover every exit path, including cancelled
-  and errored scans, or the bus is left deaf to events; and `find switches` must
-  never do it, since listening for events is that verb's whole purpose.
+  what settles the 2026-08-13 reading that is currently in doubt.
+  **`b64f81f` is the control arm**: it carries the split counters and not the
+  scan's quiescence bracket, so it is the last build that can still observe the
+  event traffic the bracket removes. Run the experiment on that ref before
+  flashing anything later.
+- **Confirm the scan's quiescence bracket on a bus.** Every operator-driven
+  walk in the shell — `scan`/`discover`, both commissioning pre-scans, the
+  commissioning post-scan, `backup save` and the `restore` refresh — now
+  broadcasts `START QUIESCENT MODE`, settles, walks, and releases on every exit
+  path including the cancelled and errored ones. `find switches` does not scan
+  and is untouched, and the integration's own periodic scan opts out: an
+  unattended walk that silences occupancy for minutes is a trade nobody is
+  present to accept. Host-covered and mutation-checked; no bus has seen it.
+  What to watch for on hardware is the failure direction — a release that does
+  not land leaves the installation's sensors quiet, and the shell's line saying
+  so is the only thing that would tell an operator to run `quiescent off all`.
 - **Add `address <aN> clear`.** Clearing a short address is a normal step in
   resolving a collision and is the one address operation with no typed verb. The
   fallback, `config-dtr0 <aN> set-short-address-dtr0 255`, is correct DALI but

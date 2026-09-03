@@ -848,6 +848,18 @@ looking broken. Whether the standard also ends the state on its own timer is not
 established here — treat `off` as the only thing that reliably releases it.
 Host-tested; no bus has run it.
 
+Every operator-driven walk now takes this bracket on its own behalf, so an
+operator rarely needs the verb for a scan: `scan`, `discover`, both
+commissioning pre-scans, the commissioning post-scan, `backup save` and the
+`restore` refresh all broadcast `START QUIESCENT MODE`, settle, walk, and
+release on the way out — including when the walk was cancelled or failed.
+Sensors are therefore silent for the length of a walk, which is minutes on a
+full bus, and any automation driven by them stops updating for that time. If a
+release fails the shell says so and `quiescent off all` is the fix. Two things
+stay outside it: `find switches`, whose whole purpose is listening for events,
+and the integration's own periodic scan, which runs with nobody present to
+accept a silent installation.
+
 Commissioning remains hardware-dependable only with a single unaddressed device
 on the bus. The receive path now attributes observations to a precise
 TX-end-relative reply window — opening at 5.5 ms for undecodable activity, which

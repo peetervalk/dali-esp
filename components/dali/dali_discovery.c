@@ -83,6 +83,60 @@ static bool scan_error_is_absent(DaliError err)
     return err == DALI_ERR_TIMEOUT || err == DALI_ERR_MALFORMED;
 }
 
+/*
+ * Broadcast START QUIESCENT MODE, then wait for any event frame already on the
+ * wire to finish.
+ *
+ * Send-twice, no reply, address byte 0xFF: every control device, control gear
+ * untouched. Nothing acknowledges it, so a return of DALI_OK means the frame
+ * was transmitted and says nothing about whether anything heard it.
+ */
+DaliError dali_discovery_quiescence_start(
+    const DaliDiscoveryTransport *transport,
+    bool *transmitted_out)
+{
+    if (!transport_valid(transport) || transmitted_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    *transmitted_out = false;
+
+    DaliFrame frame;
+    DaliError err = dali_build_device_broadcast_command(
+        DALI_CMD_START_QUIESCENT_MODE, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    err = transport->transact(&frame, false, 0u, true, NULL, transport->ctx);
+    if (err != DALI_OK) {
+        return err;
+    }
+    *transmitted_out = true;
+
+    return dali_transport_delay_ms(transport,
+                                   DALI_DISCOVERY_QUIESCENT_SETTLE_MS);
+}
+
+/*
+ * Broadcast STOP QUIESCENT MODE through the cleanup path.
+ *
+ * cleanup selects the transport that ignores a latched front-end cancellation,
+ * because the alternative is an installation whose sensors stay silent after an
+ * aborted walk. No settle follows: the caller is on its way out.
+ */
+DaliError dali_discovery_quiescence_release(
+    const DaliDiscoveryTransport *transport)
+{
+    DaliFrame frame;
+    DaliError err = dali_build_device_broadcast_command(
+        DALI_CMD_STOP_QUIESCENT_MODE, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+    return dali_transport_transact_cleanup(transport, &frame, false, 0u, true,
+                                           NULL);
+}
+
 DaliError dali_discovery_inventory_reset(DaliDiscoveryInventory *inventory)
 {
     if (inventory == NULL) {
@@ -960,18 +1014,18 @@ static void discovery_enrich_device(const DaliDiscoveryTransport *transport,
     }
 }
 
-DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
-                              const DaliDiscoveryTransport *transport,
-                              DaliDiscoveryFoundCb found_cb,
-                              void *found_ctx,
-                              uint8_t *found_out)
+/*
+ * The walk itself, split out so that everything wrapped around it runs on every
+ * exit path. There are five returns below and three of them are failures; a
+ * release that only covered the clean one would leave the bus deaf to events
+ * exactly when a scan had gone wrong.
+ */
+static DaliError discovery_scan_walk(DaliDiscoveryInventory *inventory,
+                                     const DaliDiscoveryTransport *transport,
+                                     DaliDiscoveryFoundCb found_cb,
+                                     void *found_ctx,
+                                     uint8_t *found_out)
 {
-    if (inventory == NULL ||
-        !transport_valid(transport) ||
-        !dali_transport_supports_atomic_sequence(transport)) {
-        return DALI_ERR_INVALID;
-    }
-
     DaliError reset_err = dali_discovery_inventory_reset(inventory);
     if (reset_err != DALI_OK) {
         return reset_err;
@@ -1064,6 +1118,85 @@ DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
         *found_out = inventory->found_count;
     }
     return DALI_OK;
+}
+
+DaliError dali_discovery_scan_ex(DaliDiscoveryInventory *inventory,
+                                 const DaliDiscoveryTransport *transport,
+                                 DaliDiscoveryFoundCb found_cb,
+                                 void *found_ctx,
+                                 uint8_t *found_out,
+                                 const DaliDiscoveryScanOptions *options,
+                                 DaliDiscoveryScanResult *result_out)
+{
+    DaliDiscoveryScanResult result;
+    memset(&result, 0, sizeof(result));
+
+    if (inventory == NULL ||
+        !transport_valid(transport) ||
+        !dali_transport_supports_atomic_sequence(transport)) {
+        if (result_out != NULL) {
+            *result_out = result;
+        }
+        return DALI_ERR_INVALID;
+    }
+
+    /*
+     * Validation first, so a rejected call never leaves control devices
+     * quiesced by a bracket its walk was never going to run.
+     */
+    bool start_attempted = false;
+    if (options != NULL && options->quiesce_control_devices) {
+        result.quiescence_requested = true;
+        if (!dali_transport_supports_delay(transport)) {
+            /*
+             * Without a delay there is no settle, so an event already on the
+             * wire could still be mid-frame when the walk starts transmitting.
+             * Quiescence whose settle did not run reads as hardening that is
+             * not there, so it is refused outright rather than half-applied.
+             */
+            result.quiescence_error = DALI_ERR_INVALID;
+        } else {
+            start_attempted = true;
+            bool started = false;
+            result.quiescence_error =
+                dali_discovery_quiescence_start(transport, &started);
+            result.quiescence_started = started;
+        }
+    }
+
+    DaliError err = discovery_scan_walk(inventory, transport, found_cb,
+                                        found_ctx, found_out);
+
+    /*
+     * Released whenever a START was attempted, including when it reported
+     * failure: a frame that transmitted and then failed its settle has still
+     * reached the bus, and leaving that unreleased is the one outcome that
+     * silences an installation. Only what was never attempted is left alone.
+     */
+    if (start_attempted) {
+        result.quiescence_release_attempted = true;
+        DaliError release_err = dali_discovery_quiescence_release(transport);
+        result.quiescent_state_unknown =
+            result.quiescence_started && release_err != DALI_OK;
+        if (result.quiescence_error == DALI_OK) {
+            result.quiescence_error = release_err;
+        }
+    }
+
+    if (result_out != NULL) {
+        *result_out = result;
+    }
+    return err;
+}
+
+DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
+                              const DaliDiscoveryTransport *transport,
+                              DaliDiscoveryFoundCb found_cb,
+                              void *found_ctx,
+                              uint8_t *found_out)
+{
+    return dali_discovery_scan_ex(inventory, transport, found_cb, found_ctx,
+                                  found_out, NULL, NULL);
 }
 
 static void discovery_input_reset(DaliDiscoveryInputDevice *out, uint8_t addr)

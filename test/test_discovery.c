@@ -236,10 +236,100 @@ static DaliDiscoveryTransport transport(void)
     };
 }
 
+/*
+ * The quiescence bracket, watched.
+ *
+ * Note what the plain transport above lacks: no delay_ms and no
+ * transact_cleanup. That is not an oversight in the fixture — it is the shape
+ * of the integration's own scan transport, the one caller that must never
+ * quiesce, so the default fixture doubles as the vector for the refusal.
+ */
+typedef struct {
+    uint32_t  start_count;
+    uint32_t  stop_count;
+    uint32_t  delay_count;
+    uint32_t  last_delay_ms;
+    uint32_t  tx_at_start;   /* bus tx_count when START went out */
+    uint32_t  tx_at_stop;
+    DaliError start_result;
+    DaliError stop_result;
+} MockQuiescence;
+
+static MockQuiescence s_q;
+
+/*
+ * Built with the same builder the code under test uses, so this asserts that
+ * the bracket was sent and when — not how the frame is encoded, which is
+ * test_protocol's job.
+ */
+static bool is_device_broadcast(const DaliFrame *frame, DaliCommandId id)
+{
+    DaliFrame expected;
+    if (frame == NULL ||
+        dali_build_device_broadcast_command(id, &expected) != DALI_OK) {
+        return false;
+    }
+    return frame->bit_length == expected.bit_length &&
+           frame->data == expected.data;
+}
+
+static DaliError mock_quiesce_transact(const DaliFrame *frame,
+                                       bool needs_reply,
+                                       uint8_t retries_left,
+                                       bool send_twice,
+                                       DaliFrame *reply_out,
+                                       void *ctx)
+{
+    if (is_device_broadcast(frame, DALI_CMD_START_QUIESCENT_MODE)) {
+        TEST_ASSERT_TRUE(send_twice);
+        TEST_ASSERT_FALSE(needs_reply);
+        s_q.start_count++;
+        s_q.tx_at_start = s_bus.tx_count;
+        return s_q.start_result;
+    }
+    if (is_device_broadcast(frame, DALI_CMD_STOP_QUIESCENT_MODE)) {
+        TEST_ASSERT_TRUE(send_twice);
+        TEST_ASSERT_FALSE(needs_reply);
+        s_q.stop_count++;
+        s_q.tx_at_stop = s_bus.tx_count;
+        return s_q.stop_result;
+    }
+    return mock_transact(frame, needs_reply, retries_left, send_twice,
+                         reply_out, ctx);
+}
+
+static void mock_delay_ms(uint32_t ms, void *ctx)
+{
+    (void)ctx;
+    s_q.delay_count++;
+    s_q.last_delay_ms = ms;
+}
+
+static DaliDiscoveryTransport quiescing_transport(void)
+{
+    return (DaliDiscoveryTransport){
+        .transact = mock_quiesce_transact,
+        .transact_sequence = mock_transact_sequence,
+        .transact_cleanup = mock_quiesce_transact,
+        .delay_ms = mock_delay_ms,
+        .ctx = &s_bus,
+    };
+}
+
+static DaliDiscoveryScanOptions quiescing_options(void)
+{
+    return (DaliDiscoveryScanOptions){
+        .quiesce_control_devices = true,
+    };
+}
+
 void setUp(void)
 {
     memset(&s_bus, 0, sizeof(s_bus));
     memset(&s_script, 0, sizeof(s_script));
+    memset(&s_q, 0, sizeof(s_q));
+    s_q.start_result = DALI_OK;
+    s_q.stop_result = DALI_OK;
     s_bus.bus_error_addr = -1;
     s_bus.bus_error = DALI_ERR_BUS_STUCK;
     s_script_count = 0u;
@@ -1914,9 +2004,194 @@ void test_scan_skips_identity_when_bank0_absent(void)
     TEST_ASSERT_EQUAL_UINT32(2u, s_bus.gear_memory_read_count);
 }
 
+/* ---------------------------------------------------------------------------
+ * Scan quiescence
+ * --------------------------------------------------------------------------*/
+
+/*
+ * The default is silence on the device address space, and it has to stay that
+ * way: every existing caller of dali_discovery_scan() passes no options, and an
+ * unattended walk that silenced occupancy for minutes would be a behaviour
+ * change nobody asked for.
+ */
+void test_scan_without_options_sends_no_quiescence(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+
+    s_bus.present[5] = true;
+    s_bus.status[5] = 0x80u;
+
+    DaliDiscoveryTransport t = quiescing_transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    TEST_ASSERT_EQUAL_UINT8(1u, found);
+    TEST_ASSERT_EQUAL_UINT32(0u, s_q.start_count);
+    TEST_ASSERT_EQUAL_UINT32(0u, s_q.stop_count);
+    TEST_ASSERT_EQUAL_UINT32(0u, s_q.delay_count);
+}
+
+void test_scan_quiescence_brackets_the_walk(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+
+    s_bus.present[5] = true;
+    s_bus.status[5] = 0x80u;
+
+    DaliDiscoveryTransport t = quiescing_transport();
+    DaliDiscoveryScanOptions options = quiescing_options();
+    DaliDiscoveryScanResult result;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan_ex(&inventory, &t, NULL, NULL, &found,
+                                             &options, &result));
+
+    TEST_ASSERT_EQUAL_UINT32(1u, s_q.start_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, s_q.stop_count);
+    /* START before the walk transmits anything, STOP after all of it. */
+    TEST_ASSERT_EQUAL_UINT32(0u, s_q.tx_at_start);
+    TEST_ASSERT_GREATER_THAN_UINT32(0u, s_q.tx_at_stop);
+    /* The settle is what makes the START worth sending. */
+    TEST_ASSERT_EQUAL_UINT32(1u, s_q.delay_count);
+    TEST_ASSERT_EQUAL_UINT32(DALI_DISCOVERY_QUIESCENT_SETTLE_MS,
+                             s_q.last_delay_ms);
+
+    TEST_ASSERT_TRUE(result.quiescence_requested);
+    TEST_ASSERT_TRUE(result.quiescence_started);
+    TEST_ASSERT_TRUE(result.quiescence_release_attempted);
+    TEST_ASSERT_FALSE(result.quiescent_state_unknown);
+    TEST_ASSERT_EQUAL(DALI_OK, result.quiescence_error);
+    TEST_ASSERT_EQUAL_UINT8(1u, found);
+}
+
+/*
+ * The constraint the whole bracket turns on: a walk that fails partway must
+ * still release, or the installation is left deaf to its own sensors by a scan
+ * that already went wrong.
+ */
+void test_scan_quiescence_releases_after_a_failed_walk(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+
+    s_bus.bus_error_addr = 3;
+    s_bus.bus_error = DALI_ERR_BUS_STUCK;
+
+    DaliDiscoveryTransport t = quiescing_transport();
+    DaliDiscoveryScanOptions options = quiescing_options();
+    DaliDiscoveryScanResult result;
+
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK,
+                      dali_discovery_scan_ex(&inventory, &t, NULL, NULL, &found,
+                                             &options, &result));
+
+    TEST_ASSERT_EQUAL_UINT32(1u, s_q.start_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, s_q.stop_count);
+    TEST_ASSERT_TRUE(result.quiescence_release_attempted);
+    TEST_ASSERT_FALSE(result.quiescent_state_unknown);
+}
+
+/*
+ * No delay means no settle, and quiescence without its settle is hardening that
+ * is not there. Refused outright rather than half-applied — and this fixture is
+ * the integration's scan transport, so this is also the vector that keeps the
+ * unattended walk out of the bracket.
+ */
+void test_scan_quiescence_is_refused_without_a_delay(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+
+    s_bus.present[5] = true;
+    s_bus.status[5] = 0x80u;
+
+    DaliDiscoveryTransport t = transport();
+    DaliDiscoveryScanOptions options = quiescing_options();
+    DaliDiscoveryScanResult result;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan_ex(&inventory, &t, NULL, NULL, &found,
+                                             &options, &result));
+
+    TEST_ASSERT_TRUE(result.quiescence_requested);
+    TEST_ASSERT_FALSE(result.quiescence_started);
+    TEST_ASSERT_FALSE(result.quiescence_release_attempted);
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID, result.quiescence_error);
+    TEST_ASSERT_EQUAL_UINT32(0u, s_q.start_count);
+    TEST_ASSERT_EQUAL_UINT32(0u, s_q.stop_count);
+    /* The walk itself is unaffected. */
+    TEST_ASSERT_EQUAL_UINT8(1u, found);
+}
+
+/*
+ * Hardening, not a precondition. A START that never transmits does not stop the
+ * operator commissioning a bus, and the STOP is still attempted because a frame
+ * that reached the wire before failing is exactly the case that leaves devices
+ * quiet.
+ */
+void test_scan_runs_and_still_releases_when_the_start_fails(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+
+    s_bus.present[5] = true;
+    s_bus.status[5] = 0x80u;
+    s_q.start_result = DALI_ERR_BUS_STUCK;
+
+    DaliDiscoveryTransport t = quiescing_transport();
+    DaliDiscoveryScanOptions options = quiescing_options();
+    DaliDiscoveryScanResult result;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan_ex(&inventory, &t, NULL, NULL, &found,
+                                             &options, &result));
+
+    TEST_ASSERT_EQUAL_UINT8(1u, found);
+    TEST_ASSERT_FALSE(result.quiescence_started);
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK, result.quiescence_error);
+    TEST_ASSERT_EQUAL_UINT32(1u, s_q.stop_count);
+    /* Nothing was ever silenced, so nothing is left in an unknown state. */
+    TEST_ASSERT_FALSE(result.quiescent_state_unknown);
+}
+
+/*
+ * The one an operator has to act on: the devices were silenced and the release
+ * did not land, so something has to say 'quiescent off all'.
+ */
+void test_scan_quiescence_reports_a_failed_release(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+
+    s_bus.present[5] = true;
+    s_bus.status[5] = 0x80u;
+    s_q.stop_result = DALI_ERR_TIMEOUT;
+
+    DaliDiscoveryTransport t = quiescing_transport();
+    DaliDiscoveryScanOptions options = quiescing_options();
+    DaliDiscoveryScanResult result;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan_ex(&inventory, &t, NULL, NULL, &found,
+                                             &options, &result));
+
+    TEST_ASSERT_TRUE(result.quiescence_started);
+    TEST_ASSERT_TRUE(result.quiescence_release_attempted);
+    TEST_ASSERT_TRUE(result.quiescent_state_unknown);
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT, result.quiescence_error);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_scan_without_options_sends_no_quiescence);
+    RUN_TEST(test_scan_quiescence_brackets_the_walk);
+    RUN_TEST(test_scan_quiescence_releases_after_a_failed_walk);
+    RUN_TEST(test_scan_quiescence_is_refused_without_a_delay);
+    RUN_TEST(test_scan_runs_and_still_releases_when_the_start_fails);
+    RUN_TEST(test_scan_quiescence_reports_a_failed_release);
     RUN_TEST(test_scan_records_responders_and_callback);
     RUN_TEST(test_scan_ignores_timeouts_and_malformed_slots);
     RUN_TEST(test_scan_aborts_on_bus_error);

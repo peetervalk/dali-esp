@@ -1226,6 +1226,11 @@ Two fixes, both worth taking:
   implementation: the release must cover every exit path including the cancelled
   and errored scans, or the bus is left deaf to events; and `find switches` must
   never do it, since listening for events is that verb's entire purpose.
+  **Done 2026-09-03**, both constraints kept and both covered by vectors; see
+  the unreleased-changes entry below. Note the order this leaves behind: the
+  bracket removes exactly the traffic the split counters were built to measure,
+  so `b64f81f` — split counters, no bracket — is the only build that can still
+  observe the "before" arm on the 2k bus.
 
 ## `restore` cannot stage a unit the backup has never seen — found 2026-09-03
 
@@ -1635,6 +1640,50 @@ options struct carries `terminate_control_gear` as the mirror of
 
 Raw material for the next release notes. Everything below is unreleased as of
 `dev` `a8c9372`; `v1.3.0` (`ce0a72c`) predates all of it.
+
+## Scans silence control devices for the duration of the walk
+
+**Behaviour change to every operator-driven scan, 2026-09-03.** A 64-address
+walk is minutes of back-to-back TX, and a control-device event arriving inside
+it is dropped for the state it arrived in — on the 2k bus, with a Steinel
+emitting on four instances, that was most of them. The walk now brackets itself
+with broadcast `START`/`STOP QUIESCENT MODE`, the same bracket the commissioning
+run has taken since 2026-08-26, so the traffic is removed rather than counted.
+
+Which walks: `scan`/`discover`, both commissioning pre-scans, the commissioning
+post-scan, `backup save`, and the scan behind `restore plan`/`apply`. Every
+operator-driven walk in the shell takes it, and they all take the same one — a
+rule kept deliberately simple, because the alternative is a reader working out
+which walks quiesce and which do not.
+
+Which do not, and why:
+
+- **`find switches`** does not scan at all. Listening for events is that verb's
+  entire purpose, and silencing devices would make it useless.
+- **The integration's own periodic scan** (`dali_scan.cpp`) passes no options.
+  An unattended walk that silences occupancy for minutes is a trade nobody is
+  present to accept: the operator-driven case has somebody standing there, the
+  automatic one does not. Its transport also supplies no `delay_ms`, so the
+  bracket would refuse anyway — see below.
+- **A transport that cannot delay** gets the bracket refused rather than
+  applied. Quiescence whose settle never ran is hardening that is not there,
+  and it would be reported as if it were.
+
+The release is attempted on every exit path, including the cancelled and errored
+walks — that is the constraint the whole thing turns on, since the failure mode
+is an installation left deaf to its own sensors by a scan that already went
+wrong. A release that fails prints the same line the commissioning walk prints,
+naming `quiescent off all` as the fix.
+
+API: `dali_discovery_scan_ex()` takes `DaliDiscoveryScanOptions` and fills a
+`DaliDiscoveryScanResult`; `dali_discovery_scan()` is unchanged and now calls it
+with no options, so all forty-odd existing call sites and vectors keep their
+behaviour exactly. The bracket itself moved out of `dali_commissioning.c` into
+`dali_discovery.c` as `dali_discovery_quiescence_start()` / `_release()` and the
+commissioning walk now calls the shared pair, so the two cannot drift.
+`DALI_COMMISSIONING_QUIESCENT_SETTLE_MS` is kept as an alias of the discovery
+constant. Six new vectors in `test_discovery.c`, mutation-checked against a
+release that only covered the clean exit.
 
 ## Ignored-RX counters split seven ways, and a scan note that stops crying wolf
 

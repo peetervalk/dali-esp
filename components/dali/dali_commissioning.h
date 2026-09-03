@@ -60,7 +60,7 @@
  * be too short — but it is bounded below by the frame-duration argument, which
  * is checkable without the standard.
  */
-#define DALI_COMMISSIONING_QUIESCENT_SETTLE_MS     ((2u * DALI_EXTENDED_FRAME_BITS * DALI_BIT_US) / 1000u)
+#define DALI_COMMISSIONING_QUIESCENT_SETTLE_MS     DALI_DISCOVERY_QUIESCENT_SETTLE_MS
 
 /*
  * The three things a VERIFY SHORT ADDRESS reply window can mean.
