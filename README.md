@@ -194,6 +194,7 @@ text:
 - [dali_protocol.md](dali_protocol.md) — frame layouts, opcode tables by IEC part, event decoding
 - [dali_capability_matrix.md](dali_capability_matrix.md) — per-capability status: shared API, native CLI verb, host vector, real-bus result, ESPHome surface
 - [current_status.md](current_status.md) — project state, known limitations, roadmap
+- [project_log.md](project_log.md) — verification history, investigations, and the unreleased-change list behind those claims
 - [steinel_bank2_reference.md](steinel_bank2_reference.md) — Steinel HF 360 II memory bank tuning
 
 ## Scope and limitations

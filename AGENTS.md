@@ -1,8 +1,13 @@
 # DALI-ESP Agent Guide
 
-Read `current_status.md` first. It is the source of truth for active project
-state, verified hardware status, and remaining work. Use `dali_commands.md` for
-verb and argument details, and `dali_protocol.md` for frames and opcodes.
+Read the *Prioritized Work* and *Current Software State* sections in
+`current_status.md` first, consult others as needed. It is the source of truth
+for active project state, verified hardware status, and remaining work — and it
+is deliberately short. The dated evidence behind its claims, past
+investigations, and the accumulated unreleased-change list are in
+`project_log.md`; read that only when you need the history, not to orient.
+Use `dali_commands.md` for verb and argument details, and `dali_protocol.md`
+for frames and opcodes.
 
 ## Project Aim
 
@@ -54,7 +59,7 @@ the control/protocol APIs.
 | Protocol, PHY, scheduler, discovery, memory, DT6, DT8, input config | `components/dali` | Reusable, no app dependencies |
 | `dali_mapping` | `components/dali` | Generic enough to stay; move to `main/` if the component is published separately |
 | `dali_dispatch` | `components/dali` | Headless dispatch engine; pure C, no ESPHome dependency |
-| `dali_headless` | `esphome/components/dali` | Installation-specific dispatch table; edit per site; active only with `headless_dispatch: true` |
+| `headless_dispatch` rules | YAML, per site | Installation-specific dispatch table; no source file. Schema and codegen in `esphome/components/dali/__init__.py`, loaded through `DaliComponent::add_dispatch_entry()`; active when the list is non-empty |
 | `dali_shell` | `components/dali` | Every CLI verb, the blocking transport, and session caches; one implementation both front ends run |
 | `dali_diag` | `main/` | UART0 binding for the shell; moves bytes only |
 | `dali_shell_tcp` | `esphome/components/dali` | TCP binding for the shell; one session, idle timeout, policy from YAML |

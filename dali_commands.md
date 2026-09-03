@@ -759,7 +759,7 @@ cases during `COMPARE`:
   `COMPARE` alone treats as YES;
 - ambiguous malformed activity or RX overflow is an error and aborts the run.
 
-This fixes the software-side collision inversion recorded in `current_status.md`,
+This fixes the software-side collision inversion recorded in `project_log.md`,
 but overlapping replies and the activity qualifier have host coverage only; they
 have not been validated as physical-bus collision detection. Do not rely on
 multi-device commissioning until that hardware validation is complete. A run now brackets itself with broadcast
