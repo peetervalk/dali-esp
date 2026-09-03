@@ -18,6 +18,11 @@
  * sent — and a cycle (a5 wants a8, a8 wants a5) is broken by staging one member
  * through a free address, exactly as swapping two variables needs a third.
  *
+ * Group membership is planned separately, by dali_restore_plan_groups() at the
+ * bottom of this file. It is a different repair for a different accident, and
+ * folding it into the move list would make the ordinary address restore write
+ * to gear it has no reason to touch.
+ *
  * This module performs no bus traffic and has no ESP-IDF, ESPHome, FreeRTOS or
  * task dependency. It decides; the front end executes.
  */
@@ -60,6 +65,15 @@ typedef enum {
     DALI_RESTORE_CONFLICT_TARGET_OCCUPIED,
     /* A cycle needs a free address to stage through and the space has none. */
     DALI_RESTORE_CONFLICT_NO_STAGING_ADDRESS,
+    /* Group planning only: the gear is matched, but the backup recorded no
+     * group data for it. Restoring it as "no groups" would wipe membership on
+     * the strength of a reading that never happened, so it is left alone. */
+    DALI_RESTORE_CONFLICT_NO_RECORDED_GROUPS,
+    /* Group planning only: the gear is matched and the backup has its groups,
+     * but the current membership could not be read, so there is nothing to
+     * diff against. Writing the recorded mask blind would add the groups it
+     * should be in without removing the ones it should not. */
+    DALI_RESTORE_CONFLICT_GROUPS_UNREADABLE,
 } DaliRestoreConflictKind;
 
 typedef struct {
@@ -127,3 +141,81 @@ bool dali_restore_plan_is_clean(const DaliRestorePlan *plan);
 
 const char *dali_restore_conflict_name(DaliRestoreConflictKind kind);
 const char *dali_restore_space_name(DaliSnapshotSpace space);
+
+/* ---------------------------------------------------------------------------
+ * Group membership
+ *
+ * Group membership lives in each gear's own non-volatile memory, keyed to the
+ * gear and not to the address it answers on. A commissioning walk changes short
+ * addresses and nothing else, so after a re-address the groups are already
+ * right and restoring them is a no-op. This exists for the case where the
+ * membership itself was destroyed: a RESET, a driver that lost its memory, or a
+ * group-addressed edit that emptied more than it was meant to.
+ *
+ * Two consequences follow, and both are the reason this is not part of
+ * dali_restore_plan():
+ *
+ *   - It does not depend on the address restore having run, or on ever running.
+ *     A gear is matched by identification number and the edits are addressed to
+ *     wherever it answers *now*, so it is correct on a scrambled bus and on a
+ *     restored one alike.
+ *
+ *   - It is destructive in a way the address restore is not. An address move is
+ *     reverted by moving it back; a removed group membership is only recovered
+ *     from a record of what it was. A backup taken before a deliberate
+ *     regrouping will undo that regrouping, which is why the plan reports the
+ *     mask on both sides per fixture rather than a count of edits.
+ *
+ * Control gear only. Control devices have their own group scheme in IEC
+ * 62386-103 which the discovery scan does not read, so device entries carry no
+ * group data and no device is ever considered here.
+ * --------------------------------------------------------------------------*/
+
+/* One entry per control gear, so a full bus needs no more than this. */
+#define DALI_RESTORE_MAX_GROUP_CHANGES DALI_SHORT_ADDRESS_COUNT
+
+typedef struct {
+    /* Where the gear answers now, and therefore where the edits are sent. Not
+     * the address the backup recorded: the two differ whenever the group
+     * restore runs before the address restore, or instead of it. */
+    uint8_t  address;
+    uint8_t  recorded_address;
+
+    uint16_t current;      /* membership read from the bus  */
+    uint16_t recorded;     /* membership from the backup    */
+
+    /* current and recorded differ in these bits. Both are zero only for a gear
+     * already correct, which is not stored as a change. */
+    uint16_t add_mask;     /* recorded & ~current: groups to join  */
+    uint16_t remove_mask;  /* current & ~recorded: groups to leave */
+} DaliRestoreGroupChange;
+
+typedef struct {
+    DaliRestoreGroupChange changes[DALI_RESTORE_MAX_GROUP_CHANGES];
+    uint8_t                change_count;
+
+    DaliRestoreConflict    conflicts[DALI_RESTORE_MAX_CONFLICTS];
+    uint8_t                conflict_count;   /* how many are stored */
+    uint16_t               conflict_total;   /* how many were found */
+
+    /* Gear matched to a backup entry, and how many of those already hold the
+     * recorded membership. */
+    uint8_t                matched_count;
+    uint8_t                already_correct_count;
+} DaliRestoreGroupPlan;
+
+/*
+ * Compute the group plan. Control gear only; the device space is not read.
+ *
+ * Returns DALI_ERR_INVALID on a bad argument or an inventory that is not valid.
+ * As with dali_restore_plan(), conflicts are reported through the plan rather
+ * than the return code: gear that cannot be matched, or whose membership is
+ * unknown on either side, is reported and left untouched while the rest is
+ * still planned.
+ */
+DaliError dali_restore_plan_groups(DaliRestoreGroupPlan         *out,
+                                   const DaliSnapshot           *snapshot,
+                                   const DaliDiscoveryInventory *inventory);
+
+/* True when there is nothing to do and nothing wrong: no changes, no conflicts. */
+bool dali_restore_group_plan_is_clean(const DaliRestoreGroupPlan *plan);

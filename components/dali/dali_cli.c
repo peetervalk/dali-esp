@@ -217,10 +217,10 @@ static const DaliCliCommandSpec s_commands[] = {
     { DALI_CLI_CMD_IDENTIFY, "identify", "<addr>", "blink one short-addressed lamp", 1u, 1u, NULL },
     { DALI_CLI_CMD_QUIESCENT, "quiescent", "on|off <addr|all>", "Part 103 quiescent mode: silence control-device events", 2u, 2u,
       "on off" },
-    { DALI_CLI_CMD_BACKUP, "backup", "save|export|status", "record which physical unit holds which short address", 1u, 1u,
-      "save export status" },
-    { DALI_CLI_CMD_RESTORE, "restore", "plan|apply", "put short addresses back the way the backup recorded them", 1u, 1u,
-      "plan apply" },
+    { DALI_CLI_CMD_BACKUP, "backup", "save|status|export|import <begin|HEX|end|abort>", "record which physical unit holds which short address", 1u, 3u,
+      "save export status import" },
+    { DALI_CLI_CMD_RESTORE, "restore", "plan|apply|groups [apply]", "put short addresses, or group membership, back the way the backup recorded them", 1u, 2u,
+      "plan apply groups" },
 };
 
 #define CLI_COMMAND_COUNT ((uint8_t)(sizeof(s_commands) / sizeof(s_commands[0])))
@@ -460,6 +460,47 @@ bool dali_cli_parse_u8(const char *text, unsigned max, uint8_t *out)
         return false;
     }
     *out = (uint8_t)value;
+    return true;
+}
+
+bool dali_cli_parse_hex_bytes(const char *text,
+                              uint8_t    *out,
+                              uint32_t    capacity,
+                              uint32_t   *len)
+{
+    if (text == NULL || out == NULL || len == NULL || *len > capacity) {
+        return false;
+    }
+
+    size_t chars = 0u;
+    while (text[chars] != '\0') {
+        chars++;
+    }
+    if (chars == 0u || (chars % 2u) != 0u) {
+        return false;
+    }
+    if ((chars / 2u) > (size_t)(capacity - *len)) {
+        return false;
+    }
+
+    /* Validate the whole token before storing any of it, so a bad character
+     * half way along does not leave the first half appended. */
+    for (size_t i = 0u; i < chars; i++) {
+        unsigned nibble;
+        if (!cli_digit_value(text[i], 16u, &nibble)) {
+            return false;
+        }
+    }
+
+    uint32_t pos = *len;
+    for (size_t i = 0u; i < chars; i += 2u) {
+        unsigned hi;
+        unsigned lo;
+        (void)cli_digit_value(text[i], 16u, &hi);
+        (void)cli_digit_value(text[i + 1u], 16u, &lo);
+        out[pos++] = (uint8_t)((hi << 4) | lo);
+    }
+    *len = pos;
     return true;
 }
 

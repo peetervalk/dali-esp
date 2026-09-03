@@ -277,6 +277,22 @@ void dali_cli_report_resolve(const DaliCliOut          *out,
 bool dali_cli_parse_u32(const char *text, uint32_t max, uint32_t *out);
 bool dali_cli_parse_u8(const char *text, unsigned max, uint8_t *out);
 bool dali_cli_parse_target(const char *text, DaliTarget *out);
+
+/*
+ * Append the bytes of a bare hex token to a buffer, growing *len.
+ *
+ * Bare means no 0x prefix and no separators: two characters per byte, and an
+ * odd length is an error rather than a nibble silently dropped. It exists so a
+ * blob larger than one command line can be carried across several of them --
+ * `backup import` is the caller -- which is also why the length is in/out and
+ * a partial token never advances it: a rejected chunk leaves the accumulated
+ * bytes exactly as they were, so the failure is the operator's line rather
+ * than a buffer holding half of it.
+ */
+bool dali_cli_parse_hex_bytes(const char *text,
+                              uint8_t    *out,
+                              uint32_t    capacity,
+                              uint32_t   *len);
 bool dali_cli_parse_short_addr(const char *text, uint8_t *out);
 bool dali_cli_parse_instance(const char *text, uint8_t *out);
 

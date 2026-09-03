@@ -426,6 +426,44 @@ void test_decode_rejects_a_corrupt_space_or_address(void)
                           dali_snapshot_decode(&s_decoded, s_buf, written));
 }
 
+/*
+ * A rejected blob must cost the caller nothing.
+ *
+ * `backup import` decodes a pasted blob straight over the backup an operator
+ * took before a commissioning run, because there is no spare 3.6 kB to stage a
+ * second snapshot in. That is only safe while a decode that fails leaves the
+ * destination untouched -- and the failure that reaches furthest into the blob,
+ * a corrupt entry, is the one that used to land after the reset.
+ */
+void test_a_rejected_blob_leaves_the_destination_snapshot_intact(void)
+{
+    DaliSnapshotEntry good = make_entry(DALI_SNAPSHOT_SPACE_GEAR, 1u, 0xA0u);
+    TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_add(&s_snapshot, &good));
+    DaliSnapshotEntry second = make_entry(DALI_SNAPSHOT_SPACE_DEVICE, 2u, 0xB0u);
+    TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_add(&s_snapshot, &second));
+
+    uint32_t written = 0u;
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_snapshot_encode(&s_snapshot, s_buf, sizeof(s_buf), &written));
+
+    /* Decode it once so the destination holds something worth losing. */
+    TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_decode(&s_decoded, s_buf, written));
+    TEST_ASSERT_EQUAL_UINT8(2u, s_decoded.entry_count);
+
+    /* Corrupt the *second* record, so a decoder that wrote as it went would
+     * already have reset the destination and stored the first. */
+    const uint32_t rec2 = DALI_SNAPSHOT_HEADER_SIZE + DALI_SNAPSHOT_ENTRY_WIRE_SIZE;
+    s_buf[rec2 + 2u] = DALI_SHORT_ADDRESS_COUNT;
+
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,
+                          dali_snapshot_decode(&s_decoded, s_buf, written));
+
+    TEST_ASSERT_EQUAL_UINT8(2u, s_decoded.entry_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_decoded.entries[0].short_address);
+    TEST_ASSERT_EQUAL_INT(DALI_SNAPSHOT_SPACE_DEVICE, s_decoded.entries[1].space);
+    TEST_ASSERT_EQUAL_UINT8(2u, s_decoded.entries[1].short_address);
+}
+
 void test_invalid_arguments_are_rejected(void)
 {
     uint32_t written = 0u;
@@ -472,6 +510,7 @@ int main(void)
     RUN_TEST(test_decode_rejects_a_length_that_disagrees_with_the_entry_count);
     RUN_TEST(test_decode_rejects_an_entry_count_over_capacity);
     RUN_TEST(test_decode_rejects_a_corrupt_space_or_address);
+    RUN_TEST(test_a_rejected_blob_leaves_the_destination_snapshot_intact);
     RUN_TEST(test_invalid_arguments_are_rejected);
     return UNITY_END();
 }

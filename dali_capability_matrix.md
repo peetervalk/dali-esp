@@ -84,6 +84,12 @@ cached level profile and triggers a refresh.
 | Commission unaddressed | `dali_commissioning_commission_unaddressed` | `commission unaddressed` | yes | partial | shell, opt-in |
 | Commission control devices | `dali_device_commissioning_commission_unaddressed` | `commission devices` | yes | no | shell, opt-in |
 | Post-scan verification | `dali_commissioning_audit` | automatic in both `commission` walks | yes | no | shell |
+| Address backup | `dali_snapshot_from_inventory` | `backup save`, `backup status` | yes | no | shell; persisted to flash |
+| Backup blob round trip | `dali_snapshot_encode` / `_decode` | `backup export`, `backup import` | yes | n/a — no bus traffic | shell |
+| Restore planning | `dali_restore_plan` | `restore plan` | yes | no | shell |
+| Restore execution | n/a — `SET SHORT ADDRESS DTR0` per move | `restore apply` | no | no | shell, opt-in |
+| Group restore planning | `dali_restore_plan_groups` | `restore groups` | yes | no | shell; control gear only |
+| Group restore execution | n/a — `ADD TO GROUP` / `REMOVE FROM GROUP` per bit | `restore groups apply` | no | no | shell, opt-in; read back per gear |
 | Identify blink | n/a | `identify` | no | yes | yes (button, shell) |
 | Smoke check | n/a | `smoke` | no | yes | shell |
 

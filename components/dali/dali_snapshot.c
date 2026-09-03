@@ -295,9 +295,31 @@ DaliError dali_snapshot_decode(DaliSnapshot  *out,
         return DALI_ERR_INVALID;
     }
 
+    /*
+     * Validate every entry before touching `out`.
+     *
+     * The alternative -- reset, then fail part way through the loop -- leaves
+     * the caller holding a truncated snapshot in place of the one it had, which
+     * matters because the caller with the most to lose is `backup import`:
+     * decoding a pasted blob over the top of the backup an operator took before
+     * a commissioning run. A blob this decoder rejects must cost them nothing.
+     */
+    uint32_t offset = DALI_SNAPSHOT_HEADER_SIZE;
+    for (uint8_t i = 0u; i < entry_count; i++) {
+        const uint8_t *rec = &buf[offset];
+        if (rec[1] != (uint8_t)DALI_SNAPSHOT_SPACE_GEAR &&
+            rec[1] != (uint8_t)DALI_SNAPSHOT_SPACE_DEVICE) {
+            return DALI_ERR_INVALID;
+        }
+        if (rec[2] >= DALI_SHORT_ADDRESS_COUNT) {
+            return DALI_ERR_INVALID;
+        }
+        offset += DALI_SNAPSHOT_ENTRY_WIRE_SIZE;
+    }
+
     dali_snapshot_reset(out);
 
-    uint32_t offset = DALI_SNAPSHOT_HEADER_SIZE;
+    offset = DALI_SNAPSHOT_HEADER_SIZE;
     for (uint8_t i = 0u; i < entry_count; i++) {
         const uint8_t *rec = &buf[offset];
         DaliSnapshotEntry entry;
@@ -305,13 +327,6 @@ DaliError dali_snapshot_decode(DaliSnapshot  *out,
 
         const uint8_t flags = rec[0];
         const uint8_t space = rec[1];
-        if (space != (uint8_t)DALI_SNAPSHOT_SPACE_GEAR &&
-            space != (uint8_t)DALI_SNAPSHOT_SPACE_DEVICE) {
-            return DALI_ERR_INVALID;
-        }
-        if (rec[2] >= DALI_SHORT_ADDRESS_COUNT) {
-            return DALI_ERR_INVALID;
-        }
 
         entry.space              = (DaliSnapshotSpace)space;
         entry.short_address      = rec[2];

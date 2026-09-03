@@ -409,6 +409,89 @@ static void test_parse_u8_bounds(void)
     TEST_ASSERT_EQUAL_UINT8(255u, v);
 }
 
+static void test_parse_hex_bytes_appends_across_calls(void)
+{
+    uint8_t  buf[8] = {0};
+    uint32_t len    = 0u;
+
+    TEST_ASSERT_TRUE(dali_cli_parse_hex_bytes("DA11", buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL_UINT32(2u, len);
+    TEST_ASSERT_TRUE(dali_cli_parse_hex_bytes("0002", buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL_UINT32(4u, len);
+
+    const uint8_t expect[4] = { 0xDAu, 0x11u, 0x00u, 0x02u };
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expect, buf, 4);
+}
+
+static void test_parse_hex_bytes_accepts_either_case(void)
+{
+    uint8_t  buf[4] = {0};
+    uint32_t len    = 0u;
+
+    TEST_ASSERT_TRUE(dali_cli_parse_hex_bytes("aBcDeF01", buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL_UINT32(4u, len);
+
+    const uint8_t expect[4] = { 0xABu, 0xCDu, 0xEFu, 0x01u };
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expect, buf, 4);
+}
+
+static void test_parse_hex_bytes_rejects_an_odd_length(void)
+{
+    uint8_t  buf[8] = {0};
+    uint32_t len    = 0u;
+
+    /* Not "drop the last nibble": half a byte means the line lost a character,
+     * and every byte after it in the blob would be shifted. */
+    TEST_ASSERT_FALSE(dali_cli_parse_hex_bytes("ABC", buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL_UINT32(0u, len);
+}
+
+static void test_parse_hex_bytes_rejects_junk_without_appending(void)
+{
+    uint8_t  buf[8] = {0};
+    uint32_t len    = 0u;
+
+    TEST_ASSERT_TRUE(dali_cli_parse_hex_bytes("1122", buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL_UINT32(2u, len);
+
+    /* The bad character is in the third byte. The first two must not land:
+     * a partially applied chunk is a silently corrupted blob. */
+    TEST_ASSERT_FALSE(dali_cli_parse_hex_bytes("3344ZZ", buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL_UINT32(2u, len);
+    TEST_ASSERT_EQUAL_UINT8(0x00u, buf[2]);
+    TEST_ASSERT_EQUAL_UINT8(0x00u, buf[3]);
+
+    /* An 0x prefix is junk here too: this is a bare-hex format. */
+    TEST_ASSERT_FALSE(dali_cli_parse_hex_bytes("0x11", buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL_UINT32(2u, len);
+}
+
+static void test_parse_hex_bytes_stops_at_capacity(void)
+{
+    uint8_t  buf[4] = {0};
+    uint32_t len    = 0u;
+
+    TEST_ASSERT_TRUE(dali_cli_parse_hex_bytes("11223344", buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL_UINT32(4u, len);
+    TEST_ASSERT_FALSE(dali_cli_parse_hex_bytes("55", buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL_UINT32(4u, len);
+}
+
+static void test_parse_hex_bytes_rejects_bad_arguments(void)
+{
+    uint8_t  buf[4] = {0};
+    uint32_t len    = 0u;
+
+    TEST_ASSERT_FALSE(dali_cli_parse_hex_bytes(NULL, buf, sizeof(buf), &len));
+    TEST_ASSERT_FALSE(dali_cli_parse_hex_bytes("11", NULL, sizeof(buf), &len));
+    TEST_ASSERT_FALSE(dali_cli_parse_hex_bytes("11", buf, sizeof(buf), NULL));
+    TEST_ASSERT_FALSE(dali_cli_parse_hex_bytes("", buf, sizeof(buf), &len));
+
+    /* A length already past capacity is a caller bug, not a full buffer. */
+    len = sizeof(buf) + 1u;
+    TEST_ASSERT_FALSE(dali_cli_parse_hex_bytes("11", buf, sizeof(buf), &len));
+}
+
 static void test_parse_target_forms(void)
 {
     DaliTarget target;
@@ -1314,6 +1397,12 @@ int main(void)
     RUN_TEST(test_parse_u32_leading_zero_is_decimal);
     RUN_TEST(test_parse_u32_rejects_junk_and_overflow);
     RUN_TEST(test_parse_u8_bounds);
+    RUN_TEST(test_parse_hex_bytes_appends_across_calls);
+    RUN_TEST(test_parse_hex_bytes_accepts_either_case);
+    RUN_TEST(test_parse_hex_bytes_rejects_an_odd_length);
+    RUN_TEST(test_parse_hex_bytes_rejects_junk_without_appending);
+    RUN_TEST(test_parse_hex_bytes_stops_at_capacity);
+    RUN_TEST(test_parse_hex_bytes_rejects_bad_arguments);
     RUN_TEST(test_parse_target_forms);
     RUN_TEST(test_parse_target_rejects_out_of_range);
     RUN_TEST(test_parse_short_addr_and_instance);

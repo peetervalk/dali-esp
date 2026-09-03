@@ -73,8 +73,9 @@ typedef struct {
     bool              has_gtin;
     uint8_t           gtin[DALI_MEMORY_BANK0_GTIN_LEN];
 
-    /* Gear only; group membership survives re-addressing and is restored only
-     * on request, for the case where a RESET wiped it. */
+    /* Gear only. Group membership survives re-addressing, so it is put back
+     * only on request -- dali_restore_plan_groups(), for the case where a RESET
+     * wiped it -- and never by the address restore. */
     bool              has_groups;
     uint16_t          groups;          /* bit N set => member of group N */
 } DaliSnapshotEntry;
@@ -163,8 +164,14 @@ DaliError dali_snapshot_encode(const DaliSnapshot *snapshot,
 
 /*
  * Decode from buf. Returns DALI_ERR_INVALID on a bad argument, a wrong magic, an
- * unsupported version, an entry count over capacity, or a length that does not
- * match the declared entry count.
+ * unsupported version, an entry count over capacity, a length that does not
+ * match the declared entry count, or an entry naming an unknown address space
+ * or an out-of-range short address.
+ *
+ * On any of those, `out` is left exactly as it was: the blob is validated in
+ * full before the first byte is written. A caller may therefore decode straight
+ * over a snapshot it still needs, which is what lets `backup import` accept a
+ * pasted blob without staging a second copy of one.
  */
 DaliError dali_snapshot_decode(DaliSnapshot  *out,
                                const uint8_t *buf,

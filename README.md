@@ -15,7 +15,7 @@ A reusable C protocol stack (`components/dali`) drives the bus — PHY, schedule
 - Diagnostic shell over TCP (`shell:`): the full native CLI — discover, identify, commissioning, live trace, rolling capture, JSON export — from a terminal, with no serial cable. The same shell, running the same code, as the serial console on a native ESP-IDF build
 - Free-text DALI command console in HA: queries, config, memory bank read/write, raw 16/24-bit frames
 - Protocol core is plain C with no ESPHome dependency; protocol and cross-task
-  helpers are covered by 26 host test suites, and CI additionally builds the
+  helpers are covered by 31 host test suites, and CI additionally builds the
   ESPHome component, the native ESP-IDF firmware, and a release tag as a
   consumer would fetch it
 
@@ -59,6 +59,14 @@ Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The controller has
      Timestamped reply-activity handling and the safety `TERMINATE` cleanup path
      are host-tested, not real-bus proof of multi-device commissioning. Use one
      unaddressed control gear at a time for now.
+
+     `backup save` records which physical unit — by its Bank 0 identification
+     number, which no addressing operation changes — holds which short address,
+     and `restore plan` / `restore apply` put them back afterwards using plain
+     addressed commands and no `INITIALISE` window. Take one before anything
+     that re-addresses in bulk. `backup export` prints it as the `backup import`
+     script that reads it back, which is how a backup is kept off a device with
+     no persistent store. Host-tested; no bus has run a restore.
 
      `export config` answers the other half: it prints the `dali:` block, and
      the `light:` and `sensor:` entries naming it, as YAML you can paste back.

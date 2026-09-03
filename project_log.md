@@ -1402,6 +1402,88 @@ options struct carries `terminate_control_gear` as the mirror of
 Raw material for the next release notes. Everything below is unreleased as of
 `dev` `a8c9372`; `v1.3.0` (`ce0a72c`) predates all of it.
 
+## `restore groups`
+
+**New subcommand, 2026-09-03.** `backup save` has always recorded each gear's
+group mask — the scan reads `QUERY GROUPS 0-7` / `8-15` and the snapshot wire
+format has carried it since version 1 — but nothing could put it back, and the
+documentation said so. `restore groups` and `restore groups apply` close that.
+Existing backups already contain the data, so no format change and no re-export.
+
+It is a separate verb, not part of `restore apply`, for two reasons that are
+worth keeping straight:
+
+- **It repairs a different accident.** Group membership lives in each gear's own
+  memory keyed to the gear, not to its address, so a commissioning walk leaves
+  it alone and after a re-address `restore groups` reports nothing to do. What
+  destroys it is a `RESET`, a driver that lost its memory, or a group-addressed
+  edit that emptied more than intended.
+- **It is destructive in a way an address move is not.** A move is undone by
+  moving back; a group membership only comes back from a record of what it was,
+  so a backup predating a deliberate regrouping will silently undo it. The plan
+  therefore prints the full mask on both sides per fixture rather than a count
+  of edits, and `restore apply` never reaches it.
+
+Because the match is by identification number and the edits are addressed to
+wherever the gear answers now, it is correct on a scrambled bus and a restored
+one alike, and does not require `restore apply` to have run.
+
+Two refusals, both reported and neither written: `no group data in backup` (the
+backup has the gear but never read its membership — treating that silence as "no
+groups" would empty it) and `groups unreadable` (the additions would be right
+but nothing would say which groups to leave). After applying, each gear is read
+back once, because group commands are unacknowledged; a gear whose mask does not
+match is flagged `MISMATCH` and counted apart from a transport error.
+
+Control gear only. Part 103 control devices have their own group scheme the scan
+does not read, and scenes are still not captured at all.
+
+Internally this shares the "which recorded unit is this bus unit" matching with
+the address planner rather than duplicating it (`restore_match_unit` and
+`restore_report_unmatched_entries` in `dali_restore.c`), so a fix to one planner
+cannot miss the other. New host suite `test_restore_groups` (19 vectors).
+
+## `backup import`, and a changed `backup export` output
+
+**New subcommand and a format change, 2026-09-03.** `backup export` existed with
+no inverse: the blob it printed could not be read back by anything, and a
+`/* the form `backup import` parses back */` comment in `dali_shell.c` referred
+to a verb that had never been written. That left the native serial CLI — the
+surface with no persistent store and the one allowed to de-address a bus — able
+to take a backup, print it, and never load it again.
+
+`backup import begin | <hex>... | end | abort` closes it. It is a short mode
+rather than a single line because a full snapshot is `DALI_SNAPSHOT_BLOB_MAX` =
+2440 bytes = 4880 hex characters, against `DALI_SHELL_LINE_MAX` of 80 and a
+31-character token limit: no spelling of a one-line import can carry one.
+
+**`backup export`'s output format changed** and is the operator-visible break.
+It printed one long hex line; it now prints the `backup import` script that
+reproduces the snapshot — `begin`, chunk lines of two 30-character tokens, `end`
+— so an exported file is pasted back rather than re-chunked by hand. Anything
+that captured the old single-line form and parsed it will not match.
+
+Staging reuses `s_backup_blob` rather than adding a second 2440-byte buffer, so
+`backup save|status|export` and both `restore` verbs refuse while an import is
+open. The refusal is the point: a `backup save` typed in the middle of an
+82-line paste would otherwise destroy it silently. A chunk that does not parse
+discards the whole import, because a blob missing a line in the middle can still
+satisfy the length check and decode into a plausible snapshot that moves
+fixtures to the wrong addresses.
+
+**`dali_snapshot_decode()` is now transactional**, which is what lets the import
+decode straight over the held backup with nothing staged. It previously called
+`dali_snapshot_reset(out)` before the entry loop, so a corrupt entry — the one
+failure the header checks cannot catch — replaced a good snapshot with a
+truncated one. Entries are now validated in full before the first byte is
+written. Contract change only; no signature moved.
+
+Additive C API: `dali_cli_parse_hex_bytes()`. Host-tested in `test_cli` (append
+across calls, case, odd length, partial-token rejection, capacity, bad
+arguments) and `test_snapshot` (a rejected blob leaves the destination intact).
+The shell verb itself is not in the host build; it compiles under ESPHome
+2026.8.1 and has **no real-bus result**.
+
 ## `address` — a checked tier over re-addressing and group membership
 
 **New verb, 2026-09-03.** `address <aN> set <aM> | add <gN> | remove <gN>`

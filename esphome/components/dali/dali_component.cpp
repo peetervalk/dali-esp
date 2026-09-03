@@ -1539,6 +1539,11 @@ void DaliComponent::loop()
  *   commission
  *       No guarded workflow exists here; `special` refuses its primitives for
  *       the same reason (see console_special_).
+ *   backup, restore
+ *       Both answer in a block of lines -- an entry list, a move list, a group
+ *       diff, or the import script -- and `backup import` is a mode spanning
+ *       many lines, which is not a shape one text state and one completion can
+ *       carry.
  *   meminfo, instances, sensor poll
  *       Each needs a blocking transport to walk a device before it knows what
  *       to ask next. Everything on this surface is one enqueue and one

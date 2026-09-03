@@ -3,7 +3,7 @@
 Every verb, its arguments, and its named command tables, for both surfaces that
 accept typed commands.
 
-**Last reviewed:** 2026-08-25
+**Last reviewed:** 2026-09-03
 
 Frame layouts and opcodes are in `dali_protocol.md`. Per-capability status —
 shared API, host vector, real-bus result, exposure — is in
@@ -142,6 +142,7 @@ named form.
 | `group forget` | no | yes — the cache it edits is the component's |
 | `scan` `discover` `inventory` `export` `identify` | yes | no — buttons and text sensors instead |
 | `commission` `instances` `sensor poll` `smoke` | yes | no |
+| `backup` `restore` (incl. `restore groups`) | yes | no — all answer in a block of lines |
 | `events` `find switches` | yes | no |
 | `help` `list` `schema` `query-list` `special-list` `config-list` | yes | no |
 | `stats` `bus check` `capture` `trace` `read` `rxdebug` `reset` | yes | no |
@@ -901,6 +902,151 @@ units hold it, and an address reported `occupied, unrecorded` was written to by 
 run that ended before it recorded the assignment — it is commissioned, and the
 run's own list does not say so. See `commissioning_readme.md` for that output and
 for what an equal random address looks like while the run is still going.
+
+## Backup and Restore
+
+Shell and serial CLI only; neither verb is on the **DALI Command** text entity,
+because the answer to both is a block of lines rather than one text state.
+
+```text
+backup save                             # scan the bus and record it
+backup status                           # what is held, entry by entry
+backup export                           # print it as the import script
+backup import begin|<hex>...|end|abort  # read one back in
+restore plan                            # what it would take to match the backup
+restore apply                           # do it
+restore groups                          # the same for gear group membership
+restore groups apply                    # do it
+```
+
+`backup save` scans both address spaces and records, per short address, the
+8-byte **identification number** at Bank 0 offset `0x0B` for the unit holding it
+— plus its GTIN and, for gear, its group mask. That number is the anchor: it is
+the one property of a unit that no addressing operation changes, which is what
+makes a snapshot taken before a commissioning run enough to undo one. It is not
+the 24-bit random address RANDOMISE generates, which is temporary. An address whose
+identity could not be read is still recorded, and `backup save` names it on the
+spot, because a fixture that cannot be put back is something to learn before the
+restore rather than during it.
+
+`restore plan` re-scans, matches each backup entry to the unit now holding its
+identification number, and prints the moves that would put every one back. It is
+read-only and needs no policy. `restore apply` executes them, and is gated
+exactly as `commission` is: a shell session refuses it without
+`allow_commissioning: true`.
+
+A move is a plain addressed `SET SHORT ADDRESS DTR0` — DTR0 and the command in
+one contiguous sequence, in whichever address space the entry came from.
+**`restore` opens no `INITIALISE` window.** Nothing it sends can leave the bus
+in a state that needs terminating, so it is safe to run on a live installation
+and safe to interrupt: `apply` stops at the first failed move, and re-running
+`restore plan` against the bus as it now stands is the recovery. A plan the
+planner marks `incomplete` is refused rather than partially applied.
+
+Cycles are handled. Two units that need to swap addresses cannot both move
+directly, so the plan stages one through a free address and places it on a later
+step; a cycle with no free address to stage through fails closed rather than
+overwriting. Conflicts — a unit absent from the backup, a recorded unit missing
+from the bus, an unreadable identity, two units sharing an identification number
+— are reported and never moved, and blocking cascades to anything queued behind
+the blocked unit.
+
+### `restore groups` — a different repair
+
+Group membership lives in each gear's own non-volatile memory, keyed to the gear
+and not to the address it answers on. A commissioning walk changes short
+addresses and nothing else, **so after a re-address the groups are already
+right** and `restore groups` will report nothing to do. It exists for the case
+where the membership itself was destroyed: a `config <target> reset`, a driver
+that lost its memory, or a group-addressed edit that emptied more than it meant
+to.
+
+Two things follow from that, and both are why it is a separate verb rather than
+part of `restore apply`:
+
+- **It does not depend on the addresses having been restored, or on their ever
+  being restored.** Each gear is matched by identification number and the edits
+  are addressed to wherever it answers *now*. Running it on a freshly scrambled
+  bus is correct; so is running it on a restored one. When the two differ the
+  plan prints both, as `a7 (backup a3)`.
+- **It is destructive in a way an address move is not.** A move is undone by
+  moving back; a removed group membership is only recovered from a record of
+  what it was. A backup taken before a deliberate regrouping will undo that
+  regrouping — which is why the plan prints the full mask on both sides per
+  fixture rather than a count of edits, and why `restore apply` must never reach
+  it.
+
+```text
+restore groups: 4 matched, 2 already correct, 2 change(s)
+  1. a5 now none -> g1 g3
+  2. a9 (backup a2) now g0 g1 -> g1 g4
+restore groups: run 'restore groups apply' to execute
+```
+
+`apply` sends plain addressed `ADD TO GROUP` / `REMOVE FROM GROUP` for the bits
+that differ, additions first so a fixture is never momentarily in no group at
+all, then reads `QUERY GROUPS 0-7` / `8-15` back once per gear. The read-back is
+not optional: group commands are unacknowledged, so a driver that took the edits
+and one that ignored them are indistinguishable until something asks. A gear
+whose mask does not match afterwards is reported as `MISMATCH` and counted
+separately from a transport error.
+
+It refuses to guess in two cases, both reported and neither written:
+
+| Reported | Meaning |
+|---|---|
+| `no group data in backup` | the backup has the gear but never read its membership. Treating that silence as "no groups" would issue `REMOVE FROM GROUP` for every group it is in now |
+| `groups unreadable` | the gear was identified but its `QUERY GROUPS` did not answer. Writing the recorded mask blind would add the right groups without removing the wrong ones |
+
+The remaining conflict kinds are the address planner's and mean the same things.
+**Control gear only** — IEC 62386-103 control devices have their own group
+scheme, which the scan does not read and this does not touch. Scenes are not
+captured at all.
+
+### Keeping a backup off the device
+
+Where the backup lives depends on the front end. The ESPHome shell persists it
+to flash, so it survives a reboot and `backup status` says whether what is held
+came from storage or from a `backup save` this session. **The native serial CLI
+has no persistent store**: there, a saved backup lives until reboot, and
+`backup export` is the only way to keep one.
+
+`backup export` prints the snapshot as the `backup import` script that
+reproduces it:
+
+```text
+backup: 46 byte(s); the lines below re-import it
+backup import begin
+backup import 44424B31010200000000000000000A 1B2C3D4E5F60718293A4B5C6D7E8F9
+backup import 0A1B2C3D4E5F60718293A4B5C6D7E8 F9
+backup import end
+```
+
+`44424B31` is the format magic, `01` the version and `02` the entry count; the
+rest is entry data, printed 15 bytes to a token and two tokens to a line.
+
+Redirect it to a file, paste the file back. The chunking is not decorative: a
+full snapshot is 4880 hex characters against an 80-character line limit, so the
+blob cannot arrive in one piece however it is spelled, and printing it as one
+long line would leave the operator to re-chunk it by hand.
+
+`import` is a short mode. `begin` opens it, each `backup import <hex> <hex>`
+line appends, `end` decodes and installs, `abort` discards. While it is open,
+`backup save`, `backup status`, `backup export` and both `restore` verbs refuse
+— they share the staging buffer, and a `backup save` typed in the middle of an
+82-line paste would otherwise destroy it silently. A chunk that does not parse
+discards the whole import rather than being skipped, because a blob missing a
+line in the middle can still decode into a plausible-looking snapshot that moves
+fixtures to the wrong addresses.
+
+Nothing an import can contain damages the backup already held: the blob is
+validated in full — magic, version, entry count, exact length, and every entry's
+address space and short address — before the first byte is written.
+
+**No part of this has met a bus.** Both planners, the snapshot format, and the
+blob's rejection paths have host vectors; the moves and the group edits have
+been transmitted nowhere. See `commissioning_readme.md` for the workflow this
+belongs to.
 
 ## Diagnostics
 

@@ -51,14 +51,19 @@ before adding broad new device support.
 
 ## Verification State
 
-**Last full local pass — 2026-09-03, `dev` `a8c9372`, clean tree:**
+**Last full local pass — 2026-09-03, `dev` `a8c9372` plus the `backup import`
+and `restore groups` work, clean tree:**
 
-- 29/29 host suites build and pass (`mingw32-make --directory build test`).
+- 31/31 host suites build and pass (`mingw32-make --directory build test`).
 - `dali_test.yaml` passes `esphome config` on ESPHome 2026.8.1. Because that
   config is `type: local`, this validates the Python schema in
   `esphome/components/dali/__init__.py` against the working tree.
-- Scope, stated precisely: `esphome config` exercises the Python schema only. It
-  does not compile the ESPHome C++ layer or the vendored C stack.
+- `_local/dali-diag-local.yaml` **compiles** on ESPHome 2026.8.1 — the first
+  time the C++ layer and the vendored C stack have been built under the same
+  version that validates the schema. The new shell strings are present in
+  `firmware.elf`, so this was a real rebuild and not a stale incremental.
+- Scope, stated precisely: `esphome config` exercises the Python schema only.
+  The compile above is what covers the C++ layer and the vendored C.
 - **Not a hardware pass.** No COM6, no flash, no bus.
 
 ### Recorded hardware state
@@ -82,10 +87,10 @@ Established on or before the `v1.1.1` flash of 2026-08-14 and not re-tested sinc
 - Gear or control-device commissioning on a real bus, and any physical collision
   capture behind the `RX_ACTIVITY` classification.
 - The backup/restore path against real gear.
-- ESPHome C++ compatibility on 2026.8.1. The schema validates on 2026.8.1 and
-  the C++ layer last compiled under 2026.7.4; no single version has had both,
-  and `manifest.json`'s `>=2026.6.0` floor is tested against nothing but
-  whatever `pip install esphome` last resolved to.
+- `manifest.json`'s `>=2026.6.0` ESPHome floor, which is tested against nothing
+  but whatever `pip install esphome` last resolved to. The 2026.8.1 end is now
+  covered at both stages — schema validation and a full compile of the C++ layer
+  and vendored C — but nothing establishes the floor itself.
 - Independent conformance of every protocol constant, timing boundary, memory
   layout, discovery path, and commissioning collision case.
 
@@ -131,7 +136,21 @@ Dated evidence for each of these is in `project_log.md`.
 - `dali_snapshot` records which *physical* unit (by Bank 0 identification
   number) holds which short address; `dali_restore` turns a snapshot plus a live
   bus into an ordered move list of plain addressed SET SHORT ADDRESS traffic. No
-  INITIALISE window, interruptible at any point, and convergent on re-run.
+  INITIALISE window, interruptible at any point, and convergent on re-run. The
+  blob round-trips both ways as of 2026-09-03: `backup export` prints the
+  `backup import` script that reproduces it, so a backup kept off the device can
+  be loaded back — which is what the native CLI, having no persistent store,
+  needs. `dali_snapshot_decode()` validates a blob in full before writing, so a
+  rejected import costs the held backup nothing.
+- `dali_restore_plan_groups` is the second, separate planner: it diffs each
+  gear's recorded group mask against the one on the bus and emits the ADD/REMOVE
+  bits, matched by identification number and addressed to wherever the gear
+  answers now. It is deliberately not part of `restore apply` — group membership
+  survives a re-address untouched, so this repairs a `RESET` rather than a
+  commissioning walk, and it is the one part of a restore that can destroy
+  something a restore cannot give back. Both "the backup never read this gear's
+  groups" and "this gear's groups will not read back now" are reported and
+  skipped rather than written blind.
 - `dali_device_commissioning` is the Part 103 counterpart of
   `dali_commissioning` — same walk shape over a different command space, sharing
   the reply classification rather than the encodings. Both directions of the
@@ -376,9 +395,10 @@ The typed verb surface is in place; what is missing is evidence. Keep
 - **Write the release notes.** The accumulated API migrations and
   operator-visible breaks — console verb renames with no aliases, the reply
   format change, error names replacing numbers, `special randomize` →
-  `randomise` — are collected in `project_log.md` under *Unreleased API and
-  operator-visible changes*. Anything in Home Assistant that writes command
-  strings to the `text:` entity needs updating.
+  `randomise`, and `backup export`'s single hex line becoming an import script —
+  are collected in `project_log.md` under *Unreleased API and operator-visible
+  changes*. Anything in Home Assistant that writes command strings to the
+  `text:` entity needs updating.
 - Enforce or document the actual ESP-IDF and ESPHome version requirements.
   `idf-build.yml` pins IDF 6.0.1, so the native requirement now fails when it
   stops holding. The ESPHome side is still advisory — CI installs whatever

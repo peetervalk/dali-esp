@@ -19,25 +19,42 @@ typedef struct {
 } RestorePending;
 
 typedef struct {
-    bool    present[DALI_SHORT_ADDRESS_COUNT];
-    bool    has_ident[DALI_SHORT_ADDRESS_COUNT];
-    uint8_t ident[DALI_SHORT_ADDRESS_COUNT][DALI_MEMORY_BANK0_IDENTIFICATION_LEN];
+    bool     present[DALI_SHORT_ADDRESS_COUNT];
+    bool     has_ident[DALI_SHORT_ADDRESS_COUNT];
+    uint8_t  ident[DALI_SHORT_ADDRESS_COUNT][DALI_MEMORY_BANK0_IDENTIFICATION_LEN];
+    /* Gear only, and only where the scan's QUERY GROUPS actually answered. The
+     * address planner ignores both; dali_restore_plan_groups() needs them. */
+    bool     has_groups[DALI_SHORT_ADDRESS_COUNT];
+    uint16_t groups[DALI_SHORT_ADDRESS_COUNT];
 } RestoreBusUnits;
 
-static void restore_add_conflict(DaliRestorePlan        *plan,
-                                 DaliRestoreConflictKind kind,
-                                 DaliSnapshotSpace       space,
-                                 uint8_t                 address,
-                                 uint8_t                 other_address,
-                                 bool                    has_identification,
-                                 const uint8_t          *identification)
+/*
+ * Where conflicts are written. The address plan and the group plan are separate
+ * structures that report the same kinds of trouble in the same way, so the
+ * reporting is written against the list rather than against either plan --
+ * which is what lets the two share the matching below, and stops a fix to one
+ * planner's idea of "which unit is this" from missing the other.
+ */
+typedef struct {
+    DaliRestoreConflict *items;
+    uint8_t             *count;
+    uint16_t            *total;
+} RestoreConflictSink;
+
+static void restore_add_conflict(const RestoreConflictSink *sink,
+                                 DaliRestoreConflictKind    kind,
+                                 DaliSnapshotSpace          space,
+                                 uint8_t                    address,
+                                 uint8_t                    other_address,
+                                 bool                       has_identification,
+                                 const uint8_t             *identification)
 {
-    plan->conflict_total++;
-    if (plan->conflict_count >= DALI_RESTORE_MAX_CONFLICTS) {
+    (*sink->total)++;
+    if (*sink->count >= DALI_RESTORE_MAX_CONFLICTS) {
         return;
     }
 
-    DaliRestoreConflict *conflict = &plan->conflicts[plan->conflict_count];
+    DaliRestoreConflict *conflict = &sink->items[*sink->count];
     memset(conflict, 0, sizeof(*conflict));
     conflict->kind               = kind;
     conflict->space              = space;
@@ -49,7 +66,7 @@ static void restore_add_conflict(DaliRestorePlan        *plan,
                identification,
                DALI_MEMORY_BANK0_IDENTIFICATION_LEN);
     }
-    plan->conflict_count++;
+    (*sink->count)++;
 }
 
 static bool restore_add_move(DaliRestorePlan  *plan,
@@ -107,6 +124,10 @@ static void restore_collect_bus(RestoreBusUnits              *units,
                        device->identity.serial,
                        DALI_MEMORY_BANK0_IDENTIFICATION_LEN);
             }
+            if (device->has_groups) {
+                units->has_groups[addr] = true;
+                units->groups[addr]     = device->groups;
+            }
         } else {
             if (!device->has_input_device) {
                 continue;
@@ -152,6 +173,128 @@ static uint8_t restore_find_on_bus(const RestoreBusUnits *units,
     return found;
 }
 
+/*
+ * Which snapshot entry the bus unit at `addr` is, or NULL having reported why
+ * not. Both planners go through here so there is exactly one answer to "which
+ * recorded unit is this", and a caller that gets NULL must leave the unit alone.
+ *
+ * The failures are deliberately not collapsed into one "cannot match": an
+ * operator's next step is different for each. An unreadable identity is a bus
+ * or driver problem, a duplicate is two units that must be told apart by hand,
+ * and a unit absent from the backup is usually just newer than it.
+ */
+static const DaliSnapshotEntry *restore_match_unit(const RestoreBusUnits     *units,
+                                                   const DaliSnapshot        *snapshot,
+                                                   DaliSnapshotSpace          space,
+                                                   uint8_t                    addr,
+                                                   const RestoreConflictSink *sink)
+{
+    if (!units->has_ident[addr]) {
+        restore_add_conflict(sink,
+                             DALI_RESTORE_CONFLICT_UNIDENTIFIED,
+                             space,
+                             addr,
+                             RESTORE_NO_ADDRESS,
+                             false,
+                             NULL);
+        return NULL;
+    }
+
+    bool bus_duplicate = false;
+    const uint8_t first_on_bus =
+        restore_find_on_bus(units, units->ident[addr], &bus_duplicate);
+    if (bus_duplicate) {
+        /*
+         * Two units answering with one identification number. Acting on either
+         * would be a guess, and a wrong guess changes the wrong fixture with no
+         * way to tell from the bus which one it was.
+         */
+        restore_add_conflict(sink,
+                             DALI_RESTORE_CONFLICT_DUPLICATE_BUS,
+                             space,
+                             addr,
+                             first_on_bus,
+                             true,
+                             units->ident[addr]);
+        return NULL;
+    }
+
+    bool snapshot_duplicate = false;
+    const DaliSnapshotEntry *entry =
+        dali_snapshot_find_by_identification(snapshot,
+                                             space,
+                                             units->ident[addr],
+                                             &snapshot_duplicate);
+    if (snapshot_duplicate) {
+        restore_add_conflict(sink,
+                             DALI_RESTORE_CONFLICT_DUPLICATE_SNAPSHOT,
+                             space,
+                             addr,
+                             entry != NULL ? entry->short_address
+                                           : RESTORE_NO_ADDRESS,
+                             true,
+                             units->ident[addr]);
+        return NULL;
+    }
+
+    if (entry == NULL) {
+        restore_add_conflict(sink,
+                             DALI_RESTORE_CONFLICT_UNKNOWN_UNIT,
+                             space,
+                             addr,
+                             RESTORE_NO_ADDRESS,
+                             true,
+                             units->ident[addr]);
+        return NULL;
+    }
+
+    return entry;
+}
+
+/* Report the snapshot entries that no bus unit answered for. Shared for the
+ * same reason as the matcher: what "not on the bus" means does not depend on
+ * whether the caller wanted to move an address or rewrite a group mask. */
+static void restore_report_unmatched_entries(const RestoreBusUnits     *units,
+                                             const DaliSnapshot        *snapshot,
+                                             DaliSnapshotSpace          space,
+                                             const RestoreConflictSink *sink)
+{
+    for (uint8_t i = 0u; i < snapshot->entry_count; i++) {
+        const DaliSnapshotEntry *entry = &snapshot->entries[i];
+        if (entry->space != space) {
+            continue;
+        }
+
+        if (!entry->has_identification) {
+            /*
+             * Recorded without an anchor, so it can never be matched. Reported
+             * against the address it was recorded at, which is the only useful
+             * thing known about it.
+             */
+            restore_add_conflict(sink,
+                                 DALI_RESTORE_CONFLICT_UNIDENTIFIED,
+                                 space,
+                                 entry->short_address,
+                                 RESTORE_NO_ADDRESS,
+                                 false,
+                                 NULL);
+            continue;
+        }
+
+        bool duplicate = false;
+        if (restore_find_on_bus(units, entry->identification, &duplicate) ==
+            RESTORE_NO_ADDRESS) {
+            restore_add_conflict(sink,
+                                 DALI_RESTORE_CONFLICT_MISSING,
+                                 space,
+                                 entry->short_address,
+                                 RESTORE_NO_ADDRESS,
+                                 true,
+                                 entry->identification);
+        }
+    }
+}
+
 static void restore_plan_space(DaliRestorePlan    *plan,
                                const DaliSnapshot *snapshot,
                                DaliSnapshotSpace   space,
@@ -162,6 +305,10 @@ static void restore_plan_space(DaliRestorePlan    *plan,
 
     uint64_t occupied  = 0u;
     uint64_t immovable = 0u;
+
+    const RestoreConflictSink sink = {
+        plan->conflicts, &plan->conflict_count, &plan->conflict_total,
+    };
 
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         if (units->present[addr]) {
@@ -175,65 +322,11 @@ static void restore_plan_space(DaliRestorePlan    *plan,
             continue;
         }
 
-        if (!units->has_ident[addr]) {
-            restore_add_conflict(plan,
-                                 DALI_RESTORE_CONFLICT_UNIDENTIFIED,
-                                 space,
-                                 addr,
-                                 RESTORE_NO_ADDRESS,
-                                 false,
-                                 NULL);
-            immovable |= ((uint64_t)1u << addr);
-            continue;
-        }
-
-        bool bus_duplicate = false;
-        const uint8_t first_on_bus =
-            restore_find_on_bus(units, units->ident[addr], &bus_duplicate);
-        if (bus_duplicate) {
-            /*
-             * Two units answering with one identification number. Moving either
-             * would be a guess, and a wrong guess puts a fixture in the wrong
-             * room with no way to tell from the bus which one moved.
-             */
-            restore_add_conflict(plan,
-                                 DALI_RESTORE_CONFLICT_DUPLICATE_BUS,
-                                 space,
-                                 addr,
-                                 first_on_bus,
-                                 true,
-                                 units->ident[addr]);
-            immovable |= ((uint64_t)1u << addr);
-            continue;
-        }
-
-        bool snapshot_duplicate = false;
         const DaliSnapshotEntry *entry =
-            dali_snapshot_find_by_identification(snapshot,
-                                                 space,
-                                                 units->ident[addr],
-                                                 &snapshot_duplicate);
-        if (snapshot_duplicate) {
-            restore_add_conflict(plan,
-                                 DALI_RESTORE_CONFLICT_DUPLICATE_SNAPSHOT,
-                                 space,
-                                 addr,
-                                 entry != NULL ? entry->short_address
-                                               : RESTORE_NO_ADDRESS,
-                                 true,
-                                 units->ident[addr]);
-            immovable |= ((uint64_t)1u << addr);
-            continue;
-        }
-
+            restore_match_unit(units, snapshot, space, addr, &sink);
         if (entry == NULL) {
-            restore_add_conflict(plan,
-                                 DALI_RESTORE_CONFLICT_UNKNOWN_UNIT,
-                                 space,
-                                 addr,
-                                 RESTORE_NO_ADDRESS,
-                                 true,
-                                 units->ident[addr]);
+            /* Reported by the matcher. A unit nothing can identify is a unit
+             * nothing may move, and it now blocks its own address. */
             immovable |= ((uint64_t)1u << addr);
             continue;
         }
@@ -252,40 +345,7 @@ static void restore_plan_space(DaliRestorePlan    *plan,
     }
 
     /* ---- snapshot entries with nothing to match ---------------------------*/
-    for (uint8_t i = 0u; i < snapshot->entry_count; i++) {
-        const DaliSnapshotEntry *entry = &snapshot->entries[i];
-        if (entry->space != space) {
-            continue;
-        }
-
-        if (!entry->has_identification) {
-            /*
-             * Recorded without an anchor, so it can never be matched. Reported
-             * against the address it was recorded at, which is the only useful
-             * thing known about it.
-             */
-            restore_add_conflict(plan,
-                                 DALI_RESTORE_CONFLICT_UNIDENTIFIED,
-                                 space,
-                                 entry->short_address,
-                                 RESTORE_NO_ADDRESS,
-                                 false,
-                                 NULL);
-            continue;
-        }
-
-        bool duplicate = false;
-        if (restore_find_on_bus(units, entry->identification, &duplicate) ==
-            RESTORE_NO_ADDRESS) {
-            restore_add_conflict(plan,
-                                 DALI_RESTORE_CONFLICT_MISSING,
-                                 space,
-                                 entry->short_address,
-                                 RESTORE_NO_ADDRESS,
-                                 true,
-                                 entry->identification);
-        }
-    }
+    restore_report_unmatched_entries(units, snapshot, space, &sink);
 
     /* ---- drop moves blocked by something that will never move -------------*/
     bool changed = true;
@@ -298,7 +358,7 @@ static void restore_plan_space(DaliRestorePlan    *plan,
             if ((immovable & ((uint64_t)1u << pending[i].dst)) == 0u) {
                 continue;
             }
-            restore_add_conflict(plan,
+            restore_add_conflict(&sink,
                                  DALI_RESTORE_CONFLICT_TARGET_OCCUPIED,
                                  space,
                                  pending[i].cur,
@@ -386,7 +446,7 @@ static void restore_plan_space(DaliRestorePlan    *plan,
         }
 
         if (stage == RESTORE_NO_ADDRESS) {
-            restore_add_conflict(plan,
+            restore_add_conflict(&sink,
                                  DALI_RESTORE_CONFLICT_NO_STAGING_ADDRESS,
                                  space,
                                  pending[victim].cur,
@@ -433,6 +493,109 @@ DaliError dali_restore_plan(DaliRestorePlan              *out,
     return DALI_OK;
 }
 
+DaliError dali_restore_plan_groups(DaliRestoreGroupPlan         *out,
+                                   const DaliSnapshot           *snapshot,
+                                   const DaliDiscoveryInventory *inventory)
+{
+    if (out == NULL || snapshot == NULL || inventory == NULL || !inventory->valid) {
+        return DALI_ERR_INVALID;
+    }
+    if (snapshot->entry_count > DALI_SNAPSHOT_MAX_ENTRIES) {
+        return DALI_ERR_INVALID;
+    }
+
+    memset(out, 0, sizeof(*out));
+
+    const RestoreConflictSink sink = {
+        out->conflicts, &out->conflict_count, &out->conflict_total,
+    };
+
+    /* Gear only. IEC 62386-103 control devices have their own group scheme,
+     * which nothing here reads and nothing here may guess at. */
+    RestoreBusUnits units;
+    restore_collect_bus(&units, DALI_SNAPSHOT_SPACE_GEAR, inventory);
+
+    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        if (!units.present[addr]) {
+            continue;
+        }
+
+        const DaliSnapshotEntry *entry =
+            restore_match_unit(&units, snapshot, DALI_SNAPSHOT_SPACE_GEAR, addr, &sink);
+        if (entry == NULL) {
+            continue;
+        }
+
+        out->matched_count++;
+
+        if (!entry->has_groups) {
+            /*
+             * The backup does not say what this gear belonged to. Treating the
+             * silence as "no groups" would issue REMOVE FROM GROUP for every
+             * group it is in now, destroying membership on the strength of a
+             * reading that never happened -- the one outcome a restore must
+             * never produce. Report it and leave the gear alone.
+             */
+            restore_add_conflict(&sink,
+                                 DALI_RESTORE_CONFLICT_NO_RECORDED_GROUPS,
+                                 DALI_SNAPSHOT_SPACE_GEAR,
+                                 addr,
+                                 entry->short_address,
+                                 true,
+                                 units.ident[addr]);
+            continue;
+        }
+
+        if (!units.has_groups[addr]) {
+            /*
+             * The gear answered enough of the scan to be identified but not its
+             * QUERY GROUPS. The recorded mask could still be written blind, but
+             * only the additions would be right: without the current mask there
+             * is no way to know which groups it must leave, so the result would
+             * be a fixture in the recorded rooms *and* whatever else it had
+             * drifted into. A half restore is worse than a reported one.
+             */
+            restore_add_conflict(&sink,
+                                 DALI_RESTORE_CONFLICT_GROUPS_UNREADABLE,
+                                 DALI_SNAPSHOT_SPACE_GEAR,
+                                 addr,
+                                 entry->short_address,
+                                 true,
+                                 units.ident[addr]);
+            continue;
+        }
+
+        const uint16_t current  = units.groups[addr];
+        const uint16_t recorded = entry->groups;
+        if (current == recorded) {
+            out->already_correct_count++;
+            continue;
+        }
+
+        /* One change per short address at most, and the array is sized by the
+         * same constant the loop runs over, so this cannot overflow. */
+        DaliRestoreGroupChange *change = &out->changes[out->change_count];
+        change->address          = addr;
+        change->recorded_address = entry->short_address;
+        change->current          = current;
+        change->recorded         = recorded;
+        change->add_mask         = (uint16_t)(recorded & (uint16_t)~current);
+        change->remove_mask      = (uint16_t)(current & (uint16_t)~recorded);
+        out->change_count++;
+    }
+
+    restore_report_unmatched_entries(&units, snapshot, DALI_SNAPSHOT_SPACE_GEAR, &sink);
+
+    return DALI_OK;
+}
+
+bool dali_restore_group_plan_is_clean(const DaliRestoreGroupPlan *plan)
+{
+    return plan != NULL &&
+           plan->change_count == 0u &&
+           plan->conflict_total == 0u;
+}
+
 bool dali_restore_plan_is_clean(const DaliRestorePlan *plan)
 {
     return plan != NULL &&
@@ -451,6 +614,8 @@ const char *dali_restore_conflict_name(DaliRestoreConflictKind kind)
         case DALI_RESTORE_CONFLICT_DUPLICATE_BUS:      return "duplicate on bus";
         case DALI_RESTORE_CONFLICT_TARGET_OCCUPIED:    return "target occupied";
         case DALI_RESTORE_CONFLICT_NO_STAGING_ADDRESS: return "no free address to stage";
+        case DALI_RESTORE_CONFLICT_NO_RECORDED_GROUPS: return "no group data in backup";
+        case DALI_RESTORE_CONFLICT_GROUPS_UNREADABLE:  return "groups unreadable";
         default:                                       return "unknown";
     }
 }

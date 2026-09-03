@@ -7,7 +7,7 @@ another room, an address that has to be freed, gear coming off the wall — skip
 to [Change a bus that is already
 commissioned](#5-change-a-bus-that-is-already-commissioned).
 
-**Last reviewed:** 2026-08-26
+**Last reviewed:** 2026-09-03
 
 `dali-starter.yaml` is mostly a shim: it brings up the bus and opens the
 diagnostic shell on a TCP port. The shell is the tool. The buttons and the
@@ -396,6 +396,7 @@ miss.
 | A fixture needs a different short address | `address a<N> set a<M>` |
 | A fixture is gone for good | `config-dtr0 a<N> set-short-address-dtr0 255`, then `group forget <N>` |
 | New gear on a bus that already works | `commission unaddressed` |
+| Anything that re-addresses in bulk | `backup save` first — see [Backup and restore](#backup-and-restore) |
 | The whole installation is being redone | Read [Starting over](#starting-over) before typing anything |
 
 Groups and short addresses live in each gear's own non-volatile memory, not in
@@ -505,6 +506,7 @@ Every surface that can change it also updates it:
 | `add-group` / `remove-group`, either surface | Applied immediately, and a light refresh is started |
 | **Scan DALI Bus** button | Rebuilt from the bus, replacing whatever was there |
 | `discover` or `commission` in the shell | Rebuilt the same way, from the same walk |
+| `restore groups apply` | Each edit applied as if typed, so the table follows without a rescan |
 | `set-short-address-dtr0` | Poll targets dropped, and a warning that only a scan can restore them |
 
 What a config command invalidates is decided in one place, whichever surface
@@ -725,6 +727,185 @@ Two rules that nothing enforces:
 2. `randomise` is irreversible. It does not change short addresses, but the
    random addresses a subsequent walk depends on are gone for good.
 
+### Backup and restore
+
+Everything above changes one address at a time and can be undone by typing the
+opposite. Commissioning cannot: it destroys short addresses in bulk, and a bus
+whose addresses have been shuffled has nothing left to tell you which fixture
+used to be which. `backup` and `restore` are the pair that makes that
+survivable.
+
+They work because of one fact. Every DALI-2 unit carries an 8-byte
+**identification number** at Bank 0 offset `0x0B`, and no addressing operation
+changes it — INITIALISE, RANDOMISE, PROGRAM SHORT ADDRESS and a broadcast
+de-address all leave it alone. Do not confuse it with the 24-bit *random
+address* RANDOMISE generates, which is temporary and exists only to make the
+search work. A record of which identification number held which short address is
+enough to put every address back afterwards, without a second walk.
+
+```text
+backup save        # scan, and record identity -> short address for both spaces
+backup status      # what is held, entry by entry
+restore plan       # what it would take to match the bus to that record
+restore apply      # do it
+```
+
+**Take one before anything that re-addresses.** The scan it runs is the same one
+`discover` runs, it changes nothing, and it takes seconds:
+
+```text
+backup: scanning
+backup: recorded 4 entries from 4 address(es)
+```
+
+Read the output for the one thing that matters, which is gear it could not
+anchor:
+
+```text
+backup: 1 entry has no identification number and cannot be restored
+  gear a5: id=unknown
+```
+
+That fixture will not come back on its own. Learn it now — a5 has to be
+re-addressed by hand afterwards — rather than during the restore.
+
+#### Putting it back
+
+`restore` puts addresses back; it does not hand them out. It matches recorded
+identification numbers against gear that answers at some short address, so every
+unit it is going to move must already have one. After a bulk de-address that
+means `commission unaddressed` runs first — the walk gives every fixture an
+arbitrary address, and the restore turns that arbitrary result back into the
+addressing your configuration refers to. A recorded unit that answers nowhere is
+reported as a conflict, not waited for.
+
+`restore plan` re-scans, matches each recorded identification number to whatever
+holds it now, and prints the moves:
+
+```text
+restore: 3 matched, 1 already correct, 2 move(s)
+  1. gear a9 -> a2
+  2. gear a4 -> a9
+restore: run 'restore apply' to execute
+```
+
+`plan` is read-only, so run it as often as you like. `apply` executes the moves
+as ordinary addressed `SET SHORT ADDRESS` commands and needs
+`allow_commissioning: true` over TCP, exactly as `commission` does.
+
+**`restore` opens no INITIALISE window.** That is the property to hold on to:
+nothing it sends puts the bus into a state that has to be terminated, so it is
+safe on a live installation and safe to interrupt. If a move fails, it stops
+there and says so — the moves after it assumed the failed one landed. Run
+`restore plan` again and it will plan from the bus as it now stands.
+
+Two units that need to swap addresses cannot both move directly, so the plan
+stages one through a free address and places it on a later step. A swap with no
+free address anywhere fails closed rather than overwriting a fixture. Anything
+it cannot place safely — a unit that is not in the backup, a recorded unit that
+is no longer on the bus, two units answering with the same identification number
+— is listed as a conflict and left alone.
+
+#### Putting group membership back
+
+Group membership is a separate verb, and usually you will not need it:
+
+```text
+restore groups            # what it would take to match the backup
+restore groups apply      # do it
+```
+
+The reason it is separate is that it repairs a different accident. Group
+membership lives in each gear's own memory, keyed to the gear rather than to the
+address it answers on, so a commissioning walk does not disturb it — run
+`restore groups` after a re-address and it will tell you there is nothing to do.
+What does destroy it is a `RESET`, a driver that lost its memory, or a
+group-addressed edit that emptied more than you meant.
+
+Because the match is by identification number and the edits go to wherever each
+gear answers *now*, this works on a scrambled bus and on a restored one alike.
+It does not need `restore apply` to have run first. When the current and
+recorded addresses differ the plan shows both:
+
+```text
+restore groups: 4 matched, 2 already correct, 2 change(s)
+  1. a5 now none -> g1 g3
+  2. a9 (backup a2) now g0 g1 -> g1 g4
+```
+
+Read that before applying it. This is the one part of a restore that can destroy
+something a restore cannot give back: a short address you can always move again,
+but a group membership only comes back from a record of what it was. If the
+backup predates a regrouping you did on purpose, applying it will undo the
+regrouping — which is why the plan prints the whole mask on both sides for every
+fixture instead of a count of edits, and why `restore apply` never touches
+groups.
+
+Two things it will not guess at, both reported and neither written: a gear the
+backup has but whose membership it never read (`no group data in backup` —
+treating that silence as "no groups" would empty the gear), and a gear whose
+current membership will not read back (`groups unreadable` — the additions would
+be right but nothing would say which groups to leave). Afterwards each gear is
+read back once and any that did not take the edits is flagged `MISMATCH`; group
+commands are unacknowledged, so that read-back is the only thing that tells a
+driver which took them from one which did not.
+
+Control gear only. Control devices have their own group scheme in Part 103 that
+the scan does not read. **Scenes are not captured at all** — nothing reads scene
+levels back, so a `RESET` still costs you those.
+
+#### Keeping the backup somewhere else
+
+Where a saved backup lives depends on which shell took it. The ESPHome shell
+writes it to flash, so it survives a reboot, and `backup status` tells you which
+you are looking at:
+
+```text
+backup: 4 entries, loaded from storage
+```
+
+**The native serial CLI has no persistent store.** A backup taken there lives
+until reboot. `backup export` prints it as the script that reads it back:
+
+```text
+backup: 46 byte(s); the lines below re-import it
+backup import begin
+backup import 44424B31010200000000000000000A 1B2C3D4E5F60718293A4B5C6D7E8F9
+backup import 0A1B2C3D4E5F60718293A4B5C6D7E8 F9
+backup import end
+```
+
+Redirect that to a file and keep the file. To load it back, paste the file in.
+With the shell client:
+
+```sh
+python3 /config/dali-shell backup export > /config/dali_addresses.txt
+```
+
+The chunking is not decoration — a full 64-fixture snapshot is 4880 hex
+characters and the shell reads 80-character lines — so the export is printed in
+the shape the import accepts rather than as one line you would have to break up
+yourself.
+
+While an import is open, `backup save`, `backup export`, `backup status` and
+both `restore` verbs refuse and say why. That is deliberate: they share the
+buffer the paste is landing in, and a `backup save` typed halfway through an
+82-line paste would otherwise destroy it without a word. `backup import abort`
+discards a paste that went wrong, and any line that does not parse discards it
+for you — a blob missing a line in the middle can still decode into a
+plausible-looking snapshot, and that snapshot moves fixtures to the wrong
+addresses. Nothing an import can contain touches the backup already held: the
+blob is checked end to end before a byte of it is kept.
+
+#### What has not been proven
+
+**None of this has been run on a bus.** Both planners, the snapshot format, the
+cycle-staging, and the rejection paths all have host vectors; no `restore apply`
+and no `restore groups apply` has ever transmitted a frame to real gear. Treat a
+restore as a procedure to rehearse and verify with `discover`, not as a safety
+net to rely on — and note that it can only be as good as the identities and
+group masks `backup save` managed to read.
+
 ### Starting over
 
 There is no `decommission` verb, and no single line that returns the bus to
@@ -732,9 +913,29 @@ factory addressing. The nearest sequence is a broadcast de-address followed by a
 fresh walk:
 
 ```text
+backup save                                # FIRST: record what is there now
 config-dtr0 b set-short-address-dtr0 255   # every gear loses its short address
-commission unaddressed
+commission unaddressed                     # every gear gets *an* address back
+restore plan                               # ...then put them back where they were
+restore apply
 ```
+
+Nothing in that sequence touches group membership, so there is no `restore
+groups` step in it. Add one only if you also issued a `reset`.
+
+The first line is not optional in practice. Once the second one has run, nothing
+on the bus knows which fixture used to be a3, and [Backup and
+restore](#backup-and-restore) is the only thing that will — so take the backup,
+read its output for gear it could not anchor, and keep a copy off the device
+with `backup export` if you are on the serial CLI, where it would not survive a
+reboot.
+
+Note the order. `restore` matches recorded identities against gear that answers
+at some short address, so it can only run **after** the fresh walk has given
+every unit one; on a bus that has just been de-addressed it finds nothing and
+reports every entry missing. The walk decides which fixture gets which address
+arbitrarily, and the restore is what turns that arbitrary result back into the
+addressing your configuration already refers to.
 
 Both lines need `allow_commissioning: true`, and neither is reachable from the
 **DALI Command** text entity at all — which is the point: this is the pair that
