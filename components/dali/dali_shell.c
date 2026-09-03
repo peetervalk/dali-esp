@@ -1561,6 +1561,17 @@ static void cmd_stats(void)
     shell_printf("Reply RX activity: %" PRIu32 "\r\n", g_dali_stats.reply_rx_activity);
     shell_printf("Reply timeouts:   %" PRIu32 "\r\n", g_dali_stats.reply_timeouts);
     shell_printf("RX ignored:       %" PRIu32 "\r\n", g_dali_stats.rx_ignored_outside_reply);
+    shell_printf("  reply early/late: %" PRIu32 "/%" PRIu32 "\r\n",
+                 g_dali_stats.rx_reply_early,
+                 g_dali_stats.rx_reply_late);
+    shell_printf("  reply superseded: %" PRIu32 "\r\n",
+                 g_dali_stats.rx_reply_superseded);
+    shell_printf("  event unroutable: %" PRIu32 ", no sub: %" PRIu32 "\r\n",
+                 g_dali_stats.rx_event_unroutable,
+                 g_dali_stats.rx_event_no_subscriber);
+    shell_printf("  undecodable: %" PRIu32 ", unclassified: %" PRIu32 "\r\n",
+                 g_dali_stats.rx_undecodable_ignored,
+                 g_dali_stats.rx_ignored_unclassified);
     shell_printf("RX events routed: %" PRIu32 "\r\n", g_dali_stats.unsolicited_events_routed);
     shell_printf("Raw malformed:    %" PRIu32 "\r\n", g_dali_stats.raw_malformed);
     shell_printf("ISR overruns:     %" PRIu32 "\r\n", g_dali_stats.isr_overruns);
@@ -3108,12 +3119,22 @@ static uint8_t shell_discover_bus(bool detailed)
     }
 
     /*
-     * RX observations that cannot be attributed to an active reply window are
-     * the bus/timing fault a scan cannot otherwise see. They can be early, late,
-     * or malformed noise, so report the generic count without claiming each one
-     * was a decoded late backward reply.
+     * Snapshot the ignored-RX classes across the walk.
+     *
+     * These used to be one number and one note, and on a bus with a live
+     * sensor the note read as a timing fault when what it actually counted was
+     * control-device events landing mid-transmission — loudest while an
+     * operator stood in the room doing the commissioning the note interrupted.
+     * Each class now gets its own line and only the timing ones are called
+     * timing.
      */
-    uint32_t ignored_rx_before = g_dali_stats.rx_ignored_outside_reply;
+    uint32_t early_rx_before = g_dali_stats.rx_reply_early;
+    uint32_t late_rx_before  = g_dali_stats.rx_reply_late;
+    uint32_t event_rx_before = g_dali_stats.rx_event_unroutable +
+                               g_dali_stats.rx_event_no_subscriber;
+    uint32_t other_rx_before = g_dali_stats.rx_reply_superseded +
+                               g_dali_stats.rx_undecodable_ignored +
+                               g_dali_stats.rx_ignored_unclassified;
 
     shell_printf("Scanning short addresses 0-%u...\r\n", (unsigned)DALI_MAX_SHORT_ADDRESS);
     DaliError err = dali_discovery_scan(inventory,
@@ -3162,8 +3183,13 @@ static uint8_t shell_discover_bus(bool detailed)
         s_session.hooks.inventory_changed(s_session.hooks.ctx, inventory);
     }
 
-    uint32_t ignored_rx =
-        g_dali_stats.rx_ignored_outside_reply - ignored_rx_before;
+    uint32_t early_rx = g_dali_stats.rx_reply_early - early_rx_before;
+    uint32_t late_rx  = g_dali_stats.rx_reply_late - late_rx_before;
+    uint32_t event_rx = (g_dali_stats.rx_event_unroutable +
+                         g_dali_stats.rx_event_no_subscriber) - event_rx_before;
+    uint32_t other_rx = (g_dali_stats.rx_reply_superseded +
+                         g_dali_stats.rx_undecodable_ignored +
+                         g_dali_stats.rx_ignored_unclassified) - other_rx_before;
     shell_printf("Scan complete: %u device(s) found.\r\n", (unsigned)found);
     if (inventory->undecodable_count > 0u) {
         /* Short lines on purpose; see the 128-byte TCP buffer note below. */
@@ -3198,13 +3224,23 @@ static uint8_t shell_discover_bus(bool detailed)
             }
         }
     }
-    if (ignored_rx > 0u) {
+    if (early_rx > 0u || late_rx > 0u) {
         /* Keep this copy deliberately short. The TCP shell owns a 128-byte
          * output buffer (including NUL) and sends one buffer per callback. */
-        shell_printf("  note: %" PRIu32 " RX observation(s) fell outside active "
-                     "reply attribution.\r\n", ignored_rx);
-        shell_printf("  Early/late activity or noise; inspect timing if a known "
-                     "device is missing.\r\n");
+        shell_printf("  note: %" PRIu32 " early / %" PRIu32 " late reply(s) "
+                     "outside the window.\r\n", early_rx, late_rx);
+        shell_printf("  This one is timing; inspect it if a known device is "
+                     "missing.\r\n");
+    }
+    if (event_rx > 0u) {
+        shell_printf("  note: %" PRIu32 " control-device event(s) arrived "
+                     "mid-walk.\r\n", event_rx);
+        shell_printf("  Expected on a bus with sensors. Not a fault, and not a "
+                     "timing signal.\r\n");
+    }
+    if (other_rx > 0u) {
+        shell_printf("  note: %" PRIu32 " other RX observation(s) ignored "
+                     "(noise, duplicates).\r\n", other_rx);
     }
     return found;
 }
@@ -4316,8 +4352,11 @@ static void cmd_bus(const DaliCliTokens *t)
            g_dali_stats.malformed_frames,
            g_dali_stats.reply_rx_activity,
            g_dali_stats.reply_timeouts);
-    shell_printf("         ignored=%" PRIu32 ", bus_idle_failures=%" PRIu32 "\r\n",
+    shell_printf("         ignored=%" PRIu32 " (early=%" PRIu32 " late=%" PRIu32
+           "), bus_idle_failures=%" PRIu32 "\r\n",
            g_dali_stats.rx_ignored_outside_reply,
+           g_dali_stats.rx_reply_early,
+           g_dali_stats.rx_reply_late,
            g_dali_stats.bus_idle_failures);
 }
 

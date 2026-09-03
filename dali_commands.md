@@ -1093,8 +1093,12 @@ IEC 62386-101 gives that settling time as 5.5 to 10.5 ms, nominal 7 ms, so
 healthy gear lands at `since_tx_us` of roughly 13000-18000. The scheduler
 attributes anything from `DALI_REPLY_WINDOW_OPEN_US` (5.5 ms) through
 `DALI_REPLY_WINDOW_CLOSE_US` (27 ms) after release; a reply outside that is
-counted in `rx_ignored_outside_reply` and reported by `discover` as an
-observation that fell outside active reply attribution.
+counted in `rx_reply_early` or `rx_reply_late` — the two halves of the old
+`rx_ignored_outside_reply`, which is now their sum together with five other
+classes — and reported by `discover` as N early / N late replies outside the
+window. A timestamp is what separates the two, so a reply arriving through the
+frame-only RX entry point is counted `rx_ignored_unclassified` rather than
+guessed at.
 
 Empty addresses produce no observations at all — a capture across a stretch of
 unpopulated addresses shows TX with no RX — so a non-zero count on an otherwise

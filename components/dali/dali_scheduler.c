@@ -485,8 +485,105 @@ static bool sched_has_event_subscriber(void)
     return false;
 }
 
-static void sched_route_unsolicited_or_ignore(const DaliFrame *frame)
+/*
+ * Why one ignored-RX counter became seven.
+ *
+ * Every rejected observation used to land in rx_ignored_outside_reply, so one
+ * number answered four unrelated questions: was gear early, was gear late, was
+ * a control device talking during a walk, or was the waveform noise. Three
+ * investigations read it as three different faults and one conclusion had to be
+ * reopened. Nothing new is measured below — these are the discriminators the
+ * reject path already had in hand at the moment it made the decision, written
+ * down instead of discarded.
+ */
+typedef enum {
+    SCHED_IGNORE_REPLY_EARLY = 0,
+    SCHED_IGNORE_REPLY_LATE,
+    SCHED_IGNORE_REPLY_SUPERSEDED,
+    SCHED_IGNORE_EVENT_UNROUTABLE,
+    SCHED_IGNORE_EVENT_NO_SUBSCRIBER,
+    SCHED_IGNORE_UNDECODABLE,
+    SCHED_IGNORE_UNCLASSIFIED,
+} SchedIgnoreReason;
+
+static void sched_count_ignored(SchedIgnoreReason reason)
 {
+    switch (reason) {
+    case SCHED_IGNORE_REPLY_EARLY:
+        g_dali_stats.rx_reply_early++;
+        break;
+    case SCHED_IGNORE_REPLY_LATE:
+        g_dali_stats.rx_reply_late++;
+        break;
+    case SCHED_IGNORE_REPLY_SUPERSEDED:
+        g_dali_stats.rx_reply_superseded++;
+        break;
+    case SCHED_IGNORE_EVENT_UNROUTABLE:
+        g_dali_stats.rx_event_unroutable++;
+        break;
+    case SCHED_IGNORE_EVENT_NO_SUBSCRIBER:
+        g_dali_stats.rx_event_no_subscriber++;
+        break;
+    case SCHED_IGNORE_UNDECODABLE:
+        g_dali_stats.rx_undecodable_ignored++;
+        break;
+    case SCHED_IGNORE_UNCLASSIFIED:
+    default:
+        g_dali_stats.rx_ignored_unclassified++;
+        break;
+    }
+    /* Exactly one bucket per ignored observation, so the aggregate keeps the
+     * meaning it has always had and the sum is checkable. */
+    g_dali_stats.rx_ignored_outside_reply++;
+}
+
+/*
+ * Classify a rejected observation from what the reject path already knows.
+ *
+ * The backward-frame arm needs a timestamp to tell early from late, and
+ * dali_sched_notify_rx() synthesises observations without one. That case is
+ * UNCLASSIFIED rather than a guess: a bucket that admits it cannot tell is the
+ * one thing the old counter never did.
+ *
+ * For an event-shaped frame the state is the reason it was dropped and the
+ * missing subscriber is only a build detail, so the state is tested first — a
+ * frame arriving in SCHED_TX would have been ignored however many subscribers
+ * were listening.
+ */
+static SchedIgnoreReason sched_classify_ignored(
+    const DaliPhyRxObservation *observation)
+{
+    const DaliFrame *frame = &observation->frame;
+
+    if (sched_is_unsolicited_event_frame(frame)) {
+        if (!sched_can_route_unsolicited_event()) {
+            return SCHED_IGNORE_EVENT_UNROUTABLE;
+        }
+        return SCHED_IGNORE_EVENT_NO_SUBSCRIBER;
+    }
+
+    if (frame->bit_length != DALI_BACKWARD_FRAME_BITS) {
+        return SCHED_IGNORE_UNCLASSIFIED;
+    }
+
+    if (s_reply_received || s_reply_intervened || s_reply_error != DALI_OK) {
+        return SCHED_IGNORE_REPLY_SUPERSEDED;
+    }
+    if (!observation->has_timestamps || !s_have_last_tx_us) {
+        return SCHED_IGNORE_UNCLASSIFIED;
+    }
+    if (observation->first_edge_us - s_last_tx_us <
+        DALI_REPLY_WINDOW_OPEN_DECODED_US) {
+        return SCHED_IGNORE_REPLY_EARLY;
+    }
+    return SCHED_IGNORE_REPLY_LATE;
+}
+
+static void sched_route_unsolicited_or_ignore(
+    const DaliPhyRxObservation *observation)
+{
+    const DaliFrame *frame = &observation->frame;
+
     if (sched_can_route_unsolicited_event() &&
         sched_is_unsolicited_event_frame(frame) &&
         sched_has_event_subscriber()) {
@@ -502,7 +599,7 @@ static void sched_route_unsolicited_or_ignore(const DaliFrame *frame)
         }
         return;
     }
-    g_dali_stats.rx_ignored_outside_reply++;
+    sched_count_ignored(sched_classify_ignored(observation));
 }
 
 static DaliError queue_push(const SchedQueueEntry *entry)
@@ -1014,7 +1111,7 @@ void dali_sched_notify_rx_observation(
             sched_latch_reply_error(reply_error);
             return;
         }
-        g_dali_stats.rx_ignored_outside_reply++;
+        sched_count_ignored(SCHED_IGNORE_UNDECODABLE);
         return;
     }
 
@@ -1035,7 +1132,7 @@ void dali_sched_notify_rx_observation(
         s_reply_received = false;
         s_reply_error = DALI_OK;
         s_reply_intervened = true;
-        sched_route_unsolicited_or_ignore(frame);
+        sched_route_unsolicited_or_ignore(observation);
         return;
     }
 
@@ -1054,7 +1151,7 @@ void dali_sched_notify_rx_observation(
         return;
     }
 
-    sched_route_unsolicited_or_ignore(frame);
+    sched_route_unsolicited_or_ignore(observation);
 }
 
 void dali_sched_notify_rx(const DaliFrame *frame)

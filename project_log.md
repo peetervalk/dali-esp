@@ -28,6 +28,60 @@ supersedes.
 
 # Verification history
 
+### Verified on hardware 2026-09-03 (2k bus: backup/restore, commissioning, contested)
+
+First bus result for the commissioning and backup/restore work accumulated on
+`dev` since `v1.1.1`. Driven from `python3 /config/dali-shell` against the 2k
+node at 192.168.1.216, on a `dev` build carrying the reworked backup/restore
+(at or near `7e9ee6e`). The exact flashed ref is not recorded — see the
+Installation State note in `current_status.md` about `_local/` not being
+evidence.
+
+Bus at start: a0 (lamp + Steinel HF 360 II, 4 input instances), a1 (lamp +
+DALI-2 PB coupler, 1 instance), a2, a3 and a5 plain lamps, all in group 0. Plus
+one unpowered LED driver holding a4, invisible to every probe. That unit
+regaining power mid-session is what produced the collision below.
+
+**Exercised, with a result:**
+
+- `backup save` / `backup status` — four saves across the session, 6 to 8
+  entries spanning both address spaces, gear identities and group masks
+  recorded. A group edit made between two saves (`0x0001` to `0x0002`) appeared
+  in the later one, so the snapshot reads the bus rather than a cache.
+- `restore plan` / `restore apply` — a one-move plan computed against a live
+  scan, applied, and confirmed by `discover`.
+- `address <aN> set <aM>` — four moves. The destination-free pre-check and the
+  both-ends read-back (`a4 confirmed, a5 silent`) fired correctly on every one.
+  DTR0 encodings observed as 9, 13, 11 for a4, a6, a5, all `2N+1`.
+- `address add g1` / `remove g0` — write plus membership read-back.
+- `commission unaddressed` — two genuinely unaddressed units, full
+  INITIALISE/randomise/COMPARE walk, randoms `0x96B1F4` and `0xEC97DF`,
+  post-scan confirmed 2 of 2 with `QUERY SHORT ADDRESS` echoes `0x09` and
+  `0x0B`.
+- `quiescent on all` / `off all`, `identify`, `meminfo`, `status`, `off`,
+  `config-dtr0`. `meminfo a5` returned the same identification the backup had
+  recorded independently.
+
+**The contested classification met a real collision.** When the unpowered a4
+driver regained power, two pieces of gear answered a4 at once and the scan
+reported `a4: contested` with the correct remedy text. This is the first
+physical two-unit collision behind `RX_ACTIVITY`, which every commissioning
+safety claim rests on and which until now had only host vectors. It is the scan
+path (`has_undecodable_activity`) that was exercised; the commissioning
+post-scan audit's own contested path still has no bus result, because the
+commission run that followed was clean.
+
+**Not exercised, still owed a bus:**
+
+- Equal-random-address handling. The two commissioned units drew distinct
+  randoms, so that path never ran. It remains the largest untested slice.
+- `commission devices` (control-device commissioning), `backup import`,
+  `backup export`, `restore groups`.
+- DT6, DT8, memory writes, input-device configuration writes.
+
+Three defects and one design gap came out of this session; each has an
+investigation entry below.
+
 ### Verified on hardware 2026-08-14 (`v1.1.1`)
 
 `v1.1.1` was flashed to both sites and exercised on the installed buses. This is
@@ -1085,6 +1139,186 @@ cleared by the 2026-08-14 entry above):
 
 # Investigations
 
+## The scan's unattributed-RX note is a motion detector — found 2026-09-03
+
+Every `discover` on the 2k bus carried `note: N RX observation(s) fell outside
+active reply attribution`, with N running 11 to 39 across the session. The note
+advises inspecting timing if a known device is missing, which sends the reader
+after a PHY fault. There is no PHY fault. N is a readout of whether a person is
+standing in the corridor.
+
+The mechanism is `sched_route_unsolicited_or_ignore()`. An unsolicited event
+frame is routed only in `SCHED_IDLE` or `SCHED_WAIT_REPLY`
+(`sched_can_route_unsolicited_event()`); anything arriving in `SCHED_TX` falls
+through to `g_dali_stats.rx_ignored_outside_reply++`. A 64-address walk is
+back-to-back TX for minutes, and the Steinel at a0 emits on four instances
+throughout, so a large fraction of its events land in the window that counts
+them as ignored.
+
+Two independent confirmations, which is why this is recorded as settled rather
+than as a theory:
+
+- The one scan of the session run under `quiescent on all` printed **no note at
+  all**. It returned on the next scan after `quiescent off all`. Silencing
+  control-device events silences the counter.
+- Home Assistant's recorder for the same wall-clock window:
+  `sensor.2k_koridor_dali_2k_zone_2_occupancy` changed state 31 times between
+  19:55 and 20:13 local, cycling `Present` / `Present + Moving` / `Unoccupied`
+  every 10 to 30 seconds, with lux updating 18 times alongside. The operator
+  confirms being in the room; the sensor was tracking them. The scans with the
+  lowest counts (14, 16, 11) fall in the part of the session where the recorder
+  shows `Unoccupied` stretches at 20:04:23, 20:10:03 and 20:11:51. The shell log
+  carries no timestamps, so this is a consistent shape rather than a proof of
+  alignment.
+
+The operational consequence is worse than misleading copy. Commissioning
+*requires* a human in the room — `identify` is useless unless someone is
+watching the lamp blink, and it was run five times in this session. So the note
+is loudest exactly when the operator is doing the work it interrupts, and
+quietest when nobody is present to read it. It is anti-correlated with the fault
+it claims to report.
+
+**This counter has now been used to diagnose three different faults on two
+buses, and it cannot tell them apart.** `sched_is_unsolicited_event_frame()`
+accepts only 16- and 24-bit frames, so an 8-bit backward frame — a gear reply —
+is never routable and always lands in `rx_ignored_outside_reply`. Four distinct
+facts share the number:
+
+1. **Early** replies from gear settling faster than the 5.5 ms window open. The
+   2026-08-25 1k investigation in this file reads the deltas 58/77/113 as
+   exactly this, correctly.
+2. **Late** replies from gear answering past `DALI_REPLY_TIMEOUT_MS`. The
+   2026-08-13 2k diagnosis reads ~25 per scan as this, and fixed the retry
+   backoff on the strength of it.
+3. Event frames arriving outside `SCHED_IDLE`/`SCHED_WAIT_REPLY` — this entry.
+4. Undecodable observations outside a reply window, the only case the note's
+   own wording describes.
+
+The 2026-08-13 reading is the one now in question. Its discriminator was that
+2k showed ~25 per scan while 1k showed exactly 0 — but 2k has a Steinel
+emitting on four instances and 1k has none, which explains the same split
+without any slow gear. `quiescent on all` silences control-device events and
+does nothing whatsoever to gear reply timing, so a count that falls to zero
+under quiescent cannot have been late gear replies. On 2026-09-03 it fell to
+zero. That is a single scan and wants repeating before the 2026-08-13
+conclusion is called wrong, but it is the right experiment and it points the
+other way.
+
+Note this does **not** touch the backoff fix itself, whose effect was measured
+directly and independently: 8/8 scans on 2k found all five lamps afterwards
+against 2/8 before. The fix works. What is in doubt is the mechanism story told
+about why, and the doubt exists only because the counter conflates the
+candidates.
+
+Two fixes, both worth taking:
+
+- Split the counter, four ways or at least three: early in-window-miss, late
+  post-timeout, unroutable event, undecodable. Only the first two are timing
+  signals and they point in opposite directions. Until they are separate
+  numbers, every future investigation that reaches for this counter inherits
+  the same ambiguity — and three already have. **Done 2026-09-03**, seven ways
+  rather than three; see the unreleased-changes entry below for the buckets and
+  what the scan prints now. Host-covered, mutation-checked, and not yet on a
+  bus.
+- Assert quiescent for the duration of a scan and release it after. The scan
+  already knows which addresses are input devices — it enumerates their
+  instances in the same function that prints the note. Two constraints on any
+  implementation: the release must cover every exit path including the cancelled
+  and errored scans, or the bus is left deaf to events; and `find switches` must
+  never do it, since listening for events is that verb's entire purpose.
+
+## `restore` cannot stage a unit the backup has never seen — found 2026-09-03
+
+The 2026-09-03 session ended with the operator hand-executing, in three
+commands, the exact cycle-staging algorithm `dali_restore.c` implements:
+
+    address a4 set a6      (stage the blocker out of the way)
+    address a5 set a4      (recorded unit to its recorded address)
+    address a6 set a5
+
+`restore apply` would not have done this. The blocker at a4 was a driver that
+had been unpowered during every previous `backup save`, so it appears in no
+snapshot. `restore_match_unit()` files it as `DALI_RESTORE_CONFLICT_UNKNOWN_UNIT`
+and returns NULL, at which point the caller marks its address **immovable**. The
+move the operator wanted is then dropped by the blocked-move loop as
+`DALI_RESTORE_CONFLICT_TARGET_OCCUPIED`. The plan comes back with zero moves and
+two conflicts, and the operator is sent back to doing it by hand — which is what
+happened.
+
+The header comment justifies the immovable treatment as "a restore reverts
+addressing, it does not retire units nobody recorded." That reasoning is sound
+and should be kept. But staging an unrecorded unit through a *free* address is
+not retiring it: it ends up somewhere reachable, addressed, and discoverable,
+and the operator can then decide what it is. a6 was free for the whole session.
+
+Proposed change: when a recorded unit's target is held by an `UNKNOWN_UNIT` and
+the space has a free address, plan a staging hop for the unknown unit rather
+than dropping the move. Keep the current immovable behaviour when the space is
+full — there, refusing is genuinely the only safe answer — and keep it for
+`UNIDENTIFIED` units, which cannot be moved safely because nothing can confirm
+where they went. The distinction that matters is readable identity, not
+membership in the snapshot.
+
+This is the difference between a restore that converges after a mixed
+commissioning accident and one that hands the problem back.
+
+## `address` cannot un-assign — found 2026-09-03
+
+Faced with two units contesting a4, the operator reached for
+`address a4 set none`, then `address a4 set`, and got usage text both times. The
+CLI spec fixes the verb at three required tokens, and every arm requires a
+parseable target argument.
+
+The fallback used was `config-dtr0 a4 set-short-address-dtr0 255`, which is
+correct DALI and did the right thing — both contesting units took the broadcast
+and dropped their address, leaving them to be re-commissioned cleanly. But it
+printed a bare `OK`. `config` cannot read back, and against a contested address
+nothing can: that is the definition of the state. The shell had `a4: contested`
+in its inventory from two commands earlier and said nothing about it.
+
+Wanted: an `address <aN> clear` arm that owns this properly — refuses or warns
+when the subject is contested in the current inventory, sends the DTR0 255
+sequence atomically as `address set` already does, and verifies afterwards that
+the address went silent. Clearing an address is a normal step in resolving a
+collision, and it is the one address operation with no typed verb.
+
+## No addressing fault reaches Home Assistant — found 2026-09-03
+
+Cross-checking the 2026-09-03 session against the HA recorder turned up a gap
+that the shell log alone could not show.
+`sensor.2k_koridor_dali_2k_bus_status` read `OK` at 19:00 and never changed —
+through the contested a4, a broadcast address wipe, INITIALISE, randomise, a
+full commissioning walk, and four re-addressings. One state record for the
+entire window.
+
+That sensor is not lying. `CONF_BUS_FAULT` is documented in the component schema
+as `"OK"` at boot and `"Bus stuck: N"` when the bus idle timeout fires. It is a
+PHY-level liveness signal and it reported correctly.
+
+The gap is that there is **no HA-visible signal for an addressing fault at
+all**. Two fixtures sharing a short address is the one failure nothing on the
+bus can undo remotely; the shell detects it, names the address, and prints the
+remedy — and none of that can reach Home Assistant. Had the collision happened
+while nobody was attached to the shell, nothing would have reported it. The
+scan already computes `inventory->undecodable_count` and the per-address
+`has_undecodable_activity` flags, so the data exists on the device at the right
+moment and simply has nowhere to go.
+
+A related, smaller instance of the same shape: `light.dali_2k_dali_group_0` has
+a single state record for the whole session and never went `unavailable`. As a
+robustness result that is good — the integration rode out a hostile
+commissioning session without flapping. But between the commissioning walk and
+the operator's `address a5 remove g0`, the freshly repowered driver came up with
+`groups=[0]`, so for that stretch the g0 light entity was commanding an extra
+fixture. `inventory_changed` fired on every scan; group membership is not part
+of what it surfaces.
+
+Wanted: an addressing-health text sensor fed from the scan result — a second
+one, or a widened `bus_fault` reporting `"Contested: a4"` — so the fault class
+that actually matters is visible from Home Assistant. Group membership changes
+reaching the integration is the same fix one layer along, and is what would let
+a group light entity know its own membership changed underneath it.
+
 ## Hybrid units get no pairing model — decided 2026-09-03
 
 One physical unit can be both control gear and a control device, holding two
@@ -1401,6 +1635,45 @@ options struct carries `terminate_control_gear` as the mirror of
 
 Raw material for the next release notes. Everything below is unreleased as of
 `dev` `a8c9372`; `v1.3.0` (`ce0a72c`) predates all of it.
+
+## Ignored-RX counters split seven ways, and a scan note that stops crying wolf
+
+**Diagnostic output change, 2026-09-03.** `rx_ignored_outside_reply` counted
+every rejected RX observation, so one number answered four unrelated questions
+at once: was gear early, was gear late, was a control device talking during a
+walk, or was the waveform noise. Three investigations read it as three
+different faults and one of those conclusions had to be reopened. It is now the
+sum of seven named buckets, and the aggregate is kept so nothing that already
+reads it breaks:
+
+| Bucket | Means |
+|---|---|
+| `rx_reply_early` | Backward frame before the decoded open edge — gear faster than the window |
+| `rx_reply_late` | Backward frame past the close edge, or after the reply timeout fired |
+| `rx_reply_superseded` | A reply was already latched, or a forward frame intervened |
+| `rx_event_unroutable` | Event frame arriving in a state that cannot route it |
+| `rx_event_no_subscriber` | Event frame in a routable state with nobody listening |
+| `rx_undecodable_ignored` | Undecodable observation no reply window could claim |
+| `rx_ignored_unclassified` | No timestamps, so early could not be told from late |
+
+Only the first two say anything about bus timing, and they point in opposite
+directions. The last one is the deliberate part: `dali_sched_notify_rx()`
+synthesises observations with no timestamps, and with no edge to measure
+against the scheduler now says it cannot tell rather than picking one. A
+non-zero value there means the other numbers are incomplete, not wrong.
+
+Operator-visible in two places. `status` prints the breakdown beneath the
+aggregate. The scan note, which used to read `N RX observation(s) fell outside
+active reply attribution` and advise inspecting timing, now reports each class
+in its own words — control-device events are named as expected on a bus with
+sensors and explicitly not a timing signal, which is what the 2k bus had been
+reporting all along.
+
+Nothing about attribution or acceptance changed: the same frames are accepted
+and rejected as before, and the classification reads state the reject path
+already had. Vectors in `test_scheduler.c`, including the existing
+early-and-late test whose assertion of `2` now reads one early and one late,
+plus the sum invariant. Mutation-checked both ways.
 
 ## `restore groups`
 

@@ -187,7 +187,35 @@ typedef struct {
     volatile uint32_t tx_retries;       /* scheduler TX retry count           */
     volatile uint32_t malformed_frames; /* Manchester decode errors            */
     volatile uint32_t reply_timeouts;   /* scheduler reply timeout count      */
-    volatile uint32_t rx_ignored_outside_reply; /* scheduler rejected RX frames */
+    /* Sum of the rx_ignored_* buckets below, kept as its own field because it
+     * is the number every existing consumer already reads. Do not diagnose
+     * timing from it: it adds up facts that point in opposite directions,
+     * which is how three investigations read one counter three ways. */
+    volatile uint32_t rx_ignored_outside_reply;
+    /* Backward frame that would have matched the active reply but arrived
+     * before the decoded open edge — gear settling faster than the window. */
+    volatile uint32_t rx_reply_early;
+    /* Backward frame past the close edge, or arriving after the reply timeout
+     * already fired. The opposite fault from rx_reply_early, and the only
+     * other number here that says anything about timing at all. */
+    volatile uint32_t rx_reply_late;
+    /* Backward frame arriving when a reply was already latched, or after a
+     * forward frame intervened. A duplicate, not a timing signal. */
+    volatile uint32_t rx_reply_superseded;
+    /* Event-shaped frame (16/24-bit) observed in a state that cannot route it.
+     * Any bus carrying an active control device makes this large during a
+     * walk; it measures event traffic, not a fault. */
+    volatile uint32_t rx_event_unroutable;
+    /* Event-shaped frame in a routable state with no subscriber registered.
+     * A fact about how this build is wired, not about the bus. */
+    volatile uint32_t rx_event_no_subscriber;
+    /* Undecodable observation that no reply window could claim. */
+    volatile uint32_t rx_undecodable_ignored;
+    /* Ignored RX carrying no usable timestamps, so early could not be told
+     * from late. Expected to stay zero wherever the PHY timestamps its
+     * observations: a non-zero value means the numbers above are incomplete
+     * rather than wrong. */
+    volatile uint32_t rx_ignored_unclassified;
     volatile uint32_t unsolicited_events_routed; /* raw 24-bit RX event frames  */
     volatile uint32_t raw_malformed;    /* diagnostic raw command parse errors*/
     volatile uint32_t isr_overruns;     /* timer fired before previous ISR done*/

@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-09-03, against `dev` `a8c9372`.
+**Last updated:** 2026-09-03, against `dev` `7e9ee6e`, after the 2k bus pass.
 
 Annex to `AGENTS.md`. That file holds the architecture, the layer rules, the ISR
 and timing constraints, and the native/host build commands; this one holds what
@@ -17,7 +17,7 @@ per-capability API/verb/vector/hardware status in `dali_capability_matrix.md`.
 |---|---|
 | Latest tag | `v1.3.0` (`ce0a72c`), which is what `main` points at |
 | Last hardware-tested release | `v1.1.1`. Nothing since has been flashed to a bus as a tagged build |
-| `dev` vs `main` | 8 commits ahead, 1 behind (the PR #4 merge commit itself) |
+| `dev` vs `main` | 25 commits ahead, 0 behind |
 
 `dev` carries the post-scan verification, VERIFY-based duplicate detection,
 mixed-device work, the backup/restore path, and control-device commissioning —
@@ -68,7 +68,18 @@ and `restore groups` work, clean tree:**
 
 ### Recorded hardware state
 
-Established on or before the `v1.1.1` flash of 2026-08-14 and not re-tested since:
+**2026-09-03, 2k bus, a `dev` build carrying the reworked backup/restore.** The
+first bus result for the commissioning and backup/restore work accumulated
+since `v1.1.1`. `backup save`/`status`, `restore plan`/`apply`, `address set`/
+`add`/`remove`, `commission unaddressed` with its post-scan, `quiescent`,
+`identify`, `meminfo` and `config-dtr0` all produced correct results on real
+gear. Most importantly, the `contested` classification met a **genuine physical
+two-unit collision** when an unpowered driver holding a4 regained power — the
+first real collision behind `RX_ACTIVITY`, which every commissioning safety
+claim depends on. Full scope, and what the session did *not* cover, is in
+`project_log.md`.
+
+Established on or before the `v1.1.1` flash of 2026-08-14:
 
 - Hardware target: ESP32-DevKitC-VE / ESP32-WROVER-E with MikroE DALI-2 Click.
 - Known wiring: TX on GPIO18, RX on GPIO19. GPIO16/17 are PSRAM and unusable.
@@ -80,13 +91,20 @@ Established on or before the `v1.1.1` flash of 2026-08-14 and not re-tested sinc
 
 ### Not yet verified
 
-- **Everything on `dev` since `v1.1.1`.** The protocol and commissioning work of
-  the last three weeks has host vectors and no bus behind it.
+- **Most of `dev` since `v1.1.1`.** The 2026-09-03 2k pass cleared gear
+  commissioning, the backup/restore core, and the contested classification; the
+  rest of the protocol work of the last three weeks still has host vectors and
+  no bus behind it.
 - Hardware round-trip for input-device configuration writes, DT6/DT8 helpers,
   memory operations, and vendor helpers. No write path reads its value back.
-- Gear or control-device commissioning on a real bus, and any physical collision
-  capture behind the `RX_ACTIVITY` classification.
-- The backup/restore path against real gear.
+- **Equal-random-address handling** — the largest untested slice. The two units
+  commissioned on 2026-09-03 drew distinct randoms, so the path never ran.
+- Control-device commissioning (`commission devices`) on a real bus.
+- `backup import`, `backup export`, and `restore groups` against real gear.
+  `backup save`/`status` and `restore plan`/`apply` are now covered.
+- The commissioning post-scan audit's own contested path. The scan path met a
+  real collision on 2026-09-03; the commission run that followed was clean, so
+  the audit's classification is still an inference.
 - `manifest.json`'s `>=2026.6.0` ESPHome floor, which is tested against nothing
   but whatever `pip install esphome` last resolved to. The 2026.8.1 end is now
   covered at both stages — schema validation and a full compile of the C++ layer
@@ -293,6 +311,20 @@ bus with no `query_address` anywhere in the YAML and is persisted to flash. The
 full investigation — captures, timings, and why a hand-picked margin does not
 survive this bus — is in `project_log.md`.
 
+### 2k site: the scan's unattributed-RX note counts occupancy events
+
+Every `discover` on this bus reports `N RX observation(s) fell outside active
+reply attribution`, N running 11-39. There is no timing fault. The Steinel at a0
+emits on four instances continuously, a 64-address walk is back-to-back TX, and
+events arriving outside `SCHED_IDLE`/`SCHED_WAIT_REPLY` are counted as ignored.
+Confirmed twice on 2026-09-03: the one scan run under `quiescent on all`
+printed no note at all, and HA's recorder shows the zone-2 occupancy sensor
+changing state 31 times in the same 18 minutes, tracking the operator standing
+in the corridor. The counter has since been split and the scan now reports
+control-device events on their own line, in words that do not call them a
+fault. What is still owed is a bus that shows the new numbers. Investigation in
+`project_log.md`.
+
 ### Observed Steinel instance layout
 
 | Instance | Type | Meaning | Authoritative handling |
@@ -310,11 +342,14 @@ a sensor value.
 
 ### P0 — Protocol correctness and conformance
 
-- **Hardware validation of everything commissioning-related.** Nothing in the
-  equal-random-address, mixed-device, control-device commissioning, or
-  backup/restore work has met a bus. The `RX_ACTIVITY` classification all of it
-  rests on has no physical collision capture behind it. Until then the
-  single-unaddressed-device operating envelope stands.
+- **Hardware validation of the rest of the commissioning work.** The 2026-09-03
+  2k pass cleared gear commissioning, `backup save`/`restore apply`, and — with
+  a real two-unit collision — the `RX_ACTIVITY` classification the whole safety
+  argument rests on. Still unmet by a bus: equal-random-address handling
+  (the two units drew distinct randoms, so the path never ran), control-device
+  commissioning, `backup import`/`export`, and `restore groups`. The
+  single-unaddressed-device envelope no longer stands on nothing, but the
+  equal-random path is where it is still an assumption.
 - **Prove bus timing beyond the local own-forward-frame guard.** TX-end and
   observation timestamps are exported and host-tested; HIL must validate both
   attribution edges (5.5 ms undecodable, 2 ms decoded) against the 27 ms close,
@@ -336,13 +371,23 @@ a sensor value.
   unsearchable at the first COMPARE — which presents exactly like the former
   silence/collision inversion, so an apparent improvement here would look like a
   partial fix for that and would not be one.
-- **The post-scan verification has no bus result.** Both walks now check
+- **`restore` cannot stage a unit the backup has never seen, and so fails to
+  converge after a mixed commissioning accident.** A unit absent from the
+  snapshot becomes `UNKNOWN_UNIT`, which marks its address immovable, which
+  drops any recorded unit aimed at that address as `TARGET_OCCUPIED`. On
+  2026-09-03 this produced a zero-move plan while a free address sat unused and
+  the operator hand-executed the three-command staging cycle `dali_restore.c`
+  already knows how to compute. Proposed: stage the unknown unit through a free
+  address rather than dropping the move, keeping today's refusal when the space
+  is full and for `UNIDENTIFIED` units. Reasoning in `project_log.md`.
+- **The post-scan verification has only a partial bus result.** Both walks now check
   themselves on every exit that could have written an address — including the
   failure paths, which are the only ones that can leave a short address written
   but unrecorded — and the diff behind it (`dali_commissioning_audit`) is host-
-  covered. What none of it has met is a bus. The classifications it reports rest
-  on `RX_ACTIVITY`, which has no physical collision capture behind it, so a
-  `contested` line is an inference the hardware pass still has to confirm.
+  covered. `RX_ACTIVITY` itself now has a real collision behind it, via the scan
+  path on 2026-09-03. What the audit's own contested path still lacks is a bus:
+  the commission run that session was clean, so its classification remains an
+  inference.
 
 ### P0 — Transaction and runtime reliability
 
@@ -378,6 +423,15 @@ The typed verb surface is in place; what is missing is evidence. Keep
 
 ### P1 — ESPHome correctness and architecture
 
+- **No addressing fault reaches Home Assistant.** `bus_fault` is a PHY liveness
+  signal (`"OK"` / `"Bus stuck: N"`) and reports correctly, but nothing surfaces
+  a contested short address — the one failure the bus cannot undo remotely. On
+  2026-09-03 the sensor read `OK` throughout a real collision, an address wipe,
+  and a commissioning walk. The scan already computes `undecodable_count` and
+  the per-address flags. Wanted: an addressing-health sensor, or a widened
+  `bus_fault` reporting `"Contested: a4"`. The same shape one layer along, group
+  membership changes do not reach the integration either, so a group light
+  entity cannot know its membership changed underneath it.
 - Extend the compact Part 103 dispatch key if a site needs to distinguish
   Device-Group from Instance-Group sources or match instance type. The canonical
   event/capture path retains these fields; the five-field rule key does not. No
@@ -389,6 +443,32 @@ The typed verb surface is in place; what is missing is evidence. Keep
 - The console's own dispatch has no host vectors. Its parsing, validation, and
   reply decoding are shared code that does, but the wiring in
   `dali_component.cpp` is ESPHome/FreeRTOS-bound and testable only on device.
+
+### P1 — Diagnostic shell correctness
+
+- **Confirm the split ignored-RX counters on the 2k bus.**
+  `rx_ignored_outside_reply` carried four unrelated facts and is now the sum of
+  seven named buckets: `rx_reply_early`, `rx_reply_late`, `rx_reply_superseded`,
+  `rx_event_unroutable`, `rx_event_no_subscriber`, `rx_undecodable_ignored` and
+  `rx_ignored_unclassified`. `status` prints the breakdown and the scan note
+  names each class in its own words, calling only early/late a timing signal.
+  Host-covered and mutation-checked; no bus has seen it. The experiment it was
+  built for: on 2k, `rx_event_unroutable` should account for almost all of the
+  11-39 the old note reported while early and late stay near zero — which is
+  what settles the 2026-08-13 reading that is currently in doubt. Run it before
+  bracketing the scan in quiescence, which would suppress the evidence.
+- **Assert quiescent for the duration of a scan.** The scan already enumerates
+  which addresses are input devices, in the same function that prints the note.
+  Two constraints: the release must cover every exit path, including cancelled
+  and errored scans, or the bus is left deaf to events; and `find switches` must
+  never do it, since listening for events is that verb's whole purpose.
+- **Add `address <aN> clear`.** Clearing a short address is a normal step in
+  resolving a collision and is the one address operation with no typed verb. The
+  fallback, `config-dtr0 <aN> set-short-address-dtr0 255`, is correct DALI but
+  prints a bare `OK` with no read-back and no warning when the subject is
+  already known to be contested. The verb should refuse or warn on a contested
+  subject, send the sequence atomically as `address set` does, and verify the
+  address went silent.
 
 ### P1 — Release and verification quality
 

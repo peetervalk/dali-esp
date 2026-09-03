@@ -312,6 +312,24 @@ static void inject_legacy_event(uint32_t data)
     inject_reply(data, 16u);
 }
 
+/*
+ * Every ignored observation increments exactly one bucket and the aggregate,
+ * so the sum is an invariant and not a convention. Worth asserting next to the
+ * per-bucket numbers because the aggregate is what the shell, the integration
+ * and every older vector still read.
+ */
+static void assert_ignored_buckets_sum(void)
+{
+    uint32_t sum = g_dali_stats.rx_reply_early +
+                   g_dali_stats.rx_reply_late +
+                   g_dali_stats.rx_reply_superseded +
+                   g_dali_stats.rx_event_unroutable +
+                   g_dali_stats.rx_event_no_subscriber +
+                   g_dali_stats.rx_undecodable_ignored +
+                   g_dali_stats.rx_ignored_unclassified;
+    TEST_ASSERT_EQUAL_UINT32(g_dali_stats.rx_ignored_outside_reply, sum);
+}
+
 /* ---------------------------------------------------------------------------
  * setUp / tearDown
  * --------------------------------------------------------------------------*/
@@ -752,6 +770,8 @@ void test_malformed_activity_keeps_the_standard_open_edge(void)
 
     TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_rx_activity);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_undecodable_ignored);
+    assert_ignored_buckets_sum();
 
     advance_time_ms(DALI_REPLY_TIMEOUT_MS);
     dali_sched_run();
@@ -784,6 +804,12 @@ void test_early_and_late_malformed_activity_do_not_become_replies(void)
                        DALI_ERR_MALFORMED);
     TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.reply_rx_activity);
     TEST_ASSERT_EQUAL_UINT32(2u, g_dali_stats.rx_ignored_outside_reply);
+    /* Both are undecodable waveforms. Neither is a statement about reply
+     * timing, which is the distinction the single counter could not make. */
+    TEST_ASSERT_EQUAL_UINT32(2u, g_dali_stats.rx_undecodable_ignored);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_reply_early);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_reply_late);
+    assert_ignored_buckets_sum();
 
     advance_time_ms(DALI_REPLY_TIMEOUT_MS);
     dali_sched_run();
@@ -1124,6 +1150,16 @@ void test_timestamped_phy_callback_rejects_early_and_late_backward_frames(void)
     TEST_ASSERT_EQUAL(1, g_cb_count);
     TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT, g_cb_result);
     TEST_ASSERT_EQUAL_UINT32(2u, g_dali_stats.rx_ignored_outside_reply);
+    /*
+     * One of each, and they mean opposite things: gear that answered before
+     * the window opened, and gear that answered after it closed. The aggregate
+     * has always read 2 here, which is why a bus reporting "2" could be read
+     * as either fault, or as neither.
+     */
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_reply_early);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_reply_late);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_unclassified);
+    assert_ignored_buckets_sum();
 }
 
 /* 4. Stray RX while idle must not complete the next transaction */
@@ -1131,6 +1167,11 @@ void test_stray_rx_while_idle_is_ignored(void)
 {
     inject_reply(0x11u, 8u);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+    /* Nothing has transmitted yet, so there is no edge to measure this
+     * against. Unclassified is the honest answer; guessing "late" here is the
+     * kind of inference the split exists to stop. */
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_unclassified);
+    assert_ignored_buckets_sum();
 
     DaliTransaction txn = {
         .frame        = { .data = 0x0B90u, .bit_length = 16u },
@@ -1153,6 +1194,8 @@ void test_stray_rx_while_idle_is_ignored(void)
     TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT, g_cb_result);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.reply_timeouts);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_unclassified);
+    assert_ignored_buckets_sum();
 }
 
 /* 5. A duplicate/stale RX frame must not overwrite the latched reply */
@@ -1181,6 +1224,10 @@ void test_stale_duplicate_rx_does_not_overwrite_latched_reply(void)
     TEST_ASSERT_EQUAL_HEX32(0xAAu, g_cb_reply.data);
     TEST_ASSERT_EQUAL_UINT8(8u, g_cb_reply.bit_length);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+    /* A duplicate arriving after the reply was latched. Not a timing fault:
+     * the first frame was in the window and was accepted. */
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_reply_superseded);
+    assert_ignored_buckets_sum();
 }
 
 /* 6a. Regression: reply received before run() is called must be accepted
@@ -1295,6 +1342,63 @@ void test_late_rx_after_reply_timeout_is_ignored(void)
     inject_reply(0xAFu, 8u);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.reply_timeouts);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+    /*
+     * This frame really is late, but it arrives through the frame-only entry
+     * point, which synthesises an observation with no timestamps. With no edge
+     * to compare against, the scheduler cannot prove late over early and says
+     * so. The timestamped version of exactly this case is 6c below.
+     */
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_unclassified);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_reply_late);
+    assert_ignored_buckets_sum();
+    TEST_ASSERT_EQUAL(1, g_cb_count);   /* no additional callback */
+}
+
+/*
+ * 6c. The same late reply, timestamped, is nameable.
+ *
+ * Late and early are the only two buckets that say anything about bus timing,
+ * and they point in opposite directions. This is the vector that makes a
+ * claim like "gear is answering past the timeout" checkable instead of
+ * inferred from a counter that also holds event traffic and noise.
+ */
+void test_timestamped_late_reply_after_timeout_counts_as_late(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .send_twice   = false,
+        .retries_left = 0u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+
+    advance_time_ms(DALI_REPLY_TIMEOUT_MS);
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT, g_cb_result);
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+
+    DaliPhyRxObservation observation = {
+        .result         = DALI_OK,
+        .frame          = { .data = 0xAFu,
+                            .bit_length = DALI_BACKWARD_FRAME_BITS },
+        .first_edge_us  = DALI_REPLY_WINDOW_CLOSE_US + 2u,
+        .last_edge_us   = DALI_REPLY_WINDOW_CLOSE_US + 2u + DALI_BIT_US * 9u,
+        .edge_count     = 16u,
+        .has_timestamps = true,
+    };
+    inject_phy_observation(&observation);
+
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_reply_late);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_reply_early);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_unclassified);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+    assert_ignored_buckets_sum();
     TEST_ASSERT_EQUAL(1, g_cb_count);   /* no additional callback */
 }
 
@@ -1455,6 +1559,11 @@ void test_event_subscriber_removal_stops_delivery(void)
     /* With nothing listening the frame is ignored, not routed. */
     TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.unsolicited_events_routed);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+    /* The state would have routed it; there was nobody to route it to. That
+     * is a fact about this build, not about the bus. */
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_event_no_subscriber);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_event_unroutable);
+    assert_ignored_buckets_sum();
 }
 
 void test_removing_an_unregistered_event_subscriber_is_ok(void)
@@ -1541,6 +1650,17 @@ void test_24bit_rx_during_settle_is_ignored_not_routed(void)
     TEST_ASSERT_EQUAL(SCHED_WAIT_SETTLE, dali_sched_state());
     TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.unsolicited_events_routed);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+    /*
+     * This is the 2k bus in miniature: a subscribed control device emits while
+     * the scheduler is mid-transmission, and the frame is dropped for the
+     * state it arrived in. A 64-address walk is back-to-back TX, so this is
+     * the bucket that made the scan note track whether someone was standing
+     * in the corridor. It is event traffic, not a timing fault.
+     */
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_event_unroutable);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_reply_early);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_reply_late);
+    assert_ignored_buckets_sum();
 
     advance_past_settle();
     dali_sched_run();
@@ -1580,6 +1700,10 @@ void test_unsolicited_24bit_during_reply_window_invalidates_query(void)
     TEST_ASSERT_EQUAL(1, g_mock_tx_count);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.unsolicited_events_routed);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+    /* The event routed; the backward frame behind it belongs to no query the
+     * scheduler can still complete, because the event invalidated it. */
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_reply_superseded);
+    assert_ignored_buckets_sum();
 
     /* Neither a late frame nor another run may complete or retry it again. */
     inject_reply(0x55u, 8u);
@@ -1612,6 +1736,10 @@ void test_16bit_frame_during_reply_window_invalidates_query(void)
     TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
     TEST_ASSERT_EQUAL(1, g_mock_tx_count);
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
+    /* No event callback is registered in this test, so the intervening 16-bit
+     * frame is ignored for want of a subscriber rather than for its state. */
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_event_no_subscriber);
+    assert_ignored_buckets_sum();
 
     inject_reply(0xAFu, 8u);
     dali_sched_run();
@@ -2972,6 +3100,7 @@ int main(void)
     RUN_TEST(test_timestamped_activity_captured_in_window_survives_delayed_run);
     RUN_TEST(test_rx_activity_window_handles_microsecond_clock_wrap);
     RUN_TEST(test_late_rx_after_reply_timeout_is_ignored);
+    RUN_TEST(test_timestamped_late_reply_after_timeout_counts_as_late);
     RUN_TEST(test_unsolicited_24bit_idle_routes_event);
     RUN_TEST(test_init_starts_with_no_subscribers);
     RUN_TEST(test_event_reaches_primary_callback_and_added_subscriber);
