@@ -457,9 +457,45 @@ as the plain number.
 Nothing converts for you, and nothing can reject the mistake:
 `special program-short 5` is a well-formed frame that programs short address
 **2**. An even value has bit 0 clear and is not a valid short address at all.
+`initialise`, `program-short` and `verify-short` therefore say what their
+parameter means before they send it, which is what catches a value typed as if
+it were the address:
+
+```text
+> special program-short 27
+special: 27 is the encoded form of a13
+
+> special program-short 5
+special: 5 is not a valid encoded short address
+special: a5 encodes as 11
+```
+
+The frame goes out either way — sending exactly what you typed is what `special`
+is for — so the echo tells you what you just did rather than preventing it. The
+value is that you find out on the line you typed instead of at the next `scan`.
+`address a<N> set a<M>` is the spelling that checks first and refuses.
 
 `initialise` takes `0` for all control gear, `255` for gear with no short
-address, or an encoded address to open the window for one device.
+address, or an encoded address to open the window for one device. Its `0` is the
+costly one to misread — typed as though it meant a0 it opens the addressing
+window on the whole bus — so the echo names the selection rather than decoding a
+number:
+
+```text
+> special initialise 0
+special: 0 opens the window for every control gear on the bus, not a0 -- a0 is 1
+
+> special initialise 27
+special: 27 opens the window for a13 only
+
+> special initialise 6
+special: 6 selects nothing -- 0 is every gear, 255 is unaddressed gear, anything else is an encoded short address
+special: a6 encodes as 13
+```
+
+An even parameter other than `0` selects no gear at all: the window opens for
+nobody, `compare` answers nothing, and the walk that follows looks like an empty
+bus rather than a typo.
 
 ## Device Type 6 — LED gear
 

@@ -1398,6 +1398,42 @@ Additive C API: `dali_group_map_move()`, `DALI_CLI_CMD_ADDRESS`, and the
 `test_cli`; the shell workflow compiles and carries **no real-bus result** —
 the probe/verify logic in particular has never seen a real reply window.
 
+## `special` says what an encoded parameter means before sending it
+
+**Output change, 2026-09-03.** `initialise`, `program-short` and `verify-short`
+now print what their parameter resolves to ahead of the frame:
+
+```text
+special: 27 is the encoded form of a13
+special: 5 is not a valid encoded short address
+special: a5 encodes as 11
+special: 0 opens the window for every control gear on the bus, not a0 -- a0 is 1
+special: 27 opens the window for a13 only
+special: 6 selects nothing -- 0 is every gear, 255 is unaddressed gear, ...
+```
+
+`program-short`/`verify-short` name `255` as the "no short address" value rather
+than calling it invalid. `initialise` is read against its own three-way rule
+instead of the encoding alone, because `0` and `255` are selections there, not
+addresses -- and `0` is the one that costs the most to misread, opening the
+addressing window on the whole bus when it was typed meaning a0. An even
+parameter other than `0` selects no gear at all, which is worth saying because
+the failure is silent: the window opens for nobody and the walk that follows
+looks like an empty bus.
+
+Parameters are unchanged and still raw bytes. `special` exists to put a literal
+frame on the bus, so converting an argument would break the only thing the verb
+promises -- the same reason `config-dtr0 set-short-address-dtr0` was left taking
+its literal DTR0 byte. Nor is the echo a gate: the frame goes out either way. It
+earns its place because these parameters accept a wrong value as a well-formed
+frame that nothing downstream can reject, so without the line the mistake
+surfaces at the next `scan` instead of on the line that caused it.
+`address a<N> set a<M>` remains the spelling that checks first and refuses.
+
+Anything scraping `special` output for these three names sees one or two extra
+lines before the result. No C API change. The shell plumbing compiles and
+carries **no real-bus result**.
+
 ## Source-level API migrations
 
 The RX-observation and cleanup work changes public source interfaces. External

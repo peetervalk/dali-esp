@@ -582,6 +582,21 @@ Typing the plain number is not rejected, because it is a perfectly valid frame:
 bit 0 clear and is not a valid short address at all. Read the table before you
 type the command.
 
+`special program-short`, `special verify-short` and `special initialise` do at
+least say what their parameter means before they send it, so a misread line
+surfaces on the spot rather than at the next `scan`:
+
+```text
+> special program-short 5
+special: 5 is not a valid encoded short address
+special: a5 encodes as 11
+```
+
+The frame still goes out — sending exactly what you typed is what `special` is
+for, and an echo that refused would make it something else. `config-dtr0
+set-short-address-dtr0` prints no such line: its argument is the literal DTR0
+byte and stays that way.
+
 Re-addressing a fixture in place needs no INITIALISE window, no RANDOMISE, and
 nothing to terminate afterwards — SET SHORT ADDRESS is an ordinary addressed
 configuration command. Written out by hand, the raw spelling and the checks the
@@ -652,7 +667,7 @@ console refuses them regardless with `commissioning special; use the native CLI`
 
 | Name | What it does alone |
 |---|---|
-| `initialise <param>` | Opens a 15-minute initialisation window. `0` = all gear, `255` = only gear with no short address, encoded address = that one device |
+| `initialise <param>` | Opens a 15-minute initialisation window. `0` = all gear, `255` = only gear with no short address, encoded address = that one device. Echoes which of the three it read; an even parameter other than `0` selects nothing |
 | `randomise` | Every gear in the window draws a new 24-bit random address. **Cannot be undone** |
 | `search-h/m/l <byte>` | Loads one byte of the 24-bit search address that the next `compare` tests against |
 | `compare` | `yes` if any gear in the window has a random address at or below the search address |

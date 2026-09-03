@@ -2043,6 +2043,74 @@ static void cmd_query(const DaliCliTokens *t)
     }
 }
 
+/*
+ * INITIALISE, PROGRAM SHORT ADDRESS and VERIFY SHORT ADDRESS all carry a short
+ * address as data, in the encoded form (a << 1) | 1. A plain address typed into
+ * any of them is a well-formed frame naming a different fixture, and nothing
+ * downstream can reject it.
+ *
+ * `special` is the verb that puts a literal frame on the bus, so the parameter
+ * stays the raw byte -- converting it would make the one verb whose whole
+ * promise is "send exactly this" send something else. The frame goes out
+ * either way; these lines say what it means, so a misread parameter surfaces
+ * on the line that caused it rather than at the next `scan`. `address a<N> set
+ * a<M>` is the spelling that takes plain addresses and refuses.
+ */
+static void shell_special_encoding_hint(uint8_t param)
+{
+    /* Only when the operator plausibly typed an address where the encoded byte
+     * belongs. Above 63 there is no address to suggest. */
+    if (param <= DALI_MAX_SHORT_ADDRESS) {
+        shell_printf("special: a%u encodes as %u\r\n",
+                     (unsigned)param,
+                     (unsigned)dali_commissioning_encode_short_address(param));
+    }
+}
+
+static void shell_special_explain_param(DaliCommandId id, uint8_t param)
+{
+    uint8_t    decoded = 0u;
+    const bool decodes =
+        dali_commissioning_decode_short_address(param, &decoded) == DALI_OK;
+
+    if (id == DALI_CMD_INITIALISE) {
+        /*
+         * Here 0 and 0xFF are selections rather than addresses, and 0 is the
+         * costly one to get wrong: typed as though it meant a0, it opens the
+         * addressing window on every piece of gear on the bus.
+         */
+        if (param == 0u) {
+            shell_printf("special: 0 opens the window for every control gear "
+                         "on the bus, not a0 -- a0 is 1\r\n");
+        } else if (param == DALI_INITIALISE_UNADDRESSED_PARAM) {
+            shell_printf("special: 255 opens the window for gear with no short "
+                         "address\r\n");
+        } else if (decodes) {
+            shell_printf("special: %u opens the window for a%u only\r\n",
+                         (unsigned)param, (unsigned)decoded);
+        } else {
+            shell_printf("special: %u selects nothing -- 0 is every gear, 255 "
+                         "is unaddressed gear, anything else is an encoded "
+                         "short address\r\n", (unsigned)param);
+            shell_special_encoding_hint(param);
+        }
+        return;
+    }
+
+    /* PROGRAM and VERIFY SHORT ADDRESS. */
+    if (param == DALI_COMMISSIONING_NO_SHORT_ADDRESS) {
+        shell_printf("special: %u is the 'no short address' value\r\n",
+                     (unsigned)param);
+    } else if (decodes) {
+        shell_printf("special: %u is the encoded form of a%u\r\n",
+                     (unsigned)param, (unsigned)decoded);
+    } else {
+        shell_printf("special: %u is not a valid encoded short address\r\n",
+                     (unsigned)param);
+        shell_special_encoding_hint(param);
+    }
+}
+
 static void cmd_special(const DaliCliTokens *t)
 {
     const DaliCliGearCommand *spec = dali_cli_special_find(t->tok[1]);
@@ -2075,6 +2143,12 @@ static void cmd_special(const DaliCliTokens *t)
     } else if (t->count != 2u) {
         shell_printf("usage: special %s\r\n", spec->name);
         return;
+    }
+
+    if (spec->id == DALI_CMD_INITIALISE ||
+        spec->id == DALI_CMD_PROGRAM_SHORT_ADDRESS ||
+        spec->id == DALI_CMD_VERIFY_SHORT_ADDRESS) {
+        shell_special_explain_param(spec->id, param);
     }
 
     const DaliCommandInfo *cmd = dali_command_lookup(spec->id);
