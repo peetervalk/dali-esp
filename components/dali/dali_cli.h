@@ -147,6 +147,7 @@ typedef enum {
     DALI_CLI_CMD_SPECIAL,
     DALI_CLI_CMD_CONFIG,
     DALI_CLI_CMD_CONFIG_DTR0,
+    DALI_CLI_CMD_ADDRESS,
 
     DALI_CLI_CMD_MEMREAD,
     DALI_CLI_CMD_MEMINFO,
@@ -197,11 +198,14 @@ typedef struct {
     uint8_t          min_args; /* argument count bounds, excluding the verb   */
     uint8_t          max_args;
     /*
-     * For a verb whose first argument is a fixed keyword rather than a value,
-     * the accepted keywords, space-separated. Handlers test membership with
-     * dali_cli_has_subcommand() instead of comparing their own literals, so the
-     * usage line and what the handler accepts cannot drift apart. NULL when the
-     * first argument is a value.
+     * For a verb that takes a fixed keyword rather than a value in one of its
+     * argument positions, the accepted keywords, space-separated. Handlers test
+     * membership with dali_cli_has_subcommand() instead of comparing their own
+     * literals, so the usage line and what the handler accepts cannot drift
+     * apart. Usually the first argument (`commission unaddressed`), but not
+     * always: `address` names its subject first and the keyword second
+     * (`address a5 set a13`), and the membership test does not care which.
+     * NULL when the verb takes no keyword.
      */
     const char      *subcommands;
 } DaliCliCommandSpec;

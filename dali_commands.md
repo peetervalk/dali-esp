@@ -129,6 +129,7 @@ named form.
 | `cont-up` `cont-down` `dapc-seq` `last` `scene` | yes | yes |
 | `status` `query` | yes | yes |
 | `config` `config-dtr0` | yes | yes, minus `set-short-address-dtr0` |
+| `address` | yes | no — a multi-frame workflow that claims the bus, like `scan` |
 | `special` | yes | yes, minus commissioning primitives |
 | `dt6` | yes | yes |
 | `dt8` | yes | no — held until real DT8 gear is available |
@@ -329,6 +330,68 @@ without `allow_commissioning: true`, and the console refuses it outright with
 DTR0 already holding `0xFF`, plain `config <t> set-short-address-dtr0`
 de-addresses exactly as the `config-dtr0` form does, so gating only one of them
 would be a hole rather than a difference.
+
+## Address and Group Membership
+
+```text
+address <aN> set <aM>
+address <aN> add <gN>
+address <aN> remove <gN>
+```
+
+The checked way to change what one piece of gear answers to. DALI addresses gear
+three ways — one short address, up to sixteen group addresses, and broadcast —
+and this verb changes the first two for a single unit. Every argument is written
+the way a target is, so the prefix says which kind of address is meant and
+`address a5 add a13` is refused rather than guessed at.
+
+It stands to `config` and `config-dtr0` as `commission` stands to the addressing
+specials: same frames, plus the checks that make them safe to type. The raw
+spellings are unchanged and still available.
+
+| Subverb | Sends | Checks |
+|---|---|---|
+| `set <aM>` | DTR0 + SET SHORT ADDRESS, one sequence | destination is empty and source answers, **before**; destination answers and source is silent, **after** |
+| `add <gN>` | ADD TO GROUP | reads both group bytes back and prints the resulting membership |
+| `remove <gN>` | REMOVE FROM GROUP | the same read-back |
+
+```text
+> address a5 set a13
+address: a5 -> a13 (DTR0=27)
+address: a13 confirmed, a5 silent
+
+> address a5 add g3
+address: a5 is in g1 g3
+```
+
+The subject must be a single short address. Every arm reads its result back off
+the bus, and a group or broadcast subject has no single answer to read — the
+collision that produces is indistinguishable from silence. Multi-unit group
+edits stay on `config g<N> add-group`, where a scan is needed afterwards anyway.
+
+A destination that cannot be shown to be free stops the move. Undecodable
+activity in the reply window (`DALI_ERR_RX_ACTIVITY`) is what two units sharing
+an address sound like, so it is reported as "cannot tell" rather than read as
+free:
+
+```text
+> address a5 set a13
+address: a13 already answers; refusing to move a5 onto it
+> address a5 set a13
+address: cannot tell whether a13 is free (rx-activity); nothing sent
+```
+
+Because a confirmed move names both ends, the integration can follow it. A
+re-address through `address` moves the group-membership bookkeeping with the
+gear and costs no rescan; `config-dtr0 set-short-address-dtr0` carries its
+destination out of band, so it still drops the caches and warns. What cannot
+follow is an entity configured in YAML against the old address — that is logged,
+not guessed at.
+
+`set` is gated exactly as `config <t> set-short-address-dtr0` is: refused
+without `allow_commissioning: true`. `add` and `remove` are gated on neither
+spelling. The whole verb is absent from the console, like every other verb that
+claims the bus for a multi-frame workflow.
 
 ## Special Commands
 

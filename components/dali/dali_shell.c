@@ -2294,6 +2294,341 @@ static void cmd_config_dtr0(const DaliCliTokens *t)
     shell_print_sequence_result(spec->name, err, &seq_result);
 }
 
+/* ---------------------------------------------------------------------------
+ * `address` — the checked way to change what one gear answers to
+ *
+ * DALI addresses gear three ways: one short address, up to sixteen group
+ * addresses, and broadcast. This verb changes the first two for a single unit,
+ * and every argument it takes is written the way a target is — `a13`, `g1` —
+ * so the prefix says which kind of address is meant, and `address a5 add a13`
+ * is a refusal rather than a surprise.
+ *
+ * It sits above `config` and `config-dtr0` the way `commission` sits above the
+ * addressing specials, and for the same reason: the frames are the easy part.
+ * `config-dtr0 a5 set-short-address-dtr0 27` is one line that re-addresses a
+ * fixture, but 27 is the *encoded* form of a13 ((a << 1) | 1), the destination
+ * may already be occupied, and a config command's unacknowledged write says
+ * nothing about whether the gear took it. Doing that safely is the sequence the
+ * documentation asks operators to type by hand: probe the destination, send,
+ * scan, identify. This verb runs it, and refuses rather than guessing when the
+ * bus does not answer clearly.
+ *
+ * The raw spellings stay exactly as they were. `config-dtr0` still takes the
+ * literal DTR0 byte for every name it accepts, this one included — a verb whose
+ * argument meant something different for a single command would break the only
+ * thing that verb promises.
+ * --------------------------------------------------------------------------*/
+
+/*
+ * Whether a short address is occupied, as a three-way answer.
+ *
+ * The third arm is the one that matters. DALI_ERR_RX_ACTIVITY means something
+ * did drive the reply window and could not be decoded — gear whose replies
+ * collided, which is exactly what two units sharing an address look like. A
+ * two-way present/absent reading would fold that into "free" and move a third
+ * unit onto the pile.
+ */
+typedef enum {
+    SHELL_PRESENCE_ABSENT = 0,
+    SHELL_PRESENCE_PRESENT,
+    SHELL_PRESENCE_UNKNOWN,
+} ShellPresence;
+
+static ShellPresence shell_address_presence(uint8_t addr, DaliError *err_out)
+{
+    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = addr };
+    DaliFrame  reply  = {0u, 0u};
+
+    DaliError err = shell_query_status(target, &reply);
+    if (err_out != NULL) {
+        *err_out = err;
+    }
+
+    if (err == DALI_OK) {
+        return SHELL_PRESENCE_PRESENT;
+    }
+    if (err == DALI_ERR_TIMEOUT) {
+        return SHELL_PRESENCE_ABSENT;
+    }
+    return SHELL_PRESENCE_UNKNOWN;
+}
+
+/* Both group-membership bytes as one 16-bit mask, bit g set for group g. */
+static DaliError shell_address_read_groups(uint8_t addr, uint16_t *mask_out)
+{
+    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = addr };
+    uint8_t    low    = 0u;
+    uint8_t    high   = 0u;
+
+    DaliError err = shell_query_u8(target, DALI_CMD_QUERY_GROUPS_0_7, 0u, &low);
+    if (err == DALI_OK) {
+        err = shell_query_u8(target, DALI_CMD_QUERY_GROUPS_8_15, 0u, &high);
+    }
+    if (err == DALI_OK && mask_out != NULL) {
+        *mask_out = (uint16_t)((uint16_t)low | (uint16_t)((uint16_t)high << 8u));
+    }
+    return err;
+}
+
+static void shell_address_print_groups(uint8_t addr, uint16_t mask)
+{
+    shell_printf("address: a%u is in", (unsigned)addr);
+    if (mask == 0u) {
+        shell_printf(" no groups\r\n");
+        return;
+    }
+    for (uint8_t g = 0u; g < DALI_GROUP_COUNT; g++) {
+        if ((mask & (uint16_t)(1u << g)) != 0u) {
+            shell_printf(" g%u", (unsigned)g);
+        }
+    }
+    shell_printf("\r\n");
+}
+
+static void shell_address_set(uint8_t from, uint8_t to)
+{
+    if (from == to) {
+        shell_printf("address: a%u already answers a%u; nothing sent\r\n",
+                     (unsigned)from, (unsigned)to);
+        return;
+    }
+
+    DaliError err = DALI_OK;
+
+    /*
+     * The destination must be empty first. Two pieces of gear on one short
+     * address is the contested state nothing on the bus can separate remotely,
+     * so this probe is most of why the verb exists.
+     */
+    ShellPresence dest = shell_address_presence(to, &err);
+    if (dest == SHELL_PRESENCE_PRESENT) {
+        shell_printf("address: a%u already answers; refusing to move a%u onto it\r\n",
+                     (unsigned)to, (unsigned)from);
+        return;
+    }
+    if (dest == SHELL_PRESENCE_UNKNOWN) {
+        shell_printf("address: cannot tell whether a%u is free (%s); nothing sent\r\n",
+                     (unsigned)to, shell_err(err));
+        return;
+    }
+
+    /* And there must be something at the source to move. */
+    ShellPresence src = shell_address_presence(from, &err);
+    if (src == SHELL_PRESENCE_ABSENT) {
+        shell_printf("address: a%u does not answer; nothing to re-address\r\n",
+                     (unsigned)from);
+        return;
+    }
+    if (src == SHELL_PRESENCE_UNKNOWN) {
+        shell_printf("address: cannot tell what is at a%u (%s); nothing sent\r\n",
+                     (unsigned)from, shell_err(err));
+        return;
+    }
+
+    /*
+     * DTR0 then SET SHORT ADDRESS DTR0, as one contiguous sequence so nothing
+     * can redirect DTR0 between the two frames. The encoding is applied here
+     * and named in the output, because the gear is about to stop answering the
+     * address that would let anyone ask it what happened.
+     */
+    const uint8_t encoded = dali_commissioning_encode_short_address(to);
+    shell_printf("address: a%u -> a%u (DTR0=%u)\r\n",
+                 (unsigned)from, (unsigned)to, (unsigned)encoded);
+
+    const DaliCommandInfo *cmd =
+        dali_command_lookup(DALI_CMD_SET_SHORT_ADDRESS_DTR0);
+    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = from };
+    DaliFrame  dtr_frame;
+    DaliFrame  config_frame;
+
+    err = dali_control_build_dtr(DALI_DTR0, encoded, &dtr_frame);
+    if (err == DALI_OK) {
+        err = dali_control_build_config(target, DALI_CMD_SET_SHORT_ADDRESS_DTR0,
+                                        0u, &config_frame);
+    }
+    if (err == DALI_OK && cmd == NULL) {
+        err = DALI_ERR_INVALID;
+    }
+    if (err != DALI_OK) {
+        dali_cli_print_error(&s_out, "address", err);
+        return;
+    }
+
+    DaliSequence seq = {
+        .steps = {
+            { .frame = dtr_frame },
+            { .frame = config_frame, .send_twice = cmd->send_twice },
+        },
+        .step_count = 2u,
+    };
+
+    DaliSequenceResult seq_result;
+    err = shell_sched_sequence_sync(&seq, &seq_result);
+    if (err != DALI_OK) {
+        shell_print_sequence_result("address", err, &seq_result);
+        return;
+    }
+
+    /*
+     * Confirm both ends before anything is told the move happened. A cache
+     * pointed at an address the gear did not actually take is worse than a
+     * cache dropped, so an unconfirmed move reports and calls no hook.
+     */
+    DaliError     dest_err = DALI_OK;
+    ShellPresence now_to   = shell_address_presence(to, &dest_err);
+    if (now_to != SHELL_PRESENCE_PRESENT) {
+        shell_printf("address: a%u does not answer after the write (%s); "
+                     "run 'scan' -- the gear may still be at a%u\r\n",
+                     (unsigned)to, shell_err(dest_err), (unsigned)from);
+        return;
+    }
+
+    DaliError     src_err  = DALI_OK;
+    ShellPresence now_from = shell_address_presence(from, &src_err);
+    if (now_from == SHELL_PRESENCE_PRESENT) {
+        shell_printf("address: a%u still answers as well; two units may now "
+                     "share an address -- run 'scan' before sending anything "
+                     "else\r\n", (unsigned)from);
+        return;
+    }
+    if (now_from != SHELL_PRESENCE_ABSENT) {
+        shell_printf("address: a%u answers a%u, but whether a%u went silent is "
+                     "unreadable (%s); run 'scan'\r\n",
+                     (unsigned)to, (unsigned)to, (unsigned)from,
+                     shell_err(src_err));
+        return;
+    }
+
+    shell_printf("address: a%u confirmed, a%u silent\r\n",
+                 (unsigned)to, (unsigned)from);
+
+    if (s_session.hooks.short_address_moved != NULL) {
+        s_session.hooks.short_address_moved(s_session.hooks.ctx, from, to);
+    }
+}
+
+static void shell_address_group(uint8_t addr, bool add, uint8_t group)
+{
+    const DaliCommandId    id   = add ? DALI_CMD_ADD_TO_GROUP
+                                      : DALI_CMD_REMOVE_FROM_GROUP;
+    const DaliCommandInfo *cmd  = dali_command_lookup(id);
+    const char            *verb = add ? "add" : "remove";
+    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = addr };
+
+    DaliFrame frame;
+    DaliError err = dali_control_build_config(target, id, group, &frame);
+    if (err == DALI_OK && cmd == NULL) {
+        err = DALI_ERR_INVALID;
+    }
+    if (err == DALI_OK) {
+        err = shell_send_no_reply(&frame, cmd->send_twice);
+    }
+    if (err != DALI_OK) {
+        dali_cli_print_error(&s_out, "address", err);
+        return;
+    }
+
+    shell_notify_config_applied(target, id, group);
+
+    /*
+     * Read the membership back out of the gear rather than reporting what was
+     * asked for. A group command is unacknowledged, so a driver that ignored it
+     * and one that took it are identical from here until something asks.
+     */
+    uint16_t mask = 0u;
+    err = shell_address_read_groups(addr, &mask);
+    if (err != DALI_OK) {
+        shell_printf("address: %s g%u sent, but a%u did not report its groups "
+                     "back (%s)\r\n",
+                     verb, (unsigned)group, (unsigned)addr, shell_err(err));
+        return;
+    }
+
+    const bool member = (mask & (uint16_t)(1u << group)) != 0u;
+    if (member != add) {
+        shell_printf("address: a%u did not take '%s g%u' -- it reads back as %s "
+                     "the group\r\n",
+                     (unsigned)addr, verb, (unsigned)group,
+                     member ? "still in" : "not in");
+    }
+    shell_address_print_groups(addr, mask);
+}
+
+static void cmd_address(const DaliCliTokens *t)
+{
+    const DaliCliCommandSpec *usage =
+        dali_cli_command_for_id(DALI_CLI_CMD_ADDRESS);
+    DaliTarget subject;
+
+    /*
+     * One short address only. Every arm of this verb reads its result back off
+     * the bus, and a group or broadcast subject has no single answer to read:
+     * the collision that produces is indistinguishable from silence. Multi-unit
+     * edits stay on `config g<N> add-group`, where the docs already say a scan
+     * is needed afterwards.
+     */
+    if (!dali_cli_parse_target(t->tok[1], &subject) ||
+        subject.type != DALI_ADDR_SHORT) {
+        shell_printf("address: the subject must be one short address (a0-a%u); "
+                     "group and broadcast cannot be read back\r\n",
+                     (unsigned)DALI_MAX_SHORT_ADDRESS);
+        dali_cli_print_usage(&s_out, usage);
+        return;
+    }
+
+    if (!dali_cli_has_subcommand(usage, t->tok[2])) {
+        dali_cli_print_usage(&s_out, usage);
+        return;
+    }
+
+    DaliTarget arg;
+    if (!dali_cli_parse_target(t->tok[3], &arg)) {
+        dali_cli_print_usage(&s_out, usage);
+        return;
+    }
+
+    const bool is_set = (strcmp(t->tok[2], "set") == 0);
+
+    if (is_set && arg.type != DALI_ADDR_SHORT) {
+        shell_printf("address: 'set' takes a short address (a0-a%u)\r\n",
+                     (unsigned)DALI_MAX_SHORT_ADDRESS);
+        return;
+    }
+    if (!is_set && arg.type != DALI_ADDR_GROUP) {
+        shell_printf("address: '%s' takes a group (g0-g%u)\r\n",
+                     t->tok[2], (unsigned)DALI_MAX_GROUP);
+        return;
+    }
+
+    /*
+     * `set` is re-addressing, and is gated exactly as
+     * `config <t> set-short-address-dtr0` is. A friendlier spelling of a
+     * restricted operation that skipped the restriction would be a hole rather
+     * than a convenience. Group membership is gated on neither verb.
+     */
+    if (is_set &&
+        !shell_policy_allows(DALI_SHELL_ALLOW_COMMISSION, "address set")) {
+        return;
+    }
+
+    /* Held across the probes, the write, and the read-back, so the
+     * integration's own polling cannot interleave and answer for the gear. */
+    if (!shell_bus_claim("address")) {
+        shell_printf("address: bus busy\r\n");
+        return;
+    }
+
+    if (is_set) {
+        shell_address_set(subject.address, arg.address);
+    } else {
+        shell_address_group(subject.address,
+                            strcmp(t->tok[2], "add") == 0,
+                            arg.address);
+    }
+
+    shell_bus_release();
+}
+
 static void shell_print_input_instance(const DaliInputInstanceInfo *info)
 {
     if (info == NULL) {
@@ -5369,6 +5704,7 @@ static void shell_execute(DaliCliCommandId id, const DaliCliTokens *t)
         case DALI_CLI_CMD_SPECIAL:      cmd_special(t); break;
         case DALI_CLI_CMD_CONFIG:       cmd_config(t); break;
         case DALI_CLI_CMD_CONFIG_DTR0:  cmd_config_dtr0(t); break;
+        case DALI_CLI_CMD_ADDRESS:      cmd_address(t); break;
 
         case DALI_CLI_CMD_MEMREAD:      cmd_memread(t); break;
         case DALI_CLI_CMD_MEMINFO:      cmd_meminfo(t); break;

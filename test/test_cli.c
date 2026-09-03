@@ -25,7 +25,10 @@ void tearDown(void) {}
  * Capture helper
  * --------------------------------------------------------------------------*/
 
-static char              s_capture[4096];
+/* Large enough for the whole verb table's help. This is the harness's limit,
+ * not the CLI's -- print_help() streams through the sink a row at a time -- so
+ * it grows with the table rather than the table shrinking to fit it. */
+static char              s_capture[8192];
 static DaliCliBufferSink s_sink;
 
 static DaliCliOut capture_begin(void)
@@ -1021,6 +1024,81 @@ static void test_special_commissioning_set(void)
  * and permits the easier one, so this asserts the set by name rather than by
  * whether the command happens to consume DTR0.
  */
+/*
+ * The `address` verb's shape.
+ *
+ * It is the checked tier over `config`/`config-dtr0`, so its arguments are
+ * addresses written the way targets are, and the keyword sits second rather
+ * than first. That last part is unusual enough in this table to be worth
+ * asserting: dali_cli_has_subcommand() does not care about position, and a
+ * handler that assumed tok[1] would silently accept `address set a5`.
+ */
+static void test_address_verb_shape(void)
+{
+    const DaliCliCommandSpec *spec = dali_cli_command_find("address");
+    TEST_ASSERT_NOT_NULL(spec);
+    TEST_ASSERT_EQUAL(DALI_CLI_CMD_ADDRESS, spec->id);
+
+    /* Subject, keyword, argument -- always exactly three. */
+    TEST_ASSERT_EQUAL_UINT8(3u, spec->min_args);
+    TEST_ASSERT_EQUAL_UINT8(3u, spec->max_args);
+
+    TEST_ASSERT_TRUE(dali_cli_has_subcommand(spec, "set"));
+    TEST_ASSERT_TRUE(dali_cli_has_subcommand(spec, "add"));
+    TEST_ASSERT_TRUE(dali_cli_has_subcommand(spec, "remove"));
+    /* The config table's spellings are not this verb's. */
+    TEST_ASSERT_FALSE(dali_cli_has_subcommand(spec, "add-group"));
+    TEST_ASSERT_FALSE(dali_cli_has_subcommand(spec, "set-short-address-dtr0"));
+}
+
+/*
+ * Both halves of an `address` line parse through dali_cli_parse_target(), which
+ * is what makes `a13` and `g1` self-describing: the handler type-checks what
+ * came back rather than guessing from the keyword. Assert the discrimination
+ * those refusals rest on.
+ */
+static void test_address_arguments_are_targets(void)
+{
+    DaliTarget v;
+
+    TEST_ASSERT_TRUE(dali_cli_parse_target("a13", &v));
+    TEST_ASSERT_EQUAL(DALI_ADDR_SHORT, v.type);
+    TEST_ASSERT_EQUAL_UINT8(13u, v.address);
+
+    TEST_ASSERT_TRUE(dali_cli_parse_target("g1", &v));
+    TEST_ASSERT_EQUAL(DALI_ADDR_GROUP, v.type);
+    TEST_ASSERT_EQUAL_UINT8(1u, v.address);
+
+    /* `address b set ...` and `address g1 set ...` are refused on this type,
+     * because neither subject can be read back off the bus. */
+    TEST_ASSERT_TRUE(dali_cli_parse_target("b", &v));
+    TEST_ASSERT_EQUAL(DALI_ADDR_BROADCAST, v.type);
+
+    /* A bare number is a short address, so `address a5 add 1` is caught as
+     * "add takes a group" rather than quietly meaning g1. */
+    TEST_ASSERT_TRUE(dali_cli_parse_target("1", &v));
+    TEST_ASSERT_EQUAL(DALI_ADDR_SHORT, v.type);
+}
+
+/*
+ * `set` re-addresses gear, so it must be gated wherever the config spelling is.
+ * The gate itself lives in the shell, but the fact it is the same operation is
+ * asserted here: if SET SHORT ADDRESS ever left the commissioning set, the
+ * `address` verb would need to stop being gated too, and this pins the pair.
+ */
+static void test_address_set_is_the_gated_operation(void)
+{
+    const DaliCliGearCommand *spec =
+        dali_cli_config_find("set-short-address-dtr0");
+    TEST_ASSERT_NOT_NULL(spec);
+    TEST_ASSERT_TRUE(dali_cli_config_is_commissioning(spec->id));
+
+    /* Group membership is not gated on either spelling. */
+    const DaliCliGearCommand *add = dali_cli_config_find("add-group");
+    TEST_ASSERT_NOT_NULL(add);
+    TEST_ASSERT_FALSE(dali_cli_config_is_commissioning(add->id));
+}
+
 static void test_config_commissioning_set(void)
 {
     const DaliCliGearCommand *spec =
@@ -1267,6 +1345,9 @@ int main(void)
 
     RUN_TEST(test_special_commissioning_set);
     RUN_TEST(test_config_commissioning_set);
+    RUN_TEST(test_address_verb_shape);
+    RUN_TEST(test_address_arguments_are_targets);
+    RUN_TEST(test_address_set_is_the_gated_operation);
     RUN_TEST(test_config_broadcast_rejection_set);
 
     RUN_TEST(test_format_status_names_only_the_set_flags);

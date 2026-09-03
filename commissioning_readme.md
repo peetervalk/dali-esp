@@ -371,10 +371,10 @@ miss.
 
 | What changed on site | What to send |
 |---|---|
-| A fixture joins a room | `config a<N> add-group <G>` |
-| A fixture leaves a room | `config a<N> remove-group <G>` |
+| A fixture joins a room | `address a<N> add g<G>` |
+| A fixture leaves a room | `address a<N> remove g<G>` |
 | A whole room moves as one | `config g<S> add-group <D>`, then `config g<S> remove-group <S>` |
-| A fixture needs a different short address | `config-dtr0 a<N> set-short-address-dtr0 <encoded>` |
+| A fixture needs a different short address | `address a<N> set a<M>` |
 | A fixture is gone for good | `config-dtr0 a<N> set-short-address-dtr0 255`, then `group forget <N>` |
 | New gear on a bus that already works | `commission unaddressed` |
 | The whole installation is being redone | Read [Starting over](#starting-over) before typing anything |
@@ -407,6 +407,19 @@ query a5 groups-8-15     # bit N set means member of group N+8
 ```
 
 Moving one fixture from the hallway (group 1) to the kitchen (group 3):
+
+```text
+> address a5 add g3
+address: a5 is in g1 g3
+> address a5 remove g1
+address: a5 is in g3
+> max g3                 # it should light with the kitchen
+```
+
+`address` reads the membership back out of the gear after each edit and prints
+what it found. A group command is unacknowledged, so a driver that took the
+change and one that ignored it are identical from the bus until something asks —
+which is why the raw spelling below has you ask by hand:
 
 ```text
 query a5 groups-0-7      # before
@@ -503,11 +516,57 @@ remove-group <g>` is the right verb: it reconfigures the device.
 
 ### Short addresses on gear that already has one
 
-Every command that carries a short address as *data* rather than as an address
-byte carries it **encoded** as `(address << 1) | 1`, with `0xFF` meaning "no
-short address". Nothing in the shell does this conversion for you: the DTR0
-value for `set-short-address-dtr0`, and the parameters of `special program-short`
-and `special verify-short`, are all raw bytes in the range `0-255`.
+`address <subject> set <destination>` is the verb for this. Both arguments are
+written the way a target is, and it checks the bus rather than trusting the
+line you typed:
+
+```text
+> address a5 set a13
+address: a5 -> a13 (DTR0=27)
+address: a13 confirmed, a5 silent
+```
+
+Four things happen behind those two lines. The destination is probed and the
+move refused if anything answers there — two pieces of gear on one short address
+is the `contested` condition described above, and nothing on the bus can
+separate them remotely. The source is probed, so a typo'd subject fails instead
+of writing into silence. DTR0 and SET SHORT ADDRESS go out as one sequence, so
+nothing can redirect DTR0 between them. Then both ends are read back: `a13` must
+answer and `a5` must not.
+
+Only after that does the controller hear about the move, and because the verb
+named both ends it can move its group-membership bookkeeping with the gear
+instead of dropping it. A re-address through `address` does not cost you a
+rescan; the raw spelling below still does.
+
+Every refusal leaves the bus untouched and says which check failed:
+
+```text
+> address a5 set a13
+address: a13 already answers; refusing to move a5 onto it
+
+> address a5 set a13
+address: cannot tell whether a13 is free (rx-activity); nothing sent
+```
+
+The second is the important one. Undecodable activity in the reply window is
+what two units sharing an address sound like, so it is not read as "free".
+
+`set` is gated exactly as the raw spelling is: a session refuses it with
+`refused by session policy` unless the YAML says `allow_commissioning: true`.
+The verb is not reachable from the **DALI Command** text entity at all — like
+`scan` and `commission`, it claims the bus and runs a multi-frame workflow,
+which is not what that surface is for.
+
+#### The raw spelling, and the encoding it needs
+
+`config-dtr0 <target> set-short-address-dtr0 <byte>` still does the write with
+no checks, and its argument is still the literal DTR0 byte. Every command that
+carries a short address as *data* rather than as an address byte carries it
+**encoded** as `(address << 1) | 1`, with `0xFF` meaning "no short address".
+Nothing in the raw spelling converts for you: that DTR0 value, and the
+parameters of `special program-short` and `special verify-short`, are all raw
+bytes in the range `0-255`.
 
 | Short address | Encoded byte |
 |---:|---|
@@ -525,10 +584,12 @@ type the command.
 
 Re-addressing a fixture in place needs no INITIALISE window, no RANDOMISE, and
 nothing to terminate afterwards — SET SHORT ADDRESS is an ordinary addressed
-configuration command:
+configuration command. Written out by hand, the raw spelling and the checks the
+`address` verb does for you:
 
 ```text
 scan                                       # which addresses are occupied
+status a13                                 # and nothing answers the destination
 config-dtr0 a5 set-short-address-dtr0 27   # a5 becomes a13   ((13<<1)|1 = 27)
 config a13 save-persistent
 scan                                       # a5 gone, a13 present
@@ -548,10 +609,14 @@ Swapping two addresses needs a free third one to stage through, exactly as
 swapping two variables does:
 
 ```text
-config-dtr0 a5 set-short-address-dtr0 41    # a5 -> a20, an address nothing uses
-config-dtr0 a8 set-short-address-dtr0 11    # a8 -> a5
-config-dtr0 a20 set-short-address-dtr0 17   # a20 -> a8
+address a5 set a20     # a5 -> a20, an address nothing uses
+address a8 set a5      # a8 -> a5
+address a20 set a8     # a20 -> a8
 ```
+
+Each line refuses if its destination turns out to be occupied, so a staging
+address that was not as free as you thought stops the sequence rather than
+collapsing two fixtures onto one address.
 
 To take a fixture out of the address space entirely — because it is being
 removed, or because you want `commission unaddressed` to reassign it — write the

@@ -2807,6 +2807,55 @@ void DaliComponent::on_config_applied(DaliTarget target, DaliCommandId id,
     if (notify) external_refresh_request_.store(true, std::memory_order_release);
 }
 
+/*
+ * A re-address that named both ends and then proved them on the bus.
+ *
+ * on_config_applied() has to assume the worst here — SET SHORT ADDRESS carries
+ * its destination in DTR0, so a config verb can only report that the gear at
+ * some address moved somewhere, and dropping every cache keyed by the old
+ * address is the only safe answer. The `address` verb chose `from` and `to`,
+ * checked `to` was empty before writing, and confirmed afterwards that `to`
+ * answers and `from` is silent. That is enough to move the bookkeeping instead.
+ *
+ * What can follow the gear is its group membership: a group light picks its
+ * query target from this table at runtime, so moving the member keeps the
+ * representative valid and skips the rescan. What cannot follow it is an
+ * entity configured in YAML against the old address — the firmware is not free
+ * to re-point what the user declared — so that is logged rather than guessed.
+ */
+void DaliComponent::on_short_address_moved(uint8_t from, uint8_t to)
+{
+    if (from >= DALI_SHORT_ADDRESS_COUNT || to >= DALI_SHORT_ADDRESS_COUNT ||
+        from == to)
+        return;
+
+    portENTER_CRITICAL(&s_group_map_mux);
+    bool groups_moved = dali_group_map_move(&s_group_map, from, to);
+    portEXIT_CRITICAL(&s_group_map_mux);
+
+    if (groups_moved) {
+        s_group_members_dirty_.store(true, std::memory_order_release);
+        ESP_LOGI(TAG, "a%u -> a%u: group membership followed the move",
+                 (unsigned) from, (unsigned) to);
+    }
+
+    /*
+     * Both ends lose their cached level profile. The old address because
+     * nothing answers there now, the new one because whatever was cached
+     * against it belonged to an address that was empty a moment ago.
+     */
+    const uint64_t mask = ((uint64_t) 1u << from) | ((uint64_t) 1u << to);
+    external_profile_forget_mask_.fetch_or(mask, std::memory_order_acq_rel);
+
+    ESP_LOGW(TAG,
+             "a%u -> a%u confirmed on the bus. Any entity configured with "
+             "address: %u still targets an address nothing answers -- update "
+             "the YAML, or run 'export config' to see what is in force",
+             (unsigned) from, (unsigned) to, (unsigned) from);
+
+    external_refresh_request_.store(true, std::memory_order_release);
+}
+
 bool DaliComponent::load_group_membership()
 {
     GroupMembershipPersist st{};

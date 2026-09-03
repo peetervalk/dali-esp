@@ -184,6 +184,8 @@ static const DaliCliCommandSpec s_commands[] = {
     { DALI_CLI_CMD_SPECIAL, "special", "<name> [param]", "special/broadcast command", 1u, 2u, NULL },
     { DALI_CLI_CMD_CONFIG, "config", TARGET_ARG " <config-name> [param]", "addressed configuration command", 2u, 3u, NULL },
     { DALI_CLI_CMD_CONFIG_DTR0, "config-dtr0", TARGET_ARG " <config-name> <dtr0> [param]", "load DTR0 and configure atomically", 3u, 4u, NULL },
+    { DALI_CLI_CMD_ADDRESS, "address", "<aN> set <aM> | add <gN> | remove <gN>", "change what one gear answers to, verified", 3u, 3u,
+      "set add remove" },
 
     { DALI_CLI_CMD_MEMREAD, "memread", "<addr> <bank> <offset> [count]", "control-gear memory read (Part 102)", 3u, 4u, NULL },
     { DALI_CLI_CMD_MEMINFO, "meminfo", "<addr>", "control-gear Bank 0 identity", 1u, 1u, NULL },

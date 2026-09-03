@@ -1350,6 +1350,54 @@ options struct carries `terminate_control_gear` as the mirror of
 Raw material for the next release notes. Everything below is unreleased as of
 `dev` `a8c9372`; `v1.3.0` (`ce0a72c`) predates all of it.
 
+## `address` — a checked tier over re-addressing and group membership
+
+**New verb, 2026-09-03.** `address <aN> set <aM> | add <gN> | remove <gN>`
+changes what one piece of control gear answers to, with every argument written
+the way a target is and every result read back off the bus. It stands to
+`config`/`config-dtr0` as `commission` stands to the addressing specials.
+
+`set` probes the destination (refusing unless it is demonstrably empty) and the
+source, sends DTR0 + SET SHORT ADDRESS as one sequence, then confirms the
+destination answers and the source is silent. `add`/`remove` send the group
+command and read both membership bytes back, because a group command is
+unacknowledged and a driver that ignored it is otherwise indistinguishable from
+one that took it. The subject must be a single short address: every arm reads
+its result back, and a group or broadcast subject produces a collision that
+cannot be told from silence.
+
+**Considered and rejected first:** making `config-dtr0 <t>
+set-short-address-dtr0` take the plain address instead of the encoded DTR0 byte.
+It fixes the same footgun in one line, but `config-dtr0`'s entire contract is
+that its argument is the literal byte, and a per-name argument convention would
+break the only thing that verb promises — as well as silently changing what
+every previously written line meant. The raw spellings are therefore unchanged:
+`config-dtr0` still takes `27` for a13, and `special program-short`/
+`verify-short` still take the encoded byte.
+
+**New hook, and the reason for it.** `DaliShellHooks` gains the optional
+`short_address_moved(ctx, from, to)`, called only after a move was verified at
+both ends. `config_applied()` cannot say this: SET SHORT ADDRESS carries its
+destination in DTR0, so a config verb can only report that the gear at some
+address went somewhere, and dropping every cache keyed by the old address is its
+only safe answer. `address` chose both ends and proved them, so the integration
+moves its group-membership bookkeeping with the gear (`dali_group_map_move()`,
+new and host-tested) and a re-address through this verb costs no rescan. An
+entity configured in YAML against the old address still cannot follow, and is
+logged rather than guessed at.
+
+Gating is unchanged in substance: `set` needs `allow_commissioning: true`, the
+same as the config spelling, because a friendlier spelling of a restricted
+operation that skipped the restriction would be a hole rather than a
+convenience. `add`/`remove` are gated on neither. The verb is absent from the
+console command table, like every other verb that claims the bus for a
+multi-frame workflow.
+
+Additive C API: `dali_group_map_move()`, `DALI_CLI_CMD_ADDRESS`, and the
+`short_address_moved` hook member. Host-tested in `test_group_map` and
+`test_cli`; the shell workflow compiles and carries **no real-bus result** —
+the probe/verify logic in particular has never seen a real reply window.
+
 ## Source-level API migrations
 
 The RX-observation and cleanup work changes public source interfaces. External
@@ -1496,7 +1544,9 @@ its pure frame builders now also sees the scheduler and transport types.
   new arm; `DaliDiscoveryDeviceInfo` gained `has_undecodable_activity` and
   `DaliDiscoveryInventory` gained `undecodable_count`, changing both layouts; `DaliCliCommandSpec` and
   `DaliCliInstanceConfig` gained fields, so brace-initialized tables outside
-  this repo need updating. Additive since: `dali_control_continuous_up/down()`,
+  this repo need updating; `DaliCliCommandId` gained `DALI_CLI_CMD_ADDRESS`
+  before `DALI_CLI_CMD_COUNT`, and `DaliShellHooks` gained the optional
+  `short_address_moved` — appended, so designated initializers are unaffected. Additive since: `dali_control_continuous_up/down()`,
   `dali_cli_format_response()`, `dali_cli_format_status()`, and
   `dali_cli_special_is_commissioning()`. One output change comes with them —
   `dali_cli_print_response()` now prints a status byte's head line as

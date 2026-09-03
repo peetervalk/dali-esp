@@ -197,6 +197,18 @@ void DaliShellServer::config_applied_cb(void *ctx, DaliTarget target,
     self->parent_->on_config_applied(target, id, param);
 }
 
+/* `address <from> set <to>` moved one gear, and both ends were confirmed on the
+ * bus. Unlike config_applied_cb() this names where the gear went, so caches can
+ * follow it rather than being dropped. */
+void DaliShellServer::short_address_moved_cb(void *ctx, uint8_t from, uint8_t to)
+{
+    auto *self = static_cast<DaliShellServer *>(ctx);
+    if (self == nullptr || self->parent_ == nullptr) {
+        return;
+    }
+    self->parent_->on_short_address_moved(from, to);
+}
+
 /* ── Accept loop ─────────────────────────────────────────────────────────── */
 
 void DaliShellServer::task_entry(void *arg)
@@ -281,6 +293,7 @@ void DaliShellServer::serve(int client_fd)
     session.hooks.bus_release = bus_release_cb;
     session.hooks.inventory_changed = inventory_changed_cb;
     session.hooks.config_applied = config_applied_cb;
+    session.hooks.short_address_moved = short_address_moved_cb;
     session.hooks.export_config = export_config_cb;
     session.hooks.snapshot_save = snapshot_save_cb;
     session.hooks.snapshot_load = snapshot_load_cb;

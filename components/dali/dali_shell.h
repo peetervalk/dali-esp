@@ -136,6 +136,23 @@ typedef struct {
     void (*config_applied)(void *ctx, DaliTarget target, DaliCommandId id,
                            uint8_t param);
     /*
+     * Called after `address <from> set <to>` re-addressed one gear and both
+     * ends were confirmed on the bus: `to` answers, `from` is silent.
+     *
+     * This is what config_applied() cannot say. SET SHORT ADDRESS carries its
+     * destination in DTR0, so an integration told only "a config command went
+     * to a5" knows the gear moved but not where, and its only safe response is
+     * to drop everything keyed by a5 and ask for a rescan. The `address` verb
+     * chose both ends and then verified them, so it can name the move and let
+     * caches follow it instead.
+     *
+     * Only reached after verification succeeded: an unconfirmed move calls
+     * nothing, because a cache moved to an address that turns out to be wrong
+     * is worse than a cache dropped. Called on the session's task. NULL when
+     * nothing caches.
+     */
+    void (*short_address_moved)(void *ctx, uint8_t from, uint8_t to);
+    /*
      * Print the integration's own configuration as the YAML block that would
      * produce it — what `export config` emits.
      *

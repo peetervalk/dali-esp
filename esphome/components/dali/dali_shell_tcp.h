@@ -81,6 +81,7 @@ class DaliShellServer : public Component {
   static bool snapshot_load_cb(void *ctx, uint8_t *buf, uint32_t *len);
   static void config_applied_cb(void *ctx, DaliTarget target, DaliCommandId id,
                                 uint8_t param);
+  static void short_address_moved_cb(void *ctx, uint8_t from, uint8_t to);
 
   DaliComponent *parent_{nullptr};
   uint16_t       port_{2323};

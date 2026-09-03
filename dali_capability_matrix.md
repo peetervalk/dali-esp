@@ -56,6 +56,7 @@ verb by verb.
 | Addressed queries (34 names) | `dali_control_build_query` | `query`, `status` | yes | yes | yes (console) |
 | Configuration commands (19 names) | `dali_control_build_config` | `config` | yes | partial | yes (console) |
 | DTR0-consuming configuration | `dali_control_build_config` + sequence | `config-dtr0` | yes | no | yes (console, minus `set-short-address-dtr0`) |
+| Checked re-address / regroup | `dali_group_map_move` + shell workflow | `address` | partial (map only) | no | shell only |
 | DTR0/1/2 load | `dali_control_build_dtr` | `dtr` | yes | yes | yes (console) |
 | Special/broadcast commands (18 names) | `dali_build_special` | `special` | yes | partial | partial (console) |
 | Arbitrary frame | n/a | `raw` | yes (parse only) | yes | yes (`raw`) |
