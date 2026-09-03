@@ -168,6 +168,38 @@ DaliError dali_memory_read_byte(const DaliMemoryTransport *transport,
 }
 
 /*
+ * One chunk: build the sequence, run it atomically, unpack the replies. Split
+ * out so the byte-at-a-time retry below re-reads through exactly the same path
+ * with count 1, rather than through a second hand-rolled copy of it.
+ */
+static DaliError memory_read_chunk(const DaliMemoryTransport *transport,
+                                   uint8_t short_addr,
+                                   uint8_t bank,
+                                   uint8_t offset,
+                                   uint8_t *buf,
+                                   uint8_t count,
+                                   bool    control_device)
+{
+    DaliSequence seq;
+    DaliError err = control_device
+        ? dali_memory_build_control_device_read_sequence(
+              short_addr, bank, offset, count, &seq)
+        : dali_memory_build_read_sequence(
+              short_addr, bank, offset, count, &seq);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    DaliSequenceResult result;
+    err = dali_transport_run_sequence_atomic(transport, &seq, &result);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    return dali_memory_read_from_sequence(&result, count, buf);
+}
+
+/*
  * Shared block read. `control_device` selects the Part 103 24-bit framing over
  * the Part 102 16-bit form; everything else about the two is identical,
  * including the two DTR setup steps dali_memory_read_from_sequence() skips past.
@@ -205,25 +237,27 @@ static DaliError memory_read_bytes(const DaliMemoryTransport *transport,
             chunk = DALI_MEMORY_MAX_SEQUENCE_READ_BYTES;
         }
 
-        DaliSequence seq;
-        DaliError err = control_device
-            ? dali_memory_build_control_device_read_sequence(
-                  short_addr, bank, (uint8_t)(offset + done), chunk, &seq)
-            : dali_memory_build_read_sequence(
-                  short_addr, bank, (uint8_t)(offset + done), chunk, &seq);
+        DaliError err = memory_read_chunk(transport, short_addr, bank,
+                                          (uint8_t)(offset + done),
+                                          &buf[done], chunk, control_device);
         if (err != DALI_OK) {
-            return err;
-        }
-
-        DaliSequenceResult result;
-        err = dali_transport_run_sequence_atomic(transport, &seq, &result);
-        if (err != DALI_OK) {
-            return err;
-        }
-
-        err = dali_memory_read_from_sequence(&result, chunk, &buf[done]);
-        if (err != DALI_OK) {
-            return err;
+            if (chunk == 1u) {
+                return err;
+            }
+            /* A chunk is one atomic sequence, so a single dropped reply fails
+             * the whole block, and a device that will not carry DTR0's
+             * auto-increment across a multi-read sequence fails it every time.
+             * Re-read the same bytes one at a time -- each with its own
+             * DTR1/DTR0 setup, which needs no auto-increment at all -- and give
+             * up only when a byte fails on its own too. */
+            for (uint8_t i = 0u; i < chunk; i++) {
+                err = memory_read_chunk(transport, short_addr, bank,
+                                        (uint8_t)(offset + done + i),
+                                        &buf[done + i], 1u, control_device);
+                if (err != DALI_OK) {
+                    return err;
+                }
+            }
         }
 
         done = (uint8_t)(done + chunk);

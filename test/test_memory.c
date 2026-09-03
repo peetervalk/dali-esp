@@ -22,6 +22,15 @@ static uint8_t   s_reply_index;
 
 static DaliError s_transact_err;
 
+/*
+ * How many READ frames a multi-read sequence answers before it times out.
+ * MOCK_NO_SEQ_FAILURE leaves every sequence alone. This is the shape a device
+ * takes when it will not carry DTR0's auto-increment across a block read: the
+ * block fails, but the same bytes read singly still answer.
+ */
+#define MOCK_NO_SEQ_FAILURE 0xFFu
+static uint8_t s_seq_reads_before_fail;
+
 static DaliError mock_transact(const DaliFrame *frame,
                                bool             needs_reply,
                                uint8_t          retries_left,
@@ -66,9 +75,35 @@ static DaliError mock_transact_sequence(const DaliSequence *seq,
         .result = DALI_OK,
         .failed_step = DALI_SEQUENCE_NO_FAILED_STEP,
     };
+
+    uint8_t read_steps = 0u;
+    for (uint8_t i = 0u; i < seq->step_count; i++) {
+        if (seq->steps[i].needs_reply) {
+            read_steps++;
+        }
+    }
+    bool limit_reads = (s_seq_reads_before_fail != MOCK_NO_SEQ_FAILURE) &&
+                       (read_steps > 1u);
+    uint8_t reads_done = 0u;
+
     for (uint8_t i = 0u; i < seq->step_count; i++) {
         const DaliSequenceStep *step = &seq->steps[i];
         DaliFrame reply = {0u, 0u};
+
+        if (step->needs_reply && limit_reads &&
+            reads_done >= s_seq_reads_before_fail) {
+            /* The frame goes out; nothing answers it. */
+            (void)mock_transact(&step->frame, true, step->retries_left,
+                                step->send_twice, NULL, ctx);
+            result.steps_run   = (uint8_t)(i + 1u);
+            result.result      = DALI_ERR_TIMEOUT;
+            result.failed_step = i;
+            if (result_out != NULL) {
+                *result_out = result;
+            }
+            return DALI_ERR_TIMEOUT;
+        }
+
         DaliError err = mock_transact(&step->frame,
                                       step->needs_reply,
                                       step->retries_left,
@@ -87,6 +122,7 @@ static DaliError mock_transact_sequence(const DaliSequence *seq,
         if (step->needs_reply) {
             result.replies[i] = reply;
             result.reply_mask |= (uint8_t)(1u << i);
+            reads_done++;
         }
     }
 
@@ -118,6 +154,7 @@ void setUp(void)
     s_reply_count   = 0u;
     s_reply_index   = 0u;
     s_transact_err  = DALI_OK;
+    s_seq_reads_before_fail = MOCK_NO_SEQ_FAILURE;
 }
 
 void tearDown(void) {}
@@ -570,6 +607,77 @@ void test_read_bytes_mid_sequence_error_propagates(void)
     TEST_ASSERT_EQUAL_INT(DALI_ERR_TIMEOUT, err);
 }
 
+/*
+ * A chunk is atomic, so one dropped reply fails all of it. The bytes are worth
+ * one more try singly before the whole block read gives up: a single read needs
+ * no auto-increment at all, so a device that only answers one read per DTR0
+ * setup still yields its memory, just more slowly.
+ */
+void test_read_bytes_rereads_failed_chunk_one_byte_at_a_time(void)
+{
+    s_seq_reads_before_fail = 0u;   /* the block read answers nothing */
+    push_reply(0x11u);
+    push_reply(0x22u);
+    push_reply(0x33u);
+
+    uint8_t buf[3] = {0u};
+    DaliError err = dali_memory_read_bytes(&s_transport, 1u, 0u, 0x02u, buf, 3u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK, err);
+    TEST_ASSERT_EQUAL_HEX8(0x11u, buf[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x22u, buf[1]);
+    TEST_ASSERT_EQUAL_HEX8(0x33u, buf[2]);
+
+    /* Failed block: DTR1 + DTR0 + the unanswered READ. Then one DTR1 + DTR0 +
+     * READ per byte -- 3 + 9 frames. */
+    TEST_ASSERT_EQUAL_UINT8(12u, s_frame_count);
+
+    /* Each retry names its own offset, rather than trusting auto-increment. */
+    for (uint8_t i = 0u; i < 3u; i++) {
+        DaliFrame exp_dtr0 = dali_memory_build_dtr0_offset((uint8_t)(0x02u + i));
+        TEST_ASSERT_EQUAL_UINT32(exp_dtr0.data, s_frames[3u + i * 3u + 1u].data);
+        TEST_ASSERT_TRUE(s_needs_reply[3u + i * 3u + 2u]);
+    }
+}
+
+void test_read_bytes_reread_covers_bytes_the_failed_chunk_had_returned(void)
+{
+    /* The block answers its first READ and then times out. The whole chunk is
+     * re-read, that first byte included -- a partial chunk is not trusted, so
+     * the value kept is the one the single read returned. */
+    s_seq_reads_before_fail = 1u;
+    push_reply(0x11u);   /* consumed by the block read that then failed */
+    push_reply(0xAAu);
+    push_reply(0xBBu);
+    push_reply(0xCCu);
+
+    uint8_t buf[3] = {0u};
+    DaliError err = dali_memory_read_bytes(&s_transport, 1u, 0u, 0u, buf, 3u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK, err);
+    TEST_ASSERT_EQUAL_HEX8(0xAAu, buf[0]);
+    TEST_ASSERT_EQUAL_HEX8(0xBBu, buf[1]);
+    TEST_ASSERT_EQUAL_HEX8(0xCCu, buf[2]);
+
+    /* Failed block: DTR1 + DTR0 + answered READ + unanswered READ = 4. */
+    TEST_ASSERT_EQUAL_UINT8(13u, s_frame_count);
+}
+
+void test_read_bytes_propagates_when_the_single_byte_read_fails_too(void)
+{
+    /* Nothing on the bus answers: the retry is attempted and its failure is
+     * what the caller sees. */
+    s_seq_reads_before_fail = 0u;
+
+    uint8_t buf[3] = {0u};
+    DaliError err = dali_memory_read_bytes(&s_transport, 1u, 0u, 0u, buf, 3u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_TIMEOUT, err);
+    /* Failed block (3 frames) then the first single-byte read (3 frames); the
+     * remaining bytes are not attempted. */
+    TEST_ASSERT_EQUAL_UINT8(6u, s_frame_count);
+}
+
 void test_read_bytes_null_buf_returns_invalid(void)
 {
     DaliError err = dali_memory_read_bytes(&s_transport, 0u, 0u, 0u, NULL, 4u);
@@ -765,6 +873,9 @@ int main(void)
     RUN_TEST(test_read_bytes_values_returned_in_order);
     RUN_TEST(test_read_bytes_count_zero_sends_no_frames);
     RUN_TEST(test_read_bytes_mid_sequence_error_propagates);
+    RUN_TEST(test_read_bytes_rereads_failed_chunk_one_byte_at_a_time);
+    RUN_TEST(test_read_bytes_reread_covers_bytes_the_failed_chunk_had_returned);
+    RUN_TEST(test_read_bytes_propagates_when_the_single_byte_read_fails_too);
     RUN_TEST(test_read_bytes_null_buf_returns_invalid);
     RUN_TEST(test_read_bytes_rejects_invalid_short_addresses_without_traffic);
     RUN_TEST(test_read_bytes_rejects_frame_only_transport_without_traffic);

@@ -267,10 +267,12 @@ void test_scan_records_responders_and_callback(void)
     /* 64 status + per found device (all queries timeout):
      *  groups-0-7(1), device_type(1), version(1), actual_level(1),
      *  profile MIN(1; MAX is skipped after the timeout), num_instances(1),
-     *  bank0 identity attempt: DTR1(1)+DTR0(1)+READ(1),
+     *  bank0 identity attempt: DTR1(1)+DTR0(1)+READ(1), then the block read's
+     *    byte-at-a-time retry of its first byte: DTR1(1)+DTR0(1)+READ(1),
+     *    which times out too and ends the identity read,
      *  scene-levels: QUERY_SCENE_LEVEL 0-15(16)
      * + 62 QUERY_NUMBER_OF_INSTANCES probes for the 62 absent addresses */
-    TEST_ASSERT_EQUAL_UINT32(2u * DALI_SHORT_ADDRESS_COUNT + 2u * 25u - 2u,
+    TEST_ASSERT_EQUAL_UINT32(2u * DALI_SHORT_ADDRESS_COUNT + 2u * 28u - 2u,
                              s_bus.tx_count);
     TEST_ASSERT_EQUAL_UINT32(2u, s_bus.found_cb_count);
     TEST_ASSERT_EQUAL_UINT8(12u, s_bus.found_cb_last_addr);
@@ -357,10 +359,12 @@ void test_scan_records_undecodable_activity_and_keeps_scanning(void)
     /* The walk continued past the contested address. */
     TEST_ASSERT_TRUE(dali_discovery_inventory_get(&inventory, 5u)->present);
 
-    /* 64 status queries, 62 instance probes for the absent addresses, and 25
-     * enrichment queries for the one device. Address 0 draws no instance probe:
-     * a second query into known-undecodable activity buys nothing. */
-    TEST_ASSERT_EQUAL_UINT32(64u + 62u + 25u, s_bus.tx_count);
+    /* 64 status queries, 62 instance probes for the absent addresses, and 28
+     * enrichment queries for the one device -- 25 plus the three frames of the
+     * single-byte retry the failed bank0 block read makes before giving up.
+     * Address 0 draws no instance probe: a second query into known-undecodable
+     * activity buys nothing. */
+    TEST_ASSERT_EQUAL_UINT32(64u + 62u + 28u, s_bus.tx_count);
 }
 
 void test_scan_records_undecodable_control_device_activity(void)
@@ -1893,9 +1897,11 @@ void test_scan_skips_identity_when_bank0_absent(void)
     uint8_t found = 0u;
     s_bus.present[3] = true;
     s_bus.status[3] = 0x00u;
-    /* No READ_MEMORY_LOCATION replies scripted. The first 0x03 read timeout
-     * causes read_bank0_identity to return early,
-     * leaving has_identity false. */
+    /* No READ_MEMORY_LOCATION replies scripted. The block read of 0x03 times
+     * out, its byte-at-a-time retry of 0x03 times out as well, and
+     * read_bank0_identity returns early leaving has_identity false. Two READs,
+     * not one: a lost reply is worth a second try before an absent bank is
+     * concluded. */
 
     DaliDiscoveryTransport t = transport();
     TEST_ASSERT_EQUAL(DALI_OK,
@@ -1905,7 +1911,7 @@ void test_scan_skips_identity_when_bank0_absent(void)
     TEST_ASSERT_NOT_NULL(device);
     TEST_ASSERT_TRUE(device->present);
     TEST_ASSERT_FALSE(device->has_identity);
-    TEST_ASSERT_EQUAL_UINT32(1u, s_bus.gear_memory_read_count);
+    TEST_ASSERT_EQUAL_UINT32(2u, s_bus.gear_memory_read_count);
 }
 
 int main(void)

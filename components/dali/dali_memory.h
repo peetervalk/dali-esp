@@ -170,6 +170,13 @@ DaliError dali_memory_read_byte(const DaliMemoryTransport *transport,
  * Runs through dali_transport_run_sequence_atomic() in chunks of at most
  * DALI_MEMORY_MAX_SEQUENCE_READ_BYTES, each chunk re-issuing its own DTR1/DTR0
  * setup. A frame-only transport is rejected before any frame is sent.
+ *
+ * A chunk is atomic, so one dropped reply -- or a device that will not carry
+ * DTR0's auto-increment across a multi-read sequence -- fails the whole chunk.
+ * A failed chunk of more than one byte is therefore re-read a byte at a time,
+ * each byte with its own DTR1/DTR0, and the error is returned only if a
+ * single-byte read fails as well. buf holds whatever was read up to the
+ * failing byte.
  */
 DaliError dali_memory_read_bytes(const DaliMemoryTransport *transport,
                                  uint8_t                    short_addr,
