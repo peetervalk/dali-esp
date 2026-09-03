@@ -28,6 +28,132 @@ supersedes.
 
 # Verification history
 
+### Verified on hardware 2026-09-04 (2k bus: retry and event-rate counters, `b64f81f`)
+
+One `discover` on 2k unquiesced, then `stats`; then `quiescent on all`, a second
+`discover`, and a second `stats`. Lamps were off this session (`status=0x00`,
+`level=0`, against `0x04`/85 the night before); five devices found on both
+walks, identically, a5 still physically disconnected. The unquiesced walk noted
+**36** control-device events, against 14-17 on 2026-09-03. The quiesced walk
+printed no note.
+
+Only the second interval is measurable: the two `stats` snapshots bracket
+`quiescent on all` plus one quiesced walk, and nothing bracketed the first walk.
+Across that interval:
+
+| Counter | Delta |
+|---|---:|
+| TX retries | +132 |
+| Reply timeouts | +264 |
+| `rx_event_unroutable` | +0 |
+| `rx_reply_early` / `late` / `superseded` | +0 |
+| `unsolicited_events_routed` | +19 |
+| Malformed, bus idle failures, ISR overruns | +0 |
+
+Absolute figures at the first snapshot, used by the investigation entry: 3553
+events routed, 242 unroutable, against an uptime of ~2 h 56 m — the 2k bus-status
+sensor in Home Assistant last went `OK` at 22:11:29 on 2026-09-03.
+
+What this pass establishes: `TX retries` is retired as a diagnostic for reply
+loss, since a fully quiesced walk still produces 132 of them, and the 2k event
+rate now has a number attached. What it does not: the unquiesced walk's counter
+deltas were never captured, there is no 1k comparison, and the `7d8a4f5`
+quiescence bracket is still unexercised — run 2 asserted quiescence by hand.
+
+**Idle `capture`, same session.** 111 s, 128 records with 8 dropped, 40 events
+and 23 polls. Device 0 / instance 0 emits `0x008001` every **3.000 s** — 37
+intervals, all between 2998 and 3004 ms, `event_information` constant at 1.
+Device 0 / instance 1 emits `0x00840C` every 30.01 s, also with a constant
+payload. Both are timers rather than value reports, and they confirm the
+recorded instance layout: 0 is lux, 1 is occupancy. 40 events over 111 s is
+**0.36 events/s**, agreeing with the 0.36/s derived from the lifetime counters
+above.
+
+**Walk timing and a lost query, same session.** A `discover` on 2k takes **29
+s**; two consecutive walks noted 33 control-device events each. Against the
+3.000 s and 30.01 s timers, 29 s allows ~10.6 emitted frames, so the wire
+carried at least 3.2x the idle rate. On the first of those two walks a0 was
+detected as `input-device(4 instances)` but its enumeration line never printed —
+`dali_discovery_query_input_device()` failed for a device the same walk had just
+proved present, and the loop has no else branch, so nothing was reported. The
+second walk enumerated it. Not covered: how often that happens, and whether it
+stops under `quiescent on all`.
+
+**Scan duration scales with present gear, not with empty addresses (1k, ref
+unknown).** A 1k `discover` — 16 gear, 48 empty addresses, no note, no DALI-2
+control devices — took **45 s**, against 29 s for a 2k walk with 5 gear and 59
+empty addresses. Fewer timeouts and more time. Two measurements, two unknowns:
+
+| | Cost |
+|---|---:|
+| Empty address | **~0.34 s** |
+| Present device | **~1.79 s** |
+
+(59a + 5d = 29, 48a + 16d = 45; both walks reproduce to within 0.1 s.) A present
+device costs about five empty ones, because `discovery_enrich_device()` runs
+groups, device type, version, actual level, a gear-profile sequence, and QUERY
+NUMBER OF INSTANCES — the last of which times out on every 1k gear address,
+there being no control devices on that bus. The empty-address figure implies
+~85 ms per timed-out attempt (four per address) against a protocol-timing
+minimum near 55 ms, so roughly a third of a walk is round-trip latency rather
+than wire time.
+
+The consequence for anything that counts events per walk: walk length is a
+property of bus composition, so those counts are not comparable across buses,
+nor across sessions if gear is added or removed. The ref this 1k node runs is
+not known — the local build tree for `dali-1k` was last compiled 2026-08-13 and
+carries neither the split counters nor the quiescence bracket, but that dates
+the last compile on this machine, not the flash.
+
+### Verified on hardware 2026-09-03, 22:20 (2k bus: split RX counters, `b64f81f`)
+
+The experiment the seven-way counter split was built for, run on the one ref
+that can still run it. `b64f81f` carries the split counters and *not* the scan's
+quiescence bracket, so it is the last build able to observe the event traffic
+the bracket removes; from `7d8a4f5` on, an operator-driven walk silences the
+thing being measured. Driven from `python3 /config/dali-shell` against the 2k
+node at 192.168.1.216.
+
+Bus at start: a0 (lamp + Steinel HF 360 II, 4 input instances), a1 (lamp +
+Casambi CBU-DCS, 1 instance), a2-a4 lamps, all five in group 0. a5 — the LED
+driver that contested a4 earlier the same day — was physically disconnected
+before this session, so five devices is the expected result, not a shortfall.
+
+Four `discover` runs, three unquiesced and a fourth under `quiescent on all`:
+
+| Run | Devices | early/late note | events | other note |
+|---|---:|---|---:|---|
+| 1 | 5 | absent | 17 | absent |
+| 2 | 5 | absent | 14 | absent |
+| 3 | 5 | absent | 16 | absent |
+| 4, `quiescent on all` | 5 | absent | none | absent |
+
+Every run enumerated a0-a4 identically — `present, LED, status=0x04, v4,
+level=85, groups=[0]`, with 4 and 1 input instances at a0 and a1. No address
+drift between runs, no undecodable activity, no contested line.
+
+**The absent notes are the result, not the counts.** `shell_discover_bus()`
+prints the early/late line whenever `early_rx > 0 || late_rx > 0`, and the
+other-observations line whenever `other_rx > 0`, where `other` sums
+`rx_reply_superseded`, `rx_undecodable_ignored` and `rx_ignored_unclassified`.
+Neither line appeared on any run. So across three unquiesced walks of 64
+addresses each: **early = 0, late = 0, superseded = 0, undecodable = 0,
+unclassified = 0**, and the 14-17 reported each time was
+`rx_event_unroutable` + `rx_event_no_subscriber` in full. Those counts sit
+inside the 11-39 band the old undifferentiated note reported on this bus, and
+every one of them is control-device event traffic. Under quiescence the note
+disappears entirely — the fourth run reproducing, on a build that can name what
+it is silencing, the single quiesced scan of the earlier session that evening.
+
+The conclusion this settles is in the investigation *The 2k "late gear" reading
+was event traffic* below.
+
+What this pass does not cover: the quiescence bracket added in `7d8a4f5` — run 4
+asserted quiescence by hand, which is a different code path from the bracket and
+exercises none of its release-on-exit behavior; the bracket's error and
+cancellation unwinds; and any bus but 2k. 1k has no DALI-2 control device
+emitting events, so it can reproduce neither arm of this experiment.
+
 ### Verified on hardware 2026-09-03 (2k bus: backup/restore, commissioning, contested)
 
 First bus result for the commissioning and backup/restore work accumulated on
@@ -1138,6 +1264,191 @@ cleared by the 2026-08-14 entry above):
 ---
 
 # Investigations
+
+## Ignored events arrive in our gaps, not on our frames — found 2026-09-04
+
+Retires the decisive test proposed at the end of the entry below, and re-reads
+the counter that test leaned on. Neither entry below is edited.
+
+**`TX retries` cannot see reply loss.** The test offered below assumed the
+counter mostly reflects frames that had to be re-sent because something went
+wrong. It does not. `sched_retry_active_step()` increments it on every reply
+timeout, and a 64-address walk times out on every address where nobody lives.
+`DALI_DISCOVERY_QUERY_RETRIES_LEFT` is 1, so each failing query is two attempts,
+two timeouts and one retry — and the measured deltas are exactly that: 132
+retries against 264 timeouts, on a **fully quiesced** walk. The predicted floor
+is 59 absent addresses x 2 probes (QUERY STATUS, then QUERY NUMBER OF INSTANCES)
+x 1 retry = 118; the remaining ~14 are enrichment and instance probes on the
+five present devices. There is no headroom in the counter for a collision
+signal, on either bus.
+
+Two side facts worth keeping. Every one of those 132 retries pays
+`DALI_REPLY_TIMEOUT_BACKOFF_US`, so ~1.5 s of each walk is backoff alone,
+against 6.6 s of reply waiting (264 x 25 ms). And a reply killed by the
+intervened path below increments nothing at all, so it is indistinguishable
+from silence in `stats`.
+
+**`rx_event_unroutable` does not mean the event hit us.** `SCHED_TX` is not just
+the frame: the state returns early while `sched_tx_guard_active()` holds, so the
+scheduler sits in TX through the whole inter-frame guard — 9.17 ms normally,
+11.16 ms after a retry backoff — and then through the blocking PHY call.
+`sched_can_route_unsolicited_event()` admits only `SCHED_IDLE` and
+`SCHED_WAIT_REPLY`, so an event arriving during that guard is counted unroutable
+even though the bus was idle and nothing collided. A sizeable share of a walk is
+spent in a state that classifies events this way, most of it genuinely quiet
+wire — the exact fraction is not known, since a 29 s walk is far longer than its
+264 attempts account for and the surplus may be `SCHED_IDLE` between
+transactions, which routes. The counter name is accurate; the scan note's
+"arrived mid-walk" framing is what invites the wrong reading.
+
+**An event that really did land in a reply window would abort the scan.** When a
+foreign forward frame arrives inside the window, `s_reply_intervened` is set,
+the transaction finishes `DALI_ERR_INTERVENED`, and `scan_error_is_absent()`
+does not list that error — so the scan returns it and prints `Scan ERR
+intervened` rather than quietly losing one address. That has never been seen, on
+any walk, on either bus. The control devices are staying out of the
+backward-frame slot, which is what Part 101 requires of them, and emitting into
+our gaps instead. The 36 events of the 2026-09-04 walk interfered with nothing.
+
+**The emitter is a metronome, and the walk's 36 is unexplained by it.** An idle
+`capture` on 2026-09-04 (111 s, 40 events) settles what a0 actually sends:
+device 0 / instance 0 emits `0x008001` every **3.000 s**, with 37 intervals all
+between 2998 and 3004 ms and `event_information` fixed at 1; device 0 /
+instance 1 emits `0x00840C` every 30.01 s, also with a constant payload. Both
+are timers, not value reports — the lux entity reads 0.64 and never moves while
+the frames keep coming. So occupancy has nothing to do with the count, which is
+why "nobody was moving" and "36 events" were never in conflict. Home Assistant
+sees none of this: its recorder stores only value changes.
+
+That capture also puts 40 events over 111 s = **0.36 events/s**, matching to two
+figures the 0.36/s derived independently from lifetime counters (3553 routed
+plus 242 unroutable over ~2 h 56 m of uptime). The baseline is solid.
+
+**A walk is 29 s, so the excess is real and it is about 3x.** Timed on
+2026-09-04, two consecutive walks, 33 events noted on each. In 29 s the two
+timers can emit at most ~10.6 frames — 9.7 lux at 3.000 s plus one occupancy at
+30.01 s. The note counts only `rx_event_unroutable`, which is a *subset* of the
+frames received, so 33 is a floor on how many event frames reached the wire:
+**at least 3.2x the idle emission rate**, and the true multiple is higher by
+whatever fraction arrived while the scheduler was idle and got routed instead.
+No assumption about where the walk spends its time is needed for that bound,
+which is why it is worth stating this way.
+
+The reading that fits: a multi-master control device that keeps losing its slot
+to a dense walk detects the collision and retransmits, so each timer tick
+reaches the wire as three or more frames. It predicts the count scales with walk
+density rather than with occupancy — and the two 29 s walks noting 33 apiece,
+against 36 for a walk on the same build the same evening, is the stability that
+prediction wants. It is also consistent with `Malformed frames` staying at 2
+throughout: retried frames arrive intact, whereas frames aborted mid-collision
+would not.
+
+**The same session lost a query to a present device, and the code says which
+one.** On the first of the two walks, a0 was detected as
+`input-device(4 instances)` — so QUERY NUMBER OF INSTANCES was answered during
+the walk — but the follow-up `dali_discovery_query_input_device()` failed and no
+`00: 4 input instance(s) enumerated` line printed. The second walk, run
+immediately after, enumerated it.
+
+Enumeration is not one frame. It is QUERY NUMBER OF INSTANCES, then five queries
+per instance — instance type, enabled, resolution, instance status, instance
+error — so a0 costs **21 device-addressed queries** and a1 costs six. Of those,
+**only the first can fail the call**: `query_instance_u8()` results are recorded
+per instance in `instance_type_errors[]` and skipped, and the function still
+returns `DALI_OK`. So the missing line means QUERY NUMBER OF INSTANCES was lost,
+both attempts of its one-retry budget — the same command, to the same device,
+that had answered seconds earlier in the same walk.
+
+This is the missing-lamp failure in miniature and on the *current* build. That
+it struck a0 — the emitter itself, the one device whose own event frames contend
+with its own reply window — is the strongest circumstantial support the
+collision reading has.
+
+It also exposes a shell defect, independent of any of this: that failure is
+silent. The enumeration loop only prints on `DALI_OK` and has no else branch, so
+the operator sees a device line claiming four instances, no enumeration line,
+and no error.
+
+**A cheaper test than the pre-backoff build.** Run `discover` repeatedly on 2k
+and count how often a0's enumeration line is missing; then repeat under
+`quiescent on all`. If event traffic is losing queries to present devices, the
+failure rate should go to zero under quiescence. That measures event-induced
+query loss directly, on the build that is already flashed.
+
+**What this does not settle.** The backoff's mechanism is untouched. The
+intervened path cannot be it, since it aborts scans rather than dropping
+addresses and has never fired. The collision reading in the entry below stands
+as the leading candidate, with one addition: the backoff also hands the bus
+11 ms of guaranteed idle per retry, which is the slot a deferring control device
+needs to drain, so it may reduce that device's own retransmissions as well as
+spacing ours.
+
+**Two smaller notes on method.** `sched_trace()` fires before classification, so
+unroutable events do reach `capture` as raw `rx` records — but the ring holds
+128 records and a walk emits several hundred traces, so capture idle rather than
+across a walk to see what the emitter sends. And bracket each walk with `stats`
+on *both* sides: the 2026-09-04 session bracketed only the quiesced walk, which
+is why its unquiesced deltas are unrecoverable.
+
+**Worth adding to the firmware.** A counter on the `s_reply_intervened` path. It
+is the one reply-loss mode that increments nothing today.
+
+## The 2k "late gear" reading was event traffic — settled 2026-09-03, 22:20
+
+Supersedes the *mechanism* conclusion of the 2026-08-13 2k diagnosis, and closes
+the doubt left open at the end of *The scan's unattributed-RX note is a motion
+detector* below. Neither entry is edited; both stand as they were written.
+
+The 2026-08-13 diagnosis read ~25 `rx_ignored_outside_reply` per scan on 2k
+against exactly 0 on 1k as gear answering past `DALI_REPLY_TIMEOUT_MS`, and
+re-armed the retry guard with `DALI_REPLY_TIMEOUT_BACKOFF_US` on the strength of
+it. The counter conflated four facts, so the reading was never separable from
+three others. It is separable now.
+
+Measured on `b64f81f` (see the verification entry of the same timestamp): three
+unquiesced 64-address walks on 2k, **`rx_reply_late` = 0 on all three**. Not
+"near zero" — the note that prints whenever early or late is nonzero never
+printed, on any run. No control gear on the 2k bus answers past the 25 ms
+window. The 2k-versus-1k split that carried the whole argument was the Steinel
+at a0 emitting on four instances, which is what the 14-17 events per walk are,
+and which 1k has nothing to produce.
+
+**The fix is not in question; the story about it is.** The backoff's effect was
+measured directly and independently on 2026-08-13: 8/8 scans on 2k found all
+five lamps afterwards, against 2/8 before. That number stands. What cannot
+stand is the explanation attached to it in the comment on
+`DALI_REPLY_TIMEOUT_BACKOFF_US` in `dali_frame.h` and on
+`sched_retry_active_step()` in `dali_scheduler.c`, both of which describe gear
+"that answers a shade later than the timeout" still driving the bus when the
+retry goes out. Nothing on this bus answers late, so the retransmission was
+landing on something else.
+
+Leading candidate, offered as inference and not as measurement: the collision
+is with a Steinel event frame, and it happens twice. A 24-bit event frame is
+~20.8 ms on the wire (25 bit periods at 833 µs), the walk is back-to-back TX for
+minutes, and the sensor emits asynchronously on four instances. An event that begins after the TX idle guard
+has been checked corrupts the forward frame mid-flight; the gear never decodes a
+query, so it never replies, and the 25 ms window expires as a timeout rather
+than as a late answer. Pre-fix, the retry then went out the instant the window
+shut — still inside the same event burst — and died the same way, and
+`scan_error_is_absent()` folded the second timeout into "absent". The backoff's
+11 Te plus settle happens to clear the burst as well as it clears a straggler,
+which would make it the right fix for the wrong reason.
+
+The objection to that story, kept here so it is not re-derived: the scheduler
+does not transmit onto an already-active frame, since it waits for bus idle
+first. The collision therefore has to be an event *starting* during our forward
+frame or reply window, not one already in progress. That is possible on an
+asynchronous emitter and is consistent with the frequency, but it is narrower
+than "the bus is busy".
+
+**Decisive test, if this is worth closing properly.** Build the pre-backoff ref,
+and run repeated scans on 2k under `quiescent on all`. If the missing-lamp rate
+collapses from ~25% to zero with the backoff absent, event collision is
+confirmed as the mechanism and the comments can be rewritten with evidence
+behind them. If lamps still go missing under quiescence, the cause is something
+neither entry has named yet. Until one of those runs, the honest statement is
+that the backoff works and nobody knows why.
 
 ## The scan's unattributed-RX note is a motion detector — found 2026-09-03
 

@@ -1,6 +1,6 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-09-03, against `dev` `7e9ee6e`, after the 2k bus pass.
+**Last updated:** 2026-09-04, against `dev` `7d8a4f5`.
 
 Annex to `AGENTS.md`. That file holds the architecture, the layer rules, the ISR
 and timing constraints, and the native/host build commands; this one holds what
@@ -17,7 +17,7 @@ per-capability API/verb/vector/hardware status in `dali_capability_matrix.md`.
 |---|---|
 | Latest tag | `v1.3.0` (`ce0a72c`), which is what `main` points at |
 | Last hardware-tested release | `v1.1.1`. Nothing since has been flashed to a bus as a tagged build |
-| `dev` vs `main` | 25 commits ahead, 0 behind |
+| `dev` vs `main` | 27 commits ahead, 0 behind |
 
 `dev` carries the post-scan verification, VERIFY-based duplicate detection,
 mixed-device work, the backup/restore path, and control-device commissioning —
@@ -68,16 +68,36 @@ and `restore groups` work, clean tree:**
 
 ### Recorded hardware state
 
-**2026-09-03, 2k bus, a `dev` build carrying the reworked backup/restore.** The
-first bus result for the commissioning and backup/restore work accumulated
-since `v1.1.1`. `backup save`/`status`, `restore plan`/`apply`, `address set`/
-`add`/`remove`, `commission unaddressed` with its post-scan, `quiescent`,
-`identify`, `meminfo` and `config-dtr0` all produced correct results on real
-gear. Most importantly, the `contested` classification met a **genuine physical
-two-unit collision** when an unpowered driver holding a4 regained power — the
-first real collision behind `RX_ACTIVITY`, which every commissioning safety
-claim depends on. Full scope, and what the session did *not* cover, is in
-`project_log.md`.
+What a real bus has established. The sessions themselves — dates, refs,
+counters, captures, and what each did *not* cover — are in `project_log.md`.
+
+- **Gear commissioning and the backup/restore core work on real gear.** `backup
+  save`/`status`, `restore plan`/`apply`, `address set`/`add`/`remove`,
+  `commission unaddressed` with its post-scan, `quiescent`, `identify`,
+  `meminfo` and `config-dtr0` all produced correct results on 2k. The
+  `contested` classification met a genuine physical two-unit collision — the
+  first real collision behind `RX_ACTIVITY`, which every commissioning safety
+  claim depends on.
+- **No control gear on 2k answers past the reply window.** `rx_reply_late` reads
+  0 across every measured walk. This retires the earlier late-reply reading; the
+  backoff fix that reading produced still works, but its mechanism is now
+  unexplained — see the P1 item below.
+- **The TX-retry counter cannot detect reply loss.** A fully quiesced 2k walk
+  carries 132 retries and 264 reply timeouts with zero event, early, late or
+  superseded observations: absent addresses, at two timeouts and one retry each,
+  dominate it.
+- **2k's baseline event rate is ~0.36/s**, established by two independent
+  methods, and rises to at least 3.2x that while a walk runs. a0's lux instance
+  is a 3.000 s metronome with an unchanging payload, so the count tracks elapsed
+  time, not movement.
+- **Scan duration is a property of bus composition**: ~0.34 s per empty address
+  against ~1.79 s per present device, because enrichment runs several queries
+  per device. A 16-gear 1k walk takes 45 s against 29 s for a 5-gear 2k one, so
+  events-per-walk is not comparable across buses or across gear changes.
+- **A query to known-present gear can be lost silently.** a0's instance
+  enumeration failed on one 2k walk and succeeded on the next with no error
+  printed — the first such loss seen on the current build, and the cheapest
+  handle on the backoff question above.
 
 Established on or before the `v1.1.1` flash of 2026-08-14:
 
@@ -91,20 +111,19 @@ Established on or before the `v1.1.1` flash of 2026-08-14:
 
 ### Not yet verified
 
-- **Most of `dev` since `v1.1.1`.** The 2026-09-03 2k pass cleared gear
-  commissioning, the backup/restore core, and the contested classification; the
-  rest of the protocol work of the last three weeks still has host vectors and
-  no bus behind it.
+- **Most of `dev` since `v1.1.1`.** The 2k pass cleared gear commissioning,
+  the backup/restore core, and the contested classification; the rest of the
+  protocol work has host vectors and no bus behind it.
 - Hardware round-trip for input-device configuration writes, DT6/DT8 helpers,
   memory operations, and vendor helpers. No write path reads its value back.
 - **Equal-random-address handling** — the largest untested slice. The two units
-  commissioned on 2026-09-03 drew distinct randoms, so the path never ran.
+  commissioned so far drew distinct randoms, so the path never ran.
 - Control-device commissioning (`commission devices`) on a real bus.
 - `backup import`, `backup export`, and `restore groups` against real gear.
   `backup save`/`status` and `restore plan`/`apply` are now covered.
 - The commissioning post-scan audit's own contested path. The scan path met a
-  real collision on 2026-09-03; the commission run that followed was clean, so
-  the audit's classification is still an inference.
+  real collision, but the commission run that followed was clean, so the audit's
+  classification is still an inference.
 - `manifest.json`'s `>=2026.6.0` ESPHome floor, which is tested against nothing
   but whatever `pip install esphome` last resolved to. The 2026.8.1 end is now
   covered at both stages — schema validation and a full compile of the C++ layer
@@ -155,7 +174,7 @@ Dated evidence for each of these is in `project_log.md`.
   number) holds which short address; `dali_restore` turns a snapshot plus a live
   bus into an ordered move list of plain addressed SET SHORT ADDRESS traffic. No
   INITIALISE window, interruptible at any point, and convergent on re-run. The
-  blob round-trips both ways as of 2026-09-03: `backup export` prints the
+  blob round-trips both ways: `backup export` prints the
   `backup import` script that reproduces it, so a backup kept off the device can
   be loaded back — which is what the native CLI, having no persistent store,
   needs. `dali_snapshot_decode()` validates a blob in full before writing, so a
@@ -304,26 +323,29 @@ always agree within a commit.
 ### 1k site: gear that answers just before the attribution window opens
 
 Four of sixteen fixtures settle faster than IEC 62386-101's 5.5 ms minimum
-(measured 4.12–5.85 ms) and were being read as silent. Fixed 2026-08-25 by the
-decoded-frame window edge; three confirmed on hardware the same day, and the
-fourth (a0, group 5) resolved by capture. Group membership now reads from the
-bus with no `query_address` anywhere in the YAML and is persisted to flash. The
-full investigation — captures, timings, and why a hand-picked margin does not
-survive this bus — is in `project_log.md`.
+(measured 4.12–5.85 ms) and were being read as silent. The decoded-frame window
+edge fixed it, confirmed on hardware. Group membership now reads from the bus
+with no `query_address` anywhere in the YAML and is persisted to flash. The full
+investigation — captures, timings, and why a hand-picked margin does not survive
+this bus — is in `project_log.md`.
 
-### 2k site: the scan's unattributed-RX note counts occupancy events
+### 2k site: the scan's event note counts sensor traffic, not interference
 
-Every `discover` on this bus reports `N RX observation(s) fell outside active
-reply attribution`, N running 11-39. There is no timing fault. The Steinel at a0
-emits on four instances continuously, a 64-address walk is back-to-back TX, and
-events arriving outside `SCHED_IDLE`/`SCHED_WAIT_REPLY` are counted as ignored.
-Confirmed twice on 2026-09-03: the one scan run under `quiescent on all`
-printed no note at all, and HA's recorder shows the zone-2 occupancy sensor
-changing state 31 times in the same 18 minutes, tracking the operator standing
-in the corridor. The counter has since been split and the scan now reports
-control-device events on their own line, in words that do not call them a
-fault. What is still owed is a bus that shows the new numbers. Investigation in
-`project_log.md`.
+Every `discover` here notes control-device events arriving mid-walk, N running
+14-39. There is no timing fault and no interference. The Steinel at a0 emits on
+four instances continuously, only one of which is occupancy, so the count tracks
+elapsed time rather than whether anyone is in the corridor; Home Assistant's
+recorder stores only value changes and so shows almost none of this traffic.
+
+"Unroutable" is a weaker claim than the note's wording suggests. `SCHED_TX`
+covers the inter-frame guard as well as the frame, so an event arriving in a
+guard gap — on an idle bus, colliding with nothing — is classified the same way
+as one arriving mid-transmission, and a sizeable share of a walk sits in that
+state. An event that genuinely landed inside a reply window would set
+`s_reply_intervened` and abort the scan with `DALI_ERR_INTERVENED`, which has
+never happened on either bus. What is real is the *volume*: while a walk runs
+the wire carries at least 3.2x the idle rate, most likely the sensor
+retransmitting after losing its slot. Investigation in `project_log.md`.
 
 ### Observed Steinel instance layout
 
@@ -342,14 +364,11 @@ a sensor value.
 
 ### P0 — Protocol correctness and conformance
 
-- **Hardware validation of the rest of the commissioning work.** The 2026-09-03
-  2k pass cleared gear commissioning, `backup save`/`restore apply`, and — with
-  a real two-unit collision — the `RX_ACTIVITY` classification the whole safety
-  argument rests on. Still unmet by a bus: equal-random-address handling
-  (the two units drew distinct randoms, so the path never ran), control-device
-  commissioning, `backup import`/`export`, and `restore groups`. The
-  single-unaddressed-device envelope no longer stands on nothing, but the
-  equal-random path is where it is still an assumption.
+- **Hardware validation of the rest of the commissioning work.** Unmet by a
+  bus: equal-random-address handling, control-device commissioning, `backup
+  import`/`export`, and `restore groups`. The single-unaddressed-device envelope
+  no longer stands on nothing; the equal-random path is where it is still an
+  assumption.
 - **Prove bus timing beyond the local own-forward-frame guard.** TX-end and
   observation timestamps are exported and host-tested; HIL must validate both
   attribution edges (5.5 ms undecodable, 2 ms decoded) against the 27 ms close,
@@ -357,12 +376,12 @@ a sensor value.
   remains open, as does a deadline-aware PHY call when a repeat would cross the
   100 ms limit.
 - **Cite `DALI_REPLY_WINDOW_OPEN_US` from the standard text.** It was lowered
-  from 7,000 to 5,500 us on 2026-08-25 because 7 ms is the *nominal* settling
-  time and attributing from it would time out compliant fast gear. The 5.5 ms
-  figure is still a recollection of the IEC 62386-101 range rather than a
-  reading of the clause, so the citation is owed even though the direction of
-  the change is the safe one. Guard against the regression this closed: too high
-  a value presents as gear that used to answer going quiet.
+  from 7,000 to 5,500 us because 7 ms is the *nominal* settling time and
+  attributing from it would time out compliant fast gear. The 5.5 ms figure is a
+  recollection of the IEC 62386-101 range rather than a reading of the clause,
+  so the citation is owed even though the direction of the change is the safe
+  one. Guard against the regression this closed: too high a value presents as
+  gear that used to answer going quiet.
   `DALI_REPLY_WINDOW_OPEN_DECODED_US` needs no citation — it is derived.
 - **Confirm the post-RANDOMISE settle time against the standard text.**
   `DALI_COMMISSIONING_RANDOMISE_SETTLE_MS` was raised from 15 to 100 ms on the
@@ -374,20 +393,17 @@ a sensor value.
 - **`restore` cannot stage a unit the backup has never seen, and so fails to
   converge after a mixed commissioning accident.** A unit absent from the
   snapshot becomes `UNKNOWN_UNIT`, which marks its address immovable, which
-  drops any recorded unit aimed at that address as `TARGET_OCCUPIED`. On
-  2026-09-03 this produced a zero-move plan while a free address sat unused and
-  the operator hand-executed the three-command staging cycle `dali_restore.c`
+  drops any recorded unit aimed at that address as `TARGET_OCCUPIED`. On the
+  bus this produced a zero-move plan while a free address sat unused and the
+  operator hand-executed the three-command staging cycle `dali_restore.c`
   already knows how to compute. Proposed: stage the unknown unit through a free
   address rather than dropping the move, keeping today's refusal when the space
   is full and for `UNIDENTIFIED` units. Reasoning in `project_log.md`.
-- **The post-scan verification has only a partial bus result.** Both walks now check
-  themselves on every exit that could have written an address — including the
-  failure paths, which are the only ones that can leave a short address written
-  but unrecorded — and the diff behind it (`dali_commissioning_audit`) is host-
-  covered. `RX_ACTIVITY` itself now has a real collision behind it, via the scan
-  path on 2026-09-03. What the audit's own contested path still lacks is a bus:
-  the commission run that session was clean, so its classification remains an
-  inference.
+- **The post-scan audit's contested path has no bus behind it.** Both walks
+  self-check on every exit that could have written an address, and the diff
+  (`dali_commissioning_audit`) is host-covered; `RX_ACTIVITY` has a real
+  collision behind it via the scan path. But the commission run that followed
+  was clean, so the audit's own classification remains an inference.
 
 ### P0 — Transaction and runtime reliability
 
@@ -425,13 +441,13 @@ The typed verb surface is in place; what is missing is evidence. Keep
 
 - **No addressing fault reaches Home Assistant.** `bus_fault` is a PHY liveness
   signal (`"OK"` / `"Bus stuck: N"`) and reports correctly, but nothing surfaces
-  a contested short address — the one failure the bus cannot undo remotely. On
-  2026-09-03 the sensor read `OK` throughout a real collision, an address wipe,
-  and a commissioning walk. The scan already computes `undecodable_count` and
-  the per-address flags. Wanted: an addressing-health sensor, or a widened
-  `bus_fault` reporting `"Contested: a4"`. The same shape one layer along, group
-  membership changes do not reach the integration either, so a group light
-  entity cannot know its membership changed underneath it.
+  a contested short address — the one failure the bus cannot undo remotely; it
+  read `OK` throughout a real collision, an address wipe, and a commissioning
+  walk. The scan already computes `undecodable_count` and the per-address flags.
+  Wanted: an addressing-health sensor, or a widened `bus_fault` reporting
+  `"Contested: a4"`. The same shape one layer along, group membership changes do
+  not reach the integration either, so a group light entity cannot know its
+  membership changed underneath it.
 - Extend the compact Part 103 dispatch key if a site needs to distinguish
   Device-Group from Instance-Group sources or match instance type. The canonical
   event/capture path retains these fields; the five-field rule key does not. No
@@ -446,31 +462,34 @@ The typed verb surface is in place; what is missing is evidence. Keep
 
 ### P1 — Diagnostic shell correctness
 
-- **Confirm the split ignored-RX counters on the 2k bus.**
-  `rx_ignored_outside_reply` carried four unrelated facts and is now the sum of
-  seven named buckets: `rx_reply_early`, `rx_reply_late`, `rx_reply_superseded`,
-  `rx_event_unroutable`, `rx_event_no_subscriber`, `rx_undecodable_ignored` and
-  `rx_ignored_unclassified`. `status` prints the breakdown and the scan note
-  names each class in its own words, calling only early/late a timing signal.
-  Host-covered and mutation-checked; no bus has seen it. The experiment it was
-  built for: on 2k, `rx_event_unroutable` should account for almost all of the
-  11-39 the old note reported while early and late stay near zero — which is
-  what settles the 2026-08-13 reading that is currently in doubt.
-  **`b64f81f` is the control arm**: it carries the split counters and not the
-  scan's quiescence bracket, so it is the last build that can still observe the
-  event traffic the bracket removes. Run the experiment on that ref before
-  flashing anything later.
+- **Re-derive why the retry backoff works.** `DALI_REPLY_TIMEOUT_BACKOFF_US`
+  demonstrably fixed the 2k missing-lamp rate — 8/8 scans against 2/8 — but
+  `rx_reply_late` reads 0 on that bus, so the late-straggler story asserted in
+  the comment on the constant in `dali_frame.h` and the one on
+  `sched_retry_active_step()` in `dali_scheduler.c` is not what is happening.
+  Two ways of measuring it are ruled out: `TX retries` is dominated by absent
+  addresses, and the `s_reply_intervened` path aborts the whole scan rather than
+  losing a single address, which no walk on either bus has ever done. The cheap
+  test is the silently lost instance enumeration on 2k — run `discover`
+  repeatedly, count how often the enumeration line is missing, then repeat under
+  `quiescent on all`; if event traffic is losing queries to present gear, the
+  rate should go to zero. Also worth adding: a counter on the intervened path,
+  the one reply-loss mode that increments nothing today.
+- **`discover` hides a failed input-device enumeration.** The post-scan loop in
+  `cmd_discover` only prints on `DALI_OK` from
+  `dali_discovery_query_input_device()` and has no else branch, so a lost query
+  leaves the operator with a device line claiming N instances, no enumeration
+  line, and no error. Observed on hardware. Report the failure, and keep the
+  count the device line already reported rather than silently dropping the
+  device's instance view.
 - **Confirm the scan's quiescence bracket on a bus.** Every operator-driven
-  walk in the shell — `scan`/`discover`, both commissioning pre-scans, the
-  commissioning post-scan, `backup save` and the `restore` refresh — now
-  broadcasts `START QUIESCENT MODE`, settles, walks, and releases on every exit
-  path including the cancelled and errored ones. `find switches` does not scan
-  and is untouched, and the integration's own periodic scan opts out: an
+  walk in the shell brackets itself with `START QUIESCENT MODE` and releases on
+  every exit path; the integration's own periodic scan opts out, because an
   unattended walk that silences occupancy for minutes is a trade nobody is
-  present to accept. Host-covered and mutation-checked; no bus has seen it.
-  What to watch for on hardware is the failure direction — a release that does
-  not land leaves the installation's sensors quiet, and the shell's line saying
-  so is the only thing that would tell an operator to run `quiescent off all`.
+  present to accept. Host-covered and mutation-checked; no bus has seen it. What
+  to watch for is the failure direction — a release that does not land leaves
+  the installation's sensors quiet, and the shell's line saying so is the only
+  thing that would tell an operator to run `quiescent off all`.
 - **Add `address <aN> clear`.** Clearing a short address is a normal step in
   resolving a collision and is the one address operation with no typed verb. The
   fallback, `config-dtr0 <aN> set-short-address-dtr0 255`, is correct DALI but
@@ -558,7 +577,7 @@ The typed verb surface is in place; what is missing is evidence. Keep
 | `dali-starter.yaml` | Tracked starter/commissioning firmware |
 | `dali_test.yaml` | Tracked CI coverage config; the widest configuration this repo compiles against its own tree |
 | `_local/` | Gitignored site snapshots, diagnostic compile-test config, and live secrets |
-| `test/` | 29 host suites and the vendored Unity runner |
+| `test/` | 31 host suites and the vendored Unity runner |
 | `tools/dali-shell` | Operator-side script for the TCP shell |
 | `AGENTS.md` | Architecture, layer rules, timing/ISR constraints, build commands |
 | `project_log.md` | Verification history, investigations, unreleased-change list |
@@ -594,7 +613,7 @@ Four workflows in `.github/workflows/`:
 
 | Workflow | Covers | Trigger |
 |---|---|---|
-| `host-tests.yml` | 29 host suites, cmake/ctest over `test/` | push main/dev, PR to main |
+| `host-tests.yml` | 31 host suites, cmake/ctest over `test/` | push main/dev, PR to main |
 | `idf-build.yml` | Native firmware, `idf.py build` for esp32 on IDF 6.0.1 | push main/dev, PR to main |
 | `esphome-build.yml` | Source/shim/`SRCS` agreement, config discovery, per-config schema validation, and compile of every `type: local` config | push main/dev, PR to main |
 | `release-packaging.yml` | `esphome compile` from a git tag in an empty directory | tag `v*`, manual |
