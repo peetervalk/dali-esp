@@ -380,11 +380,6 @@ The typed verb surface is in place; what is missing is evidence. Keep
   `randomise` — are collected in `project_log.md` under *Unreleased API and
   operator-visible changes*. Anything in Home Assistant that writes command
   strings to the `text:` entity needs updating.
-- Keep one intentional ESPHome source-inclusion path. The Python-copy/wrapper
-  route is authoritative; what is left is the second candidate in
-  `_protocol_source_dir()`, `esphome/components/dali/protocol/`, a directory
-  that does not exist and that no build exercises. Either make it a real
-  packaging layout or drop it.
 - Enforce or document the actual ESP-IDF and ESPHome version requirements.
   `idf-build.yml` pins IDF 6.0.1, so the native requirement now fails when it
   stops holding. The ESPHome side is still advisory — CI installs whatever

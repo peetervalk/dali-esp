@@ -191,14 +191,9 @@ _DISPATCH_ENTRY_SCHEMA = cv.All(
 # module, so static helpers keep file scope.
 
 def _protocol_source_dir():
-    component_dir = Path(__file__).resolve().parent
-    candidates = [
-        component_dir.parents[2] / "components" / "dali",
-        component_dir / "protocol",
-    ]
-    for candidate in candidates:
-        if (candidate / "dali_phy.h").is_file() and (candidate / "dali_phy.c").is_file():
-            return candidate
+    src_dir = Path(__file__).resolve().parents[3] / "components" / "dali"
+    if (src_dir / "dali_phy.h").is_file() and (src_dir / "dali_phy.c").is_file():
+        return src_dir
     raise cv.Invalid(
         "DALI protocol sources not found. Expected repo-root components/dali "
         "next to esphome/components/dali."
