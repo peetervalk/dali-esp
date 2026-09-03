@@ -1085,6 +1085,58 @@ cleared by the 2026-08-14 entry above):
 
 # Investigations
 
+## Hybrid units get no pairing model — decided 2026-09-03
+
+One physical unit can be both control gear and a control device, holding two
+independent short addresses in two independent address spaces. The Steinel
+sensors on the 2k bus are exactly this. The question was whether the software
+should record that the two halves belong to one box, warn when a walk moves one
+without the other, or try to keep the two numbers equal.
+
+**Decision: none of that. No pairing model, and nothing is owed here.** The
+entry it replaces in `current_status.md` framed this as a gap; it is not one.
+
+Nothing in the stack needs the relationship:
+
+- **Backup and restore** already match each space against its own Bank 0.
+  Reading the two spaces on the 2k bus produced *different* GTINs and different
+  identification numbers from the same physical unit — recorded in the
+  `DaliDiscoveryDeviceInfo::device_identity` comment — so there is no reliable
+  key to pair on even if something wanted to. A pairing table would have to be
+  built from numeric coincidence, which is precisely what is not evidence.
+- **Free-address accounting** keeps the two spaces separate, which is correct
+  and must stay that way. Gear at numeric address 7 and a control device at
+  numeric address 7 are different units, and reserving one because of the other
+  would refuse addresses that are free.
+- **Groups, scenes, and every control operation** are gear-space only.
+- **Commissioning** is per-space by construction: the Part 102 walk touches gear
+  addresses, the Part 103 walk touches device addresses, and neither can move
+  the other's.
+
+The real cross-part coupling is a *protocol* one, not an addressing one: a
+control device sitting in its own addressing state can answer a Part 102
+COMPARE, and control gear in an open initialise window can act on Part 103
+specials, because 0xC1 is both the Part 102 ENABLE DEVICE TYPE opcode and the
+first byte of every Part 103 special frame. That is handled by the TERMINATE
+brackets in both walks and by quiescent-mode bracketing in the gear walk. A
+pairing model would not have helped with any of it.
+
+What the decision does cost, and is accepted: removing a unit from a site frees
+its gear address and leaves the device address orphaned, with nothing connecting
+the two for whoever cleans up. `discover` shows the orphan; an operator joins
+them by hand. That is an operational annoyance, not a correctness defect.
+
+One thing did come out of the review as a genuine defect, and was fixed rather
+than filed: a contested *device* address was invisible at any number where
+control gear answered. `dali_discovery_scan()` probes the device space only when
+the gear query reports absent, so the enrichment path — the one a hybrid unit
+takes — dropped `DALI_ERR_RX_ACTIVITY` from the instance-count query on the
+floor. Two control devices sharing a device short address were therefore
+unreportable in exactly the installation where hybrids are common.
+`discovery_enrich_device()` now records it, guarded so that it never overwrites a
+good device-space reading already in hand.
+
+
 ## 1k bus: gear that replies just before the attribution window opens
 
 Recorded 2026-08-25 from three `discover` runs, a `capture export`, and the
@@ -1436,6 +1488,29 @@ carries **no real-bus result**.
 
 ## Source-level API migrations
 
+New module `dali_commissioning_audit.{c,h}`: the post-scan diff, lifted out of
+`dali_shell.c` so it is host-testable at all. Public surface is
+`DaliCommissioningAddressSpace`, `DaliCommissioningOccupancy`,
+`DaliCommissioningAudit`, `dali_commissioning_occupancy_from_inventory()`,
+`dali_commissioning_audit()`, and `dali_commissioning_audit_is_clean()`. Purely
+additive — nothing existing changes shape — but out-of-tree build systems must
+add the source, and the ESPHome component needs its
+`proto_dali_commissioning_audit.c` shim like every other module.
+
+One behaviour change under it, in `dali_discovery.c` rather than in a public
+type: `discovery_enrich_device()` now records
+`has_undecodable_device_activity` when the instance-count probe meets
+`DALI_ERR_RX_ACTIVITY`, and the scan counts it in
+`undecodable_device_count`. Before this, a contested device address was
+invisible at any number where control gear also answered — the enrichment path
+is the only route to the device space there, and it dropped the finding. A
+caller that treated `undecodable_device_count == 0` as proof of a clean device
+space will now see nonzero counts on buses where it previously saw none; that is
+the fix reporting, not a regression. It is skipped where a good device-space
+reading already exists, so an input-only address cannot be downgraded by one
+noisy frame.
+
+
 The RX-observation and cleanup work changes public source interfaces. External
 callers must update `DaliPhyRxCallback` to receive `DaliPhyRxObservation`;
 `DaliSchedOps` appends `get_last_tx_end_us`, and `DaliTransport` appends
@@ -1561,6 +1636,20 @@ its pure frame builders now also sees the scheduler and transport types.
 
 
 ## Owed release-note items
+
+- Announce the commissioning post-scan changes. They are operator-visible and
+  change output an automation could be parsing. A failed `commission
+  unaddressed` or `commission devices` now runs the post-scan instead of
+  returning at the error line, so a failed run prints more than it used to;
+  `commission devices` gained a post-scan on both exits, where it previously had
+  none. Two new report lines exist: `occupied, unrecorded` for an address a run
+  wrote to and ended before recording, and a note that the post-scan ran
+  read-only while the bus may still be in initialisation state. The per-address
+  wording changed from `contested - two gear answered as one` to `two units
+  answered as one`, because the same text now serves the control-device space,
+  where the addresses print as `d<N>` rather than `a<N>`. A successful run that
+  assigned nothing but hit a duplicate now post-scans where it did not before;
+  a successful run that assigned nothing and hit no duplicate still does not.
 
 - Document the next-release C migration before tagging it. Accumulated so far:
   the intentionally changed `DaliInputEvent` and `DaliDispatchKey` field

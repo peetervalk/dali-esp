@@ -12,6 +12,7 @@
 #include "dali_transport.h"
 #include "dali_commissioning.h"
 #include "dali_device_commissioning.h"
+#include "dali_commissioning_audit.h"
 #include "dali_snapshot.h"
 #include "dali_restore.h"
 #include "dali_memory.h"
@@ -3400,142 +3401,185 @@ static void shell_report_cross_part(const DaliCommissioningResult *result)
 }
 
 /*
- * Snapshot the two facts about an inventory that a post-scan has to diff
- * against: which addresses hold control gear, and which answered undecodably.
- *
- * Masks rather than a copy because the shell keeps one DaliDiscoveryInventory
- * scratch buffer, which the post-scan overwrites. Eight bytes of stack say
- * what a run created rather than what it inherited; a second 4868-byte
- * inventory is what made these buffers file-scope in the first place.
+ * How one address space names an address in operator-facing text. The walks
+ * already print `a5` and `d5`, and the whole point of the post-scan is telling
+ * an operator which unit to go and look at, so the prefix has to follow the
+ * space the audit was taken in.
  */
-static void shell_inventory_occupancy_masks(const DaliDiscoveryInventory *inventory,
-                                            uint64_t *gear_mask_out,
-                                            uint64_t *contested_mask_out)
+static char shell_commission_address_prefix(DaliCommissioningAddressSpace space)
 {
-    uint64_t gear = 0u;
-    uint64_t contested = 0u;
+    return (space == DALI_COMMISSIONING_SPACE_DEVICE) ? 'd' : 'a';
+}
 
+/* "gear"/"device", for the sentences that have to name what collided. */
+static const char *shell_commission_unit_noun(DaliCommissioningAddressSpace space)
+{
+    return (space == DALI_COMMISSIONING_SPACE_DEVICE) ? "control devices"
+                                                      : "gear";
+}
+
+/* One "    a5: reason" line per address in a mask. */
+static void shell_print_address_mask(DaliCommissioningAddressSpace space,
+                                     uint64_t mask,
+                                     const char *reason)
+{
+    const char prefix = shell_commission_address_prefix(space);
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
-        const DaliDiscoveryDeviceInfo *device =
-            dali_discovery_inventory_get(inventory, addr);
-        if (device == NULL) {
-            continue;
+        if ((mask & ((uint64_t)1u << addr)) != 0u) {
+            shell_printf("    %c%u: %s\r\n", prefix, (unsigned)addr, reason);
         }
-        if (device->has_undecodable_activity) {
-            contested |= ((uint64_t)1u << addr);
-        } else if (device->present && device->has_control_gear) {
-            gear |= ((uint64_t)1u << addr);
-        }
-    }
-
-    if (gear_mask_out != NULL) {
-        *gear_mask_out = gear;
-    }
-    if (contested_mask_out != NULL) {
-        *contested_mask_out = contested;
     }
 }
 
 /*
- * Check the post-scan against what the walk claims it did.
+ * Say what the post-scan found, given the audit that compared it to the
+ * pre-scan.
  *
  * Until this existed the post-scan printed a device count and nothing else,
  * which is exactly the shape that hides an equal-random-address collision. Two
- * gear that RANDOMISE to the same 24-bit value are selected together, programmed
- * together, and withdrawn together: the walk reports one assignment, the bus
- * ends up with two gear on one short address, and every step returns DALI_OK.
- * The post-scan already sees it -- QUERY STATUS to that address draws two
- * overlapping replies and lands as has_undecodable_activity -- it simply was
- * not being read.
- *
- * Diffing against the pre-scan is what separates a collision this run
- * created from one that was already there. A pre-existing contested address is
- * held out of the free pool and never assigned, so it must not be reported here
- * as damage.
+ * units that RANDOMISE to the same 24-bit value are selected together,
+ * programmed together, and withdrawn together: the walk reports one assignment,
+ * the bus ends up with two units on one short address, and every step returns
+ * DALI_OK. The scan already sees it — a query to that address draws two
+ * overlapping replies and lands as undecodable activity — it simply was not
+ * being read.
  *
  * This detects; it does not recover. Recovery needs the walk itself to notice
  * co-selection at VERIFY and re-open a per-address INITIALISE window on the
- * pair. See current_status.md.
+ * pair.
  */
-static void shell_report_commission_post_scan(
-    const DaliDiscoveryInventory *inventory,
-    const DaliCommissioningResult *result,
-    uint64_t pre_contested_mask)
+static void shell_report_commission_audit(const char *verb,
+                                          DaliCommissioningAddressSpace space,
+                                          const DaliCommissioningAudit *audit,
+                                          bool run_failed)
 {
-    uint64_t post_gear_mask = 0u;
-    uint64_t post_contested_mask = 0u;
-    shell_inventory_occupancy_masks(inventory,
-                                    &post_gear_mask,
-                                    &post_contested_mask);
+    const char *noun = shell_commission_unit_noun(space);
 
-    uint8_t confirmed = 0u;
-    uint8_t contested = 0u;
-    uint8_t silent = 0u;
+    shell_print_address_mask(space, audit->contested,
+                             "contested - two units answered as one");
+    shell_print_address_mask(space, audit->silent,
+                             "assigned but silent in the post-scan");
 
-    for (uint8_t i = 0u; i < result->assigned_count; i++) {
-        uint8_t addr = result->assignments[i].short_address;
-        uint64_t bit = (uint64_t)1u << addr;
+    shell_printf("%s: post-scan confirmed %u of %u assignment(s)\r\n",
+                 verb,
+                 (unsigned)audit->confirmed_count,
+                 (unsigned)audit->assigned_count);
 
-        if ((post_contested_mask & bit) != 0u) {
-            contested++;
-            shell_printf("    a%u: contested - two gear answered as one\r\n",
-                         (unsigned)addr);
-        } else if ((post_gear_mask & bit) != 0u) {
-            confirmed++;
-        } else {
-            silent++;
-            shell_printf("    a%u: assigned but silent in the post-scan\r\n",
-                         (unsigned)addr);
-        }
-    }
-
-    shell_printf("commission: post-scan confirmed %u of %u assignment(s)\r\n",
-                 (unsigned)confirmed,
-                 (unsigned)result->assigned_count);
-
-    if (contested > 0u) {
+    if (audit->contested_count > 0u) {
         shell_printf("  note: %u assigned address(es) answered undecodably.\r\n"
-                     "  Two gear generated the same random address and were "
+                     "  Two %s generated the same random address and were "
                      "programmed together;\r\n"
                      "  both hold that short address now and neither can be "
                      "reached alone.\r\n"
-                     "  Separate them physically, then re-run 'commission "
-                     "unaddressed'.\r\n",
-                     (unsigned)contested);
+                     "  Separate them physically, then re-run the walk.\r\n",
+                     (unsigned)audit->contested_count,
+                     noun);
     }
-    if (silent > 0u) {
-        shell_printf("  note: %u assigned address(es) did not answer QUERY "
-                     "STATUS.\r\n"
-                     "  VERIFY confirmed the write, so the gear took it and then "
-                     "went quiet -\r\n"
-                     "  a reply landing outside the window, or gear that left "
+    if (audit->silent_count > 0u) {
+        shell_printf("  note: %u assigned address(es) did not answer.\r\n"
+                     "  VERIFY confirmed the write, so the unit took it and "
+                     "then went quiet -\r\n"
+                     "  a reply landing outside the window, or a unit that left "
                      "the bus.\r\n",
-                     (unsigned)silent);
+                     (unsigned)audit->silent_count);
+    }
+
+    /*
+     * Addresses the run occupied without recording. A completed walk cannot
+     * produce these; an aborted one can, because PROGRAM SHORT ADDRESS goes out
+     * before the assignment is recorded and two of the abort paths sit in
+     * between. This is the finding the failure path existed to hide.
+     */
+    if (audit->unrecorded_count > 0u) {
+        shell_printf("  note: address(es) occupied now that were free before "
+                     "and that this run\r\n"
+                     "  did not record as assignments:\r\n");
+        shell_print_address_mask(space, audit->unrecorded,
+                                 "occupied, unrecorded");
+        shell_printf("  A write landed and the run ended before it was "
+                     "counted. The address is\r\n"
+                     "  taken; treat it as commissioned and re-scan before "
+                     "assigning from this range.\r\n");
     }
 
     /*
      * Contested addresses this run did not assign. A run only ever programs an
      * address the pre-scan proved free, so it cannot have caused these: the bus
-     * changed underneath the walk. Another master, gear that was mid-boot during
-     * the pre-scan, or a single device answering undecodably this time and not
-     * last time. Worth naming apart from the collision case, and worth naming
-     * even when the address held healthy gear before -- gear that stops being
+     * changed underneath the walk. Another master, a unit that was mid-boot
+     * during the pre-scan, or one answering undecodably this time and not last
+     * time. Worth naming apart from the collision case, and worth naming even
+     * when the address held a healthy unit before — one that stops being
      * readable is the same finding whichever direction it came from.
      */
-    uint64_t unassigned_contested = post_contested_mask & ~pre_contested_mask;
-    for (uint8_t i = 0u; i < result->assigned_count; i++) {
-        unassigned_contested &=
-            ~((uint64_t)1u << result->assignments[i].short_address);
-    }
-    if (unassigned_contested != 0u) {
+    if (audit->newly_contested_count > 0u) {
         shell_printf("  note: address(es) newly contested that this run did not "
                      "assign:\r\n");
-        for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
-            if ((unassigned_contested & ((uint64_t)1u << addr)) != 0u) {
-                shell_printf("    a%u: contested\r\n", (unsigned)addr);
-            }
-        }
+        shell_print_address_mask(space, audit->newly_contested, "contested");
     }
+
+    if (run_failed && dali_commissioning_audit_is_clean(audit)) {
+        shell_printf("  note: the run failed, but every address it had reached "
+                     "reads back clean.\r\n");
+    }
+}
+
+/*
+ * Take the post-scan and report it. Shared by both walks and by both of their
+ * exits.
+ *
+ * Running this after a failure is the point. The walk's abort paths are the
+ * only ones that can leave a short address written but unrecorded, or a
+ * co-selected pair still sharing one — `duplicate_recovery_failed` says in so
+ * many words that a pair may not have been taken back — and until this was
+ * shared, the failure path returned before any of it was looked at. The
+ * successful run, the one least likely to have damaged anything, was the only
+ * one that got checked.
+ *
+ * The scan itself is read-only, so it is safe even when the cleanup TERMINATE
+ * could not be transmitted and the bus may still be in initialisation state.
+ * That case gets a line of its own: the caller has already said the state is
+ * unknown, and this says the scan was taken anyway.
+ */
+static void shell_commission_post_scan(const char *verb,
+                                       DaliCommissioningAddressSpace space,
+                                       const DaliDiscoveryTransport *transport,
+                                       DaliDiscoveryInventory *inventory,
+                                       const DaliCommissioningOccupancy *pre,
+                                       const DaliCommissioningAssignment *assignments,
+                                       uint8_t assignment_count,
+                                       bool run_failed)
+{
+    shell_printf("%s: verifying with post-scan\r\n", verb);
+
+    uint8_t found = 0u;
+    DaliError err = dali_discovery_scan(inventory, transport, NULL, NULL, &found);
+    if (err != DALI_OK) {
+        shell_inventory_reset();
+        shell_printf("%s: post-scan ERR %s\r\n", verb, shell_err(err));
+        return;
+    }
+    shell_inventory_replace(inventory);
+
+    /* The authoritative view: taken after the walk, so it is the one that knows
+     * the addresses it just created. It supersedes the pre-scan the caller
+     * published before the walk ran. */
+    if (s_session.hooks.inventory_changed != NULL) {
+        s_session.hooks.inventory_changed(s_session.hooks.ctx, inventory);
+    }
+    shell_printf("%s: post-scan found=%u\r\n", verb, (unsigned)found);
+
+    DaliCommissioningOccupancy post;
+    DaliCommissioningAudit audit;
+    if (dali_commissioning_occupancy_from_inventory(inventory, space, &post) !=
+            DALI_OK ||
+        dali_commissioning_audit(pre, &post, assignments, assignment_count,
+                                 &audit) != DALI_OK) {
+        shell_printf("%s: post-scan could not be compared to the pre-scan\r\n",
+                     verb);
+        return;
+    }
+
+    shell_report_commission_audit(verb, space, &audit, run_failed);
 }
 
 /*
@@ -3623,6 +3667,13 @@ static void cmd_commission_devices(uint8_t first_address, uint8_t max_devices)
     }
     shell_printf("commission devices: occupied=%u\r\n", (unsigned)occupied);
 
+    /* Device space, taken before the walk, for the reason the gear run takes
+     * its own: the post-scan reuses this inventory buffer, and without a
+     * before-picture it cannot separate what the walk did from what it found. */
+    DaliCommissioningOccupancy pre_occupancy;
+    (void)dali_commissioning_occupancy_from_inventory(
+        inventory, DALI_COMMISSIONING_SPACE_DEVICE, &pre_occupancy);
+
     DaliDeviceCommissioningOptions options = {
         .first_short_address = first_address,
         .max_devices         = max_devices,
@@ -3663,6 +3714,24 @@ static void cmd_commission_devices(uint8_t first_address, uint8_t max_devices)
             shell_printf("commission devices: TERMINATE not confirmed; control "
                          "devices may still be in addressing state\r\n");
         }
+        /* Same reasoning as the gear walk's failure path: termination_required
+         * marks the point past which a PROGRAM SHORT ADDRESS can have gone out,
+         * and the abort paths that sit between that write and the assignment
+         * record are exactly the ones nothing else looks at. */
+        if (result.termination_required) {
+            if (result.initialisation_state_unknown) {
+                shell_printf("commission devices: post-scan runs read-only; the "
+                             "bus may still be in addressing state\r\n");
+            }
+            shell_commission_post_scan("commission devices",
+                                       DALI_COMMISSIONING_SPACE_DEVICE,
+                                       &transport,
+                                       inventory,
+                                       &pre_occupancy,
+                                       result.assignments,
+                                       result.assigned_count,
+                                       true);
+        }
         return;
     }
 
@@ -3680,6 +3749,17 @@ static void cmd_commission_devices(uint8_t first_address, uint8_t max_devices)
         shell_printf("  d%u <- random=0x%06" PRIX32 "\r\n",
                (unsigned)result.assignments[i].short_address,
                result.assignments[i].random_address);
+    }
+
+    if (result.assigned_count > 0u || result.duplicate_count > 0u) {
+        shell_commission_post_scan("commission devices",
+                                   DALI_COMMISSIONING_SPACE_DEVICE,
+                                   &transport,
+                                   inventory,
+                                   &pre_occupancy,
+                                   result.assignments,
+                                   result.assigned_count,
+                                   false);
     }
 }
 
@@ -3735,13 +3815,15 @@ static void cmd_commission(const DaliCliTokens *t)
     shell_printf("commission: occupied=%u\r\n", (unsigned)found);
 
     /*
-     * Taken before the walk touches the bus, and kept as a mask because the
+     * Taken before the walk touches the bus, and kept as masks because the
      * post-scan reuses this same inventory buffer. Without it the post-scan
      * cannot tell a contested address this run created from one it inherited
-     * and correctly refused to assign.
+     * and correctly refused to assign, nor an address the walk wrote to from
+     * one that was already occupied.
      */
-    uint64_t pre_contested_mask = 0u;
-    shell_inventory_occupancy_masks(inventory, NULL, &pre_contested_mask);
+    DaliCommissioningOccupancy pre_occupancy;
+    (void)dali_commissioning_occupancy_from_inventory(
+        inventory, DALI_COMMISSIONING_SPACE_GEAR, &pre_occupancy);
 
     DaliCommissioningOptions options = {
         .first_short_address = first_address,
@@ -3805,6 +3887,29 @@ static void cmd_commission(const DaliCliTokens *t)
         shell_printf("commission: ERR %s after %u assignment(s)\r\n",
                shell_err(err),
                (unsigned)result.assigned_count);
+        /*
+         * Verify anyway, and gate on termination_required rather than on
+         * assigned_count: that flag says the walk reached INITIALISE, which is
+         * the point past which a PROGRAM SHORT ADDRESS can have gone out. Two
+         * of the abort paths sit between that write and the assignment record,
+         * so a run that claims nothing can still have addressed something, and
+         * duplicate_recovery_failed says outright that a pair may still be
+         * sharing an address. This is the only look anything takes at it.
+         */
+        if (result.termination_required) {
+            if (result.initialisation_state_unknown) {
+                shell_printf("commission: post-scan runs read-only; the bus may "
+                             "still be in initialisation state\r\n");
+            }
+            shell_commission_post_scan("commission",
+                                       DALI_COMMISSIONING_SPACE_GEAR,
+                                       &transport,
+                                       inventory,
+                                       &pre_occupancy,
+                                       result.assignments,
+                                       result.assigned_count,
+                                       true);
+        }
         return;
     }
 
@@ -3838,30 +3943,22 @@ static void cmd_commission(const DaliCliTokens *t)
         shell_printf("\r\n");
     }
 
-    if (result.assigned_count > 0u) {
-        shell_printf("commission: verifying with post-scan\r\n");
-        found = 0u;
-        err = dali_discovery_scan(inventory,
-                                  &transport,
-                                  NULL,
-                                  NULL,
-                                  &found);
-        if (err != DALI_OK) {
-            shell_inventory_reset();
-            shell_printf("commission: post-scan ERR %s\r\n", shell_err(err));
-            return;
-        }
-        shell_inventory_replace(inventory);
-
-        /* The authoritative view: taken after the walk, so it is the one that
-         * knows the addresses it just created. */
-        if (s_session.hooks.inventory_changed != NULL) {
-            s_session.hooks.inventory_changed(s_session.hooks.ctx, inventory);
-        }
-        shell_printf("commission: post-scan found=%u\r\n", (unsigned)found);
-        shell_report_commission_post_scan(inventory,
-                                          &result,
-                                          pre_contested_mask);
+    /*
+     * Duplicates count as a reason to verify even with nothing assigned: the
+     * pair was de-addressed and withdrawn, and the post-scan is what shows the
+     * de-address took. A completed run that assigned nothing and hit no
+     * duplicate wrote nothing, and re-scanning it would only repeat the
+     * pre-scan taken moments earlier.
+     */
+    if (result.assigned_count > 0u || result.duplicate_count > 0u) {
+        shell_commission_post_scan("commission",
+                                   DALI_COMMISSIONING_SPACE_GEAR,
+                                   &transport,
+                                   inventory,
+                                   &pre_occupancy,
+                                   result.assignments,
+                                   result.assigned_count,
+                                   false);
     }
 }
 

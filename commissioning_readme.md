@@ -247,8 +247,8 @@ address; the post-scan below is what tells you.
 
 #### Reading the post-scan
 
-A run that assigned anything re-scans the bus afterwards and checks the result
-against what it thinks it did:
+A run that assigned anything, or that hit a duplicate, re-scans the bus
+afterwards and checks the result against what it thinks it did:
 
 ```text
 commission: verifying with post-scan
@@ -260,12 +260,12 @@ commission: post-scan confirmed 3 of 3 assignment(s)
 gear. Anything else is named:
 
 ```text
-    a7: contested - two gear answered as one
+    a7: contested - two units answered as one
 commission: post-scan confirmed 2 of 3 assignment(s)
   note: 1 assigned address(es) answered undecodably.
   Two gear generated the same random address and were programmed together;
   both hold that short address now and neither can be reached alone.
-  Separate them physically, then re-run 'commission unaddressed'.
+  Separate them physically, then re-run the walk.
 ```
 
 An assigned address answering undecodably means two gear hold it. Since the run
@@ -286,8 +286,28 @@ underneath the walk: another master, or gear that was mid-boot during the
 pre-scan. Contested addresses that were already there before the run are not
 reported here at all — they were held out of the free pool and never touched.
 
-A failed run returns before the post-scan, so none of this is available when it
-is arguably most wanted. `discover` after a failure does the same walk.
+One more line has no equivalent on a successful run:
+
+```text
+  note: address(es) occupied now that were free before and that this run
+  did not record as assignments:
+    a4: occupied, unrecorded
+```
+
+PROGRAM SHORT ADDRESS goes out before the walk records the assignment, and two
+of the abort paths sit between the two. A run that ends there leaves an
+addressed unit it never mentions — `a4` above is commissioned, and the run's own
+list does not say so. Nothing but this diff can see it.
+
+**A failed run gets the post-scan too**, which is the case it matters most in:
+the abort paths are the only ones that can leave a short address written but
+unrecorded, or — when the run reports it could not take a duplicate pair back —
+two units still sharing one. The scan is read-only, so it runs even when the
+cleanup TERMINATE could not be transmitted and the bus may still be in
+initialisation state; it says so when that is the case.
+
+`commission devices` checks itself the same way, in the control-device address
+space, and prints `d<N>` for the addresses it names.
 
 The remaining commissioning work is explicit:
 
@@ -297,9 +317,8 @@ The remaining commissioning work is explicit:
   stops one sitting in its own addressing state and answering COMPARE as gear
   that is not there — which is a state the Part 102 INITIALISE itself can put it
   in. Neither reaches a device that never received the broadcast, and none of it
-  is HIL-validated. The reverse guard, bracketing control-device commissioning
-  with a Part 102 TERMINATE, does not exist because control-device commissioning
-  does not.
+  is HIL-validated. The reverse guard — bracketing control-device commissioning
+  with a Part 102 TERMINATE — is in place too, and is equally unvalidated.
 - Two gear that generate the same 24-bit random address are detected during the
   run and sent back to being unaddressed, but they are not placed for you: a
   second run is what gives them addresses. See "When two gear share a random

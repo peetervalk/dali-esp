@@ -82,6 +82,8 @@ cached level profile and triggers a refresh.
 | Inventory export | `dali_discovery_inventory_*` | `inventory`, `export inventory` | partial | yes | yes (YAML lines, shell) |
 | Configuration export | n/a — reads live entity state | `export config` | no | yes | shell only; the native build has no YAML to describe |
 | Commission unaddressed | `dali_commissioning_commission_unaddressed` | `commission unaddressed` | yes | partial | shell, opt-in |
+| Commission control devices | `dali_device_commissioning_commission_unaddressed` | `commission devices` | yes | no | shell, opt-in |
+| Post-scan verification | `dali_commissioning_audit` | automatic in both `commission` walks | yes | no | shell |
 | Identify blink | n/a | `identify` | no | yes | yes (button, shell) |
 | Smoke check | n/a | `smoke` | no | yes | shell |
 
@@ -109,15 +111,29 @@ continues -- a second run places them. Host vectors only, and it rests on the sa
 undecodable-activity classification that has no physical collision capture behind
 it. Arbitration against another bus master remains open.
 
-Cross-part interference is guarded in the gear direction as of 2026-08-26: a run
-sends IEC 62386-103 TERMINATE before INITIALISE, again immediately after, and in
-the cleanup unwind, so a control device that entered its own addressing state on
-seeing the Part 102 INITIALISE cannot answer COMPARE as gear. Opt-in through
-`DaliCommissioningOptions.terminate_control_devices`, non-fatal on failure, host
-vectors only. The reverse guard is not implemented because control-device
-commissioning is not. Discovery now also records undecodable activity in the
-control-device address space (`has_undecodable_device_activity`), which reserves
-nothing — the two address spaces are independent.
+Cross-part interference is guarded in both directions as of 2026-08-26: a gear
+run sends IEC 62386-103 TERMINATE before INITIALISE, again immediately after, and
+in the cleanup unwind, so a control device that entered its own addressing state
+on seeing the Part 102 INITIALISE cannot answer COMPARE as gear; the
+control-device walk sends a Part 102 TERMINATE at the same three points, for the
+mirror-image reason. Opt-in through
+`DaliCommissioningOptions.terminate_control_devices` and
+`DaliDeviceCommissioningOptions.terminate_control_gear`, non-fatal on failure,
+host vectors only. Discovery records undecodable activity in the control-device
+address space (`has_undecodable_device_activity`), which reserves that device
+address in the Part 103 free-address mask and nothing in the gear one — the two
+spaces are independent.
+
+Both walks check themselves against a post-scan as of 2026-09-03, on every exit
+that could have written an address, the failure paths included. The diff is
+`dali_commissioning_audit`: it partitions the addresses a run claims into
+confirmed, contested, and silent, and names two classes the run does not claim —
+an address occupied now that was free before and was never recorded as an
+assignment (the signature of an abort between PROGRAM SHORT ADDRESS and the
+assignment record), and an address newly contested that the run never assigned.
+Host vectors only. Every classification rests on the same undecodable-activity
+reading as the in-run duplicate detection, so a `contested` line is an inference
+that the hardware pass has yet to confirm.
 
 The shell rows are the same code the native CLI runs, reached through
 `esphome/components/dali/dali_shell_tcp.cpp`. Its commissioning entry point is
@@ -240,7 +256,7 @@ native-only, and why:
 | `capture` | Rolling buffer with a terminal-shaped export; the bus monitor covers the live view |
 | `scan`, `discover`, `inventory`, `export inventory`, `identify` | Exposed as buttons and text sensors instead |
 | `export config` | A whole config block; the scan's `yaml_result` sensor carries the group map the console can fit |
-| `commission unaddressed` | No guarded workflow here; `special` refuses its primitives for the same reason |
+| `commission unaddressed`, `commission devices` | No guarded workflow here; `special` refuses its primitives for the same reason |
 | `config <t> set-short-address-dtr0` | Re-addresses gear from one typed line, the same reason `special program-short` is refused |
 | `meminfo`, `instances`, `sensor poll` | Each walks a device and decides the next query from the last reply, which needs a blocking transport. Covered by the scan and the sensor platform |
 | `smoke` | Composed of `devmem` write/read; run the parts |

@@ -854,11 +854,34 @@ static void discovery_enrich_device(const DaliDiscoveryTransport *transport,
     DaliFrame instances_frame;
     if (dali_input_build_query_number_of_instances(addr, &instances_frame) == DALI_OK) {
         uint8_t count = 0u;
-        if (dali_discovery_query_u8(transport, &instances_frame, &count) == DALI_OK &&
-            count > 0u) {
+        DaliError inst_err =
+            dali_discovery_query_u8(transport, &instances_frame, &count);
+        if (inst_err == DALI_OK && count > 0u) {
             device->has_input_device = true;
             device->has_instance_count = true;
             device->instance_count = count;
+        } else if (inst_err == DALI_ERR_RX_ACTIVITY && !device->has_input_device) {
+            /*
+             * The same finding the top-level scan records at line 1013, reached
+             * by the other route. An address where control gear answered never
+             * takes that path — the scan probes the device space only when the
+             * gear query said absent — so before this, two control devices
+             * sharing a device short address were invisible whenever any gear
+             * happened to answer at the same number. That is not a corner case:
+             * it is exactly the hybrid units, which answer in both spaces.
+             *
+             * Deliberately does not set `present` or touch the instance count,
+             * for the reason the scan's copy does not: something is there and
+             * nothing is known about it.
+             *
+             * Skipped when this address already has a good device-space
+             * reading, which is the case on the input-only entry to this
+             * function: the instance count was just read successfully, so a
+             * second query that meets activity is a blip on one frame, not a
+             * second control device, and treating it as one would throw away a
+             * reading in hand.
+             */
+            device->has_undecodable_device_activity = true;
         }
     }
 
@@ -963,6 +986,12 @@ DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
                 return err;
             }
             discovery_enrich_device(transport, addr, &inventory->devices[addr]);
+            /* Enrichment is the only route to a contested device address at a
+             * number where gear answered; the inventory-level counter is kept
+             * here because enrichment sees one device record, not the tally. */
+            if (inventory->devices[addr].has_undecodable_device_activity) {
+                inventory->undecodable_device_count++;
+            }
             if (found_cb != NULL) {
                 found_cb(addr, &inventory->devices[addr], found_ctx);
             }

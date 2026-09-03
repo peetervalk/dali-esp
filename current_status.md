@@ -317,14 +317,13 @@ a sensor value.
   unsearchable at the first COMPARE — which presents exactly like the former
   silence/collision inversion, so an apparent improvement here would look like a
   partial fix for that and would not be one.
-- **The failed-run path still returns before the post-scan verification**, which
-  is where an equal-random-address collision is most likely. Detection at VERIFY,
-  recovery, reporting, and host vectors are all in place; this is the gap left.
-- **Hybrid units have no pairing model.** One physical device can be both
-  control gear and control device with two independent short addresses. The gear
-  walk can move its gear address without touching its device address, nothing
-  records that they belong together, and nothing warns. Relevant to the Steinel
-  units specifically.
+- **The post-scan verification has no bus result.** Both walks now check
+  themselves on every exit that could have written an address — including the
+  failure paths, which are the only ones that can leave a short address written
+  but unrecorded — and the diff behind it (`dali_commissioning_audit`) is host-
+  covered. What none of it has met is a bus. The classifications it reports rest
+  on `RX_ACTIVITY`, which has no physical collision capture behind it, so a
+  `contested` line is an inference the hardware pass still has to confirm.
 
 ### P0 — Transaction and runtime reliability
 

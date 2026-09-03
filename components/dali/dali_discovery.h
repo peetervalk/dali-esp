@@ -57,11 +57,11 @@ typedef struct {
      *
      * Tracked separately because the two spaces are independent -- a control
      * device at numeric address 7 and control gear at numeric address 7 are
-     * different devices -- so this must never reach the control-gear free-address
-     * mask. It reserves nothing today; control-device commissioning does not
-     * exist yet. It is recorded so the address stops being invisible: before
-     * this, a contested device address was dropped as "absent" and reported
-     * nowhere.
+     * different devices -- so this must never reach the control-gear
+     * free-address mask. It reserves the device address in
+     * dali_device_commissioning_used_mask_from_inventory(), for the reason the
+     * gear mask reserves its own: something answered, so the address is taken
+     * even though nothing could be read from it.
      */
     bool                     has_undecodable_device_activity;
     bool                     has_status;

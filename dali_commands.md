@@ -893,11 +893,14 @@ that delivery can be guaranteed after a bus or transport failure. The Part 103
 `TERMINATE` and the quiescence release run through the same unwind and carry the
 same meaning.
 
-A run that assigned anything then re-scans and checks itself. `post-scan
-confirmed N of M assignment(s)` is the line to read; an assigned address that
-comes back `contested` means two gear hold it. See `commissioning_readme.md` for
-that output and for what an equal random address looks like while the run is
-still going.
+A run that assigned anything, hit a duplicate, or failed after reaching
+`INITIALISE` then re-scans and checks itself; `commission devices` does the same
+in the control-device address space. `post-scan confirmed N of M assignment(s)`
+is the line to read. An assigned address that comes back `contested` means two
+units hold it, and an address reported `occupied, unrecorded` was written to by a
+run that ended before it recorded the assignment — it is commissioned, and the
+run's own list does not say so. See `commissioning_readme.md` for that output and
+for what an equal random address looks like while the run is still going.
 
 ## Diagnostics
 
