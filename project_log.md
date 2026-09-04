@@ -1265,6 +1265,60 @@ cleared by the 2026-08-14 entry above):
 
 # Investigations
 
+## `restore` treated a contested address as free — found 2026-09-04
+
+Found while adding `address <aN> clear`, in the module that had the strongest
+claim not to have this bug. `dali_restore.h` opens by saying the plan exists so
+that nothing is ever moved onto an address another unit still holds, "the
+contested-address fault that nothing on the bus can undo remotely". The planner
+could create exactly that.
+
+`restore_collect_bus()` skipped every inventory entry that was not `present`.
+A contested address is deliberately not `present` — the scan records
+`has_undecodable_activity` and leaves the entry absent, because something
+answered but nothing could be read from it. So a contested address entered the
+planner's occupancy model as free, on all three routes to an address:
+
+- as a **placement target**, if a backup entry recorded a unit there;
+- as a **staging address**, borrowed to break a cycle;
+- as a **displacement address**, to park a unit the backup has never seen.
+
+The third is the worst, because it is the one the planner picks on its own
+initiative. A restore run to tidy a scrambled bus could take a working,
+identifiable unit and park it on top of two units already fighting over one
+address — turning a two-unit collision into a three-unit one, and doing it to a
+unit that had nothing to do with the fault.
+
+`dali_commissioning.c` and `dali_device_commissioning.c` both already got this
+right; their free-address masks reserve on `has_undecodable_activity` with a
+comment saying why. The restore planner was written against `present` alone and
+never revisited when the contested classification was added.
+
+**Fixed** by collecting contested addresses as `reserved` rather than skipping
+them, and folding `reserved` into both `occupied` (which every free-address
+decision reads) and `immovable` (so a blocked move is reported rather than
+stalling until the loop limit calls the plan incomplete). Each space reads its
+own flag, so a contested `d7` still leaves gear `a7` movable.
+
+Blocked moves report a new `DALI_RESTORE_CONFLICT_TARGET_CONTESTED` rather than
+`TARGET_OCCUPIED`. The distinction is not cosmetic: `target occupied` sends an
+operator to look up what is sitting on the address, and the answer here is that
+nothing addressable is — the remedy is `address <aN> clear`, then
+`commission unaddressed`, then plan again, which is the sequence the `clear`
+work exists to make possible.
+
+Seven host vectors in `test_restore_plan.c`, and `replay_and_assert_safe()` —
+the helper that replays a plan and asserts no move ever lands on an occupied
+address — now seeds contested addresses as occupied, which it did not before. It
+would have waved this bug through. Six of the seven fail with the occupancy fold
+disabled; the seventh is the over-reservation guard and passes either way, which
+is the point of it.
+
+Still unproven on a bus, for the reason everything contested is: no genuine
+two-unit collision has been driven through a scan, so the input to all of this —
+`has_undecodable_activity` being set by real overlapping replies — is asserted
+from the standard rather than observed.
+
 ## Ignored events arrive in our gaps, not on our frames — found 2026-09-04
 
 Retires the decisive test proposed at the end of the entry below, and re-reads

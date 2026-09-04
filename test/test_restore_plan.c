@@ -64,6 +64,21 @@ static void on_bus_without_identity(uint8_t addr)
     device->has_identity     = false;
 }
 
+/* Two or more units sharing one short address: reply-window activity that did
+ * not decode. Deliberately not `present` — that is how the scan records it, and
+ * the whole point is that nothing there can be read. */
+static void contested_on_bus(uint8_t addr)
+{
+    s_inventory.devices[addr].has_undecodable_activity = true;
+    s_inventory.undecodable_count++;
+}
+
+static void contested_device_on_bus(uint8_t addr)
+{
+    s_inventory.devices[addr].has_undecodable_device_activity = true;
+    s_inventory.undecodable_device_count++;
+}
+
 static void device_on_bus(uint8_t addr)
 {
     DaliDiscoveryDeviceInfo *device = &s_inventory.devices[addr];
@@ -109,6 +124,19 @@ static void replay_and_assert_safe(DaliSnapshotSpace space)
 
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         const DaliDiscoveryDeviceInfo *device = &s_inventory.devices[addr];
+        /*
+         * A contested address holds units too — more than one, which is the
+         * problem — so it starts occupied here. Without this the replay would
+         * wave through the exact move this file exists to catch: a third unit
+         * written onto an address that already answers as two.
+         */
+        const bool contested = (space == DALI_SNAPSHOT_SPACE_GEAR)
+                                   ? device->has_undecodable_activity
+                                   : device->has_undecodable_device_activity;
+        if (contested) {
+            occupant[addr] = (uint8_t)(addr + 1u);
+            continue;
+        }
         if (!device->present) {
             continue;
         }
@@ -614,6 +642,200 @@ void test_a_unit_that_cannot_be_told_from_another_is_never_moved_aside(void)
 }
 
 /* --------------------------------------------------------------------------
+ * Contested addresses
+ *
+ * An address that answered undecodably is occupied by two or more units that
+ * answer as one. The scan deliberately does not mark it present — nothing there
+ * can be read — and the danger is that "not present" reads as "free". Writing a
+ * third unit onto it is the one fault a restore cannot undo by moving anything
+ * back, so every route to an address has to see it: the direct placement, the
+ * staging hop, and the displacement.
+ * -------------------------------------------------------------------------*/
+
+void test_a_move_onto_a_contested_address_is_reported_not_made(void)
+{
+    /* The backup says this unit belongs at a4, and a4 now answers as two. The
+     * move must be dropped and named for what blocks it — the remedy is
+     * `address a4 clear`, which no other conflict kind points at. */
+    record(DALI_SNAPSHOT_SPACE_GEAR, 4u, 1u);
+    on_bus(1u, 1u);
+    contested_on_bus(4u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_plan.move_count);
+    TEST_ASSERT_EQUAL_UINT16(1u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_TARGET_CONTESTED));
+    TEST_ASSERT_EQUAL_UINT16(0u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_TARGET_OCCUPIED));
+    TEST_ASSERT_EQUAL_UINT8(4u, s_plan.conflicts[0].other_address);
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
+}
+
+void test_a_contested_address_is_never_borrowed_to_stage_a_cycle(void)
+{
+    /*
+     * a0 and a1 are a swap, so the cycle needs somewhere to stage. Every other
+     * address is occupied except a63, which is contested — free-looking to a
+     * planner that only checks `present`, and the worst possible choice: the
+     * staged unit would land on top of two units already fighting over it.
+     * Failing closed is the only safe answer.
+     */
+    record(DALI_SNAPSHOT_SPACE_GEAR, 1u, 100u);
+    record(DALI_SNAPSHOT_SPACE_GEAR, 0u, 101u);
+    on_bus(0u, 100u);
+    on_bus(1u, 101u);
+
+    /* Seeded away from the pair above: two units sharing an identification
+     * number are a different conflict and would mask this one. */
+    for (uint8_t addr = 2u; addr < 63u; addr++) {
+        record(DALI_SNAPSHOT_SPACE_GEAR, addr, addr);
+        on_bus(addr, addr);
+    }
+    contested_on_bus(63u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_TRUE(s_plan.incomplete);
+    TEST_ASSERT_EQUAL_UINT16(1u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_NO_STAGING_ADDRESS));
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
+}
+
+void test_a_contested_address_is_never_used_to_displace_an_unrecorded_unit(void)
+{
+    /*
+     * The same trap one route over. An unrecorded unit holds an address a
+     * recorded one is owed, and the only address that is not `present` is
+     * contested. Displacing onto it would put a third unit on a contested
+     * address to repair a fault that was merely reportable, so the space counts
+     * as full and the move is dropped exactly as it was before displacement
+     * existed.
+     */
+    on_bus(0u, 200u);                            /* unrecorded, holding a0 */
+    record(DALI_SNAPSHOT_SPACE_GEAR, 0u, 1u);
+    on_bus(1u, 1u);                              /* recorded at a0, sitting on a1 */
+
+    for (uint8_t addr = 2u; addr < 63u; addr++) {
+        record(DALI_SNAPSHOT_SPACE_GEAR, addr, addr);
+        on_bus(addr, addr);
+    }
+    contested_on_bus(63u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_FALSE(s_plan.incomplete);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_plan.move_count);
+    TEST_ASSERT_EQUAL_UINT16(1u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_TARGET_OCCUPIED));
+    TEST_ASSERT_EQUAL_UINT16(1u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_UNKNOWN_UNIT));
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
+}
+
+void test_a_contested_address_blocks_only_the_move_that_wants_it(void)
+{
+    /* One contested address must not cost the rest of the restore, for the
+     * reason the scan keeps going past one: the other sixty-three are fine. */
+    record(DALI_SNAPSHOT_SPACE_GEAR, 4u, 1u);    /* blocked by the contest */
+    on_bus(1u, 1u);
+    contested_on_bus(4u);
+    record(DALI_SNAPSHOT_SPACE_GEAR, 9u, 2u);    /* unrelated, must still run */
+    on_bus(8u, 2u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_FALSE(s_plan.incomplete);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_plan.move_count);
+    TEST_ASSERT_EQUAL_UINT8(8u, s_plan.moves[0].from);
+    TEST_ASSERT_EQUAL_UINT8(9u, s_plan.moves[0].to);
+    TEST_ASSERT_EQUAL_UINT16(1u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_TARGET_CONTESTED));
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
+    TEST_ASSERT_EQUAL_UINT8(1u, final_address_of(DALI_SNAPSHOT_SPACE_GEAR, 1u));
+}
+
+void test_a_contested_address_reserves_only_its_own_space(void)
+{
+    /*
+     * Contested gear at a7 and a contested control device at d5. Neither may
+     * reserve the other's numeric address: the spaces are independent, and
+     * refusing a device move because gear collided at the same number would
+     * turn one fault into two.
+     */
+    contested_on_bus(7u);
+    contested_device_on_bus(5u);
+
+    record(DALI_SNAPSHOT_SPACE_DEVICE, 7u, 1u);  /* device wants d7: free */
+    device_on_bus_with_identity(2u, 1u);
+    record(DALI_SNAPSHOT_SPACE_GEAR, 5u, 2u);    /* gear wants a5: free */
+    on_bus(3u, 2u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_EQUAL_UINT8(2u, s_plan.move_count);
+    TEST_ASSERT_EQUAL_UINT16(0u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_TARGET_CONTESTED));
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_DEVICE);
+    TEST_ASSERT_EQUAL_UINT8(5u, final_address_of(DALI_SNAPSHOT_SPACE_GEAR, 3u));
+    TEST_ASSERT_EQUAL_UINT8(7u, final_address_of(DALI_SNAPSHOT_SPACE_DEVICE, 2u));
+}
+
+void test_a_contested_device_address_blocks_a_device_move(void)
+{
+    /* The device space has no verb that de-addresses, but the planner must
+     * still refuse: a contested d4 is as occupied as a contested a4. */
+    record(DALI_SNAPSHOT_SPACE_DEVICE, 4u, 1u);
+    device_on_bus_with_identity(1u, 1u);
+    contested_device_on_bus(4u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_plan.move_count);
+    TEST_ASSERT_EQUAL_UINT16(1u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_TARGET_CONTESTED));
+    TEST_ASSERT_EQUAL_INT(DALI_SNAPSHOT_SPACE_DEVICE, s_plan.conflicts[0].space);
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_DEVICE);
+}
+
+void test_a_hybrid_address_contested_in_one_space_still_plans_the_other(void)
+{
+    /*
+     * The case only enrichment can produce: gear answers at a6 and is readable,
+     * while the Part 103 probe at the same number draws undecodable activity.
+     * The gear is planned normally; d6 is reserved.
+     */
+    on_bus(6u, 1u);
+    s_inventory.devices[6u].has_undecodable_device_activity = true;
+    s_inventory.undecodable_device_count++;
+
+    record(DALI_SNAPSHOT_SPACE_GEAR, 2u, 1u);    /* the gear at a6 belongs at a2 */
+    record(DALI_SNAPSHOT_SPACE_DEVICE, 6u, 9u);  /* a device believes it owns d6 */
+    device_on_bus_with_identity(1u, 9u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_EQUAL_UINT8(1u, s_plan.move_count);
+    TEST_ASSERT_EQUAL_INT(DALI_SNAPSHOT_SPACE_GEAR, s_plan.moves[0].space);
+    TEST_ASSERT_EQUAL_UINT8(6u, s_plan.moves[0].from);
+    TEST_ASSERT_EQUAL_UINT8(2u, s_plan.moves[0].to);
+    TEST_ASSERT_EQUAL_UINT16(1u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_TARGET_CONTESTED));
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_DEVICE);
+}
+
+/* --------------------------------------------------------------------------
  * Space independence
  * -------------------------------------------------------------------------*/
 
@@ -754,6 +976,7 @@ void test_names_are_defined_for_every_conflict_kind_and_space(void)
         DALI_RESTORE_CONFLICT_DUPLICATE_SNAPSHOT,
         DALI_RESTORE_CONFLICT_DUPLICATE_BUS,
         DALI_RESTORE_CONFLICT_TARGET_OCCUPIED,
+        DALI_RESTORE_CONFLICT_TARGET_CONTESTED,
         DALI_RESTORE_CONFLICT_NO_STAGING_ADDRESS,
     };
     for (size_t i = 0u; i < (sizeof(kinds) / sizeof(kinds[0])); i++) {
@@ -790,6 +1013,13 @@ int main(void)
     RUN_TEST(test_a_cycle_is_broken_before_any_unit_is_moved_aside);
     RUN_TEST(test_a_unit_the_backup_never_saw_stays_put_when_the_space_is_full);
     RUN_TEST(test_a_unit_that_cannot_be_told_from_another_is_never_moved_aside);
+    RUN_TEST(test_a_move_onto_a_contested_address_is_reported_not_made);
+    RUN_TEST(test_a_contested_address_is_never_borrowed_to_stage_a_cycle);
+    RUN_TEST(test_a_contested_address_is_never_used_to_displace_an_unrecorded_unit);
+    RUN_TEST(test_a_contested_address_blocks_only_the_move_that_wants_it);
+    RUN_TEST(test_a_contested_address_reserves_only_its_own_space);
+    RUN_TEST(test_a_contested_device_address_blocks_a_device_move);
+    RUN_TEST(test_a_hybrid_address_contested_in_one_space_still_plans_the_other);
     RUN_TEST(test_the_two_address_spaces_are_planned_independently);
     RUN_TEST(test_a_control_device_is_restored_from_its_own_identity);
     RUN_TEST(test_gear_and_device_identities_never_substitute_for_each_other);

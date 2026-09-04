@@ -28,6 +28,14 @@ typedef struct {
 
 typedef struct {
     bool     present[DALI_SHORT_ADDRESS_COUNT];
+    /*
+     * Answered undecodably in this space: the address is taken, but nothing
+     * there can be read, matched, or moved. Never both this and `present` --
+     * the scan records one or the other -- and the two mean different things
+     * to the planner. A present unit is something to plan for; a reserved
+     * address is something to plan around.
+     */
+    bool     reserved[DALI_SHORT_ADDRESS_COUNT];
     bool     has_ident[DALI_SHORT_ADDRESS_COUNT];
     uint8_t  ident[DALI_SHORT_ADDRESS_COUNT][DALI_MEMORY_BANK0_IDENTIFICATION_LEN];
     /* Gear only, and only where the scan's QUERY GROUPS actually answered. The
@@ -106,6 +114,18 @@ static bool restore_add_move(DaliRestorePlan    *plan,
  * other's anchor. A unit whose identity could not be read is collected as
  * present but unidentified and reported rather than silently skipped: an
  * operator needs to know the plan cannot place it.
+ *
+ * An address that answered undecodably is collected too, as `reserved` rather
+ * than present. Two units sharing one short address answer as one, so there is
+ * no identity to read and no way to address either alone -- but the address is
+ * occupied, and a plan that treated it as free would move a third unit onto it.
+ * That is the one fault a restore must never create, and unlike the others it
+ * cannot be undone by moving anything back.
+ *
+ * The two spaces read their own flag for the reason they read their own
+ * identity. A contested control-device address at number N says nothing about
+ * control gear at number N, and reserving a gear address on the strength of it
+ * would refuse a move that is perfectly safe.
  */
 static void restore_collect_bus(RestoreBusUnits              *units,
                                 DaliSnapshotSpace             space,
@@ -116,7 +136,19 @@ static void restore_collect_bus(RestoreBusUnits              *units,
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         const DaliDiscoveryDeviceInfo *device =
             dali_discovery_inventory_get(inventory, addr);
-        if (device == NULL || !device->present) {
+        if (device == NULL) {
+            continue;
+        }
+
+        const bool contested = (space == DALI_SNAPSHOT_SPACE_GEAR)
+                                   ? device->has_undecodable_activity
+                                   : device->has_undecodable_device_activity;
+        if (contested) {
+            units->reserved[addr] = true;
+            continue;
+        }
+
+        if (!device->present) {
             continue;
         }
 
@@ -398,6 +430,11 @@ static uint8_t restore_find_spare(uint64_t              occupied,
  * and propagate: a unit that stays put now blocks whoever was aimed at its own
  * address. Runs once before ordering, and again if a unit that looked
  * displaceable turns out to have nowhere to go.
+ *
+ * A contested target is reported as its own kind. Both are immovable and both
+ * cost the operator the same move, but "a4 is contested" and "a4 holds a unit
+ * that will not move" send them to different places: one to `address a4 clear`,
+ * the other to finding out what is sitting on a4 and why.
  */
 static void restore_drop_blocked(DaliSnapshotSpace          space,
                                  const RestoreBusUnits     *units,
@@ -417,7 +454,9 @@ static void restore_drop_blocked(DaliSnapshotSpace          space,
                 continue;
             }
             restore_add_conflict(sink,
-                                 DALI_RESTORE_CONFLICT_TARGET_OCCUPIED,
+                                 units->reserved[pending[i].dst]
+                                     ? DALI_RESTORE_CONFLICT_TARGET_CONTESTED
+                                     : DALI_RESTORE_CONFLICT_TARGET_OCCUPIED,
                                  space,
                                  pending[i].cur,
                                  pending[i].dst,
@@ -451,6 +490,20 @@ static void restore_plan_space(DaliRestorePlan    *plan,
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         if (units->present[addr]) {
             occupied |= ((uint64_t)1u << addr);
+        }
+        /*
+         * A contested address is occupied and will stay that way for the whole
+         * plan. Occupied keeps it out of every free-address decision — the
+         * direct placement, the staging hop and the displacement all read it —
+         * and immovable makes the drop pass report the moves aimed at it
+         * instead of leaving them stalled until the loop limit calls the plan
+         * incomplete. Nothing here is ever the *subject* of a move: the match
+         * loop below only walks present addresses, so no pending move can
+         * start on one.
+         */
+        if (units->reserved[addr]) {
+            occupied  |= ((uint64_t)1u << addr);
+            immovable |= ((uint64_t)1u << addr);
         }
     }
 
@@ -772,6 +825,7 @@ const char *dali_restore_conflict_name(DaliRestoreConflictKind kind)
         case DALI_RESTORE_CONFLICT_DUPLICATE_SNAPSHOT: return "duplicate in backup";
         case DALI_RESTORE_CONFLICT_DUPLICATE_BUS:      return "duplicate on bus";
         case DALI_RESTORE_CONFLICT_TARGET_OCCUPIED:    return "target occupied";
+        case DALI_RESTORE_CONFLICT_TARGET_CONTESTED:   return "target contested";
         case DALI_RESTORE_CONFLICT_NO_STAGING_ADDRESS: return "no free address to stage";
         case DALI_RESTORE_CONFLICT_NO_RECORDED_GROUPS: return "no group data in backup";
         case DALI_RESTORE_CONFLICT_GROUPS_UNREADABLE:  return "groups unreadable";

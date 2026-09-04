@@ -502,6 +502,17 @@ The typed verb surface is in place; what is missing is evidence. Keep
   looks like. Worth doing on 2k with two drivers deliberately set to one
   address: clear, confirm both report missing, `commission unaddressed`,
   `identify`, then `restore`.
+- **No restore has planned against a real contested address.** The planner
+  reserves one now — it used to read "not present" as "free" and could stage or
+  displace a third unit onto it, which is recorded in `project_log.md` — and the
+  reservation, the new `target contested` conflict and the space independence
+  are all host-covered and mutation-checked. What no test can supply is the
+  input: `has_undecodable_activity` set by genuine overlapping replies rather
+  than by a struct field a test wrote. The same 2k bench that proves
+  `address <aN> clear` proves this, one command earlier: with two drivers on one
+  address, a `backup save` taken beforehand and a `restore plan` afterwards
+  should report `target contested` for whatever the backup says belongs there,
+  and must never list a move onto it.
 
 ### P1 — Release and verification quality
 

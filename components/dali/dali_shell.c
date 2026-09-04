@@ -5801,6 +5801,37 @@ static void shell_restore_print_conflicts(const char                *verb,
         }
         shell_printf("\r\n");
     }
+
+    /*
+     * A contested target earns a line of follow-on that the other kinds do
+     * not. Every other conflict names an address an operator can go and look
+     * at; this one names an address that holds no unit anything can address,
+     * and the fix is a sequence rather than a lookup. Read from the stored
+     * conflicts rather than the total for the same reason the list above is:
+     * one past the cap was never recorded, so nothing here knows its kind.
+     */
+    bool gear_contested   = false;
+    bool device_contested = false;
+    for (uint8_t i = 0u; i < count; i++) {
+        if (items[i].kind != DALI_RESTORE_CONFLICT_TARGET_CONTESTED) {
+            continue;
+        }
+        if (items[i].space == DALI_SNAPSHOT_SPACE_GEAR) {
+            gear_contested = true;
+        } else {
+            device_contested = true;
+        }
+    }
+    if (gear_contested) {
+        shell_printf("%s: free a contested target with 'address <aN> clear', then "
+                     "'commission unaddressed', then run this again\r\n", verb);
+    }
+    /* Split by space for the reason 'backup save' splits it: only the gear
+     * space has a verb that takes an address away. */
+    if (device_contested) {
+        shell_printf("%s: nothing here de-addresses a control device, so a "
+                     "contested d<N> target needs a hardware pass\r\n", verb);
+    }
 }
 
 static void shell_restore_print_plan(const DaliRestorePlan *plan)

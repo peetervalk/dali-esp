@@ -1057,6 +1057,29 @@ identity, two units sharing an identification number, and an unrecorded unit in
 an address space with nowhere free to move it to — are reported and never moved,
 and blocking cascades to anything queued behind the blocked unit.
 
+**A contested address is occupied, not free.** An address that answers
+undecodably holds two or more units that reply as one, and the scan deliberately
+does not mark it present because nothing there can be read. The planner reserves
+it anyway, in the space it was contested in: it is never used as a placement
+target, never borrowed to stage a cycle through, and never used to park a unit
+the backup has never seen. Writing a third unit onto it is the one fault a
+restore cannot undo by moving anything back — every other mistake it could make
+is reverted by planning again. A move that wanted such an address is dropped and
+reported as `target contested` rather than `target occupied`, because the remedy
+is a sequence rather than a lookup:
+
+```
+restore: 1 conflict(s):
+  gear a1: target contested (4)
+restore: free a contested target with 'address <aN> clear', then
+'commission unaddressed', then run this again
+```
+
+Once cleared and re-commissioned, both units answer separately, both read back
+their own identification numbers, and a second `restore plan` places them. The
+device space is reserved the same way and reported the same way, but has no verb
+that takes an address away, so a contested `d<N>` target needs a hardware pass.
+
 ### `restore groups` — a different repair
 
 Group membership lives in each gear's own non-volatile memory, keyed to the gear

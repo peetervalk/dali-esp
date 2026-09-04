@@ -86,6 +86,20 @@ typedef enum {
      * identity cannot be read or told apart from another's, or an unrecorded
      * one in an address space with nowhere free to displace it to. */
     DALI_RESTORE_CONFLICT_TARGET_OCCUPIED,
+    /*
+     * The recorded address answered undecodably: two or more units already
+     * share it and answer as one. Kept apart from TARGET_OCCUPIED because the
+     * remedy is different and the blocker is not a unit at all. An occupied
+     * target holds something identifiable that an operator can look up and
+     * deal with; a contested one holds nothing that can be read, addressed or
+     * moved, and is cleared with `address <aN> clear` followed by
+     * `commission unaddressed` — after which a re-run of the restore finds
+     * both units and places them.
+     *
+     * The device space has no such verb, so a contested d<N> is reported for
+     * the same reason and fixed by hand.
+     */
+    DALI_RESTORE_CONFLICT_TARGET_CONTESTED,
     /* A cycle needs a free address to stage through and the space has none. */
     DALI_RESTORE_CONFLICT_NO_STAGING_ADDRESS,
     /* Group planning only: the gear is matched, but the backup recorded no
@@ -106,7 +120,8 @@ typedef struct {
      * where the snapshot says it should be. */
     uint8_t                 address;
     /* The second address involved, where the kind has one (the blocker for
-     * TARGET_OCCUPIED, the other claimant for a duplicate). 0xFF when unused. */
+     * TARGET_OCCUPIED and TARGET_CONTESTED, the other claimant for a
+     * duplicate). 0xFF when unused. */
     uint8_t                 other_address;
     bool                    has_identification;
     uint8_t                 identification[DALI_MEMORY_BANK0_IDENTIFICATION_LEN];

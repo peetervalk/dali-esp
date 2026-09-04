@@ -883,6 +883,27 @@ it cannot place safely — a unit that is not in the backup, a recorded unit tha
 is no longer on the bus, two units answering with the same identification number
 — is listed as a conflict and left alone.
 
+A contested address counts as taken here too, and for the same reason the
+pre-scan holds it out of the free pool: something answers there, so putting a
+third unit on it would make the collision worse. It is never used as a target,
+never borrowed to stage a swap through, and never used to park a unit the backup
+has never seen. A move that wanted it says so, and says what to do:
+
+```text
+restore: 1 conflict(s):
+  gear a1: target contested (4)
+restore: free a contested target with 'address <aN> clear', then
+'commission unaddressed', then run this again
+```
+
+That sequence is worth doing before you take the rest of the restore as final.
+Clearing a4 and re-commissioning turns two units nothing could read into two
+units that answer separately and read back their own identification numbers — at
+which point a second `restore plan` can place them, and whatever the backup
+recorded for a4 comes back. Contested **device** addresses are reserved and
+reported the same way, but there is no verb that de-addresses a control device,
+so one of those needs a hardware pass.
+
 #### Putting group membership back
 
 Group membership is a separate verb, and usually you will not need it:
