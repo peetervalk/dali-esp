@@ -661,15 +661,37 @@ DaliError dali_device_commissioning_commission_unaddressed(
     }
 
     /*
-     * No quiescence bracket here, and that is deliberate rather than an
-     * omission. Quiescent mode silences control devices — which are exactly
-     * what this walk is searching for. It is documented as suppressing a
-     * device's own initiative rather than its answers to addressed commands, so
-     * in principle COMPARE would still be answered, but that reading is
-     * transcribed rather than verified, and a device that took it the other way
-     * would make the bus look empty. The gear walk can afford the hardening
-     * because it silences a population it is not searching; this one cannot.
+     * Quiescence goes first, before INITIALISE, for the reason the gear walk
+     * takes it: an event frame landing in a COMPARE reply window reads as YES
+     * and sends the search after a device that is not there.
+     *
+     * This walk silences the population it is about to search, which is why it
+     * refused the bracket at first. Quiescent mode does not gate replies -- see
+     * DaliDeviceCommissioningOptions::quiesce_control_devices -- so the
+     * silencing costs nothing here and the noise it removes is this walk's own
+     * search targets firing events into its own reply windows.
+     *
+     * The capability check is hoisted above the START so the no-traffic
+     * rejection contract still holds: dev_start_unaddressed() makes the same
+     * check, but by then the START would already be on the bus.
      */
+    if (options->quiesce_control_devices) {
+        if (!dali_transport_supports_atomic_sequence(transport) ||
+            !dali_transport_supports_delay(transport)) {
+            return DALI_ERR_INVALID;
+        }
+        out->quiescence_requested = true;
+        bool started = false;
+        out->quiescence_error = dali_discovery_quiescence_start(transport,
+                                                                &started);
+        out->quiescence_started = started;
+        /*
+         * A failed START does not end the run, and the release still runs:
+         * START may have been transmitted and then failed its settle, and
+         * anything short of "certainly nothing left the scheduler" has to be
+         * unwound or the installation stays silent.
+         */
+    }
 
     /* Close any Part 102 addressing window another tool left open, before the
      * specials this walk emits can be misread inside one. */
@@ -835,6 +857,22 @@ cleanup:
      * control gear left in an addressing state answers the next tool's
      * COMPARE just as a control device would. */
     dev_try_terminate_control_gear(transport, out, true);
+
+    /*
+     * Released last, and attempted however everything above went. The
+     * addressing states are the more dangerous things to leave set, so they are
+     * unwound first; but a bus left quiescent is an installation whose sensors
+     * have stopped, so this runs on every exit path that started it.
+     */
+    if (out->quiescence_requested) {
+        out->quiescence_release_attempted = true;
+        DaliError release_err = dali_discovery_quiescence_release(transport);
+        out->quiescent_state_unknown =
+            out->quiescence_started && release_err != DALI_OK;
+        if (out->quiescence_error == DALI_OK) {
+            out->quiescence_error = release_err;
+        }
+    }
 
     if (out->last_error != DALI_OK) {
         return out->last_error;

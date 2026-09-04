@@ -294,6 +294,19 @@ bool dali_cli_parse_hex_bytes(const char *text,
                               uint32_t    capacity,
                               uint32_t   *len);
 bool dali_cli_parse_short_addr(const char *text, uint8_t *out);
+
+/*
+ * A control-device short address, written d<N>.
+ *
+ * The `d` is required, and that is the point of having a separate parser. Every
+ * other address argument in this CLI accepts a bare number, so a device address
+ * that did too would make `address 5 clear` mean one thing and `address d5
+ * clear` another with nothing on the line to say which space the operator meant
+ * -- and the two spaces are independent, so gear 5 and device 5 are unrelated
+ * units. A caller that reaches this parser has already been told which space it
+ * is in by the token itself.
+ */
+bool dali_cli_parse_device_addr(const char *text, uint8_t *out);
 bool dali_cli_parse_instance(const char *text, uint8_t *out);
 
 typedef struct {

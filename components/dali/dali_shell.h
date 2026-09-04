@@ -174,6 +174,15 @@ typedef struct {
      */
     void (*short_address_cleared)(void *ctx, uint8_t addr);
     /*
+     * Neither hook has a control-device counterpart, and that is a statement
+     * about the integration rather than an omission here: nothing on the other
+     * side caches a device short address. Lights are keyed by gear address,
+     * sensors by the device address in their own YAML, and `restore apply`
+     * already moves devices without notifying anything. `address d<N> set` and
+     * `address d<N> clear` therefore call nothing. Add a pair here if a cache
+     * ever keys on the device space.
+     */
+    /*
      * Print the integration's own configuration as the YAML block that would
      * produce it — what `export config` emits.
      *

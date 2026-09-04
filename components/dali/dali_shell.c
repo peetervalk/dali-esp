@@ -2652,7 +2652,7 @@ static void shell_address_set(uint8_t from, uint8_t to)
  * de-address, so `restore` can walk the unit back onto this address once
  * something has given it an address to be walked from.
  */
-static bool shell_backup_can_restore_gear(uint8_t addr);
+static bool shell_backup_can_restore(DaliSnapshotSpace space, uint8_t addr);
 
 /*
  * `clear` — give the address back, and say what that costs
@@ -2694,7 +2694,7 @@ static void shell_address_clear(uint8_t addr)
                      "through the collision -- so they come back only where "
                      "'commission unaddressed' puts them\r\n",
                      (unsigned)addr);
-    } else if (shell_backup_can_restore_gear(addr)) {
+    } else if (shell_backup_can_restore(DALI_SNAPSHOT_SPACE_GEAR, addr)) {
         shell_printf("address: the stored backup has an anchored entry for a%u, "
                      "so 'restore apply' can put this unit back after it is "
                      "re-addressed\r\n", (unsigned)addr);
@@ -2876,11 +2876,297 @@ static void shell_address_group(uint8_t addr, bool add, uint8_t group)
     shell_address_print_groups(addr, mask);
 }
 
+/* ---------------------------------------------------------------------------
+ * The device space
+ *
+ * `address d<N> set d<M>` and `address d<N> clear`, the Part 103 counterparts
+ * of the two re-addressing arms above. Separate functions rather than a flag
+ * through the gear ones, for the reason the two commissioning walks are
+ * separate modules: the frames differ at every step -- a 24-bit device DTR0
+ * instead of the 16-bit gear one, a different SET SHORT ADDRESS DTR0, and a
+ * different presence probe -- and one function taking a space flag would be one
+ * edit away from loading a gear DTR0 and addressing a control device with it.
+ *
+ * What is shared is the discipline: probe both ends, write atomically, and read
+ * the result back off the bus rather than reporting what was asked for.
+ * --------------------------------------------------------------------------*/
+
+/*
+ * Is there a control device at this address?
+ *
+ * QUERY NUMBER OF INSTANCES is the question discovery uses to decide the same
+ * thing, so the verb and the scan agree on what "a device is here" means. Every
+ * control device answers it, and there is no device-space QUERY STATUS to
+ * prefer.
+ */
+static ShellPresence shell_device_presence(uint8_t addr, DaliError *err_out)
+{
+    DaliFrame frame;
+    DaliFrame reply = {0u, 0u};
+
+    DaliError err = dali_build_device_command(addr,
+                                              DALI_CMD_QUERY_NUMBER_OF_INSTANCES,
+                                              &frame);
+    if (err == DALI_OK) {
+        err = shell_sched_sync(
+            &frame,
+            true,
+            shell_command_reply_retries_left(DALI_CMD_QUERY_NUMBER_OF_INSTANCES),
+            false,
+            &reply);
+    }
+    if (err == DALI_OK && reply.bit_length != DALI_BACKWARD_FRAME_BITS) {
+        err = DALI_ERR_MALFORMED;
+    }
+    if (err_out != NULL) {
+        *err_out = err;
+    }
+
+    if (err == DALI_OK) {
+        return SHELL_PRESENCE_PRESENT;
+    }
+    if (err == DALI_ERR_TIMEOUT) {
+        return SHELL_PRESENCE_ABSENT;
+    }
+    return SHELL_PRESENCE_UNKNOWN;
+}
+
+/*
+ * DTR0 then SET SHORT ADDRESS DTR0, both in the device space, as one contiguous
+ * sequence so nothing can redirect DTR0 between the two frames.
+ *
+ * The DTR0 here is a 24-bit control-device special, not the 16-bit gear one.
+ * Loading the gear DTR0 and then addressing a control device would send the
+ * command with whatever the device's own DTR0 happened to hold -- a write to an
+ * address nobody chose, rather than a failure.
+ *
+ * The device form takes the address encoded as (a << 1) | 1, the same as
+ * Part 102, because it reads the value from DTR0. The Part 103 *special*
+ * PROGRAM SHORT ADDRESS takes the raw 6-bit value instead; it is a different
+ * command, used only inside an addressing window, and not this path.
+ */
+static DaliError shell_device_write_short_address(uint8_t addr, uint8_t dtr0)
+{
+    const DaliCommandInfo *cmd =
+        dali_command_lookup(DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0);
+    DaliFrame dtr_frame;
+    DaliFrame config_frame;
+
+    DaliError err = dali_build_control_device_dtr_data(DALI_DTR0, dtr0,
+                                                       &dtr_frame);
+    if (err == DALI_OK) {
+        err = dali_build_device_command(addr,
+                                        DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0,
+                                        &config_frame);
+    }
+    if (err == DALI_OK && cmd == NULL) {
+        err = DALI_ERR_INVALID;
+    }
+    if (err != DALI_OK) {
+        dali_cli_print_error(&s_out, "address", err);
+        return err;
+    }
+
+    DaliSequence seq = {
+        .steps = {
+            { .frame = dtr_frame },
+            { .frame = config_frame, .send_twice = cmd->send_twice },
+        },
+        .step_count = 2u,
+    };
+
+    DaliSequenceResult seq_result;
+    err = shell_sched_sequence_sync(&seq, &seq_result);
+    if (err != DALI_OK) {
+        shell_print_sequence_result("address", err, &seq_result);
+    }
+    return err;
+}
+
+static void shell_device_address_set(uint8_t from, uint8_t to)
+{
+    if (from == to) {
+        shell_printf("address: d%u already answers d%u; nothing sent\r\n",
+                     (unsigned)from, (unsigned)to);
+        return;
+    }
+
+    DaliError err = DALI_OK;
+
+    /* The destination must be empty first, for the reason the gear arm probes
+     * it: two control devices on one short address is a contested state nothing
+     * on the bus can separate remotely. */
+    ShellPresence dest = shell_device_presence(to, &err);
+    if (dest == SHELL_PRESENCE_PRESENT) {
+        shell_printf("address: d%u already answers; refusing to move d%u onto "
+                     "it\r\n", (unsigned)to, (unsigned)from);
+        return;
+    }
+    if (dest == SHELL_PRESENCE_UNKNOWN) {
+        shell_printf("address: cannot tell whether d%u is free (%s); nothing "
+                     "sent\r\n", (unsigned)to, shell_err(err));
+        return;
+    }
+
+    ShellPresence src = shell_device_presence(from, &err);
+    if (src == SHELL_PRESENCE_ABSENT) {
+        shell_printf("address: d%u does not answer; nothing to re-address\r\n",
+                     (unsigned)from);
+        return;
+    }
+    if (src == SHELL_PRESENCE_UNKNOWN) {
+        shell_printf("address: cannot tell what is at d%u (%s); nothing sent\r\n",
+                     (unsigned)from, shell_err(err));
+        return;
+    }
+
+    const uint8_t encoded = dali_commissioning_encode_short_address(to);
+    shell_printf("address: d%u -> d%u (device DTR0=%u)\r\n",
+                 (unsigned)from, (unsigned)to, (unsigned)encoded);
+
+    if (shell_device_write_short_address(from, encoded) != DALI_OK) {
+        return;
+    }
+
+    DaliError     dest_err = DALI_OK;
+    ShellPresence now_to   = shell_device_presence(to, &dest_err);
+    if (now_to != SHELL_PRESENCE_PRESENT) {
+        shell_printf("address: d%u does not answer after the write (%s); run "
+                     "'discover' -- the device may still be at d%u\r\n",
+                     (unsigned)to, shell_err(dest_err), (unsigned)from);
+        return;
+    }
+
+    DaliError     src_err  = DALI_OK;
+    ShellPresence now_from = shell_device_presence(from, &src_err);
+    if (now_from == SHELL_PRESENCE_PRESENT) {
+        shell_printf("address: d%u still answers as well; two control devices "
+                     "may now share an address -- run 'discover' before sending "
+                     "anything else\r\n", (unsigned)from);
+        return;
+    }
+    if (now_from != SHELL_PRESENCE_ABSENT) {
+        shell_printf("address: d%u answers d%u, but whether d%u went silent is "
+                     "unreadable (%s); run 'discover'\r\n",
+                     (unsigned)to, (unsigned)to, (unsigned)from,
+                     shell_err(src_err));
+        return;
+    }
+
+    shell_printf("address: d%u confirmed, d%u silent\r\n",
+                 (unsigned)to, (unsigned)from);
+}
+
+/*
+ * `clear` in the device space, and the one place the two spaces are not
+ * symmetric.
+ *
+ * The gear arm has two-sided evidence: silence at the subject, plus a broadcast
+ * QUERY MISSING SHORT ADDRESS that turns "this address went quiet" into "and
+ * something on the bus is now unaddressed". Part 103 has no such query in this
+ * stack, so silence is the whole of the evidence here -- and silence is also
+ * what a control device that lost power looks like.
+ *
+ * Rather than imply a confirmation it cannot make, this says so and names the
+ * verb that can settle it: `commission devices` finds unaddressed devices by
+ * searching for them, which is the positive evidence this path lacks.
+ */
+static void shell_device_address_clear(uint8_t addr)
+{
+    DaliError     err     = DALI_OK;
+    ShellPresence subject = shell_device_presence(addr, &err);
+
+    if (subject == SHELL_PRESENCE_ABSENT) {
+        shell_printf("address: d%u does not answer; nothing to clear\r\n",
+                     (unsigned)addr);
+        return;
+    }
+
+    const bool contested = (subject == SHELL_PRESENCE_UNKNOWN);
+    if (contested) {
+        shell_printf("address: d%u answers undecodably (%s) -- control devices "
+                     "sharing one short address is the expected cause\r\n",
+                     (unsigned)addr, shell_err(err));
+        shell_printf("address: clearing frees every device on d%u at once. No "
+                     "backup holds them -- nothing could read an identity "
+                     "through the collision -- so they come back only where "
+                     "'commission devices' puts them\r\n", (unsigned)addr);
+    } else if (shell_backup_can_restore(DALI_SNAPSHOT_SPACE_DEVICE, addr)) {
+        shell_printf("address: the stored backup has an anchored entry for d%u, "
+                     "so 'restore apply' can put this device back after it is "
+                     "re-addressed\r\n", (unsigned)addr);
+    } else {
+        shell_printf("address: no anchored backup entry for d%u -- once cleared, "
+                     "nothing records that this device belongs here\r\n",
+                     (unsigned)addr);
+    }
+
+    /*
+     * DTR0 carries the literal "no short address" value, not an encoded
+     * address. Putting 255 through dali_commissioning_encode_short_address()
+     * would write a different address rather than none.
+     */
+    shell_printf("address: d%u -> unaddressed (device DTR0=%u)\r\n",
+                 (unsigned)addr,
+                 (unsigned)DALI_COMMISSIONING_NO_SHORT_ADDRESS);
+
+    if (shell_device_write_short_address(
+            addr, DALI_COMMISSIONING_NO_SHORT_ADDRESS) != DALI_OK) {
+        return;
+    }
+
+    DaliError     now_err = DALI_OK;
+    ShellPresence now     = shell_device_presence(addr, &now_err);
+
+    if (now == SHELL_PRESENCE_PRESENT) {
+        if (contested) {
+            /* Decodable where it was undecodable is partial progress, not a
+             * failure: one device took the write and at least one did not. */
+            shell_printf("address: d%u still answers, but decodably now -- one "
+                         "device took the clear and another did not. Repeat the "
+                         "clear, then run 'discover'\r\n", (unsigned)addr);
+        } else {
+            shell_printf("address: d%u still answers; the clear did not take -- "
+                         "run 'discover'\r\n", (unsigned)addr);
+        }
+        return;
+    }
+    if (now != SHELL_PRESENCE_ABSENT) {
+        shell_printf("address: whether d%u went silent is unreadable (%s); run "
+                     "'discover'\r\n", (unsigned)addr, shell_err(now_err));
+        return;
+    }
+
+    shell_printf("address: d%u is silent. Part 103 has no missing-address "
+                 "broadcast here, so that is the whole of the evidence -- a "
+                 "device that dropped off the bus reads the same\r\n",
+                 (unsigned)addr);
+    if (contested) {
+        shell_printf("address: run 'commission devices' to give them distinct "
+                     "addresses; finding them there is what confirms the "
+                     "clear\r\n");
+    } else {
+        shell_printf("address: run 'commission devices' to give it an address "
+                     "again; finding it there is what confirms the clear\r\n");
+    }
+}
+
 static void cmd_address(const DaliCliTokens *t)
 {
     const DaliCliCommandSpec *usage =
         dali_cli_command_for_id(DALI_CLI_CMD_ADDRESS);
-    DaliTarget subject;
+    DaliTarget subject = {0};
+
+    /*
+     * A d<N> subject moves the verb into the control-device space. It is tried
+     * first because it is the narrower spelling: dali_cli_parse_device_addr()
+     * requires the `d`, so nothing an operator writes for gear can land here by
+     * accident, and the two spaces are independent -- gear 5 and device 5 are
+     * unrelated units and must never be confused for one.
+     */
+    uint8_t device_subject = 0u;
+    const bool is_device = dali_cli_parse_device_addr(t->tok[1],
+                                                      &device_subject);
 
     /*
      * One short address only. Every arm of this verb reads its result back off
@@ -2889,10 +3175,13 @@ static void cmd_address(const DaliCliTokens *t)
      * edits stay on `config g<N> add-group`, where the docs already say a scan
      * is needed afterwards.
      */
-    if (!dali_cli_parse_target(t->tok[1], &subject) ||
-        subject.type != DALI_ADDR_SHORT) {
-        shell_printf("address: the subject must be one short address (a0-a%u); "
-                     "group and broadcast cannot be read back\r\n",
+    if (!is_device &&
+        (!dali_cli_parse_target(t->tok[1], &subject) ||
+         subject.type != DALI_ADDR_SHORT)) {
+        shell_printf("address: the subject must be one short address (a0-a%u) "
+                     "or one control device (d0-d%u); group and broadcast "
+                     "cannot be read back\r\n",
+                     (unsigned)DALI_MAX_SHORT_ADDRESS,
                      (unsigned)DALI_MAX_SHORT_ADDRESS);
         dali_cli_print_usage(&s_out, usage);
         return;
@@ -2913,10 +3202,33 @@ static void cmd_address(const DaliCliTokens *t)
      * which have to declare the widest form.
      */
     DaliTarget arg = {0};
+    uint8_t    device_arg = 0u;
     if (is_clear) {
         if (t->count != 3u) {
             shell_printf("address: 'clear' takes no argument\r\n");
             dali_cli_print_usage(&s_out, usage);
+            return;
+        }
+    } else if (is_device) {
+        /*
+         * The group arms are refused in the device space rather than sent.
+         * Part 103 device groups exist, but nothing in this stack reads them
+         * back, and every other arm of this verb proves its result by reading
+         * it. A write-only `address d5 add g3` would report success on the
+         * strength of an unacknowledged frame -- which is the one thing this
+         * verb was built not to do.
+         */
+        if (!is_set) {
+            shell_printf("address: '%s' is control gear only. Part 103 device "
+                         "groups have no read-back path here, so this verb "
+                         "cannot confirm the write\r\n", t->tok[2]);
+            return;
+        }
+        if (t->count != 4u || !dali_cli_parse_device_addr(t->tok[3],
+                                                          &device_arg)) {
+            shell_printf("address: a d<N> subject takes a control-device "
+                         "destination (d0-d%u)\r\n",
+                         (unsigned)DALI_MAX_SHORT_ADDRESS);
             return;
         }
     } else {
@@ -2951,13 +3263,19 @@ static void cmd_address(const DaliCliTokens *t)
     }
 
     /* Held across the probes, the write, and the read-back, so the
-     * integration's own polling cannot interleave and answer for the gear. */
+     * integration's own polling cannot interleave and answer for the unit. */
     if (!shell_bus_claim("address")) {
         shell_printf("address: bus busy\r\n");
         return;
     }
 
-    if (is_set) {
+    if (is_device) {
+        if (is_set) {
+            shell_device_address_set(device_subject, device_arg);
+        } else {
+            shell_device_address_clear(device_subject);
+        }
+    } else if (is_set) {
         shell_address_set(subject.address, arg.address);
     } else if (is_clear) {
         shell_address_clear(subject.address);
@@ -4046,6 +4364,14 @@ static void cmd_commission_devices(uint8_t first_address, uint8_t max_devices)
         /* The mirror of the gear run's Part 103 bracket: control gear left in
          * an initialise window can answer the specials this walk emits. */
         .terminate_control_gear = true,
+        /*
+         * The same bracket the gear walk and every operator-driven scan take.
+         * The devices this silences are the ones being searched for, which is
+         * why the walk went without it at first; quiescent mode does not gate
+         * replies, so what it removes here is this walk's own search targets
+         * firing events into its own COMPARE reply windows.
+         */
+        .quiesce_control_devices = true,
     };
 
     DaliDeviceCommissioningResult result;
@@ -4053,6 +4379,12 @@ static void cmd_commission_devices(uint8_t first_address, uint8_t max_devices)
         &transport, &options, &result, shell_commission_progress_cb, NULL);
 
     shell_bus_release();
+
+    shell_report_quiescence_bracket("commission devices",
+                                    result.quiescence_requested,
+                                    result.quiescence_started,
+                                    result.quiescent_state_unknown,
+                                    result.quiescence_error);
 
     if (s_session.hooks.inventory_changed != NULL) {
         s_session.hooks.inventory_changed(s_session.hooks.ctx, inventory);
@@ -5298,14 +5630,14 @@ static uint32_t s_backup_import_len;
  * address. An entry without one is recorded and reported by `backup save`, but
  * it can never be matched to anything on a bus, so it is not an undo.
  */
-static bool shell_backup_can_restore_gear(uint8_t addr)
+static bool shell_backup_can_restore(DaliSnapshotSpace space, uint8_t addr)
 {
     if (!s_backup_valid) {
         return false;
     }
     for (uint8_t i = 0u; i < s_backup.entry_count; i++) {
         const DaliSnapshotEntry *entry = &s_backup.entries[i];
-        if (entry->space == DALI_SNAPSHOT_SPACE_GEAR &&
+        if (entry->space == space &&
             entry->short_address == addr &&
             entry->has_identification &&
             !dali_snapshot_identification_is_null(entry->identification)) {

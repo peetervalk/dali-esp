@@ -57,6 +57,7 @@ verb by verb.
 | Configuration commands (19 names) | `dali_control_build_config` | `config` | yes | partial | yes (console) |
 | DTR0-consuming configuration | `dali_control_build_config` + sequence | `config-dtr0` | yes | no | yes (console, minus `set-short-address-dtr0`) |
 | Checked re-address / regroup | `dali_group_map_move` + shell workflow | `address` | partial (map only) | no | shell only |
+| Checked control-device re-address | n/a — `SET SHORT ADDRESS DTR0` (Part 103) | `address <dN> set\|clear` | partial (parsing only) | no | shell only |
 | DTR0/1/2 load | `dali_control_build_dtr` | `dtr` | yes | yes | yes (console) |
 | Special/broadcast commands (18 names) | `dali_build_special` | `special` | yes | partial | partial (console) |
 | Arbitrary frame | n/a | `raw` | yes (parse only) | yes | yes (`raw`) |
@@ -214,6 +215,7 @@ a gap.
 | Event dispatch rules | `dali_dispatch_*` | n/a | yes | yes | yes |
 | Quiescent mode | `dali_input_build_quiescent_mode[_broadcast]` | `quiescent on\|off <addr\|all>` | yes | no | yes (console) |
 | Commissioning quiescence bracket | `DaliCommissioningOptions.quiesce_control_devices` | automatic in `commission` | yes | no | n/a |
+| Device-walk quiescence bracket | `DaliDeviceCommissioningOptions.quiesce_control_devices` | automatic in `commission devices` | yes | no | n/a |
 | Cross-part TERMINATE bracket | `DaliCommissioningOptions.terminate_control_devices` | automatic in `commission` | yes | no | n/a |
 | Part 103 TERMINATE frame | `dali_build_device_special` / `DALI_CMD_DEVICE_TERMINATE` | via `commission` | yes | no | n/a |
 | Device broadcast (0xFF) | `dali_build_device_broadcast_command` | via `quiescent ... all` | yes | no | yes (console) |
@@ -296,4 +298,14 @@ use. Host- and compile-verified only; no bus has run it.
   releases what it started; the standalone verb does not, so a device left
   quiescent by hand stays silent until `quiescent off`, which is
   indistinguishable from a dead sensor.
+- Part 103 **device groups** have a decode path and no read or write path. They
+  are recognised as an event source (`DALI_EVENT_SOURCE_DEVICE_GROUP`) and
+  nowhere else: discovery does not query them, the snapshot does not record
+  them, `restore groups` is control gear only, and `address <dN> add <gN>` is
+  refused rather than sent because nothing could read the result back. A control
+  device that is replaced can be given its address back but not its group
+  membership.
+- `address <dN> clear` has one-sided evidence. Part 103 has no broadcast
+  QUERY MISSING SHORT ADDRESS in this stack, so silence at the subject is the
+  whole of the confirmation, and `commission devices` is what settles it.
 - Nothing here claims DALI Alliance certification or complete IEC 62386 coverage.

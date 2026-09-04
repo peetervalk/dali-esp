@@ -2326,7 +2326,133 @@ Anything scraping `special` output for these three names sees one or two extra
 lines before the result. No C API change. The shell plumbing compiles and
 carries **no real-bus result**.
 
+## The device walk takes the quiescence bracket after all
+
+**Reversal, 2026-09-04.** `dali_device_commissioning` refused the broadcast
+START/STOP QUIESCENT MODE bracket from the day it was written, on this argument:
+quiescent mode silences control devices, and control devices are exactly what a
+Part 103 walk is searching for. The gear walk could afford the hardening because
+it silences a population it is not searching; this one could not.
+
+The argument was wrong, and it had already lost to a comment in the same tree.
+`dali_protocol.h`, on `DALI_CMD_DEVICE_TERMINATE`, states the semantics without
+hedging: quiescent mode "stops a device transmitting on its own initiative, not
+responding to a query it was addressed with" — and names a COMPARE reply window
+as one of the things quiescence *enables*. The device module transcribed the
+same clause and then declined to believe it, calling the reading "transcribed
+rather than verified".
+
+**What settled it was the bus.** `discover` with `quiescent on` in force
+enumerates control devices and their instances normally. Those are addressed
+Part 103 queries answered with backward frames, so quiescence demonstrably does
+not gate replies.
+
+With replies unaffected the trade runs entirely the other way, and the walk that
+refused the bracket turns out to be the one that needed it most.
+`dali_commissioning_compare_from_sequence()` maps `DALI_ERR_RX_ACTIVITY` in a
+COMPARE window to YES, so one event frame landing in one window sends the 24-bit
+binary search down a branch no device is on. A device walk searches the event
+sources themselves and asks ~25 COMPARE questions per device found; on 2k the
+baseline event rate is ~0.36/s, rising to at least 3.2x that while a walk runs,
+with a0's lux instance a 3.000 s metronome that fires regardless of movement.
+
+`DaliDeviceCommissioningOptions` gains `quiesce_control_devices` and the result
+gains the five fields the gear result already had. Placement, ordering and
+failure semantics are the gear walk's, literally: capability check hoisted above
+the START so a refused run transmits nothing, START before INITIALISE, release
+last on every exit path including the aborts, a failed START recorded rather
+than fatal, and `quiescent_state_unknown` when a started quiescence could not be
+released. `commission devices` sets it and reports the bracket.
+
+**Still inferred, not observed:** COMPARE answered from inside an open Part 103
+addressing window by a device with no short address. Nothing in the clause
+separates that from the addressed-query case and the broadcast address byte
+0xFF does reach unaddressed devices, but the bus has not been asked that exact
+question. Worth doing in the same session as the first real
+`commission devices` run.
+
+Seven new vectors in `test_device_commissioning`, including the ordering
+assertion and the release-runs-on-failure path. The device mock grew a
+device-broadcast route: the quiescent pair carries an address byte where every
+other frame in that walk carries the fixed 0xC1, which the mock had been
+asserting unconditionally.
+
+## `address d<N>` — the device space gets a re-address verb
+
+**New verb arms, 2026-09-04.** `address <dN> set <dM>` and `address <dN> clear`,
+the Part 103 counterparts of the gear arms added the day before.
+
+**Why it was the blocking item.** `DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0` was
+reachable from exactly one place in the tree — `restore apply` — and that path
+only moves a device to an address a backup recorded. Nothing could take a
+control device's address *away*. Since `commission devices` addresses only
+devices that have none, there was no way to produce an unaddressed control
+device from the shell, and therefore no way to run the device walk against
+anything: its hardware verification was blocked on a fixture that did not exist.
+`dali_restore.h` had already conceded the point in a comment ("The device space
+has no such verb, so a contested d<N> is reported for the same reason and fixed
+by hand").
+
+**The `d` prefix is mandatory**, and that strictness is the safety property.
+`dali_cli_parse_device_addr()` rejects `5`, `a5`, `g5` and `b`. Every other
+address argument in this CLI accepts a bare number, so a device parser that did
+too would leave `address 5 clear` and `address d5 clear` meaning different
+things with nothing on the line to say which — and the two spaces are
+independent, so gear 5 and device 5 are unrelated units that may be different
+physical products. `address d5 set a7` is refused for the same reason.
+
+Separate shell functions rather than a space flag through the gear ones, for the
+reason the two commissioning walks are separate modules: the frames differ at
+every step — a 24-bit control-device DTR0 rather than the 16-bit gear one, a
+different SET SHORT ADDRESS DTR0, QUERY NUMBER OF INSTANCES as the presence
+probe instead of QUERY STATUS — and one function taking a flag would be one edit
+away from loading a gear DTR0 and addressing a control device with it. The
+discipline is shared instead: probe both ends, write atomically, read back.
+
+**Two deliberate asymmetries with the gear arms.**
+
+The group arms stay gear-only. `address d5 add g3` is refused rather than sent.
+Part 103 device groups exist and this stack decodes them as an event source, but
+nothing reads them back — so a device group arm would report success on the
+strength of an unacknowledged frame, which is the one thing this verb was built
+not to do. The gap is now recorded in `dali_capability_matrix.md`.
+
+`clear` proves less than its gear counterpart, and says so. The gear arm backs
+silence at the subject with a broadcast QUERY MISSING SHORT ADDRESS; Part 103
+has no such query in this stack, so silence is the whole of the evidence and a
+device that lost power reads identically. Rather than imply a confirmation it
+cannot make, the verb names the step that settles it: `commission devices` finds
+unaddressed devices by searching for them, which is the positive evidence this
+path lacks. Adding a device-level missing-address query was considered and
+rejected for now — it would mean asserting an opcode from a clause not read
+here, and this stack's Part 103 opcode surface is independently audited.
+
+No integration hook, and `dali_shell.h` now says why rather than leaving it
+looking like an oversight: nothing on the other side caches a device short
+address. Lights are keyed by gear address, sensors by the device address in
+their own YAML, and `restore apply` already moves devices without notifying
+anything.
+
+`shell_backup_can_restore_gear()` became `shell_backup_can_restore(space, addr)`
+so the device clear can report whether the stored backup could put the device
+back — device entries are anchored by the Part 103 Bank 0 identification the
+2026-09-02 session confirmed on hardware.
+
+Additive C API: `dali_cli_parse_device_addr()`, and a widened `address` usage
+string. Four new vectors in `test_cli` covering the parser, the gear parsers'
+refusal of the device spelling, and the resolver's half of the split. The shell
+workflow itself is not host-compiled and carries **no real-bus result**.
+
 ## Source-level API migrations
+
+`DaliDeviceCommissioningOptions` gains `quiesce_control_devices` and
+`DaliDeviceCommissioningResult` gains `quiescence_requested`,
+`quiescence_started`, `quiescence_release_attempted`,
+`quiescent_state_unknown` and `quiescence_error`. Purely additive: a
+zero-initialized options struct leaves the bracket off and the walk behaves
+exactly as before. `dali_cli_parse_device_addr()` is new, and the `address`
+verb's usage string widens to cover the `d<N>` arms. `DaliShellHooks` is
+unchanged — the device arms deliberately notify nothing.
 
 New module `dali_commissioning_audit.{c,h}`: the post-scan diff, lifted out of
 `dali_shell.c` so it is host-testable at all. Public surface is
@@ -2476,6 +2602,20 @@ its pure frame builders now also sees the scheduler and transport types.
 
 
 ## Owed release-note items
+
+- Announce the new `address <dN>` arms. `address <dN> set <dM>` and
+  `address <dN> clear` re-address and de-address control devices, gated by
+  `allow_commissioning: true` like the gear arms. The `d` prefix is mandatory
+  and the group arms are refused in the device space, so no previously valid
+  line changes meaning. The `address` usage string widened, which anything
+  parsing `help` output will see.
+
+- Announce that `commission devices` now brackets its run with broadcast
+  START/STOP QUIESCENT MODE, like `commission unaddressed` already did. It is
+  operator-visible: the run prints the quiescence bracket line, and a failed
+  release warns that control devices may stay silent until `quiescent off
+  all`. Sensors are silent for the duration of a device walk where they were
+  not before.
 
 - Announce the commissioning post-scan changes. They are operator-visible and
   change output an automation could be parsing. A failed `commission

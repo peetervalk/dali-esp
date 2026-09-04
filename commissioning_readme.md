@@ -322,7 +322,27 @@ cleanup TERMINATE could not be transmitted and the bus may still be in
 initialisation state; it says so when that is the case.
 
 `commission devices` checks itself the same way, in the control-device address
-space, and prints `d<N>` for the addresses it names.
+space, and prints `d<N>` for the addresses it names. It takes the same
+START/STOP QUIESCENT MODE bracket as the gear walk.
+
+That last point reverses an earlier decision, and the reasoning is worth having.
+The device walk originally refused the bracket: quiescent mode silences control
+devices, and control devices are exactly what it searches for. But quiescent
+mode stops a device transmitting *on its own initiative* — it does not stop one
+answering a command it was addressed with, which you can see directly by running
+`discover` with `quiescent on` in force and watching devices and instances
+enumerate normally. So the silencing costs the walk nothing, while what it
+removes is the noise most likely to break it: a Part 103 walk searches the event
+sources themselves and asks about 25 `COMPARE` questions per device found, each
+with a reply window that a stray event frame turns into a false YES. Of the two
+walks, this is the one with more to gain from the bracket, not less.
+
+One part of that reasoning is still inference rather than observation: a device
+answering `COMPARE` from inside an open Part 103 addressing window, with no
+short address. Nothing in the clause separates that from the addressed-query
+case, and the broadcast address byte 0xFF does reach unaddressed devices, but
+the bus has not been asked that exact question. It is worth confirming in the
+same session as the first real `commission devices` run.
 
 The remaining commissioning work is explicit:
 
@@ -632,6 +652,60 @@ address: no anchored backup entry for a5 -- once cleared, nothing records that
 in what DTR0 holds. Its main use is the contested address described at the top
 of this document, where it is the step that makes a collision resolvable without
 a hardware pass.
+
+#### Control devices: `address d<N>`
+
+Everything above addresses control *gear*. Sensors, push-button couplers and
+other IEC 62386-103 control devices live in a separate 0..63 address space, and
+the same verb reaches them with a `d` prefix:
+
+```text
+> address d0 set d4
+address: d0 -> d4 (device DTR0=9)
+address: d4 confirmed, d0 silent
+
+> address d0 clear
+address: d0 -> unaddressed (device DTR0=255)
+```
+
+The `d` is not optional. Every other address argument in this shell accepts a
+bare number, so `address 5 clear` is gear 5 and always will be; without the
+prefix there would be nothing on the line to say which space you meant, and gear
+5 and device 5 are unrelated units that may be different physical products.
+`address d5 set a7` is refused for the same reason — a move never crosses
+spaces.
+
+The checks are the gear ones, over Part 103 frames: the destination is probed
+and the move refused if anything answers, the source is probed, the device DTR0
+and SET SHORT ADDRESS DTR0 go out as one sequence, and both ends are read back.
+The presence question is QUERY NUMBER OF INSTANCES rather than QUERY STATUS,
+which is the same question `discover` uses to decide a control device is there.
+
+Two things differ from the gear arms:
+
+**No group arms.** `address d5 add g3` is refused. Part 103 device groups exist,
+but nothing in this stack reads them back, and every arm of this verb proves its
+result by reading it.
+
+**`clear` proves less.** For gear, silence at the subject is backed by a
+broadcast QUERY MISSING SHORT ADDRESS — "and something on the bus is now
+unaddressed". Part 103 has no such query here, so silence is all you get, and a
+device that lost power looks identical. The verb says so and names the step that
+settles it:
+
+```text
+address: d0 is silent. Part 103 has no missing-address broadcast here, so that
+  is the whole of the evidence -- a device that dropped off the bus reads the
+  same
+address: run 'commission devices' to give it an address again; finding it there
+  is what confirms the clear
+```
+
+That is the normal workflow, not a workaround. `commission devices` only
+addresses devices that have none, so `address d<N> clear` followed by
+`commission devices` is how you re-commission a control device that is already
+addressed — and how you produce an unaddressed device to test the walk against
+in the first place.
 
 #### The raw spelling, and the encoding it needs
 

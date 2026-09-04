@@ -184,7 +184,7 @@ static const DaliCliCommandSpec s_commands[] = {
     { DALI_CLI_CMD_SPECIAL, "special", "<name> [param]", "special/broadcast command", 1u, 2u, NULL },
     { DALI_CLI_CMD_CONFIG, "config", TARGET_ARG " <config-name> [param]", "addressed configuration command", 2u, 3u, NULL },
     { DALI_CLI_CMD_CONFIG_DTR0, "config-dtr0", TARGET_ARG " <config-name> <dtr0> [param]", "load DTR0 and configure atomically", 3u, 4u, NULL },
-    { DALI_CLI_CMD_ADDRESS, "address", "<aN> set <aM> | add <gN> | remove <gN> | clear", "change what one gear answers to, verified", 2u, 3u,
+    { DALI_CLI_CMD_ADDRESS, "address", "<aN|dN> set <aM|dM> | clear; <aN> add <gN> | remove <gN>", "change what one gear or control device answers to, verified", 2u, 3u,
       "set add remove clear" },
 
     { DALI_CLI_CMD_MEMREAD, "memread", "<addr> <bank> <offset> [count]", "control-gear memory read (Part 102)", 3u, 4u, NULL },
@@ -543,6 +543,14 @@ bool dali_cli_parse_short_addr(const char *text, uint8_t *out)
     return dali_cli_parse_u8(text[0] == 'a' ? text + 1 : text,
                              DALI_MAX_SHORT_ADDRESS,
                              out);
+}
+
+bool dali_cli_parse_device_addr(const char *text, uint8_t *out)
+{
+    if (text == NULL || text[0] != 'd') {
+        return false;
+    }
+    return dali_cli_parse_u8(text + 1, DALI_MAX_SHORT_ADDRESS, out);
 }
 
 bool dali_cli_parse_instance(const char *text, uint8_t *out)

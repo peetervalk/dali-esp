@@ -339,13 +339,25 @@ address <aN> set <aM>
 address <aN> add <gN>
 address <aN> remove <gN>
 address <aN> clear
+
+address <dN> set <dM>
+address <dN> clear
 ```
 
-The checked way to change what one piece of gear answers to. DALI addresses gear
-three ways — one short address, up to sixteen group addresses, and broadcast —
-and this verb changes the first two for a single unit. Every argument is written
-the way a target is, so the prefix says which kind of address is meant and
-`address a5 add a13` is refused rather than guessed at.
+The checked way to change what one piece of gear — or one control device —
+answers to. DALI addresses gear three ways: one short address, up to sixteen
+group addresses, and broadcast; this verb changes the first two for a single
+unit. Every argument is written the way a target is, so the prefix says which
+kind of address is meant and `address a5 add a13` is refused rather than guessed
+at.
+
+The `d<N>` spelling moves the verb into the IEC 62386-103 control-device space,
+and the `d` is **mandatory** there. Every other address argument in this CLI
+accepts a bare number; a device address that did too would leave `address 5
+clear` and `address d5 clear` meaning different things with nothing on the line
+to say which. The two spaces are independent — gear 5 and control device 5 are
+unrelated units, and may be different physical products — so a line that does
+not say which space it means is refused rather than resolved.
 
 It stands to `config` and `config-dtr0` as `commission` stands to the addressing
 specials: same frames, plus the checks that make them safe to type. The raw
@@ -357,6 +369,8 @@ spellings are unchanged and still available.
 | `add <gN>` | ADD TO GROUP | reads both group bytes back and prints the resulting membership |
 | `remove <gN>` | REMOVE FROM GROUP | the same read-back |
 | `clear` | the same sequence, DTR0 = 255 | subject answers, **before**; subject is silent and the bus reports unaddressed gear, **after** |
+| `set <dM>` | device DTR0 + SET SHORT ADDRESS DTR0 (Part 103), one sequence | the same two-sided check, over QUERY NUMBER OF INSTANCES |
+| `clear` on a `d<N>` | the same device sequence, DTR0 = 255 | subject answers, **before**; subject is silent, **after** — and only that; see below |
 
 ```text
 > address a5 set a13
@@ -473,6 +487,62 @@ again. The threshold is lower than a move's, too: a move that cannot be
 confirmed reports nothing, because pointing a cache at an address the gear may
 not hold is worse than dropping it, whereas a cache keyed by a silent address is
 stale whether the gear was cleared or died.
+
+### The control-device space
+
+`address d<N> set d<M>` and `address d<N> clear` are the Part 103 counterparts,
+and they exist mainly so a control device can be *taken off* its address:
+`commission devices` only addresses devices that have none, so without a way to
+clear one there is no way to re-run it against a device already commissioned.
+
+The frames differ from the gear arms at every step — a 24-bit control-device
+DTR0 rather than the 16-bit gear one, a different SET SHORT ADDRESS DTR0, and
+QUERY NUMBER OF INSTANCES as the presence probe instead of QUERY STATUS. What is
+the same is the discipline: probe both ends before, write atomically, read the
+result back after.
+
+```text
+> address d0 set d4
+address: d0 -> d4 (device DTR0=9)
+address: d4 confirmed, d0 silent
+```
+
+Two differences from the gear arms are worth knowing.
+
+**The group arms are gear only.** `address d5 add g3` is refused rather than
+sent. Part 103 device groups exist, but nothing in this stack reads them back,
+and every other arm of this verb proves its result by reading it. A write-only
+group arm would report success on the strength of an unacknowledged frame, which
+is the one thing the verb was built not to do.
+
+**`clear` has half the evidence its gear counterpart has.** The gear arm follows
+silence at the subject with a broadcast QUERY MISSING SHORT ADDRESS, turning
+"this address went quiet" into "and something on the bus is now unaddressed".
+Part 103 has no such query here, so silence is the whole of it — and silence is
+also what a control device that lost power looks like. The verb says so rather
+than implying a confirmation it cannot make:
+
+```text
+> address d0 clear
+address: the stored backup has an anchored entry for d0, so 'restore apply' can
+  put this device back after it is re-addressed
+address: d0 -> unaddressed (device DTR0=255)
+address: d0 is silent. Part 103 has no missing-address broadcast here, so that
+  is the whole of the evidence -- a device that dropped off the bus reads the
+  same
+address: run 'commission devices' to give it an address again; finding it there
+  is what confirms the clear
+```
+
+That last line is the resolution: `commission devices` finds unaddressed devices
+by searching for them, which is the positive evidence this path lacks. A device
+that shows up in the walk was cleared; one that does not, was not.
+
+Both device arms are gated by `allow_commissioning: true`, for the reason the
+gear ones are — they are the same DALI command differing only in what DTR0
+holds. Nothing in the integration caches a device short address, so neither arm
+notifies it: lights are keyed by gear address and sensors by the device address
+in their own YAML.
 
 ## Special Commands
 
@@ -960,6 +1030,17 @@ and cannot put an event frame into a COMPARE reply window. The release is
 unconditional, so a run also releases a quiescence started by hand with
 `quiescent on all`; if the release fails, the shell says so and `quiescent off
 all` is the fix.
+
+`commission devices` takes the same bracket, and since 2026-09-04 it takes it
+for a stronger reason than `commission unaddressed` does. Quiescent mode stops a
+control device transmitting on its own initiative; it does not stop one
+answering a command it was addressed with, which is why `discover` enumerates
+devices and instances normally with `quiescent on` in force. So silencing the
+population a device walk is searching costs that walk nothing — and what it
+removes is the noise most likely to corrupt it, because a Part 103 walk searches
+the event sources themselves and takes about 25 `COMPARE` probes per device
+found. The walk went without the bracket until that date, on the mistaken
+assumption that quiescence would silence the devices it was looking for.
 
 A Part 103 `TERMINATE` is bracketed with it — before `INITIALISE`, again
 immediately after, and in the cleanup unwind. It covers the half quiescence does

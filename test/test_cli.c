@@ -1228,6 +1228,98 @@ static void test_address_arguments_are_targets(void)
 }
 
 /*
+ * The device-space subject.
+ *
+ * `d<N>` is the only spelling that reaches the control-device arms, and the `d`
+ * is mandatory. That strictness is the safety property: every other address
+ * argument in this CLI accepts a bare number, so a device parser that did too
+ * would leave `address 5 clear` meaning gear and `address d5 clear` meaning a
+ * device with nothing on the line to say which -- and the two spaces are
+ * independent, so gear 5 and device 5 are unrelated units.
+ */
+static void test_parse_device_addr_requires_the_d_prefix(void)
+{
+    uint8_t v = 0xFFu;
+
+    TEST_ASSERT_TRUE(dali_cli_parse_device_addr("d0", &v));
+    TEST_ASSERT_EQUAL_UINT8(0u, v);
+    TEST_ASSERT_TRUE(dali_cli_parse_device_addr("d63", &v));
+    TEST_ASSERT_EQUAL_UINT8(63u, v);
+
+    /* A bare number is never a device address, and neither is the gear or
+     * group spelling. Each of these would be a write into the wrong space. */
+    TEST_ASSERT_FALSE(dali_cli_parse_device_addr("5", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_device_addr("a5", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_device_addr("g5", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_device_addr("b", &v));
+
+    /* Same bounds and same trailing-character rejection as everything else. */
+    TEST_ASSERT_FALSE(dali_cli_parse_device_addr("d64", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_device_addr("d", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_device_addr("d5x", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_device_addr(NULL, &v));
+}
+
+/*
+ * The gear parser must not accept the device spelling either. If it did,
+ * `address d5 set d7` would resolve as gear and re-address the wrong space --
+ * the exact confusion the separate parser exists to prevent.
+ */
+static void test_the_gear_parsers_reject_the_device_spelling(void)
+{
+    DaliTarget target;
+    uint8_t    v = 0u;
+
+    TEST_ASSERT_FALSE(dali_cli_parse_target("d5", &target));
+    TEST_ASSERT_FALSE(dali_cli_parse_short_addr("d5", &v));
+}
+
+/*
+ * A device line resolves to the same arity the gear one does, so both reach the
+ * handler and the handler is what splits them. `address d5 add g3` resolves
+ * here and is refused there, because the resolver cannot express "the group
+ * arms are gear only".
+ */
+static void test_address_device_lines_reach_the_handler(void)
+{
+    DaliCliTokens             tokens;
+    const DaliCliCommandSpec *spec = NULL;
+
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_OK,
+                      dali_cli_resolve("address d5 clear", &tokens, &spec));
+    TEST_ASSERT_EQUAL_UINT8(3u, tokens.count);
+    TEST_ASSERT_EQUAL_STRING("d5", tokens.tok[1]);
+
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_OK,
+                      dali_cli_resolve("address d5 set d7", &tokens, &spec));
+    TEST_ASSERT_EQUAL_UINT8(4u, tokens.count);
+    TEST_ASSERT_EQUAL_STRING("d7", tokens.tok[3]);
+
+    /* Resolves; the handler refuses it. */
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_OK,
+                      dali_cli_resolve("address d5 add g3", &tokens, &spec));
+}
+
+/*
+ * The device re-addressing command must be the one the walk's own de-address
+ * uses, and its DTR0 sentinel must stay outside the encoded range -- otherwise
+ * `address d<N> clear` would write an address rather than remove one.
+ */
+static void test_device_clear_writes_a_value_no_address_encodes_to(void)
+{
+    const DaliCommandInfo *cmd =
+        dali_command_lookup(DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0);
+    TEST_ASSERT_NOT_NULL(cmd);
+    TEST_ASSERT_TRUE_MESSAGE(cmd->send_twice,
+                             "SET SHORT ADDRESS DTR0 is send-twice in both spaces");
+
+    for (uint8_t addr = 0u; addr <= DALI_MAX_SHORT_ADDRESS; addr++) {
+        TEST_ASSERT_NOT_EQUAL(DALI_COMMISSIONING_NO_SHORT_ADDRESS,
+                              dali_commissioning_encode_short_address(addr));
+    }
+}
+
+/*
  * `set` re-addresses gear, so it must be gated wherever the config spelling is.
  * The gate itself lives in the shell, but the fact it is the same operation is
  * asserted here: if SET SHORT ADDRESS ever left the commissioning set, the
@@ -1470,6 +1562,10 @@ int main(void)
     RUN_TEST(test_parse_target_forms);
     RUN_TEST(test_parse_target_rejects_out_of_range);
     RUN_TEST(test_parse_short_addr_and_instance);
+    RUN_TEST(test_parse_device_addr_requires_the_d_prefix);
+    RUN_TEST(test_the_gear_parsers_reject_the_device_spelling);
+    RUN_TEST(test_address_device_lines_reach_the_handler);
+    RUN_TEST(test_device_clear_writes_a_value_no_address_encodes_to);
     RUN_TEST(test_parse_level_distinguishes_mask);
     RUN_TEST(test_parse_len_token);
     RUN_TEST(test_parse_raw_frame);

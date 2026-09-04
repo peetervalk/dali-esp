@@ -66,6 +66,38 @@ typedef struct {
      * a failure is recorded and the run continues.
      */
     bool     terminate_control_gear;
+
+    /*
+     * Bracket the run with broadcast START/STOP QUIESCENT MODE, the way the
+     * gear walk does.
+     *
+     * This walk refused the bracket until 2026-09-04, on the grounds that
+     * quiescent mode silences control devices and control devices are what it
+     * is searching. That reasoning was wrong, and it lost the argument to
+     * dali_protocol.h, which had the semantics right all along: quiescent mode
+     * stops a device transmitting on its own initiative, not responding to a
+     * command it was addressed with. A real bus settled the addressed-query
+     * half -- `discover` under quiescence enumerates control devices and their
+     * instances normally.
+     *
+     * With replies unaffected, the trade runs entirely the other way. COMPARE
+     * maps undecodable activity in its reply window to YES
+     * (dali_commissioning_compare_from_sequence), so one event frame landing in
+     * one window sends the 24-bit binary search down a branch no device is on.
+     * This walk searches the event sources themselves and takes ~25 COMPARE
+     * probes per device found, which makes it the walk with the most exposure
+     * to that, not the least.
+     *
+     * What is still inferred rather than observed: COMPARE answered from inside
+     * an open Part 103 addressing window, by a device with no short address.
+     * Nothing separates it from the addressed-query case in the clause, and the
+     * broadcast address byte 0xFF reaches unaddressed devices, but the bus has
+     * not been asked that exact question yet.
+     *
+     * Off in a zero-initialized struct. Hardening rather than a precondition: a
+     * failed START is recorded and the run continues.
+     */
+    bool     quiesce_control_devices;
 } DaliDeviceCommissioningOptions;
 
 typedef struct {
@@ -84,6 +116,18 @@ typedef struct {
      * addressing state may still be active. */
     bool      initialisation_state_unknown;
     DaliError cleanup_error;
+
+    /* The quiescence bracket, reported the way the gear walk reports its own:
+     * transmission only. Nothing acknowledges START or STOP, so a bus with no
+     * control devices and a bus that ignored both look identical from here.
+     * quiescent_state_unknown is the one that matters operationally -- a START
+     * that went out and a STOP that did not leaves an installation's sensors
+     * silent until something releases them. */
+    bool      quiescence_requested;
+    bool      quiescence_started;
+    bool      quiescence_release_attempted;
+    bool      quiescent_state_unknown;
+    DaliError quiescence_error;
 
     /* Cross-part Part 102 TERMINATE: what was transmitted, never what was
      * applied. Nothing acknowledges it, so a bus with no gear and a bus that

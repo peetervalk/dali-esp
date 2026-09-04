@@ -52,6 +52,13 @@ typedef struct {
     uint8_t    delay_count;
     uint32_t   delay_total_ms;
     bool       cancelled;
+    /* The Part 103 device-level quiescent broadcasts. Counted separately from
+     * the specials because they carry an address byte rather than 0xC1, and
+     * getting that wrong is the failure this mock exists to catch. */
+    uint8_t    quiescent_start_count;
+    uint8_t    quiescent_stop_count;
+    uint8_t    quiescent_fail_opcode;   /* 0xFF = none */
+    DaliError  quiescent_fail_err;
 } MockDeviceBus;
 
 static MockDeviceBus s_bus;
@@ -76,6 +83,18 @@ static void mock_log_tx(const DaliFrame *frame, bool needs_reply, bool send_twic
         .needs_reply = needs_reply,
         .send_twice  = send_twice,
     };
+}
+
+/* Index of the first logged frame with this exact data, or -1. Ordering
+ * assertions need it: which frames were sent matters less than when. */
+static int mock_log_index_of(uint32_t data)
+{
+    for (uint16_t i = 0u; i < s_bus.log_count; i++) {
+        if (s_bus.log[i].data == data) {
+            return (int)i;
+        }
+    }
+    return -1;
 }
 
 static bool mock_selected(const MockDevice *device)
@@ -252,6 +271,37 @@ static DaliError mock_gear_frame(const DaliFrame *frame, bool needs_reply, bool 
     return s_bus.gear_terminate_fails ? DALI_ERR_BUS_STUCK : DALI_OK;
 }
 
+/*
+ * The 24-bit device-level broadcasts. The only pair this walk sends is
+ * START/STOP QUIESCENT MODE; anything else arriving here addressed rather than
+ * as a 0xC1 special is a bug in the code under test, so it fails loudly.
+ */
+static DaliError mock_device_broadcast(const DaliFrame *frame,
+                                       bool             needs_reply,
+                                       bool             send_twice)
+{
+    const uint8_t inst_byte = (uint8_t)((frame->data >> 8u) & 0xFFu);
+    const uint8_t opcode    = (uint8_t)(frame->data & 0xFFu);
+
+    TEST_ASSERT_EQUAL_HEX8(DALI_DEVICE_INSTANCE, inst_byte);
+    TEST_ASSERT_FALSE(needs_reply);
+    TEST_ASSERT_TRUE_MESSAGE(send_twice,
+                             "quiescent mode is a send-twice command");
+
+    if (opcode == 0x1Du) {
+        s_bus.quiescent_start_count++;
+    } else if (opcode == 0x1Eu) {
+        s_bus.quiescent_stop_count++;
+    } else {
+        TEST_FAIL_MESSAGE("unexpected 24-bit device broadcast");
+    }
+
+    if (s_bus.quiescent_fail_opcode == opcode) {
+        return s_bus.quiescent_fail_err;
+    }
+    return DALI_OK;
+}
+
 static DaliError mock_transact(const DaliFrame *frame,
                                bool             needs_reply,
                                uint8_t          retries_left,
@@ -280,6 +330,14 @@ static DaliError mock_transact(const DaliFrame *frame,
     const uint8_t addr_byte = (uint8_t)((frame->data >> 16u) & 0xFFu);
     const uint8_t opcode    = (uint8_t)((frame->data >> 8u) & 0xFFu);
     const uint8_t param     = (uint8_t)(frame->data & 0xFFu);
+
+    /* A device *command* carries an address byte; a Part 103 *special* carries
+     * the fixed 0xC1. The two share the frame width, so the byte is the only
+     * thing telling them apart. */
+    if (addr_byte == DALI_BROADCAST_COMMAND_ADDRESS) {
+        return mock_device_broadcast(frame, needs_reply, send_twice);
+    }
+
     TEST_ASSERT_EQUAL_HEX8_MESSAGE(0xC1u, addr_byte,
                                    "Part 103 specials carry 0xC1 as byte 2");
 
@@ -306,6 +364,14 @@ static DaliError mock_cleanup_transact(const DaliFrame *frame,
 
     if (frame->bit_length == DALI_FORWARD_FRAME_BITS) {
         return mock_gear_frame(frame, needs_reply, send_twice);
+    }
+
+    /* Ahead of cleanup_count, which counts Part 103 special cleanup sends. The
+     * quiescent release rides the same cleanup channel but is not one of
+     * them. */
+    if ((uint8_t)((frame->data >> 16u) & 0xFFu) ==
+        DALI_BROADCAST_COMMAND_ADDRESS) {
+        return mock_device_broadcast(frame, needs_reply, send_twice);
     }
 
     s_bus.cleanup_count++;
@@ -381,6 +447,7 @@ void setUp(void)
 {
     memset(&s_bus, 0, sizeof(s_bus));
     s_bus.fail_opcode = 0xFFu;
+    s_bus.quiescent_fail_opcode = 0xFFu;
     for (uint8_t i = 0u; i < MOCK_DEVICE_COUNT; i++) {
         s_bus.devices[i].short_address = MOCK_UNADDRESSED;
     }
@@ -826,6 +893,227 @@ void test_invalid_arguments_are_rejected(void)
                           &t, DALI_DEVICE_NO_SHORT_ADDRESS));
 }
 
+/* ---------------------------------------------------------------------------
+ * The quiescence bracket
+ *
+ * This walk went without one until 2026-09-04, on the theory that silencing
+ * control devices would silence the devices it is searching for. Quiescent mode
+ * does not gate replies, so the bracket costs nothing here and removes the
+ * noise most likely to corrupt a COMPARE window -- events from the very devices
+ * being searched.
+ * --------------------------------------------------------------------------*/
+
+#define DEVICE_QUIESCENT_START_FRAME 0xFFFE1Du
+#define DEVICE_QUIESCENT_STOP_FRAME  0xFFFE1Eu
+
+void test_without_the_option_no_quiescent_broadcast_is_sent(void)
+{
+    DaliTransport t = transport();
+    DaliDeviceCommissioningResult result;
+
+    mock_add_device(0u, 0x010203u);
+
+    DaliDeviceCommissioningOptions options = {
+        .first_short_address = 0u,
+    };
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_device_commissioning_commission_unaddressed(
+                          &t, &options, &result, NULL, NULL));
+
+    TEST_ASSERT_EQUAL_UINT8(0u, s_bus.quiescent_start_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_bus.quiescent_stop_count);
+    TEST_ASSERT_FALSE(result.quiescence_requested);
+    TEST_ASSERT_FALSE(result.quiescence_started);
+    TEST_ASSERT_FALSE(result.quiescence_release_attempted);
+    TEST_ASSERT_FALSE(result.quiescent_state_unknown);
+}
+
+void test_quiescence_brackets_the_device_walk_around_initialise_and_terminate(void)
+{
+    DaliTransport t = transport();
+    DaliDeviceCommissioningResult result;
+
+    mock_add_device(0u, 0x010203u);
+
+    DaliDeviceCommissioningOptions options = {
+        .first_short_address     = 0u,
+        .query_short_address     = true,
+        .quiesce_control_devices = true,
+    };
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_device_commissioning_commission_unaddressed(
+                          &t, &options, &result, NULL, NULL));
+
+    TEST_ASSERT_EQUAL_UINT8(1u, result.assigned_count);
+    TEST_ASSERT_TRUE(result.quiescence_requested);
+    TEST_ASSERT_TRUE(result.quiescence_started);
+    TEST_ASSERT_TRUE(result.quiescence_release_attempted);
+    TEST_ASSERT_FALSE(result.quiescent_state_unknown);
+    TEST_ASSERT_EQUAL(DALI_OK, result.quiescence_error);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.quiescent_start_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.quiescent_stop_count);
+
+    /*
+     * Ordering is the point. START must precede INITIALISE or an event can
+     * still reach the first COMPARE window, and STOP must be last on the bus so
+     * nothing this walk does afterwards happens on a silenced installation.
+     */
+    int start      = mock_log_index_of(DEVICE_QUIESCENT_START_FRAME);
+    int stop       = mock_log_index_of(DEVICE_QUIESCENT_STOP_FRAME);
+    int initialise = mock_log_index_of(
+        0xC10100u | DALI_DEVICE_INITIALISE_UNADDRESSED_PARAM);
+
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, start);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, stop);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, initialise);
+    TEST_ASSERT_LESS_THAN_INT(initialise, start);
+    TEST_ASSERT_EQUAL_INT((int)s_bus.log_count - 1, stop);
+}
+
+void test_the_quiescent_settle_runs_before_the_first_compare(void)
+{
+    DaliTransport t = transport();
+    DaliDeviceCommissioningResult result;
+
+    mock_add_device(0u, 0x010203u);
+
+    DaliDeviceCommissioningOptions options = {
+        .first_short_address     = 0u,
+        .quiesce_control_devices = true,
+    };
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_device_commissioning_commission_unaddressed(
+                          &t, &options, &result, NULL, NULL));
+
+    /* Two settles: one after START QUIESCENT MODE, one after RANDOMISE. A
+     * skipped quiescent settle leaves an event frame mid-flight into the
+     * window INITIALISE opens. */
+    TEST_ASSERT_EQUAL_UINT8(2u, s_bus.delay_count);
+    TEST_ASSERT_EQUAL_UINT32(DALI_COMMISSIONING_QUIESCENT_SETTLE_MS +
+                                 DALI_COMMISSIONING_RANDOMISE_SETTLE_MS,
+                             s_bus.delay_total_ms);
+}
+
+void test_a_failed_quiescent_start_does_not_abort_the_device_walk(void)
+{
+    DaliTransport t = transport();
+    DaliDeviceCommissioningResult result;
+
+    mock_add_device(0u, 0x010203u);
+    s_bus.quiescent_fail_opcode = 0x1Du;
+    s_bus.quiescent_fail_err    = DALI_ERR_QUEUE_FULL;
+
+    DaliDeviceCommissioningOptions options = {
+        .first_short_address     = 0u,
+        .quiesce_control_devices = true,
+    };
+
+    /* Hardening, not a precondition: the walk still commissions, and the result
+     * is what says the bus was never silenced. */
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_device_commissioning_commission_unaddressed(
+                          &t, &options, &result, NULL, NULL));
+
+    TEST_ASSERT_EQUAL_UINT8(1u, result.assigned_count);
+    TEST_ASSERT_TRUE(result.quiescence_requested);
+    TEST_ASSERT_FALSE(result.quiescence_started);
+    TEST_ASSERT_EQUAL(DALI_ERR_QUEUE_FULL, result.quiescence_error);
+
+    /* The release still runs: a START that reported an error may have reached
+     * the bus anyway. Nothing was proven quiesced, so a failed release here is
+     * not the silent-installation hazard. */
+    TEST_ASSERT_TRUE(result.quiescence_release_attempted);
+    TEST_ASSERT_FALSE(result.quiescent_state_unknown);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.quiescent_stop_count);
+}
+
+void test_a_failed_quiescent_release_is_reported_as_state_unknown(void)
+{
+    DaliTransport t = transport();
+    DaliDeviceCommissioningResult result;
+
+    mock_add_device(0u, 0x010203u);
+    s_bus.quiescent_fail_opcode = 0x1Eu;
+    s_bus.quiescent_fail_err    = DALI_ERR_BUS_STUCK;
+
+    DaliDeviceCommissioningOptions options = {
+        .first_short_address     = 0u,
+        .quiesce_control_devices = true,
+    };
+
+    /* Quiesced and not released: the installation's sensors stay silent. It
+     * does not fail the result, because the addresses really were assigned. */
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_device_commissioning_commission_unaddressed(
+                          &t, &options, &result, NULL, NULL));
+
+    TEST_ASSERT_EQUAL_UINT8(1u, result.assigned_count);
+    TEST_ASSERT_TRUE(result.quiescence_started);
+    TEST_ASSERT_TRUE(result.quiescence_release_attempted);
+    TEST_ASSERT_TRUE(result.quiescent_state_unknown);
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK, result.quiescence_error);
+}
+
+/*
+ * The release runs on the failure paths too. A walk that aborted mid-search has
+ * the same silenced bus behind it as one that finished, and the abort paths are
+ * exactly the ones nothing else unwinds.
+ */
+void test_the_quiescent_release_runs_even_when_the_walk_fails(void)
+{
+    DaliTransport t = transport();
+    DaliDeviceCommissioningResult result;
+
+    mock_add_device(0u, 0x010203u);
+    /* PROGRAM SHORT ADDRESS fails, so the walk aborts after INITIALISE. */
+    s_bus.fail_opcode = 0x07u;
+    s_bus.fail_err    = DALI_ERR_BUS_STUCK;
+
+    DaliDeviceCommissioningOptions options = {
+        .first_short_address     = 0u,
+        .quiesce_control_devices = true,
+    };
+
+    TEST_ASSERT_NOT_EQUAL(DALI_OK,
+                          dali_device_commissioning_commission_unaddressed(
+                              &t, &options, &result, NULL, NULL));
+
+    TEST_ASSERT_TRUE(result.quiescence_release_attempted);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.quiescent_stop_count);
+    TEST_ASSERT_FALSE(result.quiescent_state_unknown);
+}
+
+/*
+ * The capability check is hoisted above the START. A transport that cannot
+ * delay has no settle, so the bracket would be hardening that is not there --
+ * and refusing after transmitting would leave the bus quiesced by a walk that
+ * then declined to run.
+ */
+void test_quiescence_is_refused_without_a_delay_and_sends_nothing(void)
+{
+    DaliTransport t = transport();
+    DaliDeviceCommissioningResult result;
+
+    t.delay_ms = NULL;
+    mock_add_device(0u, 0x010203u);
+
+    DaliDeviceCommissioningOptions options = {
+        .first_short_address     = 0u,
+        .quiesce_control_devices = true,
+    };
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_device_commissioning_commission_unaddressed(
+                          &t, &options, &result, NULL, NULL));
+
+    TEST_ASSERT_EQUAL_UINT8(0u, s_bus.quiescent_start_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_bus.quiescent_stop_count);
+    TEST_ASSERT_EQUAL_UINT16(0u, s_bus.log_count);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -851,5 +1139,12 @@ int main(void)
     RUN_TEST(test_used_mask_reserves_undecodable_device_activity);
     RUN_TEST(test_used_mask_is_independent_of_the_gear_mask);
     RUN_TEST(test_invalid_arguments_are_rejected);
+    RUN_TEST(test_without_the_option_no_quiescent_broadcast_is_sent);
+    RUN_TEST(test_quiescence_brackets_the_device_walk_around_initialise_and_terminate);
+    RUN_TEST(test_the_quiescent_settle_runs_before_the_first_compare);
+    RUN_TEST(test_a_failed_quiescent_start_does_not_abort_the_device_walk);
+    RUN_TEST(test_a_failed_quiescent_release_is_reported_as_state_unknown);
+    RUN_TEST(test_the_quiescent_release_runs_even_when_the_walk_fails);
+    RUN_TEST(test_quiescence_is_refused_without_a_delay_and_sends_nothing);
     return UNITY_END();
 }

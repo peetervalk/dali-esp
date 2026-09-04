@@ -41,7 +41,7 @@ is not DALI Alliance certified.
 
 | Aim | Current state |
 |---|---|
-| CLI completeness | **Surface complete, verification incomplete.** Every shared capability has a typed verb, including memory, DT6, DT8, input-device query/configuration, vendor helpers, control-device memory, gear *and* control-device commissioning, backup/restore, CONTINUOUS UP/DOWN, arc power MASK, and send-twice `raw2`. What is missing is real-bus results for DT6, DT8, memory writes, and input-device configuration. |
+| CLI completeness | **Surface complete, verification incomplete.** Every shared capability has a typed verb, including memory, DT6, DT8, input-device query/configuration, vendor helpers, control-device memory, gear *and* control-device commissioning, gear *and* control-device re-addressing, backup/restore, CONTINUOUS UP/DOWN, arc power MASK, and send-twice `raw2`. What is missing is real-bus results for DT6, DT8, memory writes, and input-device configuration. |
 | ESP32 / ESPHome controller | **Working installation-grade baseline.** The two known sites have operational brightness control, observation, sensor polling, diagnostics, and discovery. Not yet a general, fully state-correct DALI controller. |
 | Protocol separation | **Directionally strong.** The reusable C stack is independent of ESPHome, and every frame the ESPHome layer sends is built by a shared builder in `components/dali`. What stays ESPHome-bound is the wiring — console dispatch, the refresh pump, the entity registries — none of which host tests can reach. |
 | Standards confidence | **Selected workflows verified, not complete conformance.** Some tests repeat implementation constants rather than independent standard-derived vectors. |
@@ -118,7 +118,11 @@ Established on or before the `v1.1.1` flash of 2026-08-14:
   memory operations, and vendor helpers. No write path reads its value back.
 - **Equal-random-address handling** — the largest untested slice. The two units
   commissioned so far drew distinct randoms, so the path never ran.
-- Control-device commissioning (`commission devices`) on a real bus.
+- Control-device commissioning (`commission devices`) on a real bus, and the
+  quiescence bracket it now takes. `address <dN> clear` makes the fixture
+  reachable for the first time: until it existed there was no way to produce an
+  unaddressed control device from the shell, so the walk could not be run
+  against anything.
 - `backup import`, `backup export`, and `restore groups` against real gear.
   `backup save`/`status` and `restore plan`/`apply` are now covered.
 - The commissioning post-scan audit's own contested path. The scan path met a
@@ -167,9 +171,14 @@ Dated evidence for each of these is in `project_log.md`.
 - Part 103 generic instance configuration plus Part 301/type 1, Part 303/type 3,
   and Part 304/type 4 builders have an independently audited opcode surface.
   Software-level evidence only.
-- The Part 102 memory helper reads the common Bank 0 identity block. Discovery
-  performs this 16-bit read only for confirmed control gear; pure Part 103
-  devices need a future typed 24-bit memory path.
+- The Part 102 memory helper reads the common Bank 0 identity block, and the
+  Part 103 form beside it reads a control device's own Bank 0 over 24-bit
+  framing. Discovery performs each read in its own space, independently: gear
+  identity for confirmed control gear, device identity for any address an input
+  device answered. A unit that is both answers each space from a separate
+  Bank 0, and on the 2026-09-02 bus those reported different GTINs and different
+  identification numbers — so nothing may infer that gear address N and device
+  address N are one unit.
 - `dali_snapshot` records which *physical* unit (by Bank 0 identification
   number) holds which short address; `dali_restore` turns a snapshot plus a live
   bus into an ordered move list of plain addressed SET SHORT ADDRESS traffic. No
@@ -192,7 +201,16 @@ Dated evidence for each of these is in `project_log.md`.
   `dali_commissioning` — same walk shape over a different command space, sharing
   the reply classification rather than the encodings. Both directions of the
   cross-part guard exist (`terminate_control_devices` and
-  `terminate_control_gear`).
+  `terminate_control_gear`), and since 2026-09-04 both walks take the broadcast
+  quiescence bracket. The device walk went without one on the assumption that
+  silencing control devices would silence the devices it searches; quiescent
+  mode does not gate replies, which a real bus shows directly — `discover` under
+  `quiescent on` enumerates devices and instances normally. The walk searching
+  the event sources themselves, at ~25 COMPARE probes per device, is the one
+  with the most to gain from the bracket rather than the least. What is still
+  inferred is COMPARE answered from inside an open Part 103 addressing window by
+  a device with no short address; nothing separates it from the addressed-query
+  case, but the bus has not been asked that exact question.
 - DT1 and other specialized/legacy device types remain intentionally
   unimplemented.
 
@@ -212,6 +230,13 @@ Dated evidence for each of these is in `project_log.md`.
   checks argument-count bounds before any handler runs, so trailing tokens are
   rejected rather than ignored. Help and `list <table>` are generated from the
   same tables, so neither can describe a command the parser will not accept.
+- `address` is the one verb that spans both address spaces. `<aN>` reaches
+  control gear and `<dN>` reaches control devices, and the `d` is mandatory
+  because every other address argument in the CLI accepts a bare number — the
+  spaces are independent, so a line that does not say which one it means is
+  refused rather than resolved. The device arms are `set` and `clear` only: the
+  group arms stay gear-only because Part 103 device groups have no read-back
+  path here, and every arm of this verb proves its result by reading it.
 - `raw` sends one arbitrary 16- or 24-bit frame and `raw2` sends one twice
   through the send-twice path. Both are diagnostic escape hatches, not
   substitutes for the typed atomic verbs.
@@ -368,7 +393,12 @@ a sensor value.
   bus: equal-random-address handling, control-device commissioning, `backup
   import`/`export`, and `restore groups`. The single-unaddressed-device envelope
   no longer stands on nothing; the equal-random path is where it is still an
-  assumption.
+  assumption. The control-device half is no longer blocked on a fixture:
+  `address <dN> clear` de-addresses a control device, so the 2k Steinel can be
+  cleared and re-commissioned in one session. Worth settling in the same
+  session: whether a device answers COMPARE from inside an addressing window
+  while quiescent, which is the one part of the new bracket's reasoning the bus
+  has not been asked.
 - **Prove bus timing beyond the local own-forward-frame guard.** TX-end and
   observation timestamps are exported and host-tested; HIL must validate both
   attribution edges (5.5 ms undecodable, 2 ms decoded) against the 27 ms close,
@@ -445,6 +475,13 @@ The typed verb surface is in place; what is missing is evidence. Keep
   `"Contested: a4"`. The same shape one layer along, group membership changes do
   not reach the integration either, so a group light entity cannot know its
   membership changed underneath it.
+- **Part 103 device groups are decode-only.** They are recognised as an event
+  source and nowhere else: discovery does not query them, the snapshot does not
+  record them, `restore groups` is control gear only, and `address <dN> add
+  <gN>` is refused rather than sent because nothing could read the result back.
+  A control device that is replaced can be given its address back but not its
+  group membership. Wanted, in order: a query path in discovery, a `groups`
+  field on the device snapshot entry, then the planner and the verb arm.
 - Extend the compact Part 103 dispatch key if a site needs to distinguish
   Device-Group from Instance-Group sources or match instance type. The canonical
   event/capture path retains these fields; the five-field rule key does not. No
