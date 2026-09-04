@@ -595,6 +595,21 @@ The typed verb surface is in place; what is missing is evidence. Keep
 - Do not use GPIO16 or GPIO17 on the WROVER-E target. Nothing enforces this:
   the schema deliberately does not ban them, because they are ordinary pins on
   WROOM and the S3 puts PSRAM elsewhere.
+- **Static DRAM is ~134 KiB and the shell is 65 KiB of it.** Two builds of the
+  same tree on 2026-09-04: `dali_test.yaml` uses 133.9 KiB of the 176.5 KiB
+  static window, and the same config without its `shell:` block uses 69.1 KiB
+  — 64.8 KiB of RAM and 78.8 KiB of flash. `dali_shell.c` is compiled
+  unconditionally through the `proto_dali_shell.c` shim, but nothing outside
+  `dali_shell_tcp.cpp` references it, so `--gc-sections` drops the whole of it
+  when the block is absent. Every file-scope buffer added there is paid for on
+  each board that does run the shell.
+- **`sram1_as_iram` is inert at this IRAM level.** IRAM is
+  76.7 KiB of the default 128 KiB and this build's `.iram0.text` ends at
+  `0x4009369F`. IDF reserves D/IRAM out of the heap only in proportion to what
+  the app's IRAM actually uses above `0x400A0000` — `_sram1_iram_len` in
+  `memory.ld.in`, clamped at zero — so below that line the option costs
+  nothing and buys nothing. Above it the heap pays byte for byte, and the image
+  then needs a bootloader that knows the region.
 
 ## Source Layout
 

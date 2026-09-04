@@ -1036,6 +1036,14 @@ you are looking at:
 backup: 4 entries, loaded from storage
 ```
 
+That flash is the NVS partition ESPHome's default layout already provides — no
+extra partition, and nothing to configure. The shell task stages the blob and
+the main loop performs the write, because the preferences API is Core 0 only;
+NVS itself is flushed on ESPHome's `flash_write_interval`, 60 s by default, or
+at a clean shutdown. A `backup save` seconds before a power cut is therefore
+still in RAM when the lights go out, and `backup status` after the reboot is
+what tells you. Reboots and OTA updates keep it; erasing the chip does not.
+
 **The native serial CLI has no persistent store.** A backup taken there lives
 until reboot. `backup export` prints it as the script that reads it back:
 
