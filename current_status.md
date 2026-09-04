@@ -390,15 +390,6 @@ a sensor value.
   unsearchable at the first COMPARE — which presents exactly like the former
   silence/collision inversion, so an apparent improvement here would look like a
   partial fix for that and would not be one.
-- **`restore` cannot stage a unit the backup has never seen, and so fails to
-  converge after a mixed commissioning accident.** A unit absent from the
-  snapshot becomes `UNKNOWN_UNIT`, which marks its address immovable, which
-  drops any recorded unit aimed at that address as `TARGET_OCCUPIED`. On the
-  bus this produced a zero-move plan while a free address sat unused and the
-  operator hand-executed the three-command staging cycle `dali_restore.c`
-  already knows how to compute. Proposed: stage the unknown unit through a free
-  address rather than dropping the move, keeping today's refusal when the space
-  is full and for `UNIDENTIFIED` units. Reasoning in `project_log.md`.
 - **The post-scan audit's contested path has no bus behind it.** Both walks
   self-check on every exit that could have written an address, and the diff
   (`dali_commissioning_audit`) is host-covered; `RX_ACTIVITY` has a real
@@ -432,6 +423,12 @@ The typed verb surface is in place; what is missing is evidence. Keep
 - Validate input-device configuration writes with read/write/read-back per
   parameter. `iconfig` success means transmitted; until this is done the whole
   surface stays experimental.
+- Run a restore against a bus carrying gear no backup has seen. The planner now
+  moves such a unit aside to a free address instead of dropping the move, which
+  is host-covered but has never sent a frame. The 2026-09-03 bus is the exact
+  fixture: an unrecorded driver holding an address a recorded unit is owed.
+  Worth checking the operator reading as much as the moves — a displacement and
+  a placement look alike in the apply log apart from the plan's note.
 - Add host vectors for `identify`, `smoke`, `capture`, and the inventory JSON
   export, whose output formats are unasserted.
 - Nothing in the shared-`dali_cli` migration, or the verb-parity work built on

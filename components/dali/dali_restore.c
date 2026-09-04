@@ -5,14 +5,22 @@
 #define RESTORE_NO_ADDRESS 0xFFu
 
 /*
- * Upper bound on main-loop passes. Each pass either places at least one unit or
- * stages exactly one, and every unit is placed once and staged at most once, so
- * the loop cannot need more than this. It exists so a logic error becomes a
- * reported incomplete plan rather than a hung shell holding the bus.
+ * Upper bound on main-loop passes. Every pass either emits at least one move —
+ * one or more when it places, exactly one when it stages or displaces — or
+ * reclassifies one address as immovable, and neither can happen more times than
+ * there are moves in a plan or addresses in a space. It exists so a logic error
+ * becomes a reported incomplete plan rather than a hung shell holding the bus.
  */
-#define RESTORE_LOOP_LIMIT ((2u * DALI_SHORT_ADDRESS_COUNT) + 8u)
+#define RESTORE_LOOP_LIMIT \
+    (DALI_RESTORE_MAX_MOVES + DALI_SHORT_ADDRESS_COUNT + 8u)
 
 typedef struct {
+    /*
+     * Where the unit was found. `cur` follows it through a staging hop; the
+     * identification read off the bus is still filed under `origin`, so a
+     * conflict reported after a hop still names the right unit.
+     */
+    uint8_t origin;
     uint8_t cur;
     uint8_t dst;
     bool    active;
@@ -69,11 +77,11 @@ static void restore_add_conflict(const RestoreConflictSink *sink,
     (*sink->count)++;
 }
 
-static bool restore_add_move(DaliRestorePlan  *plan,
-                             DaliSnapshotSpace space,
-                             uint8_t           from,
-                             uint8_t           to,
-                             bool              is_staging)
+static bool restore_add_move(DaliRestorePlan    *plan,
+                             DaliSnapshotSpace   space,
+                             uint8_t             from,
+                             uint8_t             to,
+                             DaliRestoreMoveKind kind)
 {
     if (plan->move_count >= DALI_RESTORE_MAX_MOVES) {
         plan->incomplete = true;
@@ -81,10 +89,10 @@ static bool restore_add_move(DaliRestorePlan  *plan,
     }
 
     DaliRestoreMove *move = &plan->moves[plan->move_count];
-    move->space      = space;
-    move->from       = from;
-    move->to         = to;
-    move->is_staging = is_staging;
+    move->space = space;
+    move->from  = from;
+    move->to    = to;
+    move->kind  = kind;
     plan->move_count++;
     return true;
 }
@@ -182,12 +190,18 @@ static uint8_t restore_find_on_bus(const RestoreBusUnits *units,
  * operator's next step is different for each. An unreadable identity is a bus
  * or driver problem, a duplicate is two units that must be told apart by hand,
  * and a unit absent from the backup is usually just newer than it.
+ *
+ * `out_kind` receives the conflict that was reported, or is left alone on
+ * success; pass NULL when the distinction does not matter. The address planner
+ * needs it because only one of these failures leaves a unit that can be moved
+ * and found again afterwards.
  */
 static const DaliSnapshotEntry *restore_match_unit(const RestoreBusUnits     *units,
                                                    const DaliSnapshot        *snapshot,
                                                    DaliSnapshotSpace          space,
                                                    uint8_t                    addr,
-                                                   const RestoreConflictSink *sink)
+                                                   const RestoreConflictSink *sink,
+                                                   DaliRestoreConflictKind   *out_kind)
 {
     if (!units->has_ident[addr]) {
         restore_add_conflict(sink,
@@ -197,6 +211,9 @@ static const DaliSnapshotEntry *restore_match_unit(const RestoreBusUnits     *un
                              RESTORE_NO_ADDRESS,
                              false,
                              NULL);
+        if (out_kind != NULL) {
+            *out_kind = DALI_RESTORE_CONFLICT_UNIDENTIFIED;
+        }
         return NULL;
     }
 
@@ -216,6 +233,9 @@ static const DaliSnapshotEntry *restore_match_unit(const RestoreBusUnits     *un
                              first_on_bus,
                              true,
                              units->ident[addr]);
+        if (out_kind != NULL) {
+            *out_kind = DALI_RESTORE_CONFLICT_DUPLICATE_BUS;
+        }
         return NULL;
     }
 
@@ -234,6 +254,9 @@ static const DaliSnapshotEntry *restore_match_unit(const RestoreBusUnits     *un
                                            : RESTORE_NO_ADDRESS,
                              true,
                              units->ident[addr]);
+        if (out_kind != NULL) {
+            *out_kind = DALI_RESTORE_CONFLICT_DUPLICATE_SNAPSHOT;
+        }
         return NULL;
     }
 
@@ -245,6 +268,9 @@ static const DaliSnapshotEntry *restore_match_unit(const RestoreBusUnits     *un
                              RESTORE_NO_ADDRESS,
                              true,
                              units->ident[addr]);
+        if (out_kind != NULL) {
+            *out_kind = DALI_RESTORE_CONFLICT_UNKNOWN_UNIT;
+        }
         return NULL;
     }
 
@@ -295,6 +321,115 @@ static void restore_report_unmatched_entries(const RestoreBusUnits     *units,
     }
 }
 
+/* Index of the active move whose unit sits on `addr` right now, or
+ * RESTORE_NO_ADDRESS. */
+static uint8_t restore_pending_at(const RestorePending *pending,
+                                  uint8_t               count,
+                                  uint8_t               addr)
+{
+    for (uint8_t i = 0u; i < count; i++) {
+        if (pending[i].active && pending[i].cur == addr) {
+            return i;
+        }
+    }
+    return RESTORE_NO_ADDRESS;
+}
+
+/*
+ * An active move that is genuinely part of a cycle, or RESTORE_NO_ADDRESS.
+ *
+ * A move that cannot proceed is not by itself evidence of a cycle: it may be
+ * the head of a chain that ends on a unit waiting to be displaced, which is
+ * unblocked by moving that unit and not by staging anything. Following each
+ * chain to its end is what separates the two, and staging a chain member would
+ * spend a free address to make no progress at all.
+ */
+static uint8_t restore_find_cycle_member(const RestorePending *pending, uint8_t count)
+{
+    for (uint8_t i = 0u; i < count; i++) {
+        if (!pending[i].active) {
+            continue;
+        }
+
+        uint8_t step = i;
+        /* A chain that has not closed within `count` hops has entered some
+         * other cycle, not this one; that cycle is found from its own members. */
+        for (uint8_t hops = 0u; hops <= count; hops++) {
+            const uint8_t next = restore_pending_at(pending, count, pending[step].dst);
+            if (next == RESTORE_NO_ADDRESS) {
+                break;
+            }
+            if (next == i) {
+                return i;
+            }
+            step = next;
+        }
+    }
+    return RESTORE_NO_ADDRESS;
+}
+
+/*
+ * A free address that no remaining move wants, or RESTORE_NO_ADDRESS. The
+ * staging hop and the displacement need exactly the same thing: somewhere a
+ * unit can sit without becoming the next obstacle.
+ */
+static uint8_t restore_find_spare(uint64_t              occupied,
+                                  const RestorePending *pending,
+                                  uint8_t               count)
+{
+    uint64_t wanted = 0u;
+    for (uint8_t i = 0u; i < count; i++) {
+        if (pending[i].active) {
+            wanted |= ((uint64_t)1u << pending[i].dst);
+        }
+    }
+
+    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        const uint64_t bit = ((uint64_t)1u << addr);
+        if ((occupied & bit) == 0u && (wanted & bit) == 0u) {
+            return addr;
+        }
+    }
+    return RESTORE_NO_ADDRESS;
+}
+
+/*
+ * Drop the moves whose target is held by something that will never vacate it,
+ * and propagate: a unit that stays put now blocks whoever was aimed at its own
+ * address. Runs once before ordering, and again if a unit that looked
+ * displaceable turns out to have nowhere to go.
+ */
+static void restore_drop_blocked(DaliSnapshotSpace          space,
+                                 const RestoreBusUnits     *units,
+                                 RestorePending            *pending,
+                                 uint8_t                    pending_count,
+                                 uint64_t                  *immovable,
+                                 const RestoreConflictSink *sink)
+{
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (uint8_t i = 0u; i < pending_count; i++) {
+            if (!pending[i].active) {
+                continue;
+            }
+            if ((*immovable & ((uint64_t)1u << pending[i].dst)) == 0u) {
+                continue;
+            }
+            restore_add_conflict(sink,
+                                 DALI_RESTORE_CONFLICT_TARGET_OCCUPIED,
+                                 space,
+                                 pending[i].cur,
+                                 pending[i].dst,
+                                 units->has_ident[pending[i].origin],
+                                 units->ident[pending[i].origin]);
+            pending[i].active = false;
+            *immovable |= ((uint64_t)1u << pending[i].cur);
+            changed = true;
+        }
+    }
+}
+
 static void restore_plan_space(DaliRestorePlan    *plan,
                                const DaliSnapshot *snapshot,
                                DaliSnapshotSpace   space,
@@ -305,6 +440,9 @@ static void restore_plan_space(DaliRestorePlan    *plan,
 
     uint64_t occupied  = 0u;
     uint64_t immovable = 0u;
+    /* Identified, but no snapshot entry claims it. Not a blocker in its own
+     * right: it can be moved aside and still be found afterwards. */
+    uint64_t displaceable = 0u;
 
     const RestoreConflictSink sink = {
         plan->conflicts, &plan->conflict_count, &plan->conflict_total,
@@ -322,12 +460,23 @@ static void restore_plan_space(DaliRestorePlan    *plan,
             continue;
         }
 
+        DaliRestoreConflictKind  why   = DALI_RESTORE_CONFLICT_UNIDENTIFIED;
         const DaliSnapshotEntry *entry =
-            restore_match_unit(units, snapshot, space, addr, &sink);
+            restore_match_unit(units, snapshot, space, addr, &sink, &why);
         if (entry == NULL) {
-            /* Reported by the matcher. A unit nothing can identify is a unit
-             * nothing may move, and it now blocks its own address. */
-            immovable |= ((uint64_t)1u << addr);
+            /*
+             * Reported by the matcher. A unit absent from the backup read back
+             * an identification number, so moving it aside loses nothing — it
+             * is still identifiable wherever it lands. Every other failure here
+             * is a unit that cannot be told apart from another, or cannot be
+             * read at all; moving one of those would put a fixture somewhere
+             * nothing could confirm, so it stays and blocks its own address.
+             */
+            if (why == DALI_RESTORE_CONFLICT_UNKNOWN_UNIT) {
+                displaceable |= ((uint64_t)1u << addr);
+            } else {
+                immovable |= ((uint64_t)1u << addr);
+            }
             continue;
         }
 
@@ -338,6 +487,7 @@ static void restore_plan_space(DaliRestorePlan    *plan,
             continue;
         }
 
+        pending[pending_count].origin = addr;
         pending[pending_count].cur    = addr;
         pending[pending_count].dst    = entry->short_address;
         pending[pending_count].active = true;
@@ -348,30 +498,7 @@ static void restore_plan_space(DaliRestorePlan    *plan,
     restore_report_unmatched_entries(units, snapshot, space, &sink);
 
     /* ---- drop moves blocked by something that will never move -------------*/
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (uint8_t i = 0u; i < pending_count; i++) {
-            if (!pending[i].active) {
-                continue;
-            }
-            if ((immovable & ((uint64_t)1u << pending[i].dst)) == 0u) {
-                continue;
-            }
-            restore_add_conflict(&sink,
-                                 DALI_RESTORE_CONFLICT_TARGET_OCCUPIED,
-                                 space,
-                                 pending[i].cur,
-                                 pending[i].dst,
-                                 units->has_ident[pending[i].cur],
-                                 units->ident[pending[i].cur]);
-            pending[i].active = false;
-            /* It stays where it is, so it now blocks anyone aimed at its own
-             * address. Re-run until that has propagated. */
-            immovable |= ((uint64_t)1u << pending[i].cur);
-            changed = true;
-        }
-    }
+    restore_drop_blocked(space, units, pending, pending_count, &immovable, &sink);
 
     /* ---- order the remaining moves ----------------------------------------*/
     uint32_t passes = 0u;
@@ -400,7 +527,8 @@ static void restore_plan_space(DaliRestorePlan    *plan,
             if ((occupied & ((uint64_t)1u << pending[i].dst)) != 0u) {
                 continue;
             }
-            if (!restore_add_move(plan, space, pending[i].cur, pending[i].dst, false)) {
+            if (!restore_add_move(plan, space, pending[i].cur, pending[i].dst,
+                                  DALI_RESTORE_MOVE_PLACE)) {
                 return;
             }
             occupied &= ~((uint64_t)1u << pending[i].cur);
@@ -414,55 +542,84 @@ static void restore_plan_space(DaliRestorePlan    *plan,
         }
 
         /*
-         * Nothing can move directly, so everything left is a cycle. Vacate one
-         * member to a free address; that frees the address someone else needed
-         * and the rest unwinds. The staged unit is placed by a later pass.
+         * Nothing can move directly. Break a cycle before displacing anything:
+         * a staging hop borrows its free address and hands it back when the
+         * cycle unwinds, while a displacement keeps the address it takes. On a
+         * bus with exactly one address to spare, displacing first strands the
+         * cycle with nowhere to stage and turns a restore that would have
+         * converged into an incomplete plan.
          */
-        uint8_t victim = RESTORE_NO_ADDRESS;
+        const uint8_t victim = restore_find_cycle_member(pending, pending_count);
+        if (victim != RESTORE_NO_ADDRESS) {
+            const uint8_t stage = restore_find_spare(occupied, pending, pending_count);
+            if (stage == RESTORE_NO_ADDRESS) {
+                restore_add_conflict(&sink,
+                                     DALI_RESTORE_CONFLICT_NO_STAGING_ADDRESS,
+                                     space,
+                                     pending[victim].cur,
+                                     pending[victim].dst,
+                                     units->has_ident[pending[victim].origin],
+                                     units->ident[pending[victim].origin]);
+                plan->incomplete = true;
+                break;
+            }
+
+            if (!restore_add_move(plan, space, pending[victim].cur, stage,
+                                  DALI_RESTORE_MOVE_STAGE)) {
+                return;
+            }
+            occupied &= ~((uint64_t)1u << pending[victim].cur);
+            occupied |= ((uint64_t)1u << stage);
+            pending[victim].cur = stage;
+            continue;
+        }
+
+        /*
+         * No cycle left, so every stalled move is waiting on a unit the backup
+         * never recorded. Move it aside to an address nothing wants: it is
+         * still powered, addressed and discoverable there, which is what makes
+         * this different from retiring it. The operator finds out what it is
+         * from the UNKNOWN_UNIT conflict the matcher already reported.
+         */
+        uint8_t blocked = RESTORE_NO_ADDRESS;
         for (uint8_t i = 0u; i < pending_count; i++) {
-            if (pending[i].active) {
-                victim = i;
+            if (pending[i].active &&
+                (displaceable & ((uint64_t)1u << pending[i].dst)) != 0u) {
+                blocked = i;
                 break;
             }
         }
-        if (victim == RESTORE_NO_ADDRESS) {
-            break;
-        }
-
-        uint64_t wanted = 0u;
-        for (uint8_t i = 0u; i < pending_count; i++) {
-            if (pending[i].active) {
-                wanted |= ((uint64_t)1u << pending[i].dst);
-            }
-        }
-
-        uint8_t stage = RESTORE_NO_ADDRESS;
-        for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
-            const uint64_t bit = ((uint64_t)1u << addr);
-            if ((occupied & bit) == 0u && (wanted & bit) == 0u) {
-                stage = addr;
-                break;
-            }
-        }
-
-        if (stage == RESTORE_NO_ADDRESS) {
-            restore_add_conflict(&sink,
-                                 DALI_RESTORE_CONFLICT_NO_STAGING_ADDRESS,
-                                 space,
-                                 pending[victim].cur,
-                                 pending[victim].dst,
-                                 units->has_ident[pending[victim].cur],
-                                 units->ident[pending[victim].cur]);
+        if (blocked == RESTORE_NO_ADDRESS) {
+            /* Stalled on neither a cycle nor a displaceable unit. The drop pass
+             * clears every other reason a move cannot proceed, so this is a
+             * logic error; refuse rather than emit a move the occupancy model
+             * cannot account for. */
             plan->incomplete = true;
             break;
         }
 
-        if (!restore_add_move(plan, space, pending[victim].cur, stage, true)) {
+        const uint8_t squatter = pending[blocked].dst;
+        const uint8_t spare    = restore_find_spare(occupied, pending, pending_count);
+        if (spare == RESTORE_NO_ADDRESS) {
+            /*
+             * The space is full, so it will never move after all. Reclassify it
+             * as immovable and let the ordinary blocked-move pass report it —
+             * refusing is the only safe answer when there is nowhere to put it,
+             * and that is the same TARGET_OCCUPIED an operator saw before
+             * displacement existed.
+             */
+            displaceable &= ~((uint64_t)1u << squatter);
+            immovable |= ((uint64_t)1u << squatter);
+            restore_drop_blocked(space, units, pending, pending_count, &immovable, &sink);
+            continue;
+        }
+
+        if (!restore_add_move(plan, space, squatter, spare, DALI_RESTORE_MOVE_DISPLACE)) {
             return;
         }
-        occupied &= ~((uint64_t)1u << pending[victim].cur);
-        occupied |= ((uint64_t)1u << stage);
-        pending[victim].cur = stage;
+        occupied &= ~((uint64_t)1u << squatter);
+        occupied |= ((uint64_t)1u << spare);
+        displaceable &= ~((uint64_t)1u << squatter);
     }
 }
 
@@ -520,8 +677,10 @@ DaliError dali_restore_plan_groups(DaliRestoreGroupPlan         *out,
             continue;
         }
 
-        const DaliSnapshotEntry *entry =
-            restore_match_unit(&units, snapshot, DALI_SNAPSHOT_SPACE_GEAR, addr, &sink);
+        /* Why the match failed changes nothing here: group membership is only
+         * ever written to gear a snapshot entry claims. */
+        const DaliSnapshotEntry *entry = restore_match_unit(
+            &units, snapshot, DALI_SNAPSHOT_SPACE_GEAR, addr, &sink, NULL);
         if (entry == NULL) {
             continue;
         }

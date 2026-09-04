@@ -18,6 +18,15 @@
  * sent — and a cycle (a5 wants a8, a8 wants a5) is broken by staging one member
  * through a free address, exactly as swapping two variables needs a third.
  *
+ * A free address is also what lets a restore converge past gear the backup has
+ * never seen. A unit that answers, reads back an identification number, and
+ * appears in no snapshot entry — added since the backup, or unpowered through
+ * every save — is not retired and not overwritten: if it sits on an address a
+ * recorded unit is owed, it is displaced to a free one, where it stays
+ * addressed and discoverable for the operator to identify afterwards. Cycles
+ * are always broken before any unit is displaced, because a cycle borrows its
+ * staging address and gives it back while a displacement keeps it.
+ *
  * Group membership is planned separately, by dali_restore_plan_groups() at the
  * bottom of this file. It is a different repair for a different accident, and
  * folding it into the move list would make the ordinary address restore write
@@ -30,12 +39,18 @@
 #include "dali_snapshot.h"
 
 /*
- * Worst case is one 64-unit cycle per address space: 64 final moves plus one
- * staging hop, twice over. Sized so a plan is never truncated — a partial plan
- * executed in full would leave the bus in a state neither the snapshot nor the
- * inventory describes.
+ * Worst case per address space is 63 units that must move — a 64th address has
+ * to stay free or nothing can be staged at all — arranged as 31 two-unit cycles
+ * plus one lone move: 63 placements and 31 staging hops. Twice over for the two
+ * spaces. Displacing an unrecorded unit never raises this, because it costs one
+ * move where the cycle member it replaces costs one and a half.
+ *
+ * Sized so a plan is never truncated — a partial plan executed in full would
+ * leave the bus in a state neither the snapshot nor the inventory describes.
  */
-#define DALI_RESTORE_MAX_MOVES     ((2u * DALI_SHORT_ADDRESS_COUNT) + 4u)
+#define DALI_RESTORE_MAX_MOVES                                    \
+    (2u * ((DALI_SHORT_ADDRESS_COUNT - 1u) +                      \
+           ((DALI_SHORT_ADDRESS_COUNT - 2u) / 2u)))
 
 /* Conflicts are reported, not resolved. Stored up to this many; the total keeps
  * counting past the array so a truncated list still states the true number. */
@@ -50,9 +65,15 @@ typedef enum {
      * which is to find out why the identity cannot be read.
      */
     DALI_RESTORE_CONFLICT_UNIDENTIFIED = 0,
-    /* On the bus and readable, but absent from the snapshot: gear added since
-     * the backup. Left alone deliberately — a restore reverts addressing, it
-     * does not retire units nobody recorded. */
+    /*
+     * On the bus and readable, but absent from the snapshot: gear added since
+     * the backup, or unpowered through every save. Never retired and never
+     * overwritten — a restore reverts addressing, it does not dispose of units
+     * nobody recorded. Reported whether or not it moved: if it holds an address
+     * a recorded unit is owed and the space has a free address, the plan
+     * displaces it there (DALI_RESTORE_MOVE_DISPLACE) rather than abandoning
+     * the move, and the operator still needs to know it is on the bus.
+     */
     DALI_RESTORE_CONFLICT_UNKNOWN_UNIT,
     /* In the snapshot but not on the bus: powered down, removed, or unaddressed
      * and therefore unreachable by addressed commands. */
@@ -61,7 +82,9 @@ typedef enum {
     DALI_RESTORE_CONFLICT_DUPLICATE_SNAPSHOT,
     /* Two units on the bus report one identification number. */
     DALI_RESTORE_CONFLICT_DUPLICATE_BUS,
-    /* The recorded address is held by a unit that will never move. */
+    /* The recorded address is held by a unit that will never move: one whose
+     * identity cannot be read or told apart from another's, or an unrecorded
+     * one in an address space with nowhere free to displace it to. */
     DALI_RESTORE_CONFLICT_TARGET_OCCUPIED,
     /* A cycle needs a free address to stage through and the space has none. */
     DALI_RESTORE_CONFLICT_NO_STAGING_ADDRESS,
@@ -89,17 +112,33 @@ typedef struct {
     uint8_t                 identification[DALI_MEMORY_BANK0_IDENTIFICATION_LEN];
 } DaliRestoreConflict;
 
-typedef struct {
-    DaliSnapshotSpace space;
-    uint8_t           from;
-    uint8_t           to;
+typedef enum {
+    /* The unit is matched to a snapshot entry and this puts it on its recorded
+     * address. Where the plan ends for that unit. */
+    DALI_RESTORE_MOVE_PLACE = 0,
     /*
-     * True when this hop exists only to vacate an address inside a cycle. The
-     * unit is not at its recorded address afterwards; a later move in the same
-     * plan puts it there. An operator watching the run should not read a
-     * staging hop as a finished placement.
+     * A hop that exists only to vacate an address inside a cycle. The unit is
+     * not at its recorded address afterwards; a later move in the same plan
+     * puts it there, and the address borrowed here is free again once it does.
+     * An operator watching the run should not read a staging hop as a finished
+     * placement.
      */
-    bool              is_staging;
+    DALI_RESTORE_MOVE_STAGE,
+    /*
+     * An identified unit that no snapshot entry claims, moved off an address a
+     * recorded unit is owed. Final in this plan — nothing moves it again, and
+     * the address it lands on is one nothing else wanted. An operator watching
+     * the run should read it as "this is not where it belongs, because nothing
+     * records where it belongs", not as a placement.
+     */
+    DALI_RESTORE_MOVE_DISPLACE,
+} DaliRestoreMoveKind;
+
+typedef struct {
+    DaliSnapshotSpace   space;
+    uint8_t             from;
+    uint8_t             to;
+    DaliRestoreMoveKind kind;
 } DaliRestoreMove;
 
 typedef struct {

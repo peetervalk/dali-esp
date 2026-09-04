@@ -5486,6 +5486,18 @@ static void shell_restore_print_plan(const DaliRestorePlan *plan)
 
     for (uint8_t i = 0u; i < plan->move_count; i++) {
         const DaliRestoreMove *move = &plan->moves[i];
+        const char            *note = "";
+        switch (move->kind) {
+            case DALI_RESTORE_MOVE_STAGE:
+                note = "  (staging, placed by a later step)";
+                break;
+            case DALI_RESTORE_MOVE_DISPLACE:
+                note = "  (not in the backup, moved aside)";
+                break;
+            case DALI_RESTORE_MOVE_PLACE:
+            default:
+                break;
+        }
         shell_printf("  %u. %s %s%u -> %s%u%s\r\n",
                (unsigned)(i + 1u),
                dali_restore_space_name(move->space),
@@ -5493,7 +5505,7 @@ static void shell_restore_print_plan(const DaliRestorePlan *plan)
                (unsigned)move->from,
                move->space == DALI_SNAPSHOT_SPACE_GEAR ? "a" : "d",
                (unsigned)move->to,
-               move->is_staging ? "  (staging, placed by a later step)" : "");
+               note);
     }
 
     shell_restore_print_conflicts("restore",

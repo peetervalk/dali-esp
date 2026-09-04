@@ -186,7 +186,7 @@ void test_one_displaced_unit_produces_exactly_one_move(void)
     TEST_ASSERT_EQUAL_UINT8(1u, s_plan.move_count);
     TEST_ASSERT_EQUAL_UINT8(4u, s_plan.moves[0].from);
     TEST_ASSERT_EQUAL_UINT8(5u, s_plan.moves[0].to);
-    TEST_ASSERT_FALSE(s_plan.moves[0].is_staging);
+    TEST_ASSERT_EQUAL_INT(DALI_RESTORE_MOVE_PLACE, s_plan.moves[0].kind);
     TEST_ASSERT_EQUAL_UINT16(0u, s_plan.conflict_total);
     replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
     TEST_ASSERT_EQUAL_UINT8(5u, final_address_of(DALI_SNAPSHOT_SPACE_GEAR, 4u));
@@ -226,7 +226,7 @@ void test_a_two_cycle_is_broken_by_staging_through_a_free_address(void)
                           dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
     TEST_ASSERT_FALSE(s_plan.incomplete);
     TEST_ASSERT_EQUAL_UINT8(3u, s_plan.move_count);   /* stage + two placements */
-    TEST_ASSERT_TRUE(s_plan.moves[0].is_staging);
+    TEST_ASSERT_EQUAL_INT(DALI_RESTORE_MOVE_STAGE, s_plan.moves[0].kind);
     TEST_ASSERT_EQUAL_UINT16(0u, s_plan.conflict_total);
     replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
 
@@ -260,9 +260,13 @@ void test_staging_skips_an_occupied_address_to_reach_a_free_one(void)
 {
     /*
      * The staging address must be free, not merely unwanted. Here a0 is held by
-     * a unit that will never move and is not the destination of anything, so a
-     * planner that only checked "is anyone aiming at this?" would park the
-     * staged unit on top of the squatter. The lowest legal choice is a3.
+     * a squatter that is not the destination of anything, so a planner that only
+     * checked "is anyone aiming at this?" would park the staged unit on top of
+     * it. The lowest legal choice is a3.
+     *
+     * The squatter is also absent from the backup, so it could be moved aside —
+     * and must not be, because nothing needs its address. Displacement is a
+     * repair for a blocked move, not a tidy-up.
      */
     on_bus(0u, 55u);                            /* squatter, absent from backup */
     record(DALI_SNAPSHOT_SPACE_GEAR, 2u, 1u);
@@ -274,7 +278,7 @@ void test_staging_skips_an_occupied_address_to_reach_a_free_one(void)
                           dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
     TEST_ASSERT_FALSE(s_plan.incomplete);
     TEST_ASSERT_EQUAL_UINT8(3u, s_plan.move_count);
-    TEST_ASSERT_TRUE(s_plan.moves[0].is_staging);
+    TEST_ASSERT_EQUAL_INT(DALI_RESTORE_MOVE_STAGE, s_plan.moves[0].kind);
     TEST_ASSERT_NOT_EQUAL_UINT8(0u, s_plan.moves[0].to);
     replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
 
@@ -396,12 +400,186 @@ void test_two_backup_entries_sharing_an_identification_number_block_the_move(voi
 
 void test_a_target_held_by_an_immovable_unit_is_reported_not_overwritten(void)
 {
+    /*
+     * The squatter's identity cannot be read, so it cannot be moved aside: put
+     * it anywhere and nothing could confirm which unit went where. That is the
+     * distinction that decides whether a blocked move is repaired or reported —
+     * readable identity, not membership in the backup.
+     */
     record(DALI_SNAPSHOT_SPACE_GEAR, 9u, 1u);
-    on_bus(1u, 1u);           /* wants 9 */
-    on_bus(9u, 55u);          /* squatter, absent from the backup */
+    on_bus(1u, 1u);                 /* wants 9 */
+    on_bus_without_identity(9u);    /* squatter, unreadable */
 
     TEST_ASSERT_EQUAL_INT(DALI_OK,
                           dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_plan.move_count);
+    TEST_ASSERT_EQUAL_UINT16(1u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_TARGET_OCCUPIED));
+    TEST_ASSERT_EQUAL_UINT16(1u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_UNIDENTIFIED));
+}
+
+void test_blocking_cascades_to_units_waiting_behind_the_blocked_one(void)
+{
+    /* 1 wants 9 (held by an unreadable squatter, so 1 stays); 2 wants 1, which 1
+     * still holds. Both must be reported rather than one being moved onto the
+     * other. */
+    record(DALI_SNAPSHOT_SPACE_GEAR, 9u, 1u);
+    record(DALI_SNAPSHOT_SPACE_GEAR, 1u, 2u);
+    on_bus(1u, 1u);
+    on_bus(2u, 2u);
+    on_bus_without_identity(9u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_plan.move_count);
+    TEST_ASSERT_EQUAL_UINT16(2u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_TARGET_OCCUPIED));
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
+}
+
+/* --------------------------------------------------------------------------
+ * Moving aside a unit the backup never saw
+ * -------------------------------------------------------------------------*/
+
+void test_a_unit_the_backup_never_saw_is_moved_aside_so_the_restore_converges(void)
+{
+    /*
+     * The 2026-09-03 bus, exactly. An LED driver held a4 while unpowered
+     * through every `backup save`, so it is in no snapshot; a collision and a
+     * re-commission then left the unit recorded at a4 sitting on a5. The old
+     * planner filed the driver as immovable and came back with zero moves and
+     * two conflicts, and the operator did the staging by hand.
+     */
+    for (uint8_t addr = 0u; addr < 4u; addr++) {
+        record(DALI_SNAPSHOT_SPACE_GEAR, addr, addr);
+        on_bus(addr, addr);
+    }
+    record(DALI_SNAPSHOT_SPACE_GEAR, 4u, 100u);
+    on_bus(5u, 100u);         /* recorded at a4, answering on a5 */
+    on_bus(4u, 200u);         /* the driver no backup has ever seen */
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_FALSE(s_plan.incomplete);
+    TEST_ASSERT_EQUAL_UINT8(2u, s_plan.move_count);
+
+    /* Aside first, into the lowest address nothing wants, then the placement. */
+    TEST_ASSERT_EQUAL_INT(DALI_RESTORE_MOVE_DISPLACE, s_plan.moves[0].kind);
+    TEST_ASSERT_EQUAL_UINT8(4u, s_plan.moves[0].from);
+    TEST_ASSERT_EQUAL_UINT8(6u, s_plan.moves[0].to);
+    TEST_ASSERT_EQUAL_INT(DALI_RESTORE_MOVE_PLACE, s_plan.moves[1].kind);
+    TEST_ASSERT_EQUAL_UINT8(5u, s_plan.moves[1].from);
+    TEST_ASSERT_EQUAL_UINT8(4u, s_plan.moves[1].to);
+
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
+    TEST_ASSERT_EQUAL_UINT8(4u, final_address_of(DALI_SNAPSHOT_SPACE_GEAR, 5u));
+    TEST_ASSERT_EQUAL_UINT8(6u, final_address_of(DALI_SNAPSHOT_SPACE_GEAR, 4u));
+
+    /*
+     * Moving it does not make it known. The operator still has to be told there
+     * is gear on this bus that no backup accounts for, and the move alone would
+     * not say so.
+     */
+    TEST_ASSERT_EQUAL_UINT16(1u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_UNKNOWN_UNIT));
+    TEST_ASSERT_EQUAL_UINT16(0u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_TARGET_OCCUPIED));
+}
+
+void test_moving_one_unit_aside_unblocks_the_chain_waiting_behind_it(void)
+{
+    /* a1 is unrecorded and in the way; a2 belongs at a1 and a3 belongs at a2.
+     * One displacement has to release both. */
+    record(DALI_SNAPSHOT_SPACE_GEAR, 1u, 1u);
+    record(DALI_SNAPSHOT_SPACE_GEAR, 2u, 2u);
+    on_bus(2u, 1u);
+    on_bus(3u, 2u);
+    on_bus(1u, 200u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_FALSE(s_plan.incomplete);
+    TEST_ASSERT_EQUAL_UINT8(3u, s_plan.move_count);
+    TEST_ASSERT_EQUAL_INT(DALI_RESTORE_MOVE_DISPLACE, s_plan.moves[0].kind);
+
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
+    TEST_ASSERT_EQUAL_UINT8(0u, final_address_of(DALI_SNAPSHOT_SPACE_GEAR, 1u));
+    TEST_ASSERT_EQUAL_UINT8(1u, final_address_of(DALI_SNAPSHOT_SPACE_GEAR, 2u));
+    TEST_ASSERT_EQUAL_UINT8(2u, final_address_of(DALI_SNAPSHOT_SPACE_GEAR, 3u));
+}
+
+void test_a_cycle_is_broken_before_any_unit_is_moved_aside(void)
+{
+    /*
+     * One address to spare, and two things that want it: a cycle needs it as a
+     * staging hop and an unrecorded unit needs it to get out of the way. The
+     * cycle must go first, because it hands the address back when it unwinds
+     * and the displacement keeps it. Displacing first strands the cycle with
+     * nowhere to stage and turns a restore that converges into an incomplete
+     * plan.
+     *
+     * a0 and a1 are a swap; a2 holds an unrecorded unit; a3 belongs at a2;
+     * a4..a62 are already correct; a63 is the only free address.
+     */
+    record(DALI_SNAPSHOT_SPACE_GEAR, 1u, 1u);
+    record(DALI_SNAPSHOT_SPACE_GEAR, 0u, 2u);
+    on_bus(0u, 1u);
+    on_bus(1u, 2u);
+
+    on_bus(2u, 200u);                            /* unrecorded, in the way */
+    record(DALI_SNAPSHOT_SPACE_GEAR, 2u, 3u);
+    on_bus(3u, 3u);
+
+    for (uint8_t addr = 4u; addr < 63u; addr++) {
+        record(DALI_SNAPSHOT_SPACE_GEAR, addr, addr);
+        on_bus(addr, addr);
+    }
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_FALSE(s_plan.incomplete);
+    TEST_ASSERT_EQUAL_UINT16(0u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_NO_STAGING_ADDRESS));
+    TEST_ASSERT_EQUAL_UINT16(0u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_TARGET_OCCUPIED));
+    TEST_ASSERT_EQUAL_INT(DALI_RESTORE_MOVE_STAGE, s_plan.moves[0].kind);
+
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
+    TEST_ASSERT_EQUAL_UINT8(1u, final_address_of(DALI_SNAPSHOT_SPACE_GEAR, 0u));
+    TEST_ASSERT_EQUAL_UINT8(0u, final_address_of(DALI_SNAPSHOT_SPACE_GEAR, 1u));
+    TEST_ASSERT_EQUAL_UINT8(2u, final_address_of(DALI_SNAPSHOT_SPACE_GEAR, 3u));
+    TEST_ASSERT_EQUAL_UINT8(63u, final_address_of(DALI_SNAPSHOT_SPACE_GEAR, 2u));
+}
+
+void test_a_unit_the_backup_never_saw_stays_put_when_the_space_is_full(void)
+{
+    /*
+     * Every address occupied, so there is nowhere to move the blocker to. This
+     * is the case where refusing really is the only safe answer, and it must
+     * report exactly what it reported before displacement existed: the move
+     * dropped as TARGET_OCCUPIED, and a plan that is merely conflicted rather
+     * than incomplete, so the unambiguous part of a larger restore still runs.
+     */
+    on_bus(0u, 200u);                            /* unrecorded, holding a0 */
+    record(DALI_SNAPSHOT_SPACE_GEAR, 0u, 1u);
+    on_bus(1u, 1u);                              /* recorded at a0, sitting on a1 */
+
+    for (uint16_t addr = 2u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        record(DALI_SNAPSHOT_SPACE_GEAR, (uint8_t)addr, (uint8_t)addr);
+        on_bus((uint8_t)addr, (uint8_t)addr);
+    }
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_FALSE(s_plan.incomplete);
     TEST_ASSERT_EQUAL_UINT8(0u, s_plan.move_count);
     TEST_ASSERT_EQUAL_UINT16(1u,
                              count_conflicts(&s_plan,
@@ -411,23 +589,28 @@ void test_a_target_held_by_an_immovable_unit_is_reported_not_overwritten(void)
                                              DALI_RESTORE_CONFLICT_UNKNOWN_UNIT));
 }
 
-void test_blocking_cascades_to_units_waiting_behind_the_blocked_one(void)
+void test_a_unit_that_cannot_be_told_from_another_is_never_moved_aside(void)
 {
-    /* 1 wants 9 (held by a squatter, so 1 stays); 2 wants 1, which 1 still
-     * holds. Both must be reported rather than one being moved onto the other. */
+    /*
+     * Two units answering with one identification number, holding an address a
+     * recorded unit is owed. Displacing one would move a fixture nothing could
+     * afterwards confirm the identity of, so this keeps the refusal even though
+     * the space has room.
+     */
     record(DALI_SNAPSHOT_SPACE_GEAR, 9u, 1u);
-    record(DALI_SNAPSHOT_SPACE_GEAR, 1u, 2u);
-    on_bus(1u, 1u);
-    on_bus(2u, 2u);
-    on_bus(9u, 55u);
+    on_bus(1u, 1u);           /* wants 9 */
+    on_bus(9u, 77u);
+    on_bus(10u, 77u);         /* the same number as a9 */
 
     TEST_ASSERT_EQUAL_INT(DALI_OK,
                           dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
     TEST_ASSERT_EQUAL_UINT8(0u, s_plan.move_count);
-    TEST_ASSERT_EQUAL_UINT16(2u,
+    TEST_ASSERT_EQUAL_UINT16(1u,
                              count_conflicts(&s_plan,
                                              DALI_RESTORE_CONFLICT_TARGET_OCCUPIED));
-    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
+    TEST_ASSERT_EQUAL_UINT16(2u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_DUPLICATE_BUS));
 }
 
 /* --------------------------------------------------------------------------
@@ -602,6 +785,11 @@ int main(void)
     RUN_TEST(test_two_backup_entries_sharing_an_identification_number_block_the_move);
     RUN_TEST(test_a_target_held_by_an_immovable_unit_is_reported_not_overwritten);
     RUN_TEST(test_blocking_cascades_to_units_waiting_behind_the_blocked_one);
+    RUN_TEST(test_a_unit_the_backup_never_saw_is_moved_aside_so_the_restore_converges);
+    RUN_TEST(test_moving_one_unit_aside_unblocks_the_chain_waiting_behind_it);
+    RUN_TEST(test_a_cycle_is_broken_before_any_unit_is_moved_aside);
+    RUN_TEST(test_a_unit_the_backup_never_saw_stays_put_when_the_space_is_full);
+    RUN_TEST(test_a_unit_that_cannot_be_told_from_another_is_never_moved_aside);
     RUN_TEST(test_the_two_address_spaces_are_planned_independently);
     RUN_TEST(test_a_control_device_is_restored_from_its_own_identity);
     RUN_TEST(test_gear_and_device_identities_never_substitute_for_each_other);

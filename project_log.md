@@ -1578,6 +1578,13 @@ membership in the snapshot.
 This is the difference between a restore that converges after a mixed
 commissioning accident and one that hands the problem back.
 
+**Done 2026-09-04**, both constraints kept and both covered by vectors; see the
+unreleased-changes entry below. One thing the proposal did not anticipate: the
+displacement and the cycle hop compete for the same free address and do not
+spend it the same way, so the planner has to break cycles first. Detecting that
+required distinguishing a real cycle from a chain ending at a displaceable unit,
+which the old "pick the first stalled move" victim search could not do.
+
 ## `address` cannot un-assign — found 2026-09-03
 
 Faced with two units contesting a4, the operator reached for
@@ -2164,6 +2171,70 @@ Additive C API: `dali_group_map_move()`, `DALI_CLI_CMD_ADDRESS`, and the
 `short_address_moved` hook member. Host-tested in `test_group_map` and
 `test_cli`; the shell workflow compiles and carries **no real-bus result** —
 the probe/verify logic in particular has never seen a real reply window.
+
+## `restore` moves aside gear the backup has never seen
+
+**Behaviour change to `restore plan` and `restore apply`, 2026-09-04.** Host-
+tested, no bus result. Closes the defect found on the 2k bus on 2026-09-03,
+where the plan came back with zero moves and two conflicts and the operator
+hand-executed the three-command cycle the planner already knew how to compute.
+
+A unit that answers, reads back an identification number, and matches no
+snapshot entry used to be marked immovable. That is right as far as it goes — a
+restore does not retire units nobody recorded — but it also made the unit a
+permanent obstacle: any recorded unit aimed at its address was dropped as
+`TARGET_OCCUPIED`, and the block cascaded to everything queued behind that. On
+a bus that had just been through a collision repair and a re-commission, that
+is a restore which cannot converge.
+
+Such a unit is now *displaced* rather than dropped: moved to a free address that
+nothing else wants, where it stays powered, addressed and discoverable. The
+`UNKNOWN_UNIT` conflict is still reported — moving it does not make it known,
+and the operator still has to be told there is gear here no backup accounts for.
+Where it belongs is not something a restore can know, so nothing tries to guess;
+it is left where it lands.
+
+The line that decides this is **readable identity, not membership in the
+backup**. A unit whose Bank 0 read failed, or one of two units sharing an
+identification number, still blocks: move one of those and nothing afterwards
+could confirm which unit went where. Both keep today's `TARGET_OCCUPIED`, and so
+does an unrecorded unit in an address space with nowhere free to put it —
+refusing is the only safe answer when there is nowhere to put it, and that path
+degrades to exactly the pre-change reporting rather than to an incomplete plan.
+
+Two things the proposal did not anticipate, both found while implementing it:
+
+- **Cycles must be broken before anything is displaced.** A staging hop borrows
+  its free address and hands it back when the cycle unwinds; a displacement
+  keeps the address it takes. On a bus with exactly one address to spare,
+  displacing first strands the cycle at `NO_STAGING_ADDRESS` and turns a restore
+  that would have converged into an incomplete plan. Covered by a vector that
+  fails on the reverse order.
+- **A stalled move is no longer evidence of a cycle.** It may be the head of a
+  chain ending at a displaceable unit, which is unblocked by moving that unit
+  and not by staging anything. The old victim search took the first stalled move
+  and would have spent a free address to make no progress; it now follows each
+  chain to its end (`restore_find_cycle_member`).
+
+Operator-visible output: a displacement prints as `(not in the backup, moved
+aside)` against the move, alongside the existing `(staging, placed by a later
+step)`.
+
+**API change.** `DaliRestoreMove.is_staging` (bool) is replaced by
+`DaliRestoreMove.kind`, a `DaliRestoreMoveKind` of `DALI_RESTORE_MOVE_PLACE`,
+`_STAGE`, or `_DISPLACE`. The bool could not express the third case honestly: a
+displacement vacates an address like a staging hop but is final like a
+placement, and a reader of two bools would have had to work out that both can
+never be true. External callers rendering or executing a plan must switch.
+
+`DALI_RESTORE_MAX_MOVES` also changes, from 132 to 188, fixing a bound that was
+already wrong before this work. The header claimed a worst case of one 64-unit
+cycle per space (65 moves each), but 31 two-unit cycles in one space cost 93 —
+62 placements and 31 staging hops — and two such spaces overran the array. It
+failed closed, as a truncated plan sets `incomplete` and is refused, but the
+documented invariant "a plan is never truncated" did not hold. Displacement does
+not raise the ceiling: an unrecorded unit moved aside costs one move where the
+cycle member it displaces from the count costs one and a half.
 
 ## `special` says what an encoded parameter means before sending it
 

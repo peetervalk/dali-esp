@@ -958,10 +958,24 @@ planner marks `incomplete` is refused rather than partially applied.
 Cycles are handled. Two units that need to swap addresses cannot both move
 directly, so the plan stages one through a free address and places it on a later
 step; a cycle with no free address to stage through fails closed rather than
-overwriting. Conflicts — a unit absent from the backup, a recorded unit missing
-from the bus, an unreadable identity, two units sharing an identification number
-— are reported and never moved, and blocking cascades to anything queued behind
-the blocked unit.
+overwriting. Such a hop prints as `(staging, placed by a later step)`.
+
+Gear the backup has never seen is handled too, and differently. A unit that
+answers and reads back an identification number no snapshot entry claims —
+added since the last `backup save`, or unpowered through every one — is never
+retired and never overwritten. If it holds an address a recorded unit is owed,
+the plan moves it aside to a free address and prints the hop as `(not in the
+backup, moved aside)`; it stays powered, addressed and discoverable there, and
+the `UNKNOWN_UNIT` conflict still names it so the operator knows there is gear
+on the bus no backup accounts for. Where it *belongs* is not something a restore
+can know, so it is left where it lands. Cycles are always broken before any unit
+is moved aside, because a staging hop hands its address back and a displacement
+keeps it.
+
+Remaining conflicts — a recorded unit missing from the bus, an unreadable
+identity, two units sharing an identification number, and an unrecorded unit in
+an address space with nowhere free to move it to — are reported and never moved,
+and blocking cascades to anything queued behind the blocked unit.
 
 ### `restore groups` — a different repair
 
