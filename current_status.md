@@ -246,8 +246,7 @@ Dated evidence for each of these is in `project_log.md`.
 
 ### ESPHome component
 
-- Active component: `esphome/components/dali`. `esphome/dali_esphome.h` is an
-  unused legacy placeholder.
+- Active component: `esphome/components/dali`.
 - `dali-starter.yaml` provides discovery and diagnostics: scan, identify,
   find-couplers, target controls, bus monitoring, group-map output, and
   generated YAML log lines.
@@ -307,7 +306,12 @@ Dated evidence for each of these is in `project_log.md`.
   `tx_frames_ok` PHY counter is the recovery signal: it publishes
   `Bus stuck (N total)` and returns to `OK (N past faults)` once a frame clocks
   out in full.
-- The GPIO schema is board-aware, rejects TX equal to RX, and rejects GPIO16/17.
+- The GPIO schema is board-aware and rejects TX equal to RX. It declares the
+  modes `dali_phy_init()` actually requests — TX as output plus pulldown, RX as
+  plain input — so ESPHome's per-variant pin tables reject an input-only pin
+  named as TX instead of letting it silently never transmit. No pin numbers are
+  hardcoded: GPIO16/17 are a WROVER wiring caveat, not a schema error, since
+  they are ordinary pins on WROOM and other variants.
   DALI-task creation is checked and fails the component rather than running
   without a bus task.
 - The TCP shell exposes the guarded `commission` verb only when
@@ -404,22 +408,7 @@ a sensor value.
   attribution edges (5.5 ms undecodable, 2 ms decoded) against the 27 ms close,
   physical collision behavior, and external-frame cases. DALI-2 priority/backoff
   remains open, as does a deadline-aware PHY call when a repeat would cross the
-  100 ms limit.
-- **Cite `DALI_REPLY_WINDOW_OPEN_US` from the standard text.** It was lowered
-  from 7,000 to 5,500 us because 7 ms is the *nominal* settling time and
-  attributing from it would time out compliant fast gear. The 5.5 ms figure is a
-  recollection of the IEC 62386-101 range rather than a reading of the clause,
-  so the citation is owed even though the direction of the change is the safe
-  one. Guard against the regression this closed: too high a value presents as
-  gear that used to answer going quiet.
-  `DALI_REPLY_WINDOW_OPEN_DECODED_US` needs no citation — it is derived.
-- **Confirm the post-RANDOMISE settle time against the standard text.**
-  `DALI_COMMISSIONING_RANDOMISE_SETTLE_MS` was raised from 15 to 100 ms on the
-  strength of Espressif's `esp_dali` citing IEC 62386-102 §11.3; the clause has
-  not been read here. If 15 ms was genuinely too short, gear could have been
-  unsearchable at the first COMPARE — which presents exactly like the former
-  silence/collision inversion, so an apparent improvement here would look like a
-  partial fix for that and would not be one.
+  100 ms limit.  
 - **The post-scan audit's contested path has no bus behind it.** Both walks
   self-check on every exit that could have written an address, and the diff
   (`dali_commissioning_audit`) is host-covered; `RX_ACTIVITY` has a real
@@ -603,7 +592,9 @@ The typed verb surface is in place; what is missing is evidence. Keep
   dependent frames as separate transactions reintroduces the class of bug this
   removed. The tell is a query whose answer depends on a register or enumeration
   pointer that the same query, or an immediately preceding frame, modifies.
-- Do not use GPIO16 or GPIO17 on the WROVER-E target.
+- Do not use GPIO16 or GPIO17 on the WROVER-E target. Nothing enforces this:
+  the schema deliberately does not ban them, because they are ordinary pins on
+  WROOM and the S3 puts PSRAM elsewhere.
 
 ## Source Layout
 
@@ -626,7 +617,6 @@ The typed verb surface is in place; what is missing is evidence. Keep
 | `esphome/components/dali/` | Active ESPHome external component |
 | `esphome/components/dali/dali_shell_tcp.cpp` | TCP binding for the shell |
 | `esphome/components/dali/proto_dali_*.c` | Shims pulling the vendored C in behind ESPHome's source glob |
-| `esphome/dali_esphome.h` | Unused legacy placeholder |
 | `dali-starter.yaml` | Tracked starter/commissioning firmware |
 | `dali_test.yaml` | Tracked CI coverage config; the widest configuration this repo compiles against its own tree |
 | `_local/` | Gitignored site snapshots, diagnostic compile-test config, and live secrets |

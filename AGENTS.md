@@ -87,7 +87,9 @@ builders are in `dali_input_config`; common Part 103 queries are in
 - TX-to-RX settle suppression: 2 ms; DALI reply window opens at 5.5 ms.
 - Reply timeout: 25 ms.
 - Send-twice window: 100 ms.
-- GPIO16 and GPIO17 are connected to WROVER-E PSRAM and must not be used.
+- GPIO16 and GPIO17 are connected to WROVER-E PSRAM and must not be used on
+  that module. The pin schema does not reject them — they are ordinary pins on
+  WROOM and other variants — so this is a review check, not a build error.
 
 ISR code must remain minimal:
 

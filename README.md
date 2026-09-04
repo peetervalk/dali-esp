@@ -27,7 +27,7 @@ A reusable C protocol stack (`components/dali`) drives the bus — PHY, schedule
 | DALI interface | MikroE [DALI 2 Click](https://www.mikroe.com/dali-2-click) |
 | Wiring | TX → GPIO18, RX → GPIO19 |
 
-Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The controller has no proven collision-detection/arbitration strategy. Existing DALI-1 pushbutton couplers in direct-control mode coexist on the installed buses, but simultaneous transmissions remain a risk; see `headless_dispatch`.
+Notes: GPIO16/17 are unavailable on WROVER-E — the PSRAM die uses them, and driving them corrupts PSRAM or the DALI line. This is a module-level wiring caveat, not a schema error: they are ordinary pins on WROOM, and the S3 puts PSRAM elsewhere, so `tx_pin`/`rx_pin` accept them and it is on you to avoid them on a WROVER. The pin schema does check what the chip can actually do, and rejects an input-only pin (GPIO34-39 on the classic ESP32) named as `tx_pin`. The controller has no proven collision-detection/arbitration strategy. Existing DALI-1 pushbutton couplers in direct-control mode coexist on the installed buses, but simultaneous transmissions remain a risk; see `headless_dispatch`.
 
 ## Getting started
 

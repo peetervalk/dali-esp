@@ -5,7 +5,15 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 import esphome.pins as pins
 from esphome.components import text_sensor
-from esphome.const import CONF_ID
+from esphome.const import (
+    CONF_ID,
+    CONF_INPUT,
+    CONF_INVERTED,
+    CONF_MODE,
+    CONF_NUMBER,
+    CONF_OUTPUT,
+    CONF_PULLDOWN,
+)
 from esphome.core import CORE
 
 CODEOWNERS = ["@peetervalk"]
@@ -219,27 +227,45 @@ def _copy_protocol_stack():
 # The DALI-2 Click needs a pin it can actually drive for TX and one that can
 # raise an edge interrupt for RX. A plain int_range(0, 39) accepts neither
 # constraint: GPIO34-39 on the classic ESP32 are input-only, so a config naming
-# one as TX passes validation and then silently never transmits. The
-# internal_gpio_*_pin_number validators know each variant's real capabilities
-# and reject those at compile time.
+# one as TX passes validation and then silently never transmits. ESPHome's
+# per-variant pin tables know each chip's real capabilities, so the modes
+# declared below are what gets enforced — no pin numbers are hardcoded here.
+#
+# The modes must match what dali_phy_init() actually asks the driver for, or
+# validation passes on a pin the driver then fails to configure. TX is an
+# output holding an internal pulldown: TX polarity is inverted, so a low pin is
+# the idle bus, and the pulldown keeps the line idle while the ESP32 is in
+# reset and the pin is not yet driven. RX is a plain input — both pulls are
+# disabled there, so pins without pull resistors (34-39 on the classic ESP32)
+# are legitimate receive pins.
+#
+# Module-level wiring hazards are not schema errors. GPIO16/17 carry PSRAM on
+# WROVER modules but are ordinary pins on WROOM, and on the S3 the PSRAM pins
+# are different again; ESPHome reserves none of them for any board. Banning
+# them here would reject valid configs on every non-WROVER target, so that
+# caveat lives in the hardware notes in README.md instead.
+_TX_PIN_MODE = {CONF_OUTPUT: True, CONF_PULLDOWN: True}
+_RX_PIN_MODE = {CONF_INPUT: True}
 
-# WROVER modules wire GPIO16/17 to the PSRAM die. Driving them corrupts PSRAM
-# or the DALI line depending on which wins, and ESPHome only knows to reserve
-# them when PSRAM is configured in the YAML — which the DALI configs do not do.
-_WROVER_PSRAM_PINS = (16, 17)
 
-
-def _dali_gpio(validator):
-    """Board-aware pin number, plus the WROVER PSRAM restriction."""
+def _dali_gpio(mode):
+    """Validate a bare pin number against the target's capabilities for `mode`."""
 
     def validate(value):
-        number = validator(value)
-        if number in _WROVER_PSRAM_PINS:
-            raise cv.Invalid(
-                f"GPIO{number} is wired to PSRAM on WROVER modules and must not "
-                f"be used for DALI. Pick another pin."
-            )
-        return number
+        if isinstance(value, dict):
+            if CONF_MODE in value or CONF_INVERTED in value:
+                raise cv.Invalid(
+                    "This variable only supports pin numbers, not full pin "
+                    "schemas (with inverted and mode)."
+                )
+            value_d = {**value, CONF_MODE: mode}
+        else:
+            value_d = {CONF_NUMBER: value, CONF_MODE: mode}
+        # target_platform restricts this to on-chip pins; a DALI line cannot be
+        # driven through an I/O expander at DALI bit rates.
+        return pins.PIN_SCHEMA_REGISTRY.validate(value_d, CORE.target_platform)[
+            CONF_NUMBER
+        ]
 
     return validate
 
@@ -286,8 +312,8 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(DaliComponent),
-        cv.Required(CONF_TX_PIN): _dali_gpio(pins.internal_gpio_output_pin_number),
-        cv.Required(CONF_RX_PIN): _dali_gpio(pins.internal_gpio_input_pin_number),
+        cv.Required(CONF_TX_PIN): _dali_gpio(_TX_PIN_MODE),
+        cv.Required(CONF_RX_PIN): _dali_gpio(_RX_PIN_MODE),
         # Scan-status: "Idle" / "Scanning..." / "Found N devices"
         cv.Optional(CONF_SCAN_STATUS): text_sensor.text_sensor_schema(),
         # Scan-result: compact last-scan summary persisted in HA
