@@ -2439,6 +2439,55 @@ static ShellPresence shell_address_presence(uint8_t addr, DaliError *err_out)
     return SHELL_PRESENCE_UNKNOWN;
 }
 
+/*
+ * Whether anything on the bus has no short address, as a broadcast question.
+ *
+ * This is the only positive evidence a de-address leaves behind. Silence at the
+ * address that was cleared says the gear stopped answering there, which is also
+ * what a driver that lost power says; QUERY MISSING SHORT ADDRESS asks the
+ * other side of it — is there now a unit alive and unaddressed.
+ *
+ * The three-way reading is not shell_address_presence()'s. For a YES/NO query
+ * NO is silence, so nothing that would answer "no, I have an address" drives
+ * the reply window at all: any activity there is a YES. That makes undecodable
+ * activity unambiguous rather than uncertain — several units answering YES at
+ * once — and it is the expected reading after clearing a contested address,
+ * where the collision that made the address unreadable becomes the evidence
+ * that more than one unit was on it. `err_out` distinguishes the two YES arms
+ * for a caller that wants to say "more than one".
+ */
+typedef enum {
+    SHELL_UNADDRESSED_NONE = 0,    /* silence: every unit holds a short address */
+    SHELL_UNADDRESSED_SOME,        /* at least one unit reports none            */
+    SHELL_UNADDRESSED_UNREADABLE,  /* a decoded non-YES byte, or a bus error    */
+} ShellUnaddressed;
+
+static ShellUnaddressed shell_unaddressed_probe(DaliError *err_out)
+{
+    DaliTarget bcast = { .type = DALI_ADDR_BROADCAST, .address = 0u };
+    uint8_t    reply = 0u;
+
+    DaliError err = shell_query_u8(bcast, DALI_CMD_QUERY_MISSING_SHORT_ADDRESS,
+                                   0u, &reply);
+    if (err_out != NULL) {
+        *err_out = err;
+    }
+
+    if (err == DALI_OK) {
+        /* A decoded byte that is not 0xFF is malformed traffic, not an answer,
+         * exactly as it is for COMPARE. */
+        return dali_is_yes(reply) ? SHELL_UNADDRESSED_SOME
+                                  : SHELL_UNADDRESSED_UNREADABLE;
+    }
+    if (err == DALI_ERR_TIMEOUT) {
+        return SHELL_UNADDRESSED_NONE;
+    }
+    if (err == DALI_ERR_RX_ACTIVITY) {
+        return SHELL_UNADDRESSED_SOME;
+    }
+    return SHELL_UNADDRESSED_UNREADABLE;
+}
+
 /* Both group-membership bytes as one 16-bit mask, bit g set for group g. */
 static DaliError shell_address_read_groups(uint8_t addr, uint16_t *mask_out)
 {
@@ -2593,6 +2642,193 @@ static void shell_address_set(uint8_t from, uint8_t to)
     }
 }
 
+/*
+ * Whether the stored backup could put this gear back on this address.
+ *
+ * Declared here and defined with the backup verb, because the snapshot the
+ * answer comes from is that verb's. `clear` needs it for one line, and that
+ * line is the difference between an operation the operator can undo and one
+ * they cannot: an entry anchored by an identification number survives the
+ * de-address, so `restore` can walk the unit back onto this address once
+ * something has given it an address to be walked from.
+ */
+static bool shell_backup_can_restore_gear(uint8_t addr);
+
+/*
+ * `clear` — give the address back, and say what that costs
+ *
+ * The frames are `set`'s, with DTR0 holding the "no short address" value
+ * instead of an encoded destination. Everything else about the two arms
+ * differs, because the post-condition does.
+ *
+ * `set` can prove its result: the destination answering is the gear saying it
+ * took the write. Nothing answers for an unaddressed unit, so the direct
+ * observation here — silence at the subject — is also what a driver that lost
+ * power looks like. shell_unaddressed_probe() supplies the other half, and the
+ * verb reports which of the two it can actually show.
+ *
+ * The presence reading inverts as well. For `set`, undecodable activity is a
+ * refusal: it cannot tell whether the destination is free. For `clear` it is
+ * the main reason the verb exists — two units on one address, which nothing on
+ * the bus can separate while they share it, but which a de-address frees
+ * together for `commission unaddressed` to separate by random address after.
+ */
+static void shell_address_clear(uint8_t addr)
+{
+    DaliError     err     = DALI_OK;
+    ShellPresence subject = shell_address_presence(addr, &err);
+
+    if (subject == SHELL_PRESENCE_ABSENT) {
+        shell_printf("address: a%u does not answer; nothing to clear\r\n",
+                     (unsigned)addr);
+        return;
+    }
+
+    const bool contested = (subject == SHELL_PRESENCE_UNKNOWN);
+    if (contested) {
+        shell_printf("address: a%u answers undecodably (%s) -- gear sharing one "
+                     "short address is the expected cause\r\n",
+                     (unsigned)addr, shell_err(err));
+        shell_printf("address: clearing frees every unit on a%u at once. No "
+                     "backup holds them -- nothing could read an identity "
+                     "through the collision -- so they come back only where "
+                     "'commission unaddressed' puts them\r\n",
+                     (unsigned)addr);
+    } else if (shell_backup_can_restore_gear(addr)) {
+        shell_printf("address: the stored backup has an anchored entry for a%u, "
+                     "so 'restore apply' can put this unit back after it is "
+                     "re-addressed\r\n", (unsigned)addr);
+    } else {
+        shell_printf("address: no anchored backup entry for a%u -- once cleared, "
+                     "nothing records that this unit belongs here\r\n",
+                     (unsigned)addr);
+    }
+
+    /*
+     * Sampled before the write, because the answer is only conclusive as a
+     * change. A bus that already has unaddressed gear on it answers this the
+     * same way before and after, and the verb says so rather than claiming a
+     * confirmation it did not get.
+     */
+    const ShellUnaddressed before = shell_unaddressed_probe(NULL);
+
+    /*
+     * DTR0 carries the literal "no short address" value. This is the one place
+     * the DTR0 byte for SET SHORT ADDRESS is not an encoded address, so it must
+     * not go through dali_commissioning_encode_short_address() the way `set`'s
+     * destination does -- encoding 255 would write a different address rather
+     * than none.
+     */
+    shell_printf("address: a%u -> unaddressed (DTR0=%u)\r\n",
+                 (unsigned)addr,
+                 (unsigned)DALI_COMMISSIONING_NO_SHORT_ADDRESS);
+
+    const DaliCommandInfo *cmd =
+        dali_command_lookup(DALI_CMD_SET_SHORT_ADDRESS_DTR0);
+    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = addr };
+    DaliFrame  dtr_frame;
+    DaliFrame  config_frame;
+
+    err = dali_control_build_dtr(DALI_DTR0,
+                                 DALI_COMMISSIONING_NO_SHORT_ADDRESS,
+                                 &dtr_frame);
+    if (err == DALI_OK) {
+        err = dali_control_build_config(target, DALI_CMD_SET_SHORT_ADDRESS_DTR0,
+                                        0u, &config_frame);
+    }
+    if (err == DALI_OK && cmd == NULL) {
+        err = DALI_ERR_INVALID;
+    }
+    if (err != DALI_OK) {
+        dali_cli_print_error(&s_out, "address", err);
+        return;
+    }
+
+    DaliSequence seq = {
+        .steps = {
+            { .frame = dtr_frame },
+            { .frame = config_frame, .send_twice = cmd->send_twice },
+        },
+        .step_count = 2u,
+    };
+
+    DaliSequenceResult seq_result;
+    err = shell_sched_sequence_sync(&seq, &seq_result);
+    if (err != DALI_OK) {
+        shell_print_sequence_result("address", err, &seq_result);
+        return;
+    }
+
+    DaliError     now_err = DALI_OK;
+    ShellPresence now     = shell_address_presence(addr, &now_err);
+
+    if (now == SHELL_PRESENCE_PRESENT) {
+        if (contested) {
+            /* Decodable where it was undecodable is partial progress, not a
+             * failure: one unit took the write and at least one did not. */
+            shell_printf("address: a%u still answers, but decodably now -- one "
+                         "unit took the clear and another did not. Repeat the "
+                         "clear, then run 'scan'\r\n", (unsigned)addr);
+        } else {
+            shell_printf("address: a%u still answers; the clear did not take -- "
+                         "run 'scan'\r\n", (unsigned)addr);
+        }
+        return;
+    }
+    if (now != SHELL_PRESENCE_ABSENT) {
+        shell_printf("address: whether a%u went silent is unreadable (%s); run "
+                     "'scan'\r\n", (unsigned)addr, shell_err(now_err));
+        return;
+    }
+
+    /* a<addr> is silent. What that silence means is the remaining question. */
+    DaliError              after_err = DALI_OK;
+    const ShellUnaddressed after     = shell_unaddressed_probe(&after_err);
+
+    if (after == SHELL_UNADDRESSED_NONE) {
+        shell_printf("address: a%u is silent, but nothing on the bus reports a "
+                     "missing short address -- the gear may have dropped off "
+                     "rather than been cleared; run 'scan'\r\n",
+                     (unsigned)addr);
+    } else if (after == SHELL_UNADDRESSED_UNREADABLE) {
+        shell_printf("address: a%u is silent, but the missing-address check is "
+                     "unreadable (%s); run 'scan'\r\n",
+                     (unsigned)addr, shell_err(after_err));
+    } else if (before == SHELL_UNADDRESSED_NONE) {
+        shell_printf("address: a%u cleared -- %s now reports no short address\r\n",
+                     (unsigned)addr,
+                     after_err == DALI_ERR_RX_ACTIVITY ? "more than one unit"
+                                                       : "gear on the bus");
+    } else if (before == SHELL_UNADDRESSED_SOME) {
+        shell_printf("address: a%u is silent. The bus already had unaddressed "
+                     "gear before this, so the missing-address check cannot "
+                     "single a%u out\r\n", (unsigned)addr, (unsigned)addr);
+    } else {
+        shell_printf("address: a%u is silent and the bus reports unaddressed "
+                     "gear, but the same check before the write was unreadable, "
+                     "so nothing can attribute the difference to a%u\r\n",
+                     (unsigned)addr, (unsigned)addr);
+    }
+
+    if (contested) {
+        shell_printf("address: run 'commission unaddressed' to give them "
+                     "distinct addresses, then 'identify' to see which fixture "
+                     "is which\r\n");
+    } else {
+        shell_printf("address: run 'commission unaddressed' to give it an "
+                     "address again\r\n");
+    }
+
+    /*
+     * Called on silence rather than on a proven clear. Whichever of the two
+     * happened, nothing answers a<addr> now, and every cache keyed by it is
+     * stale either way.
+     */
+    if (s_session.hooks.short_address_cleared != NULL) {
+        s_session.hooks.short_address_cleared(s_session.hooks.ctx, addr);
+    }
+}
+
 static void shell_address_group(uint8_t addr, bool add, uint8_t group)
 {
     const DaliCommandId    id   = add ? DALI_CMD_ADD_TO_GROUP
@@ -2667,33 +2903,50 @@ static void cmd_address(const DaliCliTokens *t)
         return;
     }
 
-    DaliTarget arg;
-    if (!dali_cli_parse_target(t->tok[3], &arg)) {
-        dali_cli_print_usage(&s_out, usage);
-        return;
-    }
+    const bool is_set   = (strcmp(t->tok[2], "set") == 0);
+    const bool is_clear = (strcmp(t->tok[2], "clear") == 0);
 
-    const bool is_set = (strcmp(t->tok[2], "set") == 0);
+    /*
+     * `clear` is the one arm with nothing to name: the address it takes away is
+     * the subject, and there is no destination. Its argument count differs from
+     * the rest, so the shape is checked here rather than by the spec's bounds,
+     * which have to declare the widest form.
+     */
+    DaliTarget arg = {0};
+    if (is_clear) {
+        if (t->count != 3u) {
+            shell_printf("address: 'clear' takes no argument\r\n");
+            dali_cli_print_usage(&s_out, usage);
+            return;
+        }
+    } else {
+        if (t->count != 4u || !dali_cli_parse_target(t->tok[3], &arg)) {
+            dali_cli_print_usage(&s_out, usage);
+            return;
+        }
 
-    if (is_set && arg.type != DALI_ADDR_SHORT) {
-        shell_printf("address: 'set' takes a short address (a0-a%u)\r\n",
-                     (unsigned)DALI_MAX_SHORT_ADDRESS);
-        return;
-    }
-    if (!is_set && arg.type != DALI_ADDR_GROUP) {
-        shell_printf("address: '%s' takes a group (g0-g%u)\r\n",
-                     t->tok[2], (unsigned)DALI_MAX_GROUP);
-        return;
+        if (is_set && arg.type != DALI_ADDR_SHORT) {
+            shell_printf("address: 'set' takes a short address (a0-a%u)\r\n",
+                         (unsigned)DALI_MAX_SHORT_ADDRESS);
+            return;
+        }
+        if (!is_set && arg.type != DALI_ADDR_GROUP) {
+            shell_printf("address: '%s' takes a group (g0-g%u)\r\n",
+                         t->tok[2], (unsigned)DALI_MAX_GROUP);
+            return;
+        }
     }
 
     /*
-     * `set` is re-addressing, and is gated exactly as
-     * `config <t> set-short-address-dtr0` is. A friendlier spelling of a
-     * restricted operation that skipped the restriction would be a hole rather
-     * than a convenience. Group membership is gated on neither verb.
+     * `set` and `clear` are both re-addressing, and are gated exactly as
+     * `config <t> set-short-address-dtr0` is — the same command carries both,
+     * differing only in what DTR0 holds. A friendlier spelling of a restricted
+     * operation that skipped the restriction would be a hole rather than a
+     * convenience. Group membership is gated on neither verb.
      */
-    if (is_set &&
-        !shell_policy_allows(DALI_SHELL_ALLOW_COMMISSION, "address set")) {
+    if ((is_set || is_clear) &&
+        !shell_policy_allows(DALI_SHELL_ALLOW_COMMISSION,
+                             is_set ? "address set" : "address clear")) {
         return;
     }
 
@@ -2706,6 +2959,8 @@ static void cmd_address(const DaliCliTokens *t)
 
     if (is_set) {
         shell_address_set(subject.address, arg.address);
+    } else if (is_clear) {
+        shell_address_clear(subject.address);
     } else {
         shell_address_group(subject.address,
                             strcmp(t->tok[2], "add") == 0,
@@ -5036,6 +5291,30 @@ static uint8_t      s_backup_blob[DALI_SNAPSHOT_BLOB_MAX];
 static bool     s_backup_import_active;
 static uint32_t s_backup_import_len;
 
+/*
+ * Forward-declared with the `address` verb, which asks this before clearing a
+ * short address: an entry anchored by an identification number is what makes
+ * that reversible, because `restore` matches on the anchor and not on the
+ * address. An entry without one is recorded and reported by `backup save`, but
+ * it can never be matched to anything on a bus, so it is not an undo.
+ */
+static bool shell_backup_can_restore_gear(uint8_t addr)
+{
+    if (!s_backup_valid) {
+        return false;
+    }
+    for (uint8_t i = 0u; i < s_backup.entry_count; i++) {
+        const DaliSnapshotEntry *entry = &s_backup.entries[i];
+        if (entry->space == DALI_SNAPSHOT_SPACE_GEAR &&
+            entry->short_address == addr &&
+            entry->has_identification &&
+            !dali_snapshot_identification_is_null(entry->identification)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* 15 bytes is 30 hex characters: one token, two to a line. */
 #define SHELL_BACKUP_IMPORT_CHUNK_BYTES  15u
 #define SHELL_BACKUP_IMPORT_LINE_CHUNKS  2u
@@ -5425,6 +5704,53 @@ static void cmd_backup(const DaliCliTokens *t)
             if (!s_backup.entries[i].has_identification) {
                 shell_backup_print_entry(&s_backup.entries[i]);
             }
+        }
+    }
+
+    /*
+     * Contested addresses, which are the worse case and the quieter one.
+     *
+     * An unanchored entry is at least an entry: the operator can see the
+     * address in `backup status` and knows one fixture needs doing by hand. An
+     * address answering undecodably produces no entry at all: the scan marks it
+     * occupied but deliberately not `present`, and the snapshot records only
+     * what is present. Without this the units on it are missing from the
+     * backup, from its entry count, and from the output, and the first anyone
+     * hears of it is a restore that puts back fewer fixtures than went in.
+     */
+    if (inventory->undecodable_count > 0u ||
+        inventory->undecodable_device_count > 0u) {
+        shell_printf("backup: %u address(es) answered undecodably and are NOT "
+                     "recorded here\r\n",
+               (unsigned)(inventory->undecodable_count +
+                          inventory->undecodable_device_count));
+        for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+            const DaliDiscoveryDeviceInfo *device =
+                dali_discovery_inventory_get(inventory, addr);
+            if (device == NULL) {
+                continue;
+            }
+            if (device->has_undecodable_activity) {
+                shell_printf("  gear a%u: contested\r\n", (unsigned)addr);
+            }
+            if (device->has_undecodable_device_activity) {
+                shell_printf("  device d%u: contested\r\n", (unsigned)addr);
+            }
+        }
+        shell_printf("backup: units sharing one short address answer as one, so "
+                     "no identity can be read through them and nothing here can "
+                     "put them back\r\n");
+        if (inventory->undecodable_count > 0u) {
+            shell_printf("backup: 'address <aN> clear' frees the gear ones for "
+                         "'commission unaddressed'\r\n");
+        }
+        /* The two spaces get different advice because only one of them has a
+         * verb. `address` is control-gear only, and the Part 103 SET SHORT
+         * ADDRESS is reached from `restore` alone -- which needs a unit that
+         * already answers, and a contested one does not answer as itself. */
+        if (inventory->undecodable_device_count > 0u) {
+            shell_printf("backup: nothing here de-addresses a control device, "
+                         "so a contested d<N> needs a hardware pass\r\n");
         }
     }
 

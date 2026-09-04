@@ -138,8 +138,23 @@ Scan complete: 3 device(s) found.
     a7: contested
 ```
 
-Resolving a contested address needs a hardware pass — pull one fixture, or
-re-address the pair one at a time. Nothing on the bus can separate them remotely.
+Nothing on the bus can separate two units *while they share the address* — no
+query can be answered by one of them alone. What can be done is to stop them
+sharing it. `address a7 clear` de-addresses both at once, and `commission
+unaddressed` then gives them distinct addresses, separating them by random
+address the way the walk separates anything else:
+
+```text
+address a7 clear
+commission unaddressed
+```
+
+That costs the original assignment, which was never recoverable: a contested
+address is not in any backup, because no identity can be read through the
+collision. Both units come back at whatever the walk hands them, and `identify`
+is how you work out which fixture is which afterwards. A hardware pass — pull
+one fixture, re-address the other — is still the alternative if you need one of
+them to keep `a7` specifically.
 
 COMPARE now distinguishes silence from observed but undecodable traffic:
 
@@ -549,8 +564,8 @@ address: a13 confirmed, a5 silent
 
 Four things happen behind those two lines. The destination is probed and the
 move refused if anything answers there — two pieces of gear on one short address
-is the `contested` condition described above, and nothing on the bus can
-separate them remotely. The source is probed, so a typo'd subject fails instead
+is the `contested` condition described above, and no query can be answered by
+one of them alone. The source is probed, so a typo'd subject fails instead
 of writing into silence. DTR0 and SET SHORT ADDRESS go out as one sequence, so
 nothing can redirect DTR0 between them. Then both ends are read back: `a13` must
 answer and `a5` must not.
@@ -578,6 +593,45 @@ what two units sharing an address sound like, so it is not read as "free".
 The verb is not reachable from the **DALI Command** text entity at all — like
 `scan` and `commission`, it claims the bus and runs a multi-frame workflow,
 which is not what that surface is for.
+
+#### Taking an address away
+
+`address <aN> clear` de-addresses one unit: it stops answering `aN` and answers
+nothing until something addresses it again. Same frames as `set`, with DTR0
+holding 255 instead of an encoded destination.
+
+```text
+> address a5 clear
+address: the stored backup has an anchored entry for a5, so 'restore apply' can
+  put this unit back after it is re-addressed
+address: a5 -> unaddressed (DTR0=255)
+address: a5 cleared -- gear on the bus now reports no short address
+address: run 'commission unaddressed' to give it an address again
+```
+
+What `clear` can prove is weaker than what `set` can, and the verb says which
+half it managed. Silence at `a5` is the direct observation, but it is also what
+a driver that lost power looks like, so a broadcast QUERY MISSING SHORT ADDRESS
+supplies the other side: is something now alive on the bus without an address.
+That is conclusive only as a *change* — on a bus that already had unaddressed
+gear the answer is the same before and after, and the verb says so instead of
+claiming a confirmation it did not get.
+
+The first line is the one to read before you type this on a fixture you care
+about. `restore` matches on the identification number, not the address, so an
+anchored backup entry is what makes a clear reversible — via `commission
+unaddressed` first, since restore only moves gear that already answers
+*something*. Without one, nothing records that this unit belongs on `a5`:
+
+```text
+address: no anchored backup entry for a5 -- once cleared, nothing records that
+  this unit belongs here
+```
+
+`clear` is gated exactly as `set` is; they are one DALI command differing only
+in what DTR0 holds. Its main use is the contested address described at the top
+of this document, where it is the step that makes a collision resolvable without
+a hardware pass.
 
 #### The raw spelling, and the encoding it needs
 
@@ -768,6 +822,29 @@ backup: 1 entry has no identification number and cannot be restored
 
 That fixture will not come back on its own. Learn it now — a5 has to be
 re-addressed by hand afterwards — rather than during the restore.
+
+And the worse case, which is the quieter one:
+
+```text
+backup: 1 address(es) answered undecodably and are NOT recorded here
+  gear a7: contested
+backup: units sharing one short address answer as one, so no identity can be
+  read through them and nothing here can put them back
+backup: 'address <aN> clear' frees the gear ones for 'commission unaddressed'
+```
+
+A contested **control device** address gets different advice, because only the
+gear space has a verb for it: `address` is control-gear only, and the Part 103
+SET SHORT ADDRESS is reached from `restore` alone — which needs a unit that
+already answers as itself, which a contested one does not. That case still needs
+a hardware pass.
+
+An unanchored entry is at least an entry — the address is in the record and in
+`backup status`, and one fixture needs doing by hand. A contested address
+produces no entry at all: the scan marks it occupied but not *present*, and the
+snapshot records only what is present. Nothing about those units is in the
+backup, including their number, so without this line the first anyone would hear
+of it is a restore that puts back fewer fixtures than went in.
 
 #### Putting it back
 

@@ -153,6 +153,27 @@ typedef struct {
      */
     void (*short_address_moved)(void *ctx, uint8_t from, uint8_t to);
     /*
+     * Called after `address <aN> clear` and `aN` was confirmed silent.
+     *
+     * The opposite of short_address_moved() in what the cache should do:
+     * nothing follows the gear, because the gear no longer has an address to
+     * follow it to. Group membership keyed by `addr` must be forgotten rather
+     * than moved — the unit keeps its own group registers through a
+     * de-address, so it reappears in those groups at whatever address a later
+     * `commission unaddressed` hands it, which only a scan can learn.
+     *
+     * The bar for calling this is lower than for a move, deliberately. A move
+     * that could not be confirmed calls nothing, because pointing a cache at
+     * an address the gear may not hold is worse than dropping it. Here the
+     * confirmed fact is that `addr` went silent, and a cache keyed by a silent
+     * address is stale whether the gear was cleared, lost power, or failed —
+     * the three are indistinguishable from the bus and want the same response.
+     * So this is called on silence, and the shell's own output carries the
+     * distinction the operator needs. Called on the session's task. NULL when
+     * nothing caches.
+     */
+    void (*short_address_cleared)(void *ctx, uint8_t addr);
+    /*
      * Print the integration's own configuration as the YAML block that would
      * produce it — what `export config` emits.
      *

@@ -338,6 +338,7 @@ would be a hole rather than a difference.
 address <aN> set <aM>
 address <aN> add <gN>
 address <aN> remove <gN>
+address <aN> clear
 ```
 
 The checked way to change what one piece of gear answers to. DALI addresses gear
@@ -355,6 +356,7 @@ spellings are unchanged and still available.
 | `set <aM>` | DTR0 + SET SHORT ADDRESS, one sequence | destination is empty and source answers, **before**; destination answers and source is silent, **after** |
 | `add <gN>` | ADD TO GROUP | reads both group bytes back and prints the resulting membership |
 | `remove <gN>` | REMOVE FROM GROUP | the same read-back |
+| `clear` | the same sequence, DTR0 = 255 | subject answers, **before**; subject is silent and the bus reports unaddressed gear, **after** |
 
 ```text
 > address a5 set a13
@@ -364,6 +366,72 @@ address: a13 confirmed, a5 silent
 > address a5 add g3
 address: a5 is in g1 g3
 ```
+
+### `clear`, and what it can prove
+
+`clear` takes the short address away: the gear stops answering `a5` and answers
+nothing until something addresses it again. It sends `set`'s frames with DTR0
+holding 255, the "no short address" value — which is the one DTR0 byte for SET
+SHORT ADDRESS that is *not* an encoded address, and so is not put through the
+encoding `set` applies to its destination.
+
+The check is weaker than `set`'s and the verb says which half it got. `set` can
+prove its result, because the destination answering is the gear confirming the
+write. Nothing answers for an unaddressed unit, so silence at `a5` is also what
+a driver that lost power looks like. The other half comes from a broadcast QUERY
+MISSING SHORT ADDRESS, which asks whether anything on the bus now has no short
+address:
+
+```text
+> address a5 clear
+address: the stored backup has an anchored entry for a5, so 'restore apply' can
+  put this unit back after it is re-addressed
+address: a5 -> unaddressed (DTR0=255)
+address: a5 cleared -- gear on the bus now reports no short address
+address: run 'commission unaddressed' to give it an address again
+```
+
+That check is conclusive only as a change. A bus that already had unaddressed
+gear on it answers the same way before and after, and the verb reports that
+rather than claiming a confirmation it did not get:
+
+```text
+address: a5 is silent. The bus already had unaddressed gear before this, so the
+  missing-address check cannot single a5 out
+```
+
+The reverse — `a5` silent and *nothing* reporting a missing short address — is
+the case worth reading carefully, because the gear more likely dropped off the
+bus than took the write.
+
+### Clearing a contested address
+
+Undecodable activity is a refusal for `set` and the main reason to run `clear`.
+Two units on one short address answer as one, and nothing on the bus can
+separate them while they share it — but a de-address frees both at once, and
+`commission unaddressed` then separates them by random address:
+
+```text
+> address a7 clear
+address: a7 answers undecodably (rx-activity) -- gear sharing one short address
+  is the expected cause
+address: clearing frees every unit on a7 at once. No backup holds them --
+  nothing could read an identity through the collision -- so they come back only
+  where 'commission unaddressed' puts them
+address: a7 -> unaddressed (DTR0=255)
+address: a7 cleared -- more than one unit now reports no short address
+address: run 'commission unaddressed' to give them distinct addresses, then
+  'identify' to see which fixture is which
+```
+
+`more than one unit` is the collision reappearing as evidence: several units
+answering the missing-address query at once is undecodable in the same way, and
+here that is the expected reading rather than an ambiguity, because for a YES/NO
+query NO is silence — nothing that still holds an address drives the reply
+window at all.
+
+If `a7` comes back answering *decodably* after the clear, one unit took the
+write and another did not. That is progress, not failure; repeat the clear.
 
 The subject must be a single short address. Every arm reads its result back off
 the bus, and a group or broadcast subject has no single answer to read — the
@@ -389,10 +457,22 @@ destination out of band, so it still drops the caches and warns. What cannot
 follow is an entity configured in YAML against the old address — that is logged,
 not guessed at.
 
-`set` is gated exactly as `config <t> set-short-address-dtr0` is: refused
-without `allow_commissioning: true`. `add` and `remove` are gated on neither
-spelling. The whole verb is absent from the console, like every other verb that
-claims the bus for a multi-frame workflow.
+`set` and `clear` are gated exactly as `config <t> set-short-address-dtr0` is:
+refused without `allow_commissioning: true`. They are the same DALI command
+differing only in what DTR0 holds, so gating one and not the other would be a
+hole rather than a difference. `add` and `remove` are gated on neither spelling.
+The whole verb is absent from the console, like every other verb that claims the
+bus for a multi-frame workflow.
+
+A confirmed `clear` is reported to the integration the way a confirmed move is,
+but the bookkeeping is the opposite: group membership is **retired** rather than
+followed. The unit keeps its own group registers through a de-address, so it
+reappears in the same groups at whatever address `commission unaddressed` hands
+it — and that address is not knowable in advance, so only a scan can find it
+again. The threshold is lower than a move's, too: a move that cannot be
+confirmed reports nothing, because pointing a cache at an address the gear may
+not hold is worse than dropping it, whereas a cache keyed by a silent address is
+stale whether the gear was cleared or died.
 
 ## Special Commands
 

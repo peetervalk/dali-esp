@@ -209,6 +209,18 @@ void DaliShellServer::short_address_moved_cb(void *ctx, uint8_t from, uint8_t to
     self->parent_->on_short_address_moved(from, to);
 }
 
+/* `address <aN> clear` took the address away and `aN` was confirmed silent.
+ * The mirror of short_address_moved_cb(): nothing follows the gear, because it
+ * has no address to be followed to. */
+void DaliShellServer::short_address_cleared_cb(void *ctx, uint8_t addr)
+{
+    auto *self = static_cast<DaliShellServer *>(ctx);
+    if (self == nullptr || self->parent_ == nullptr) {
+        return;
+    }
+    self->parent_->on_short_address_cleared(addr);
+}
+
 /* ── Accept loop ─────────────────────────────────────────────────────────── */
 
 void DaliShellServer::task_entry(void *arg)
@@ -294,6 +306,7 @@ void DaliShellServer::serve(int client_fd)
     session.hooks.inventory_changed = inventory_changed_cb;
     session.hooks.config_applied = config_applied_cb;
     session.hooks.short_address_moved = short_address_moved_cb;
+    session.hooks.short_address_cleared = short_address_cleared_cb;
     session.hooks.export_config = export_config_cb;
     session.hooks.snapshot_save = snapshot_save_cb;
     session.hooks.snapshot_load = snapshot_load_cb;

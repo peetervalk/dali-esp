@@ -231,6 +231,7 @@ class DaliComponent : public Component {
   // are deferred to loop().
   void on_config_applied(DaliTarget target, DaliCommandId id, uint8_t param);
   void on_short_address_moved(uint8_t from, uint8_t to);
+  void on_short_address_cleared(uint8_t addr);
   // Called by the scan task before on_scan_complete(). Copies only control-gear
   // profile metadata; scan_done_'s release/acquire handoff publishes the copy.
   void set_scan_level_profile_snapshot(const DaliDiscoveryInventory *inventory);

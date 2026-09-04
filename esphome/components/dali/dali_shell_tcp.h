@@ -82,6 +82,7 @@ class DaliShellServer : public Component {
   static void config_applied_cb(void *ctx, DaliTarget target, DaliCommandId id,
                                 uint8_t param);
   static void short_address_moved_cb(void *ctx, uint8_t from, uint8_t to);
+  static void short_address_cleared_cb(void *ctx, uint8_t addr);
 
   DaliComponent *parent_{nullptr};
   uint16_t       port_{2323};

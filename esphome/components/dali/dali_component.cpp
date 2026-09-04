@@ -2861,6 +2861,49 @@ void DaliComponent::on_short_address_moved(uint8_t from, uint8_t to)
     external_refresh_request_.store(true, std::memory_order_release);
 }
 
+/*
+ * A de-address, confirmed by the address going silent.
+ *
+ * The mirror of on_short_address_moved(), and the bookkeeping is the opposite
+ * in the way that matters. A move keeps the group-membership entry and
+ * re-points it, because the unit is still on the bus answering something. A
+ * clear has to retire it. SET SHORT ADDRESS changes nothing but the address, so
+ * the unit keeps its own group registers and will reappear in the same groups
+ * at whatever address `commission unaddressed` hands it — an address not
+ * knowable from here. Keeping the old entry would leave a group light polling
+ * something that never answers; pointing it anywhere else would be a guess.
+ *
+ * Reached on silence rather than on a proven clear, because the two cases the
+ * shell cannot separate — cleared, or dropped off the bus — want exactly this
+ * same response.
+ */
+void DaliComponent::on_short_address_cleared(uint8_t addr)
+{
+    if (addr >= DALI_SHORT_ADDRESS_COUNT) return;
+
+    portENTER_CRITICAL(&s_group_map_mux);
+    bool groups_dropped =
+        dali_group_map_forget(&s_group_map, addr, DALI_GROUP_MAP_ALL_GROUPS);
+    portEXIT_CRITICAL(&s_group_map_mux);
+
+    if (groups_dropped) {
+        s_group_members_dirty_.store(true, std::memory_order_release);
+        ESP_LOGI(TAG, "a%u cleared: retired from every group it was known in",
+                 (unsigned) addr);
+    }
+
+    external_profile_forget_mask_.fetch_or((uint64_t) 1u << addr,
+                                           std::memory_order_acq_rel);
+
+    ESP_LOGW(TAG,
+             "a%u no longer answers. Any entity configured with address: %u now "
+             "targets nothing -- the unit comes back only through 'commission "
+             "unaddressed', at an address only a scan can find",
+             (unsigned) addr, (unsigned) addr);
+
+    external_refresh_request_.store(true, std::memory_order_release);
+}
+
 bool DaliComponent::load_group_membership()
 {
     GroupMembershipPersist st{};

@@ -487,13 +487,21 @@ The typed verb surface is in place; what is missing is evidence. Keep
   to watch for is the failure direction — a release that does not land leaves
   the installation's sensors quiet, and the shell's line saying so is the only
   thing that would tell an operator to run `quiescent off all`.
-- **Add `address <aN> clear`.** Clearing a short address is a normal step in
-  resolving a collision and is the one address operation with no typed verb. The
-  fallback, `config-dtr0 <aN> set-short-address-dtr0 255`, is correct DALI but
-  prints a bare `OK` with no read-back and no warning when the subject is
-  already known to be contested. The verb should refuse or warn on a contested
-  subject, send the sequence atomically as `address set` does, and verify the
-  address went silent.
+- **`address <aN> clear` has never run on a bus.** Added with the `backup save`
+  contested warning; host-covered only at the CLI layer (arity, subcommand, and
+  that the "no short address" value is outside the encoded range), because the
+  shell handler itself has no host vectors. Three things want a real bus. The
+  broadcast QUERY MISSING SHORT ADDRESS check is new to this codebase and its
+  three-way reading — silence as NONE, decoded `0xFF` or RX activity as SOME —
+  is asserted from the standard, not observed; the second arm in particular
+  assumes several units answering YES collide the way several units answering a
+  status query do. The contested path has the same problem the post-scan audit's
+  does: no collision has been driven through it. And the partial-clear branch
+  (`a7` answering decodably after the write, meaning one unit took it and one
+  did not) is a guess about what a half-applied broadcast-to-one-address write
+  looks like. Worth doing on 2k with two drivers deliberately set to one
+  address: clear, confirm both report missing, `commission unaddressed`,
+  `identify`, then `restore`.
 
 ### P1 — Release and verification quality
 

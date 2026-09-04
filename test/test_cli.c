@@ -15,6 +15,7 @@
 
 #include "unity.h"
 #include "dali_cli.h"
+#include "dali_commissioning.h"
 
 #include <string.h>
 
@@ -1122,16 +1123,79 @@ static void test_address_verb_shape(void)
     TEST_ASSERT_NOT_NULL(spec);
     TEST_ASSERT_EQUAL(DALI_CLI_CMD_ADDRESS, spec->id);
 
-    /* Subject, keyword, argument -- always exactly three. */
-    TEST_ASSERT_EQUAL_UINT8(3u, spec->min_args);
+    /*
+     * Subject and keyword, plus an argument on every arm but `clear` — which
+     * takes the address away and so has nothing to name. The spec declares the
+     * widest form, and the handler checks the exact shape per subcommand; what
+     * is asserted here is that a two-argument line reaches the handler at all,
+     * because the resolver rejects on arity before dispatch.
+     */
+    TEST_ASSERT_EQUAL_UINT8(2u, spec->min_args);
     TEST_ASSERT_EQUAL_UINT8(3u, spec->max_args);
 
     TEST_ASSERT_TRUE(dali_cli_has_subcommand(spec, "set"));
     TEST_ASSERT_TRUE(dali_cli_has_subcommand(spec, "add"));
     TEST_ASSERT_TRUE(dali_cli_has_subcommand(spec, "remove"));
+    TEST_ASSERT_TRUE(dali_cli_has_subcommand(spec, "clear"));
     /* The config table's spellings are not this verb's. */
     TEST_ASSERT_FALSE(dali_cli_has_subcommand(spec, "add-group"));
     TEST_ASSERT_FALSE(dali_cli_has_subcommand(spec, "set-short-address-dtr0"));
+}
+
+/*
+ * The arity widening `clear` needed must not turn the other arms into
+ * two-argument verbs. `address a5 set` resolves — the bounds cannot express
+ * "three unless the keyword is clear" — so the handler is what refuses it, and
+ * this pins the resolver's half of that split: both lengths reach dispatch,
+ * neither one nor four does.
+ */
+static void test_address_clear_arity(void)
+{
+    DaliCliTokens             tokens;
+    const DaliCliCommandSpec *spec = NULL;
+
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_OK,
+                      dali_cli_resolve("address a5 clear", &tokens, &spec));
+    TEST_ASSERT_EQUAL_UINT8(3u, tokens.count);
+    /* Absent tokens are empty rather than stale, which is what lets the
+     * handler dispatch on count without reading past the end. */
+    TEST_ASSERT_EQUAL_STRING("", tokens.tok[3]);
+
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_OK,
+                      dali_cli_resolve("address a5 set a13", &tokens, &spec));
+    TEST_ASSERT_EQUAL_UINT8(4u, tokens.count);
+
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY,
+                      dali_cli_resolve("address a5", &tokens, &spec));
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY,
+                      dali_cli_resolve("address a5 clear now please",
+                                       &tokens, &spec));
+}
+
+/*
+ * `clear` is the same DALI command as `set` with a different DTR0, so it is the
+ * same gated operation. The gate lives in the shell; what is pinned here is
+ * that there is no second command it could be spelled with that might escape
+ * the commissioning set.
+ */
+static void test_address_clear_is_the_gated_operation(void)
+{
+    const DaliCliGearCommand *spec =
+        dali_cli_config_find("set-short-address-dtr0");
+    TEST_ASSERT_NOT_NULL(spec);
+    TEST_ASSERT_EQUAL(DALI_CMD_SET_SHORT_ADDRESS_DTR0, spec->id);
+    TEST_ASSERT_TRUE(dali_cli_config_is_commissioning(spec->id));
+
+    /* The value that means "no short address" is outside the encoded range, so
+     * it can never be a destination `set` would produce. */
+    uint8_t decoded = 0u;
+    TEST_ASSERT_NOT_EQUAL(DALI_OK,
+                          dali_commissioning_decode_short_address(
+                              DALI_COMMISSIONING_NO_SHORT_ADDRESS, &decoded));
+    for (uint8_t addr = 0u; addr <= DALI_MAX_SHORT_ADDRESS; addr++) {
+        TEST_ASSERT_NOT_EQUAL(DALI_COMMISSIONING_NO_SHORT_ADDRESS,
+                              dali_commissioning_encode_short_address(addr));
+    }
 }
 
 /*
@@ -1435,6 +1499,8 @@ int main(void)
     RUN_TEST(test_special_commissioning_set);
     RUN_TEST(test_config_commissioning_set);
     RUN_TEST(test_address_verb_shape);
+    RUN_TEST(test_address_clear_arity);
+    RUN_TEST(test_address_clear_is_the_gated_operation);
     RUN_TEST(test_address_arguments_are_targets);
     RUN_TEST(test_address_set_is_the_gated_operation);
     RUN_TEST(test_config_broadcast_rejection_set);
