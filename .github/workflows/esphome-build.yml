@@ -167,13 +167,20 @@ jobs:
 
       - name: Write dummy secrets
         run: |
-          cat > secrets.yaml <<'EOF'
+          # The API key is generated per run rather than written out here:
+          # ESPHome 2026.9 reserves the all-zeros key and rejects it at
+          # validation, and a real key in a workflow file invites someone to
+          # believe it means something. Nothing is flashed, so it is discarded
+          # with the runner. The heredoc is unquoted for $key alone; no other
+          # line contains a dollar sign.
+          key=$(openssl rand -base64 32)
+          cat > secrets.yaml <<EOF
           # CI COMPILE-ONLY SECRETS — generated per run, never deployed.
           wifi_ssid: "DUMMY_COMPILE_ONLY_NETWORK"
           wifi_ssid2: "DUMMY_COMPILE_ONLY_NETWORK"
           wifi_password: "DUMMY-COMPILE-ONLY"
           ap_password: "DUMMY-COMPILE-ONLY"
-          api_encryption_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          api_encryption_key: "$key"
           ota_password: "DUMMY-COMPILE-ONLY"
           EOF
 
@@ -222,13 +229,20 @@ jobs:
 
       - name: Write dummy secrets
         run: |
-          cat > secrets.yaml <<'EOF'
+          # The API key is generated per run rather than written out here:
+          # ESPHome 2026.9 reserves the all-zeros key and rejects it at
+          # validation, and a real key in a workflow file invites someone to
+          # believe it means something. Nothing is flashed, so it is discarded
+          # with the runner. The heredoc is unquoted for $key alone; no other
+          # line contains a dollar sign.
+          key=$(openssl rand -base64 32)
+          cat > secrets.yaml <<EOF
           # CI COMPILE-ONLY SECRETS — generated per run, never deployed.
           wifi_ssid: "DUMMY_COMPILE_ONLY_NETWORK"
           wifi_ssid2: "DUMMY_COMPILE_ONLY_NETWORK"
           wifi_password: "DUMMY-COMPILE-ONLY"
           ap_password: "DUMMY-COMPILE-ONLY"
-          api_encryption_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          api_encryption_key: "$key"
           ota_password: "DUMMY-COMPILE-ONLY"
           EOF
 

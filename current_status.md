@@ -1,13 +1,13 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-09-04, against `dev` `7d8a4f5`.
+**Last updated:** 2026-09-18, at the `v2.0.0` release.
 
 Annex to `AGENTS.md`. That file holds the architecture, the layer rules, the ISR
 and timing constraints, and the native/host build commands; this one holds what
 is true right now — what works, what is proven, and what is open.
 
-Everything dated lives elsewhere: verification history, investigations, and the
-accumulated unreleased-change list are in `project_log.md`. Verb and argument
+Everything dated lives elsewhere: verification history and investigations are in
+`project_log.md`, and per-release changes in `CHANGELOG.md`. Verb and argument
 detail is in `dali_commands.md`, frame and opcode detail in `dali_protocol.md`,
 per-capability API/verb/vector/hardware status in `dali_capability_matrix.md`.
 
@@ -15,20 +15,24 @@ per-capability API/verb/vector/hardware status in `dali_capability_matrix.md`.
 
 | | |
 |---|---|
-| Latest tag | `v1.3.0` (`ce0a72c`), which is what `main` points at |
-| Last hardware-tested release | `v1.1.1`. Nothing since has been flashed to a bus as a tagged build |
-| `dev` vs `main` | 27 commits ahead, 0 behind |
+| Latest tag | `v2.0.0`, which is what `main` points at |
+| Last hardware-tested release | `v1.1.1` as a tagged build. The `v2.0.0` tree has real-bus results (below), taken from `dev` rather than from a flashed tag |
+| `dev` vs `main` | level at the tag; `dev` accumulates work between releases |
 
-`dev` carries the post-scan verification, VERIFY-based duplicate detection,
-mixed-device work, the backup/restore path, and control-device commissioning —
-none of which any tag has. `dali-starter.yaml` and the README example both pin
-`ref: v1.3.0`, so an operator who wants that work must move the pin
-deliberately.
+`v2.0.0` releases the post-scan verification, VERIFY-based duplicate detection,
+mixed-device work, the backup/restore path, the `address` verb, and
+control-device commissioning — none of which any earlier tag had. It is a
+breaking release for C API consumers and for out-of-tree build systems;
+`CHANGELOG.md` has the migration.
+
+`dali-starter.yaml` and the README example pin the current tag, so a new
+installation gets released code by default. Work lands on `dev` between
+releases, and pointing an installation there is a deliberate move: compile and
+test it separately first.
 
 **What is deployed is not recorded here, and this is not the place to look.**
-The authoritative site configurations live in Home Assistant. The `_local/`
-copies are snapshots taken when convenient, are not kept in step, and are
-therefore not evidence of what any device runs or of which ref it was built
+The authoritative site configurations live in Home Assistant. Nothing in this
+repository is evidence of what any device runs or of which ref it was built
 from.
 
 **Overall:** the ESPHome controller is operational on the two known
@@ -51,20 +55,23 @@ before adding broad new device support.
 
 ## Verification State
 
-**Last full local pass — 2026-09-03, `dev` `a8c9372` plus the `backup import`
-and `restore groups` work, clean tree:**
+**At the `v2.0.0` tag, 2026-09-18:**
 
-- 31/31 host suites build and pass (`mingw32-make --directory build test`).
-- `dali_test.yaml` passes `esphome config` on ESPHome 2026.8.1. Because that
-  config is `type: local`, this validates the Python schema in
-  `esphome/components/dali/__init__.py` against the working tree.
-- `_local/dali-diag-local.yaml` **compiles** on ESPHome 2026.8.1 — the first
-  time the C++ layer and the vendored C stack have been built under the same
-  version that validates the schema. The new shell strings are present in
-  `firmware.elf`, so this was a real rebuild and not a stale incremental.
-- Scope, stated precisely: `esphome config` exercises the Python schema only.
-  The compile above is what covers the C++ layer and the vendored C.
-- **Not a hardware pass.** No COM6, no flash, no bus.
+- 31/31 host suites build and pass, locally and in CI.
+- `dali_test.yaml` passes `esphome config` and `esphome compile` on ESPHome
+  2026.9.0. Because that config is `type: local`, it validates the Python schema
+  in `esphome/components/dali/__init__.py` against this tree and compiles the
+  C++ layer and the vendored C stack from it. It is deliberately the widest
+  config here — every platform, every optional block.
+- The native ESP-IDF firmware builds in CI, compiling the same
+  `components/dali` C under a second toolchain.
+- The tag itself builds as an external component in an empty directory with no
+  checkout around it (`release-packaging.yml`), which is the only thing that
+  proves a consumer can fetch and build it.
+- Scope, stated precisely: `esphome config` exercises the Python schema only;
+  the compile is what covers the C++ layer and the vendored C.
+- **Not a hardware pass.** The real-bus results below were taken from `dev`
+  during development, not from a flashed `v2.0.0` build.
 
 ### Recorded hardware state
 
@@ -324,25 +331,14 @@ Dated evidence for each of these is in `project_log.md`.
 this repository establishes what a site runs or which ref it was built from. To
 learn what a device actually runs, ask Home Assistant or the device.
 
-| Configuration | Component source | Tracked | Role |
-|---|---|---|---|
-| `dali-starter.yaml` | `ref: v1.3.0` | yes | Starter/commissioning firmware; node `dali-starter` |
-| `dali_test.yaml` | `type: local` | yes | CI coverage config; fictitious layout, never flashed |
-| `_local/dali-1k.yaml` | `ref: v1.1.1` | no | Stale snapshot, 2026-08-14; 16 control gear, groups 0/2–7 |
-| `_local/dali-2k.yaml` | `ref: dev` | no | Stale snapshot, 2026-08-14; group 0 lighting, HA console, Steinel HF 360 II polling |
-| `_local/dali-diag-local.yaml` | `type: local` | no | Compile-test copy of the diagnostic firmware |
+Two configurations are tracked, and neither is a deployment:
 
-`_local/` also holds underscore-named leftovers (`dali_1k.yaml`,
-`dali_2k.yaml`) that predate the hyphenated pair and are not current. The whole
-directory is gitignored, so normal `git status` does not show changes under it —
-back up any real site files separately.
+| Configuration | Component source | Role |
+|---|---|---|
+| `dali-starter.yaml` | `ref:` the current tag | Starter/commissioning firmware — the config to flash first on a new bus |
+| `dali_test.yaml` | `type: local` | CI coverage config; fictitious layout, never flashed |
 
-`_local/secrets.yaml` holds **live credentials**, not dummy values: its six
-shared keys are byte-identical to the root `secrets.yaml`, and the 2k device
-joins WiFi and accepts OTA using them. Both files are gitignored and untracked;
-treat both as real secrets.
-
-The former tracked site copies are gone. Tracking a real deployment to obtain CI
+The tracked site copies that used to sit beside them are gone. Tracking a real deployment to obtain CI
 coverage was the wrong trade — they carried an address layout nobody else could
 use and needed editing whenever the site changed. `dali_test.yaml` replaces them
 and keeps the property that mattered: `type: local` with
@@ -542,13 +538,11 @@ The typed verb surface is in place; what is missing is evidence. Keep
 
 ### P1 — Release and verification quality
 
-- **Write the release notes.** The accumulated API migrations and
-  operator-visible breaks — console verb renames with no aliases, the reply
-  format change, error names replacing numbers, `special randomize` →
-  `randomise`, and `backup export`'s single hex line becoming an import script —
-  are collected in `project_log.md` under *Unreleased API and operator-visible
-  changes*. Anything in Home Assistant that writes command strings to the
-  `text:` entity needs updating.
+- **Empty the unreleased-change list as part of tagging, not after it.** The
+  v2.0.0 notes were written from a list that had not been emptied at `v1.3.0`
+  and so claimed two releases' worth of breaks as pending; each item had to be
+  checked against the tag to find which had already shipped. The list is in
+  `project_log.md` and the released notes are in `CHANGELOG.md`.
 - Enforce or document the actual ESP-IDF and ESPHome version requirements.
   `idf-build.yml` pins IDF 6.0.1, so the native requirement now fails when it
   stops holding. The ESPHome side is still advisory — CI installs whatever
@@ -634,11 +628,11 @@ The typed verb surface is in place; what is missing is evidence. Keep
 | `esphome/components/dali/proto_dali_*.c` | Shims pulling the vendored C in behind ESPHome's source glob |
 | `dali-starter.yaml` | Tracked starter/commissioning firmware |
 | `dali_test.yaml` | Tracked CI coverage config; the widest configuration this repo compiles against its own tree |
-| `_local/` | Gitignored site snapshots, diagnostic compile-test config, and live secrets |
 | `test/` | 31 host suites and the vendored Unity runner |
 | `tools/dali-shell` | Operator-side script for the TCP shell |
 | `AGENTS.md` | Architecture, layer rules, timing/ISR constraints, build commands |
-| `project_log.md` | Verification history, investigations, unreleased-change list |
+| `project_log.md` | Verification history and investigations |
+| `CHANGELOG.md` | Per-release changes, with the C API and operator-visible migrations |
 | `dali_commands.md` | Every verb and named command table, both surfaces |
 | `dali_protocol.md` | Frame layouts, opcode tables by IEC part, event decoding |
 | `commissioning_readme.md` | Commissioning workflow: flash, walk the bus, export a config |
@@ -703,7 +697,8 @@ Notes an operator needs:
 ## Documentation Policy
 
 - Keep this file limited to current state, constraints, and open work. If an
-  entry has a date on it, it belongs in `project_log.md`.
+  entry has a date on it, it belongs in `project_log.md`; if it describes what
+  changed in a release, it belongs in `CHANGELOG.md`.
 - Record completed work in Git history or `project_log.md`; remove it from the
   backlog rather than annotating it as done.
 - Keep verb and argument detail in `dali_commands.md`, frame and opcode detail

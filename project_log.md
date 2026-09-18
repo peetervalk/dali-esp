@@ -111,8 +111,7 @@ The experiment the seven-way counter split was built for, run on the one ref
 that can still run it. `b64f81f` carries the split counters and *not* the scan's
 quiescence bracket, so it is the last build able to observe the event traffic
 the bracket removes; from `7d8a4f5` on, an operator-driven walk silences the
-thing being measured. Driven from `python3 /config/dali-shell` against the 2k
-node at 192.168.1.216.
+thing being measured. Driven from the `dali-shell` script against the 2k node.
 
 Bus at start: a0 (lamp + Steinel HF 360 II, 4 input instances), a1 (lamp +
 Casambi CBU-DCS, 1 instance), a2-a4 lamps, all five in group 0. a5 — the LED
@@ -157,11 +156,10 @@ emitting events, so it can reproduce neither arm of this experiment.
 ### Verified on hardware 2026-09-03 (2k bus: backup/restore, commissioning, contested)
 
 First bus result for the commissioning and backup/restore work accumulated on
-`dev` since `v1.1.1`. Driven from `python3 /config/dali-shell` against the 2k
-node at 192.168.1.216, on a `dev` build carrying the reworked backup/restore
+`dev` since `v1.1.1`. Driven from the `dali-shell` script against the 2k node, on a `dev` build carrying the reworked backup/restore
 (at or near `7e9ee6e`). The exact flashed ref is not recorded — see the
-Installation State note in `current_status.md` about `_local/` not being
-evidence.
+Installation State note in `current_status.md`: nothing in this repository is
+evidence of what a device runs.
 
 Bus at start: a0 (lamp + Steinel HF 360 II, 4 input instances), a1 (lamp +
 DALI-2 PB coupler, 1 instance), a2, a3 and a5 plain lamps, all in group 0. Plus
@@ -244,7 +242,7 @@ Working tree at `dev` `e26f442`, clean.
   does not compile the ESPHome C++ layer or the vendored C stack, so 2026.8.1
   has no compile result here and the `manifest.json` floor of `>=2026.6.0`
   remains advisory. `esphome compile` under 2026.8.1 is the missing half.
-- Not a hardware pass. No COM6, no flash, no bus.
+- Not a hardware pass. No flash, no bus.
 
 ### Verified locally on 2026-08-25 (commissioning P0 slice)
 
@@ -436,7 +434,7 @@ Working tree at `dev` `e26f442`, clean.
   hardcodes a suite or module count that `dali_error.c` would have invalidated.
 - All 26 host suites pass. Focused totals are PHY 28, scheduler 78, transport 14,
   discovery 56, commissioning 32, and dispatch 31. Native ESP-IDF 6.0.1 and ESPHome 2026.7.4
-  builds pass. These are host and compile results only: no COM6, flash, captured
+  builds pass. These are host and compile results only: no flash, captured
   collision waveform, or commissioning run was used in this pass.
 - Multi-device commissioning therefore remains restricted to the documented
   single-unaddressed-device envelope until HIL proves overlapping replies. Part
@@ -699,7 +697,7 @@ the fixture is replaced. The bus can answer the question itself.
   `broadcast` entity still needs it — "everyone" has no member to derive — and
   pinning a particular member (a plain lamp rather than one sharing an input
   device) is a judgement no sweep can make. `dali_test.yaml` keeps it so the
-  override stays under test; the README example and `_local` site configs no
+  override stays under test; the README example and site configs no
   longer need it.
 - `export config` no longer drafts a `query_address` into the group entities it
   proposes. It names one member in a comment instead, so the export cannot
@@ -933,11 +931,11 @@ cleared by the 2026-08-14 entry above):
 - All 24 host executables pass. The new CLI suite is 59 cases; protocol is now
   66, control 31, DT6 21, DT8 46, and input config 9.
 - The native firmware builds with ESP-IDF 6.0.1 (`0x3C0A0`-byte application
-  image). `_local/dali-diag-local.yaml` builds the working-tree component with
+  image). A local compile-test config builds the working-tree component with
   ESPHome 2026.7.4 (919611-byte OTA image); the shared-stack header changes did
   not disturb the ESPHome wrapper set.
 - These changes are host- and compile-verified only. No new verb has been
-  flashed or exercised on COM6, and neither site deployment has been re-tested.
+  flashed or exercised on hardware, and neither site deployment has been re-tested.
 
 - Light command deduplication is now committed only by a scheduler completion.
   Previously the cached on/level was written as soon as `dali_control_*`
@@ -988,10 +986,10 @@ cleared by the 2026-08-14 entry above):
 - All 23 host executables pass. The scheduler suite is 50 cases, control 29, and
   the new light-write suite 19.
 - The native firmware builds with ESP-IDF 6.0.1 (`0x38AA0`-byte application
-  image). `_local/dali-diag-local.yaml` builds the working-tree component with
+  image). A local compile-test config builds the working-tree component with
   ESPHome 2026.7.4 (919515-byte image).
 - These changes are host- and compile-verified only. They have not been flashed
-  or exercised on COM6, and neither site deployment has been re-tested.
+  or exercised on hardware, and neither site deployment has been re-tested.
 
 - The correctness audit closed the remaining local split-transaction paths.
   Every existing dependent discovery, commissioning, memory, DT8, and input-
@@ -1035,10 +1033,10 @@ cleared by the 2026-08-14 entry above):
   8, discovery 47, commissioning 20, memory 40, DT8 42, scheduler 50, dispatch
   30, group map 29, control 29, light write 19, and protocol 61 tests.
 - The native firmware builds with ESP-IDF 6.0.1 (`0x387D0`-byte application
-  image). `_local/dali-diag-local.yaml` builds the working-tree component with
+  image). A local compile-test config builds the working-tree component with
   ESPHome 2026.7.4 (ESP-IDF 5.5.5; 918608-byte OTA image).
 - These audit fixes are host- and compile-verified only. They have not been
-  flashed or exercised on COM6, and neither site deployment has been re-tested.
+  flashed or exercised on hardware, and neither site deployment has been re-tested.
 
 - Commissioning's opening is one three-step sequence built by
   `dali_commissioning_build_start_sequence()`: TERMINATE, INITIALISE
@@ -1194,7 +1192,7 @@ cleared by the 2026-08-14 entry above):
   ESPHome 2026.7.4 (ESP-IDF 5.5.5); the current OTA image is 918608 bytes. This
   is a newer ESPHome than the 2026.6.2 recorded
   below; the three pinned YAMLs were not re-checked against it.
-  `_local/dali-diag-local.yaml` had been switched to the `v1.0.1` git source and
+  The local compile-test config had been switched to the `v1.0.1` git source and
   was restored to `type: local` with `path: ../esphome/components`, without
   which the compile test verifies the release rather than the working tree.
 - The native ESP-IDF firmware builds with ESP-IDF 6.0.1; the application binary
@@ -1212,7 +1210,7 @@ cleared by the 2026-08-14 entry above):
 - All three pinned YAMLs pass `esphome config` with ESPHome 2026.6.2 and
   resolve the published `v1.0.1` external component.
 - The current `dev` worktree compiles and links as a local ESPHome 2026.6.2
-  external component through `_local/dali-diag-local.yaml`; dispatch schema boundary
+  external component through a local compile-test config; dispatch schema boundary
   and backwards-compatibility cases also pass.
 - The ESPHome protocol wrapper set matches the 19 reusable C source files.
 - The input-device configuration opcode audit is complete against Part 103:2022,
@@ -2010,710 +2008,19 @@ options struct carries `terminate_control_gear` as the mirror of
 
 # Unreleased API and operator-visible changes
 
-Raw material for the next release notes. Everything below is unreleased as of
-`dev` `a8c9372`; `v1.3.0` (`ce0a72c`) predates all of it.
-
-## Scans silence control devices for the duration of the walk
-
-**Behaviour change to every operator-driven scan, 2026-09-03.** A 64-address
-walk is minutes of back-to-back TX, and a control-device event arriving inside
-it is dropped for the state it arrived in — on the 2k bus, with a Steinel
-emitting on four instances, that was most of them. The walk now brackets itself
-with broadcast `START`/`STOP QUIESCENT MODE`, the same bracket the commissioning
-run has taken since 2026-08-26, so the traffic is removed rather than counted.
-
-Which walks: `scan`/`discover`, both commissioning pre-scans, the commissioning
-post-scan, `backup save`, and the scan behind `restore plan`/`apply`. Every
-operator-driven walk in the shell takes it, and they all take the same one — a
-rule kept deliberately simple, because the alternative is a reader working out
-which walks quiesce and which do not.
-
-Which do not, and why:
-
-- **`find switches`** does not scan at all. Listening for events is that verb's
-  entire purpose, and silencing devices would make it useless.
-- **The integration's own periodic scan** (`dali_scan.cpp`) passes no options.
-  An unattended walk that silences occupancy for minutes is a trade nobody is
-  present to accept: the operator-driven case has somebody standing there, the
-  automatic one does not. Its transport also supplies no `delay_ms`, so the
-  bracket would refuse anyway — see below.
-- **A transport that cannot delay** gets the bracket refused rather than
-  applied. Quiescence whose settle never ran is hardening that is not there,
-  and it would be reported as if it were.
-
-The release is attempted on every exit path, including the cancelled and errored
-walks — that is the constraint the whole thing turns on, since the failure mode
-is an installation left deaf to its own sensors by a scan that already went
-wrong. A release that fails prints the same line the commissioning walk prints,
-naming `quiescent off all` as the fix.
-
-API: `dali_discovery_scan_ex()` takes `DaliDiscoveryScanOptions` and fills a
-`DaliDiscoveryScanResult`; `dali_discovery_scan()` is unchanged and now calls it
-with no options, so all forty-odd existing call sites and vectors keep their
-behaviour exactly. The bracket itself moved out of `dali_commissioning.c` into
-`dali_discovery.c` as `dali_discovery_quiescence_start()` / `_release()` and the
-commissioning walk now calls the shared pair, so the two cannot drift.
-`DALI_COMMISSIONING_QUIESCENT_SETTLE_MS` is kept as an alias of the discovery
-constant. Six new vectors in `test_discovery.c`, mutation-checked against a
-release that only covered the clean exit.
-
-## Ignored-RX counters split seven ways, and a scan note that stops crying wolf
-
-**Diagnostic output change, 2026-09-03.** `rx_ignored_outside_reply` counted
-every rejected RX observation, so one number answered four unrelated questions
-at once: was gear early, was gear late, was a control device talking during a
-walk, or was the waveform noise. Three investigations read it as three
-different faults and one of those conclusions had to be reopened. It is now the
-sum of seven named buckets, and the aggregate is kept so nothing that already
-reads it breaks:
-
-| Bucket | Means |
-|---|---|
-| `rx_reply_early` | Backward frame before the decoded open edge — gear faster than the window |
-| `rx_reply_late` | Backward frame past the close edge, or after the reply timeout fired |
-| `rx_reply_superseded` | A reply was already latched, or a forward frame intervened |
-| `rx_event_unroutable` | Event frame arriving in a state that cannot route it |
-| `rx_event_no_subscriber` | Event frame in a routable state with nobody listening |
-| `rx_undecodable_ignored` | Undecodable observation no reply window could claim |
-| `rx_ignored_unclassified` | No timestamps, so early could not be told from late |
-
-Only the first two say anything about bus timing, and they point in opposite
-directions. The last one is the deliberate part: `dali_sched_notify_rx()`
-synthesises observations with no timestamps, and with no edge to measure
-against the scheduler now says it cannot tell rather than picking one. A
-non-zero value there means the other numbers are incomplete, not wrong.
-
-Operator-visible in two places. `status` prints the breakdown beneath the
-aggregate. The scan note, which used to read `N RX observation(s) fell outside
-active reply attribution` and advise inspecting timing, now reports each class
-in its own words — control-device events are named as expected on a bus with
-sensors and explicitly not a timing signal, which is what the 2k bus had been
-reporting all along.
-
-Nothing about attribution or acceptance changed: the same frames are accepted
-and rejected as before, and the classification reads state the reject path
-already had. Vectors in `test_scheduler.c`, including the existing
-early-and-late test whose assertion of `2` now reads one early and one late,
-plus the sum invariant. Mutation-checked both ways.
-
-## `restore groups`
-
-**New subcommand, 2026-09-03.** `backup save` has always recorded each gear's
-group mask — the scan reads `QUERY GROUPS 0-7` / `8-15` and the snapshot wire
-format has carried it since version 1 — but nothing could put it back, and the
-documentation said so. `restore groups` and `restore groups apply` close that.
-Existing backups already contain the data, so no format change and no re-export.
-
-It is a separate verb, not part of `restore apply`, for two reasons that are
-worth keeping straight:
-
-- **It repairs a different accident.** Group membership lives in each gear's own
-  memory keyed to the gear, not to its address, so a commissioning walk leaves
-  it alone and after a re-address `restore groups` reports nothing to do. What
-  destroys it is a `RESET`, a driver that lost its memory, or a group-addressed
-  edit that emptied more than intended.
-- **It is destructive in a way an address move is not.** A move is undone by
-  moving back; a group membership only comes back from a record of what it was,
-  so a backup predating a deliberate regrouping will silently undo it. The plan
-  therefore prints the full mask on both sides per fixture rather than a count
-  of edits, and `restore apply` never reaches it.
-
-Because the match is by identification number and the edits are addressed to
-wherever the gear answers now, it is correct on a scrambled bus and a restored
-one alike, and does not require `restore apply` to have run.
-
-Two refusals, both reported and neither written: `no group data in backup` (the
-backup has the gear but never read its membership — treating that silence as "no
-groups" would empty it) and `groups unreadable` (the additions would be right
-but nothing would say which groups to leave). After applying, each gear is read
-back once, because group commands are unacknowledged; a gear whose mask does not
-match is flagged `MISMATCH` and counted apart from a transport error.
-
-Control gear only. Part 103 control devices have their own group scheme the scan
-does not read, and scenes are still not captured at all.
-
-Internally this shares the "which recorded unit is this bus unit" matching with
-the address planner rather than duplicating it (`restore_match_unit` and
-`restore_report_unmatched_entries` in `dali_restore.c`), so a fix to one planner
-cannot miss the other. New host suite `test_restore_groups` (19 vectors).
-
-## `backup import`, and a changed `backup export` output
-
-**New subcommand and a format change, 2026-09-03.** `backup export` existed with
-no inverse: the blob it printed could not be read back by anything, and a
-`/* the form `backup import` parses back */` comment in `dali_shell.c` referred
-to a verb that had never been written. That left the native serial CLI — the
-surface with no persistent store and the one allowed to de-address a bus — able
-to take a backup, print it, and never load it again.
-
-`backup import begin | <hex>... | end | abort` closes it. It is a short mode
-rather than a single line because a full snapshot is `DALI_SNAPSHOT_BLOB_MAX` =
-2440 bytes = 4880 hex characters, against `DALI_SHELL_LINE_MAX` of 80 and a
-31-character token limit: no spelling of a one-line import can carry one.
-
-**`backup export`'s output format changed** and is the operator-visible break.
-It printed one long hex line; it now prints the `backup import` script that
-reproduces the snapshot — `begin`, chunk lines of two 30-character tokens, `end`
-— so an exported file is pasted back rather than re-chunked by hand. Anything
-that captured the old single-line form and parsed it will not match.
-
-Staging reuses `s_backup_blob` rather than adding a second 2440-byte buffer, so
-`backup save|status|export` and both `restore` verbs refuse while an import is
-open. The refusal is the point: a `backup save` typed in the middle of an
-82-line paste would otherwise destroy it silently. A chunk that does not parse
-discards the whole import, because a blob missing a line in the middle can still
-satisfy the length check and decode into a plausible snapshot that moves
-fixtures to the wrong addresses.
-
-**`dali_snapshot_decode()` is now transactional**, which is what lets the import
-decode straight over the held backup with nothing staged. It previously called
-`dali_snapshot_reset(out)` before the entry loop, so a corrupt entry — the one
-failure the header checks cannot catch — replaced a good snapshot with a
-truncated one. Entries are now validated in full before the first byte is
-written. Contract change only; no signature moved.
-
-Additive C API: `dali_cli_parse_hex_bytes()`. Host-tested in `test_cli` (append
-across calls, case, odd length, partial-token rejection, capacity, bad
-arguments) and `test_snapshot` (a rejected blob leaves the destination intact).
-The shell verb itself is not in the host build; it compiles under ESPHome
-2026.8.1 and has **no real-bus result**.
-
-## `address` — a checked tier over re-addressing and group membership
-
-**New verb, 2026-09-03.** `address <aN> set <aM> | add <gN> | remove <gN>`
-changes what one piece of control gear answers to, with every argument written
-the way a target is and every result read back off the bus. It stands to
-`config`/`config-dtr0` as `commission` stands to the addressing specials.
-
-`set` probes the destination (refusing unless it is demonstrably empty) and the
-source, sends DTR0 + SET SHORT ADDRESS as one sequence, then confirms the
-destination answers and the source is silent. `add`/`remove` send the group
-command and read both membership bytes back, because a group command is
-unacknowledged and a driver that ignored it is otherwise indistinguishable from
-one that took it. The subject must be a single short address: every arm reads
-its result back, and a group or broadcast subject produces a collision that
-cannot be told from silence.
-
-**Considered and rejected first:** making `config-dtr0 <t>
-set-short-address-dtr0` take the plain address instead of the encoded DTR0 byte.
-It fixes the same footgun in one line, but `config-dtr0`'s entire contract is
-that its argument is the literal byte, and a per-name argument convention would
-break the only thing that verb promises — as well as silently changing what
-every previously written line meant. The raw spellings are therefore unchanged:
-`config-dtr0` still takes `27` for a13, and `special program-short`/
-`verify-short` still take the encoded byte.
-
-**New hook, and the reason for it.** `DaliShellHooks` gains the optional
-`short_address_moved(ctx, from, to)`, called only after a move was verified at
-both ends. `config_applied()` cannot say this: SET SHORT ADDRESS carries its
-destination in DTR0, so a config verb can only report that the gear at some
-address went somewhere, and dropping every cache keyed by the old address is its
-only safe answer. `address` chose both ends and proved them, so the integration
-moves its group-membership bookkeeping with the gear (`dali_group_map_move()`,
-new and host-tested) and a re-address through this verb costs no rescan. An
-entity configured in YAML against the old address still cannot follow, and is
-logged rather than guessed at.
-
-Gating is unchanged in substance: `set` needs `allow_commissioning: true`, the
-same as the config spelling, because a friendlier spelling of a restricted
-operation that skipped the restriction would be a hole rather than a
-convenience. `add`/`remove` are gated on neither. The verb is absent from the
-console command table, like every other verb that claims the bus for a
-multi-frame workflow.
-
-Additive C API: `dali_group_map_move()`, `DALI_CLI_CMD_ADDRESS`, and the
-`short_address_moved` hook member. Host-tested in `test_group_map` and
-`test_cli`; the shell workflow compiles and carries **no real-bus result** —
-the probe/verify logic in particular has never seen a real reply window.
-
-## `restore` moves aside gear the backup has never seen
-
-**Behaviour change to `restore plan` and `restore apply`, 2026-09-04.** Host-
-tested, no bus result. Closes the defect found on the 2k bus on 2026-09-03,
-where the plan came back with zero moves and two conflicts and the operator
-hand-executed the three-command cycle the planner already knew how to compute.
-
-A unit that answers, reads back an identification number, and matches no
-snapshot entry used to be marked immovable. That is right as far as it goes — a
-restore does not retire units nobody recorded — but it also made the unit a
-permanent obstacle: any recorded unit aimed at its address was dropped as
-`TARGET_OCCUPIED`, and the block cascaded to everything queued behind that. On
-a bus that had just been through a collision repair and a re-commission, that
-is a restore which cannot converge.
-
-Such a unit is now *displaced* rather than dropped: moved to a free address that
-nothing else wants, where it stays powered, addressed and discoverable. The
-`UNKNOWN_UNIT` conflict is still reported — moving it does not make it known,
-and the operator still has to be told there is gear here no backup accounts for.
-Where it belongs is not something a restore can know, so nothing tries to guess;
-it is left where it lands.
-
-The line that decides this is **readable identity, not membership in the
-backup**. A unit whose Bank 0 read failed, or one of two units sharing an
-identification number, still blocks: move one of those and nothing afterwards
-could confirm which unit went where. Both keep today's `TARGET_OCCUPIED`, and so
-does an unrecorded unit in an address space with nowhere free to put it —
-refusing is the only safe answer when there is nowhere to put it, and that path
-degrades to exactly the pre-change reporting rather than to an incomplete plan.
-
-Two things the proposal did not anticipate, both found while implementing it:
-
-- **Cycles must be broken before anything is displaced.** A staging hop borrows
-  its free address and hands it back when the cycle unwinds; a displacement
-  keeps the address it takes. On a bus with exactly one address to spare,
-  displacing first strands the cycle at `NO_STAGING_ADDRESS` and turns a restore
-  that would have converged into an incomplete plan. Covered by a vector that
-  fails on the reverse order.
-- **A stalled move is no longer evidence of a cycle.** It may be the head of a
-  chain ending at a displaceable unit, which is unblocked by moving that unit
-  and not by staging anything. The old victim search took the first stalled move
-  and would have spent a free address to make no progress; it now follows each
-  chain to its end (`restore_find_cycle_member`).
-
-Operator-visible output: a displacement prints as `(not in the backup, moved
-aside)` against the move, alongside the existing `(staging, placed by a later
-step)`.
-
-**API change.** `DaliRestoreMove.is_staging` (bool) is replaced by
-`DaliRestoreMove.kind`, a `DaliRestoreMoveKind` of `DALI_RESTORE_MOVE_PLACE`,
-`_STAGE`, or `_DISPLACE`. The bool could not express the third case honestly: a
-displacement vacates an address like a staging hop but is final like a
-placement, and a reader of two bools would have had to work out that both can
-never be true. External callers rendering or executing a plan must switch.
-
-`DALI_RESTORE_MAX_MOVES` also changes, from 132 to 188, fixing a bound that was
-already wrong before this work. The header claimed a worst case of one 64-unit
-cycle per space (65 moves each), but 31 two-unit cycles in one space cost 93 —
-62 placements and 31 staging hops — and two such spaces overran the array. It
-failed closed, as a truncated plan sets `incomplete` and is refused, but the
-documented invariant "a plan is never truncated" did not hold. Displacement does
-not raise the ceiling: an unrecorded unit moved aside costs one move where the
-cycle member it displaces from the count costs one and a half.
-
-## `special` says what an encoded parameter means before sending it
-
-**Output change, 2026-09-03.** `initialise`, `program-short` and `verify-short`
-now print what their parameter resolves to ahead of the frame:
-
-```text
-special: 27 is the encoded form of a13
-special: 5 is not a valid encoded short address
-special: a5 encodes as 11
-special: 0 opens the window for every control gear on the bus, not a0 -- a0 is 1
-special: 27 opens the window for a13 only
-special: 6 selects nothing -- 0 is every gear, 255 is unaddressed gear, ...
-```
-
-`program-short`/`verify-short` name `255` as the "no short address" value rather
-than calling it invalid. `initialise` is read against its own three-way rule
-instead of the encoding alone, because `0` and `255` are selections there, not
-addresses -- and `0` is the one that costs the most to misread, opening the
-addressing window on the whole bus when it was typed meaning a0. An even
-parameter other than `0` selects no gear at all, which is worth saying because
-the failure is silent: the window opens for nobody and the walk that follows
-looks like an empty bus.
-
-Parameters are unchanged and still raw bytes. `special` exists to put a literal
-frame on the bus, so converting an argument would break the only thing the verb
-promises -- the same reason `config-dtr0 set-short-address-dtr0` was left taking
-its literal DTR0 byte. Nor is the echo a gate: the frame goes out either way. It
-earns its place because these parameters accept a wrong value as a well-formed
-frame that nothing downstream can reject, so without the line the mistake
-surfaces at the next `scan` instead of on the line that caused it.
-`address a<N> set a<M>` remains the spelling that checks first and refuses.
-
-Anything scraping `special` output for these three names sees one or two extra
-lines before the result. No C API change. The shell plumbing compiles and
-carries **no real-bus result**.
-
-## The device walk takes the quiescence bracket after all
-
-**Reversal, 2026-09-04.** `dali_device_commissioning` refused the broadcast
-START/STOP QUIESCENT MODE bracket from the day it was written, on this argument:
-quiescent mode silences control devices, and control devices are exactly what a
-Part 103 walk is searching for. The gear walk could afford the hardening because
-it silences a population it is not searching; this one could not.
-
-The argument was wrong, and it had already lost to a comment in the same tree.
-`dali_protocol.h`, on `DALI_CMD_DEVICE_TERMINATE`, states the semantics without
-hedging: quiescent mode "stops a device transmitting on its own initiative, not
-responding to a query it was addressed with" — and names a COMPARE reply window
-as one of the things quiescence *enables*. The device module transcribed the
-same clause and then declined to believe it, calling the reading "transcribed
-rather than verified".
-
-**What settled it was the bus.** `discover` with `quiescent on` in force
-enumerates control devices and their instances normally. Those are addressed
-Part 103 queries answered with backward frames, so quiescence demonstrably does
-not gate replies.
-
-With replies unaffected the trade runs entirely the other way, and the walk that
-refused the bracket turns out to be the one that needed it most.
-`dali_commissioning_compare_from_sequence()` maps `DALI_ERR_RX_ACTIVITY` in a
-COMPARE window to YES, so one event frame landing in one window sends the 24-bit
-binary search down a branch no device is on. A device walk searches the event
-sources themselves and asks ~25 COMPARE questions per device found; on 2k the
-baseline event rate is ~0.36/s, rising to at least 3.2x that while a walk runs,
-with a0's lux instance a 3.000 s metronome that fires regardless of movement.
-
-`DaliDeviceCommissioningOptions` gains `quiesce_control_devices` and the result
-gains the five fields the gear result already had. Placement, ordering and
-failure semantics are the gear walk's, literally: capability check hoisted above
-the START so a refused run transmits nothing, START before INITIALISE, release
-last on every exit path including the aborts, a failed START recorded rather
-than fatal, and `quiescent_state_unknown` when a started quiescence could not be
-released. `commission devices` sets it and reports the bracket.
-
-**Still inferred, not observed:** COMPARE answered from inside an open Part 103
-addressing window by a device with no short address. Nothing in the clause
-separates that from the addressed-query case and the broadcast address byte
-0xFF does reach unaddressed devices, but the bus has not been asked that exact
-question. Worth doing in the same session as the first real
-`commission devices` run.
-
-Seven new vectors in `test_device_commissioning`, including the ordering
-assertion and the release-runs-on-failure path. The device mock grew a
-device-broadcast route: the quiescent pair carries an address byte where every
-other frame in that walk carries the fixed 0xC1, which the mock had been
-asserting unconditionally.
-
-## `address d<N>` — the device space gets a re-address verb
-
-**New verb arms, 2026-09-04.** `address <dN> set <dM>` and `address <dN> clear`,
-the Part 103 counterparts of the gear arms added the day before.
-
-**Why it was the blocking item.** `DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0` was
-reachable from exactly one place in the tree — `restore apply` — and that path
-only moves a device to an address a backup recorded. Nothing could take a
-control device's address *away*. Since `commission devices` addresses only
-devices that have none, there was no way to produce an unaddressed control
-device from the shell, and therefore no way to run the device walk against
-anything: its hardware verification was blocked on a fixture that did not exist.
-`dali_restore.h` had already conceded the point in a comment ("The device space
-has no such verb, so a contested d<N> is reported for the same reason and fixed
-by hand").
-
-**The `d` prefix is mandatory**, and that strictness is the safety property.
-`dali_cli_parse_device_addr()` rejects `5`, `a5`, `g5` and `b`. Every other
-address argument in this CLI accepts a bare number, so a device parser that did
-too would leave `address 5 clear` and `address d5 clear` meaning different
-things with nothing on the line to say which — and the two spaces are
-independent, so gear 5 and device 5 are unrelated units that may be different
-physical products. `address d5 set a7` is refused for the same reason.
-
-Separate shell functions rather than a space flag through the gear ones, for the
-reason the two commissioning walks are separate modules: the frames differ at
-every step — a 24-bit control-device DTR0 rather than the 16-bit gear one, a
-different SET SHORT ADDRESS DTR0, QUERY NUMBER OF INSTANCES as the presence
-probe instead of QUERY STATUS — and one function taking a flag would be one edit
-away from loading a gear DTR0 and addressing a control device with it. The
-discipline is shared instead: probe both ends, write atomically, read back.
-
-**Two deliberate asymmetries with the gear arms.**
-
-The group arms stay gear-only. `address d5 add g3` is refused rather than sent.
-Part 103 device groups exist and this stack decodes them as an event source, but
-nothing reads them back — so a device group arm would report success on the
-strength of an unacknowledged frame, which is the one thing this verb was built
-not to do. The gap is now recorded in `dali_capability_matrix.md`.
-
-`clear` proves less than its gear counterpart, and says so. The gear arm backs
-silence at the subject with a broadcast QUERY MISSING SHORT ADDRESS; Part 103
-has no such query in this stack, so silence is the whole of the evidence and a
-device that lost power reads identically. Rather than imply a confirmation it
-cannot make, the verb names the step that settles it: `commission devices` finds
-unaddressed devices by searching for them, which is the positive evidence this
-path lacks. Adding a device-level missing-address query was considered and
-rejected for now — it would mean asserting an opcode from a clause not read
-here, and this stack's Part 103 opcode surface is independently audited.
-
-No integration hook, and `dali_shell.h` now says why rather than leaving it
-looking like an oversight: nothing on the other side caches a device short
-address. Lights are keyed by gear address, sensors by the device address in
-their own YAML, and `restore apply` already moves devices without notifying
-anything.
-
-`shell_backup_can_restore_gear()` became `shell_backup_can_restore(space, addr)`
-so the device clear can report whether the stored backup could put the device
-back — device entries are anchored by the Part 103 Bank 0 identification the
-2026-09-02 session confirmed on hardware.
-
-Additive C API: `dali_cli_parse_device_addr()`, and a widened `address` usage
-string. Four new vectors in `test_cli` covering the parser, the gear parsers'
-refusal of the device spelling, and the resolver's half of the split. The shell
-workflow itself is not host-compiled and carries **no real-bus result**.
-
-## Source-level API migrations
-
-`DaliDeviceCommissioningOptions` gains `quiesce_control_devices` and
-`DaliDeviceCommissioningResult` gains `quiescence_requested`,
-`quiescence_started`, `quiescence_release_attempted`,
-`quiescent_state_unknown` and `quiescence_error`. Purely additive: a
-zero-initialized options struct leaves the bracket off and the walk behaves
-exactly as before. `dali_cli_parse_device_addr()` is new, and the `address`
-verb's usage string widens to cover the `d<N>` arms. `DaliShellHooks` is
-unchanged — the device arms deliberately notify nothing.
-
-New module `dali_commissioning_audit.{c,h}`: the post-scan diff, lifted out of
-`dali_shell.c` so it is host-testable at all. Public surface is
-`DaliCommissioningAddressSpace`, `DaliCommissioningOccupancy`,
-`DaliCommissioningAudit`, `dali_commissioning_occupancy_from_inventory()`,
-`dali_commissioning_audit()`, and `dali_commissioning_audit_is_clean()`. Purely
-additive — nothing existing changes shape — but out-of-tree build systems must
-add the source, and the ESPHome component needs its
-`proto_dali_commissioning_audit.c` shim like every other module.
-
-One behaviour change under it, in `dali_discovery.c` rather than in a public
-type: `discovery_enrich_device()` now records
-`has_undecodable_device_activity` when the instance-count probe meets
-`DALI_ERR_RX_ACTIVITY`, and the scan counts it in
-`undecodable_device_count`. Before this, a contested device address was
-invisible at any number where control gear also answered — the enrichment path
-is the only route to the device space there, and it dropped the finding. A
-caller that treated `undecodable_device_count == 0` as proof of a clean device
-space will now see nonzero counts on buses where it previously saw none; that is
-the fix reporting, not a regression. It is skipped where a good device-space
-reading already exists, so an input-only address cannot be downgraded by one
-noisy frame.
-
-
-The RX-observation and cleanup work changes public source interfaces. External
-callers must update `DaliPhyRxCallback` to receive `DaliPhyRxObservation`;
-`DaliSchedOps` appends `get_last_tx_end_us`, and `DaliTransport` appends
-`transact_cleanup`. `dali_stats_t` gains `reply_rx_activity`,
-`DaliCommissioningResult` gains termination/cleanup state, and `DaliError` gains
-`DALI_ERR_RX_ACTIVITY`. Existing designated initializers remain valid for the
-appended optional callbacks, but positional initializers and callback adapters
-must be rebuilt and reviewed.
-
-The corrected input-configuration surface intentionally removes invalid generic
-timer/hysteresis/deadtime aliases and non-standard Part 301/304 APIs. C callers
-must migrate to the explicit `pb`, `occ`, and `light` type-specific builders.
-ESPHome callers must use the `pb-*` and `light-*` names; the established Part 303
-occupancy names remain available. This is a source/API migration, not evidence of
-hardware write verification.
-
-The corrected memory identity API removes `DaliMemoryBank1Identity`,
-`dali_memory_read_bank1_identity()`, the Bank 1 identity-layout macros, and the
-`has_bank1`/`bank1` discovery fields. It also removes
-`DALI_MEMORY_BANK0_OFFSET_INDICATOR` and `DALI_MEMORY_BANK_IMPLEMENTED`;
-`DALI_MEMORY_BANK0_OFFSET_SERIAL` remains as an alias but changes from `0x0A` to
-the correct `0x0B`. `DaliMemoryBank0Identity` gains `hw_major`/`hw_minor`; its
-existing `serial` member remains the standard eight-byte identification number.
-This changes the layouts of `DaliMemoryBank0Identity`, `DaliDiscoveryDeviceInfo`,
-and `DaliDiscoveryInventory`. Callers using the removed typed Bank 1 model must
-migrate to generic bank access.
-
-`DALI_SEQUENCE_MAX_STEPS` increases from 4 to 7 so the control-device memory
-write fits in one queue entry. This changes the public `DaliSequence` layout and
-requires all callers to rebuild. In the ESP32 build, the active-sequence and
-16-entry scheduler queue storage increase by 612 bytes in total.
-
-`DaliCommandFrameKind` gains `DALI_CMD_FRAME_24BIT_SPECIAL = 5` and
-`DaliCommandId` gains `DALI_CMD_DEVICE_TERMINATE`, both appended, so existing
-numeric values are unchanged. A `switch` over `DaliCommandFrameKind` compiled
-with `-Wswitch` will newly warn. `DaliCommissioningOptions` gains
-`terminate_control_devices` and `DaliCommissioningResult` gains
-`cross_part_terminate_requested`, `cross_part_terminate_attempted`, and
-`cross_part_error`; the option is off in a zero-initialized struct, so an
-out-of-tree caller keeps the frames it already sent.
-`DaliDiscoveryDeviceInfo` gains `has_undecodable_device_activity` and
-`DaliDiscoveryInventory` gains `undecodable_device_count`, changing both
-layouts — anything persisting either struct raw must be rebuilt.
-
-`dali_commissioning_verify_from_sequence()` and
-`dali_commissioning_verify_short_address()` replace their `bool *verified_out`
-with `DaliCommissioningVerifyOutcome *outcome_out`. The compiler catches the
-signature change, but the semantic change is quieter and matters more: what used
-to return `DALI_ERR_RX_ACTIVITY` now returns `DALI_OK` with
-`DALI_COMMISSIONING_VERIFY_MULTIPLE`, so a caller that only checked the error
-code will read a collision as success. `DaliCommissioningResult` gains
-`duplicate_count`, `duplicate_random_addresses`, and
-`duplicate_recovery_failed`; `DaliCommissioningEventKind` gains
-`DALI_COMMISSIONING_EVENT_DUPLICATE_RANDOM_ADDRESS` before
-`..._TERMINATED`, which changes that enumerator's numeric value — a switch over
-event kinds must be rebuilt, not just recompiled against the old value.
-
-`DaliCommandId` gains `DALI_CMD_CONTINUOUS_UP` and `DALI_CMD_CONTINUOUS_DOWN`,
-appended before `DALI_CMD_COUNT` so every existing numeric value is unchanged.
-`dali_command_lookup_opcode(DALI_CMD_FRAME_16BIT, ...)` now resolves opcodes
-`0x0B` and `0x0C`, which previously returned NULL. `dali_frame.h` adds
-`DALI_DAPC_MASK_LEVEL`; `dali_protocol.h` adds `dali_build_dapc_mask()` and
-`dali_control.h` adds `dali_control_build_dapc_mask()` plus
-`dali_control_build_continuous_up/down()`. The ordinary DAPC builders still
-reject 255, so this is additive rather than a behaviour change.
-
-`dali_gear_dt6.h` now includes `dali_scheduler.h` and `dali_input_config.h` now
-includes `dali_scheduler.h`, for the new
-`dali_dt6_build_command_sequence()`, `dali_dt8_build_command_sequence()`, and
-`dali_input_build_config_sequence()`. A translation unit that included either
-header only for its pure frame builders now also sees the scheduler types.
-
-`dali_scheduler.h` adds `DaliSchedQueueStats`, `dali_sched_queue_stats()`, and
-`dali_sched_reset_queue_stats()`. These are additive; existing callers are
-unaffected. `dali_control.h` likewise adds `dali_control_set_level_cb()` and
-`dali_control_off_cb()`, with the existing `dali_control_set_level()` and
-`dali_control_off()` unchanged as their NULL-callback forms.
-
-`DaliBusLight::flush_pending_write()` changes meaning: it now also collects the
-scheduler completion for an in-flight command, so `DaliComponent::loop()` calls
-it every loop rather than only outside a scan. An implementation must apply the
-scan gate itself before admitting new traffic.
-
-`DaliError` adds `DALI_ERR_TIMING = 8`, `DALI_ERR_CANCELLED = 9`, and
-`DALI_ERR_INTERVENED = 10`. Existing earlier numeric values remain unchanged;
-callers with exhaustive error handling should add the new scheduler results.
-
-`dali_sched_reset()` is now a deferred compatibility wrapper around
-`dali_sched_request_reset()`. A successful request means accepted, not complete;
-the owner-task completion callback (or `dali_sched_reset_pending() == false`) is
-the fence. Work discarded by reset completes with `DALI_ERR_CANCELLED`.
-
-`DaliSequenceCompletionCb` changes from
-`(DaliError, uint8_t failed_step, const DaliFrame *last_reply, void *cb_ctx)` to
-`(const DaliSequenceResult *result, void *cb_ctx)`. The new result carries the
-overall error, the failed step, the number of steps attempted, and one backward
-frame per reply-bearing step, read through `dali_sequence_result_reply()` and
-`dali_sequence_result_last_reply()`. Replies collected before a failing step are
-retained rather than discarded. The pointer refers to scheduler-owned storage
-that the next sequence overwrites, so a callback must copy anything it keeps.
-Transaction callbacks (`DaliSchedCompletionCb`) are unchanged; only sequence
-callers need migrating.
-
-`DaliDiscoveryTransport`, `DaliMemoryTransport`, and `DaliDt8Transport` are now
-aliases of the shared `DaliTransport` in the new `dali_transport.h`, and
-`DaliDiscoveryTransactionFn`, `DaliMemoryTransactionFn`, and
-`DaliDt8TransactionFn` alias `DaliTransactionFn`. Existing code keeps compiling,
-and a transport built for one module can now be passed to another without
-conversion. The struct gains an optional `transact_sequence` member between
-`transact` and `ctx`: designated initializers are unaffected, but any positional
-initializer must be updated. `DALI_MEMORY_QUERY_RETRIES` is removed, because
-memory reads no longer retry individual READ MEMORY LOCATION frames.
-
-Dependent public executors require the new strict
-`dali_transport_run_sequence_atomic()` contract. A transport must provide both
-its normal `transact` callback and scheduler-backed `transact_sequence`; otherwise
-the call returns `DALI_ERR_INVALID` before traffic. The ordinary runner retains
-its stepwise fallback only for explicitly non-dependent callers.
-
-`dali_gear_dt8.h` now includes `dali_transport.h`, which transitively pulls in
-`dali_scheduler.h`. A translation unit that included only `dali_gear_dt8.h` for
-its pure frame builders now also sees the scheduler and transport types.
-
-
-## Owed release-note items
-
-- Announce the new `address <dN>` arms. `address <dN> set <dM>` and
-  `address <dN> clear` re-address and de-address control devices, gated by
-  `allow_commissioning: true` like the gear arms. The `d` prefix is mandatory
-  and the group arms are refused in the device space, so no previously valid
-  line changes meaning. The `address` usage string widened, which anything
-  parsing `help` output will see.
-
-- Announce that `commission devices` now brackets its run with broadcast
-  START/STOP QUIESCENT MODE, like `commission unaddressed` already did. It is
-  operator-visible: the run prints the quiescence bracket line, and a failed
-  release warns that control devices may stay silent until `quiescent off
-  all`. Sensors are silent for the duration of a device walk where they were
-  not before.
-
-- Announce the commissioning post-scan changes. They are operator-visible and
-  change output an automation could be parsing. A failed `commission
-  unaddressed` or `commission devices` now runs the post-scan instead of
-  returning at the error line, so a failed run prints more than it used to;
-  `commission devices` gained a post-scan on both exits, where it previously had
-  none. Two new report lines exist: `occupied, unrecorded` for an address a run
-  wrote to and ended before recording, and a note that the post-scan ran
-  read-only while the bus may still be in initialisation state. The per-address
-  wording changed from `contested - two gear answered as one` to `two units
-  answered as one`, because the same text now serves the control-device space,
-  where the addresses print as `d<N>` rather than `a<N>`. A successful run that
-  assigned nothing but hit a duplicate now post-scans where it did not before;
-  a successful run that assigned nothing and hit no duplicate still does not.
-
-- Document the next-release C migration before tagging it. Accumulated so far:
-  the intentionally changed `DaliInputEvent` and `DaliDispatchKey` field
-  names/layout; `dali_cli.{c,h}` moved from `main/` to `components/dali/`;
-  `DaliCommandId` gained three enumerators before `DALI_CMD_COUNT`
-  (`DALI_CMD_QUERY_DEVICE_CONTENT_DTR0/1/2`), so any persisted or wire-shared
-  numeric command id is unaffected but `DALI_CMD_COUNT` itself moved;
-  `dali_stats_t` gained `tx_frames_ok` and `reply_rx_activity` at the end;
-  `DaliPhyRxCallback` changed signature — it now takes a `DaliPhyRxObservation *`
-  rather than a `DaliFrame *`, which breaks any out-of-tree PHY consumer at
-  compile time; `DaliSchedOps` gained the optional `get_last_tx_end_us`;
-  `DaliTransport` gained the optional `transact_cleanup` and `delay_ms` — and
-  `dali_commissioning_commission_unaddressed()` now *requires* `delay_ms`,
-  returning `DALI_ERR_INVALID` without transmitting when it is absent, so an
-  out-of-tree transport that commissions must supply one; `DaliError` gained
-  `DALI_ERR_RX_ACTIVITY = 12`, so any switch over it outside this repo needs a
-  new arm; `DaliDiscoveryDeviceInfo` gained `has_undecodable_activity` and
-  `DaliDiscoveryInventory` gained `undecodable_count`, changing both layouts; `DaliCliCommandSpec` and
-  `DaliCliInstanceConfig` gained fields, so brace-initialized tables outside
-  this repo need updating; `DaliCliCommandId` gained `DALI_CLI_CMD_ADDRESS`
-  before `DALI_CLI_CMD_COUNT`, and `DaliShellHooks` gained the optional
-  `short_address_moved` — appended, so designated initializers are unaffected. Additive since: `dali_control_continuous_up/down()`,
-  `dali_cli_format_response()`, `dali_cli_format_status()`, and
-  `dali_cli_special_is_commissioning()`. One output change comes with them —
-  `dali_cli_print_response()` now prints a status byte's head line as
-  `status: 0x04 arc-on` rather than `status: 0x04`, before the same per-field
-  block, so anything scraping native CLI output for that exact line needs
-  updating.
-  Also new: `components/dali/dali_error.c` is an additional translation unit, so
-  an out-of-tree build that lists sources by hand must add it or fail to link
-  `dali_error_name()`/`dali_error_text()`. Its second operator-visible output
-  change: every error a shell, native CLI, or Home Assistant `command_result`
-  reports is now a name rather than a number — `status: intervened` where the
-  CLI printed `status: ERR 10`, `commission: ERR rx activity` where the shell
-  printed `commission: ERR 12`, and `rx activity` where the text entity
-  published `err`. Anything matching on those strings or parsing the number out
-  of them needs updating; this belongs in the release notes next to the console
-  reply-format change, which has the same audience.
-  `DaliCommandId` gained `DALI_CMD_START_QUIESCENT_MODE` and
-  `DALI_CMD_STOP_QUIESCENT_MODE` before `DALI_CMD_COUNT`, and `DaliCliCommandId`
-  gained `DALI_CLI_CMD_QUIESCENT` before `DALI_CLI_CMD_COUNT`, so both counts moved
-  again and any out-of-tree switch over the CLI ids needs a new arm. Additive:
-  `dali_cmd_device_broadcast()`, `dali_build_device_broadcast_command()`, and
-  `dali_input_build_quiescent_mode[_broadcast]()`.
-  The spelling work adds one operator-visible break, smaller than it could have
-  been: `special randomize` is now `special randomise`, with no alias, so a
-  stored Home Assistant command using the old spelling is rejected as an unknown
-  special. `special initialise` is unchanged. On the C side `DALI_CMD_RANDOMIZE`
-  became `DALI_CMD_RANDOMISE` and `dali_cmd_randomize()` became
-  `dali_cmd_randomise()`; the other renamed identifiers are listed under the
-  2026-08-25 entry above, and the words outside the command surface
-  (`tokenize`, `recognize`, `quantize`, `serialize`, `normalize`) changed with
-  no API impact.
-  One release step this forces: `dali-starter.yaml` and the README example pin
-  `ref: v1.2.0`, which predates the rename, so the documented spelling and the
-  firmware an operator actually flashes disagree until that pin is bumped to the
-  next tag. CI cannot catch it — the starter config is validated against the tag
-  it names, not against this tree.
-  `DaliCommissioningOptions` gained `quiesce_control_devices` and
-  `DaliCommissioningResult` gained `quiescence_requested`, `quiescence_started`,
-  `quiescence_release_attempted`, `quiescent_state_unknown`, and
-  `quiescence_error`, changing both layouts; the option is off when the struct is
-  zero-initialized, so behaviour is unchanged for a caller that does not set it.
-  One runtime behaviour change to announce with them: a query that meets
-  `MALFORMED` or `OVERFLOW` inside its reply window now re-sends once if it holds
-  a retry budget, instead of failing on the first blip. Retry-safe commands only,
-  so no command repeats that could not already repeat on a timeout — but a noisy
-  bus will show more `tx_retries` and fewer aborted sequences than before.
-- Announce the ESPHome console verb renames in the release notes. They are the
-  operator-visible half of the `dali_cli` adoption and have no aliases — the
-  rename table has never been written down — it is owed, not merely misfiled,
-  and the list below is the raw material for it. Anything in Home Assistant that writes a command
-  string to the `text:` entity (scripts, automations, dashboard buttons) needs
-  updating. The target spelling lands back where the console started: a short
-  address is `a<N>` or a bare number, as it was before the shared tables. Only
-  v1.2.0's short-lived `s<N>` is gone, and it now fails as `bad target`, so a
-  script updated to `s<N>` for that one release needs updating again. Beyond
-  that, `memread`/`memwrite`
-  became `devmem read`/`devmem write`, `iquery a0:1 x` became `iquery 0 1 x`,
-  `query a0 actual-level` became `query a0 actual`, `config <t> <name> <dtr0>`
-  became `config-dtr0`, and the Part 303/304 instance names took type prefixes
-  (`hold-timer` → `occ-hold-timer`).
-- Announce the console reply-format change alongside those renames. Every query
-  reply is now named and decoded (`actual: 42 (0x2A)`, `present: yes (0xFF)`,
-  `status: 0x06 lamp-fail,arc-on`) instead of being published as a bare
-  `42 (0x2A)`, so an automation that parses `command_result` numerically breaks.
-  This is the second half of the same migration and has the same audience.
+Raw material for the next release notes. Nothing is pending: this section was
+emptied into [CHANGELOG.md](CHANGELOG.md) when **v2.0.0** shipped on 2026-09-18.
+
+Add new entries here as breaks accumulate, and empty the section again at the
+next tag.
+
+**One thing to do differently.** This section was not emptied when `v1.3.0`
+shipped, so by the time it was read for the v2.0.0 notes it had silently
+accumulated two releases' worth of items and claimed all of them were
+unreleased. The console verb renames, the decoded reply format, error names
+replacing error numbers, and `special randomize` -> `special randomise` had all
+shipped in v1.3.0 and would have been announced a second time. The entries were
+not wrong when written; the list simply outlived the tag that released them. So
+when it is next read, check each claim against the tag rather than trusting the
+heading -- `git grep <symbol> <tag>` settles it in seconds -- and empty the
+section as part of tagging rather than after it.

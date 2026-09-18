@@ -104,7 +104,9 @@ The native ESP-IDF serial firmware passes no persistence hooks at all, so a back
      addressed commands and no `INITIALISE` window. Take one before anything
      that re-addresses in bulk. `backup export` prints it as the `backup import`
      script that reads it back, which is how a backup is kept off a device with
-     no persistent store. Host-tested; no bus has run a restore.
+     no persistent store. `backup save`/`status` and `restore plan`/`apply` have
+     run correctly on a real bus; `backup import`/`export` and `restore groups`
+     are host-tested only.
 
      `export config` answers the other half: it prints the `dali:` block, and
      the `light:` and `sensor:` entries naming it, as YAML you can paste back.
@@ -239,6 +241,7 @@ text:
 - [dali_commands.md](dali_commands.md) — every verb and named command table, for the shell and the HA console
 - [dali_protocol.md](dali_protocol.md) — frame layouts, opcode tables by IEC part, event decoding
 - [dali_capability_matrix.md](dali_capability_matrix.md) — per-capability status: shared API, native CLI verb, host vector, real-bus result, ESPHome surface
+- [CHANGELOG.md](CHANGELOG.md) — per-release changes, with the C API and operator-visible migrations
 - [current_status.md](current_status.md) — project state, known limitations, roadmap
 - [project_log.md](project_log.md) — verification history, investigations, and the unreleased-change list behind those claims
 - [steinel_bank2_reference.md](steinel_bank2_reference.md) — Steinel HF 360 II memory bank tuning

@@ -122,9 +122,18 @@ ISR -> fixed ring buffer -> task-context frame decoder -> scheduler/protocol
 - Suggest software-stack changes first and implement them only after explicit
   go-ahead.
 - Touch hardware/serial only after explicit go-ahead.
-- Use COM6 only. If COM6 is unavailable, stop and notify.
+- Touch only the serial port named in *Local setup* below. If it is
+  unavailable, stop and notify rather than scanning for another — the wrong
+  port is someone else's device.
 
 ## Build And Test
+
+The paths and port below are the maintainer's Windows workstation, which is the
+only environment these have been run in; substitute your own. CI is the
+portable definition of a build — see `.github/workflows/`.
+
+**Local setup:** serial port `COM6`; ESP-IDF 6.0.1 at `C:\Espressif`; MSYS2
+UCRT64 toolchain at `C:\msys64`.
 
 Native firmware:
 

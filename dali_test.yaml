@@ -59,9 +59,13 @@ wifi:
     password: "DUMMY-COMPILE-ONLY"
 captive_portal:
 
+# Compile-only, and public on purpose: no device is ever flashed from this
+# config, so this is a throwaway constant, not a secret. It has to be a real
+# random key rather than the obvious all-zeros placeholder because ESPHome
+# 2026.9 reserves the all-zeros key and rejects it at validation.
 api:
   encryption:
-    key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    key: "bT9Whs/I1mSjJqr41YsIM/kItVuhonh5ByVUygeCDl0="
 
 ota:
   - platform: esphome
