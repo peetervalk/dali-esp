@@ -136,7 +136,7 @@ The native ESP-IDF serial firmware passes no persistence hooks at all, so a back
 
 A bus with two lamp groups, one individually addressed lamp, and a DALI-2 multi-sensor (e.g. Steinel HF 360 II) at short address 0:
 
-The example pins `v1.3.0`, the last tagged release. `dev` carries newer work;
+The example pins `v2.0.0`, the current release. `dev` carries newer work;
 compile and test it separately before pointing an installation at it.
 
 ```yaml
@@ -149,7 +149,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/peetervalk/dali-esp.git
-      ref: v1.3.0
+      ref: v2.0.0
     components: [dali]
 
 dali:
