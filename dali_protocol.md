@@ -368,8 +368,11 @@ data = (0xC1 << 16) | (special_opcode << 8) | parameter
 | `0x20` | WRITE MEMORY LOCATION | |
 | `0x30`/`0x31`/`0x32` | DTR0/DTR1/DTR2 DATA | |
 
-None of this is implemented. The command table has no 24-bit special frame kind,
-so control-device commissioning has no path here at all.
+`TERMINATE` is implemented as of 2026-08-26: `DALI_CMD_FRAME_24BIT_SPECIAL` is
+the frame kind, `DALI_CMD_DEVICE_TERMINATE` the command, and
+`dali_build_device_special()` the builder. Nothing else in this table is, so
+control-device commissioning still has no path here. TERMINATE was built first
+because control-*gear* commissioning needs it — see Cross-Part Interference.
 
 Two encodings differ from their Part 102 namesakes and are worth stating plainly,
 because using the Part 102 form silently does the wrong thing:
@@ -474,6 +477,28 @@ Espressif's `esp_dali` brackets each part's commissioning with the other part's
 re-enter the state, and holds control devices in quiescent mode across the whole
 run. Its comments name a Steinel DLS-203-P as the device that forced this
 handling. Unverified here.
+
+**Implemented for the gear direction on 2026-08-26.** `commission unaddressed`
+now sends a Part 103 `TERMINATE` three times: before `INITIALISE`, again
+immediately after the opening sequence, and once more in the cleanup unwind. The
+second is the one that earns its place — the addressing state being closed is one
+the Part 102 `INITIALISE` itself can open, so closing it beforehand proves
+nothing. It is opt-in through `DaliCommissioningOptions.terminate_control_devices`
+and is hardening rather than a precondition: a failure is recorded and the run
+continues, the same call quiescence makes.
+
+That second send carries a known tension, recorded rather than hidden. It is a
+`0xC1`-prefixed frame transmitted while control gear is in an initialise window,
+which is exactly the direction of interference described above. Gear that
+mis-frames the 24-bit special as 16-bit would read `ENABLE DEVICE TYPE 0`, which
+qualifies only the frame immediately after it; the frames that follow here are
+specials, which are not device-type-qualified, so a stray enable expires without
+effect. The trade is a bounded, argued risk against a phantom device that gets a
+short address programmed into nothing. Neither half has been seen on a bus.
+
+The reverse direction — bracketing control-device commissioning with a Part 102
+`TERMINATE` — is not implemented, because control-device commissioning is not.
+The guard is symmetric and should be designed once when it is.
 
 ## Event Frames
 

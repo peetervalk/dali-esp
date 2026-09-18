@@ -412,6 +412,84 @@ static void test_forget_preserves_verified_bits(void)
     TEST_ASSERT_EQUAL_UINT8(6u, dali_group_map_pick(&map, 2u));
 }
 
+/*
+ * A re-addressed member keeps every group it was in. This is the whole point of
+ * having a move at all: `forget` plus a rescan is the alternative, and the
+ * rescan is what the `address` verb exists to avoid.
+ */
+static void test_move_follows_member_into_every_group(void)
+{
+    DaliGroupMap map;
+    dali_group_map_reset(&map);
+    dali_group_map_seed(&map, 1u, 5u);
+    dali_group_map_seed(&map, 3u, 5u);
+    dali_group_map_seed(&map, 3u, 9u);
+
+    TEST_ASSERT_TRUE(dali_group_map_move(&map, 5u, 13u));
+
+    /* a5 is gone from both its groups, a13 stands in its place. */
+    TEST_ASSERT_EQUAL_UINT8(13u, dali_group_map_pick(&map, 1u));
+    /* Group 3 still has a9, which is lower, so pick() proves membership
+     * rather than ordering: check the bit directly. */
+    TEST_ASSERT_EQUAL_HEX64((uint64_t) 1u << 9u | (uint64_t) 1u << 13u,
+                            map.members[3]);
+    TEST_ASSERT_EQUAL_HEX64((uint64_t) 1u << 13u, map.members[1]);
+}
+
+static void test_move_leaves_other_groups_and_verified_alone(void)
+{
+    DaliGroupMap map;
+    dali_group_map_reset(&map);
+    dali_group_map_seed(&map, 2u, 4u);
+    dali_group_map_seed(&map, 6u, 8u);
+    map.verified = 0xFFFFu;
+
+    TEST_ASSERT_TRUE(dali_group_map_move(&map, 4u, 20u));
+
+    /* A member that changed address is still a member: the group's membership
+     * is no less known than it was, so verified is untouched. */
+    TEST_ASSERT_EQUAL_HEX16(0xFFFFu, map.verified);
+    TEST_ASSERT_EQUAL_UINT8(20u, dali_group_map_pick(&map, 2u));
+    /* The gear that did not move is where it was. */
+    TEST_ASSERT_EQUAL_UINT8(8u, dali_group_map_pick(&map, 6u));
+}
+
+/*
+ * Moving onto an address that is already a member must not double-count or
+ * lose the group. The `address` verb refuses an occupied destination, so this
+ * should be unreachable from the shell -- which is exactly why the map should
+ * not depend on that being true.
+ */
+static void test_move_onto_an_existing_member_is_idempotent(void)
+{
+    DaliGroupMap map;
+    dali_group_map_reset(&map);
+    dali_group_map_seed(&map, 1u, 5u);
+    dali_group_map_seed(&map, 1u, 7u);
+
+    TEST_ASSERT_TRUE(dali_group_map_move(&map, 5u, 7u));
+    TEST_ASSERT_EQUAL_HEX64((uint64_t) 1u << 7u, map.members[1]);
+}
+
+static void test_move_reports_no_change_and_rejects_bad_args(void)
+{
+    DaliGroupMap map;
+    dali_group_map_reset(&map);
+    dali_group_map_seed(&map, 1u, 2u);
+
+    /* The mover belonged to nothing. */
+    TEST_ASSERT_FALSE(dali_group_map_move(&map, 3u, 4u));
+    /* Same address both ends: a no-op, not a self-move. */
+    TEST_ASSERT_FALSE(dali_group_map_move(&map, 2u, 2u));
+    /* Out of range at either end, and a NULL map. */
+    TEST_ASSERT_FALSE(dali_group_map_move(&map, 2u, 64u));
+    TEST_ASSERT_FALSE(dali_group_map_move(&map, 64u, 2u));
+    TEST_ASSERT_FALSE(dali_group_map_move(NULL, 2u, 3u));
+
+    /* None of the refusals touched the map. */
+    TEST_ASSERT_EQUAL_HEX64((uint64_t) 1u << 2u, map.members[1]);
+}
+
 static void test_forget_reports_no_change_and_rejects_bad_args(void)
 {
     DaliGroupMap map;
@@ -482,6 +560,11 @@ int main(void)
     RUN_TEST(test_forget_all_groups_removes_every_membership);
     RUN_TEST(test_forget_preserves_verified_bits);
     RUN_TEST(test_forget_reports_no_change_and_rejects_bad_args);
+
+    RUN_TEST(test_move_follows_member_into_every_group);
+    RUN_TEST(test_move_leaves_other_groups_and_verified_alone);
+    RUN_TEST(test_move_onto_an_existing_member_is_idempotent);
+    RUN_TEST(test_move_reports_no_change_and_rejects_bad_args);
 
     RUN_TEST(test_null_map_is_safe);
 

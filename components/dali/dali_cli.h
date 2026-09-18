@@ -147,6 +147,7 @@ typedef enum {
     DALI_CLI_CMD_SPECIAL,
     DALI_CLI_CMD_CONFIG,
     DALI_CLI_CMD_CONFIG_DTR0,
+    DALI_CLI_CMD_ADDRESS,
 
     DALI_CLI_CMD_MEMREAD,
     DALI_CLI_CMD_MEMINFO,
@@ -172,6 +173,9 @@ typedef enum {
     DALI_CLI_CMD_EXPORT,
     DALI_CLI_CMD_IDENTIFY,
     DALI_CLI_CMD_QUIESCENT,
+    DALI_CLI_CMD_BACKUP,
+    DALI_CLI_CMD_RESTORE,
+    DALI_CLI_CMD_DEVINFO,
 
     /*
      * Also the marker a front end with its own table (see dali_cli_resolve_in)
@@ -194,11 +198,14 @@ typedef struct {
     uint8_t          min_args; /* argument count bounds, excluding the verb   */
     uint8_t          max_args;
     /*
-     * For a verb whose first argument is a fixed keyword rather than a value,
-     * the accepted keywords, space-separated. Handlers test membership with
-     * dali_cli_has_subcommand() instead of comparing their own literals, so the
-     * usage line and what the handler accepts cannot drift apart. NULL when the
-     * first argument is a value.
+     * For a verb that takes a fixed keyword rather than a value in one of its
+     * argument positions, the accepted keywords, space-separated. Handlers test
+     * membership with dali_cli_has_subcommand() instead of comparing their own
+     * literals, so the usage line and what the handler accepts cannot drift
+     * apart. Usually the first argument (`commission unaddressed`), but not
+     * always: `address` names its subject first and the keyword second
+     * (`address a5 set a13`), and the membership test does not care which.
+     * NULL when the verb takes no keyword.
      */
     const char      *subcommands;
 } DaliCliCommandSpec;
@@ -270,7 +277,36 @@ void dali_cli_report_resolve(const DaliCliOut          *out,
 bool dali_cli_parse_u32(const char *text, uint32_t max, uint32_t *out);
 bool dali_cli_parse_u8(const char *text, unsigned max, uint8_t *out);
 bool dali_cli_parse_target(const char *text, DaliTarget *out);
+
+/*
+ * Append the bytes of a bare hex token to a buffer, growing *len.
+ *
+ * Bare means no 0x prefix and no separators: two characters per byte, and an
+ * odd length is an error rather than a nibble silently dropped. It exists so a
+ * blob larger than one command line can be carried across several of them --
+ * `backup import` is the caller -- which is also why the length is in/out and
+ * a partial token never advances it: a rejected chunk leaves the accumulated
+ * bytes exactly as they were, so the failure is the operator's line rather
+ * than a buffer holding half of it.
+ */
+bool dali_cli_parse_hex_bytes(const char *text,
+                              uint8_t    *out,
+                              uint32_t    capacity,
+                              uint32_t   *len);
 bool dali_cli_parse_short_addr(const char *text, uint8_t *out);
+
+/*
+ * A control-device short address, written d<N>.
+ *
+ * The `d` is required, and that is the point of having a separate parser. Every
+ * other address argument in this CLI accepts a bare number, so a device address
+ * that did too would make `address 5 clear` mean one thing and `address d5
+ * clear` another with nothing on the line to say which space the operator meant
+ * -- and the two spaces are independent, so gear 5 and device 5 are unrelated
+ * units. A caller that reaches this parser has already been told which space it
+ * is in by the token itself.
+ */
+bool dali_cli_parse_device_addr(const char *text, uint8_t *out);
 bool dali_cli_parse_instance(const char *text, uint8_t *out);
 
 typedef struct {

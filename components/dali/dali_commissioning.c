@@ -73,51 +73,55 @@ static DaliError send_special_cleanup_no_reply(
  * the two into one result would lose exactly the case that leaves an
  * installation silent.
  */
-static DaliError commissioning_start_quiescence(
+/*
+ * IEC 62386-103 TERMINATE, closing any control-device addressing state.
+ *
+ * No reply and nothing to acknowledge it, so this reports transmission only.
+ * cleanup selects the transport that ignores a latched front-end cancellation,
+ * for the same reason the Part 102 unwind does: the send that matters most is
+ * the one after everything has gone wrong.
+ */
+static DaliError commissioning_terminate_control_devices(
     const DaliDiscoveryTransport *transport,
-    bool *transmitted_out)
+    bool cleanup)
 {
-    if (transmitted_out == NULL) {
-        return DALI_ERR_INVALID;
-    }
-    *transmitted_out = false;
-
     DaliFrame frame;
-    DaliError err = dali_build_device_broadcast_command(
-        DALI_CMD_START_QUIESCENT_MODE, &frame);
+    DaliError err = dali_build_device_special(DALI_CMD_DEVICE_TERMINATE,
+                                              0u,
+                                              &frame);
     if (err != DALI_OK) {
         return err;
     }
 
-    err = transact_frame(transport, &frame, false, 0u, true, NULL);
-    if (err != DALI_OK) {
-        return err;
+    if (cleanup) {
+        return dali_transport_transact_cleanup(transport, &frame, false, 0u,
+                                               false, NULL);
     }
-    *transmitted_out = true;
-
-    return dali_transport_delay_ms(transport,
-                                   DALI_COMMISSIONING_QUIESCENT_SETTLE_MS);
+    return transact_frame(transport, &frame, false, 0u, false, NULL);
 }
 
 /*
- * Broadcast STOP QUIESCENT MODE through the cleanup path.
+ * Record a cross-part TERMINATE attempt without letting it end the run.
  *
- * Same reasoning as the TERMINATE unwind: this has to be attempted even when a
- * front-end cancellation is latched, because the alternative is an installation
- * whose sensors stay silent after an aborted run. No settle follows — the
- * caller is on its way out and nothing else is about to transmit.
+ * Hardening, not a precondition: commissioning worked before any of it existed,
+ * and refusing to address a bus because an optional guard could not be sent
+ * would trade a working operation for a risk the installation may not even
+ * have. Same call quiescence makes.
  */
-static DaliError commissioning_release_quiescence(
-    const DaliDiscoveryTransport *transport)
+static void commissioning_try_terminate_control_devices(
+    const DaliDiscoveryTransport *transport,
+    DaliCommissioningResult *out,
+    bool cleanup)
 {
-    DaliFrame frame;
-    DaliError err = dali_build_device_broadcast_command(
-        DALI_CMD_STOP_QUIESCENT_MODE, &frame);
-    if (err != DALI_OK) {
-        return err;
+    if (!out->cross_part_terminate_requested) {
+        return;
     }
-    return dali_transport_transact_cleanup(transport, &frame, false, 0u, true,
-                                           NULL);
+
+    out->cross_part_terminate_attempted = true;
+    DaliError err = commissioning_terminate_control_devices(transport, cleanup);
+    if (err != DALI_OK && out->cross_part_error == DALI_OK) {
+        out->cross_part_error = err;
+    }
 }
 
 static DaliError query_special_u8(const DaliDiscoveryTransport *transport,
@@ -363,12 +367,40 @@ DaliError dali_commissioning_compare_from_sequence(const DaliSequenceResult *res
                                 yes_out);
 }
 
-DaliError dali_commissioning_verify_from_sequence(const DaliSequenceResult *result,
-                                                  bool *verified_out)
+DaliError dali_commissioning_verify_from_sequence(
+    const DaliSequenceResult *result,
+    DaliCommissioningVerifyOutcome *outcome_out)
 {
-    return answer_from_sequence(result,
-                                DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_VERIFY,
-                                verified_out);
+    if (result == NULL || outcome_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    /*
+     * Activity on the VERIFY step alone. Exactly one device is selected when a
+     * program-verify sequence runs, so undecodable reply-window activity here
+     * is not the ambiguity it is everywhere else -- it says a second device
+     * answered, which means a second device is selected, which means two gear
+     * generated the same random address. On any earlier step it stays an error:
+     * a PROGRAM that collided tells us nothing about how many devices there are.
+     */
+    if (result->result == DALI_ERR_RX_ACTIVITY &&
+        result->failed_step == DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_VERIFY) {
+        *outcome_out = DALI_COMMISSIONING_VERIFY_MULTIPLE;
+        return DALI_OK;
+    }
+
+    bool verified = false;
+    DaliError err = answer_from_sequence(
+        result,
+        DALI_COMMISSIONING_PROGRAM_VERIFY_STEP_VERIFY,
+        &verified);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    *outcome_out = verified ? DALI_COMMISSIONING_VERIFY_CONFIRMED
+                            : DALI_COMMISSIONING_VERIFY_SILENT;
+    return DALI_OK;
 }
 
 static void emit_progress(DaliCommissioningProgressCb cb,
@@ -530,11 +562,11 @@ DaliError dali_commissioning_program_short_address(
 DaliError dali_commissioning_verify_short_address(
     const DaliDiscoveryTransport *transport,
     uint8_t short_address,
-    bool *verified_out)
+    DaliCommissioningVerifyOutcome *outcome_out)
 {
     if (!comm_transport_valid(transport) ||
         short_address >= DALI_SHORT_ADDRESS_COUNT ||
-        verified_out == NULL) {
+        outcome_out == NULL) {
         return DALI_ERR_INVALID;
     }
 
@@ -545,7 +577,13 @@ DaliError dali_commissioning_verify_short_address(
         dali_commissioning_encode_short_address(short_address),
         &raw);
     if (err == DALI_ERR_TIMEOUT) {
-        *verified_out = false;
+        *outcome_out = DALI_COMMISSIONING_VERIFY_SILENT;
+        return DALI_OK;
+    }
+    /* See dali_commissioning_verify_from_sequence(): on VERIFY, and only on
+     * VERIFY, qualified activity is a count rather than an ambiguity. */
+    if (err == DALI_ERR_RX_ACTIVITY) {
+        *outcome_out = DALI_COMMISSIONING_VERIFY_MULTIPLE;
         return DALI_OK;
     }
     if (err != DALI_OK) {
@@ -555,7 +593,7 @@ DaliError dali_commissioning_verify_short_address(
     if (!dali_is_yes(raw)) {
         return DALI_ERR_MALFORMED;
     }
-    *verified_out = true;
+    *outcome_out = DALI_COMMISSIONING_VERIFY_CONFIRMED;
     return DALI_OK;
 }
 
@@ -703,7 +741,7 @@ static DaliError commissioning_finish(const DaliDiscoveryTransport *transport)
  * run between the write and the read-back. */
 static DaliError program_and_verify(const DaliDiscoveryTransport *transport,
                                     uint8_t short_address,
-                                    bool *verified_out)
+                                    DaliCommissioningVerifyOutcome *outcome_out)
 {
     DaliSequence seq;
     DaliError err = dali_commissioning_build_program_verify_sequence(short_address,
@@ -714,7 +752,50 @@ static DaliError program_and_verify(const DaliDiscoveryTransport *transport,
 
     DaliSequenceResult result;
     (void)dali_transport_run_sequence_atomic(transport, &seq, &result);
-    return dali_commissioning_verify_from_sequence(&result, verified_out);
+    return dali_commissioning_verify_from_sequence(&result, outcome_out);
+}
+
+/*
+ * Undo an assignment that turned out to have been written to two gear at once.
+ *
+ * PROGRAM SHORT ADDRESS 0xFF takes the address back from both -- selection is by
+ * random address, so both are still addressed by it -- and WITHDRAW then removes
+ * them from the search. The withdraw is not optional: without it the next
+ * find_next_random_address() converges on the same random address and the walk
+ * never terminates.
+ *
+ * The pair is left unaddressed rather than sharing an address, which is where
+ * they started and what a later run knows how to handle. Nothing here can be
+ * confirmed: two devices answering QUERY SHORT ADDRESS with the same 0xFF
+ * collide exactly as they did before, so this reports transmission only.
+ */
+static DaliError deaddress_and_withdraw(const DaliDiscoveryTransport *transport)
+{
+    DaliError err = send_special_no_reply(transport,
+                                          DALI_CMD_PROGRAM_SHORT_ADDRESS,
+                                          DALI_COMMISSIONING_NO_SHORT_ADDRESS,
+                                          false);
+    DaliError withdraw_err =
+        send_special_no_reply(transport, DALI_CMD_WITHDRAW, 0u, false);
+
+    /*
+     * Attempt both, keep the first failure. A failed de-address with a working
+     * withdraw still has to leave the search, or the walk spins; a failed
+     * withdraw after a working de-address is the case that spins, and the caller
+     * turns either into a run-level error rather than continuing the loop.
+     */
+    return err != DALI_OK ? err : withdraw_err;
+}
+
+static void record_duplicate(DaliCommissioningResult *out,
+                             uint32_t random_address)
+{
+    if (out->duplicate_count < DALI_COMMISSIONING_MAX_DUPLICATES) {
+        out->duplicate_random_addresses[out->duplicate_count] = random_address;
+    }
+    if (out->duplicate_count < UINT8_MAX) {
+        out->duplicate_count++;
+    }
 }
 
 DaliError dali_commissioning_commission_unaddressed(
@@ -771,7 +852,7 @@ DaliError dali_commissioning_commission_unaddressed(
         }
         out->quiescence_requested = true;
         bool started = false;
-        out->quiescence_error = commissioning_start_quiescence(transport,
+        out->quiescence_error = dali_discovery_quiescence_start(transport,
                                                                &started);
         out->quiescence_started = started;
         /*
@@ -787,6 +868,14 @@ DaliError dali_commissioning_commission_unaddressed(
          */
     }
 
+    /*
+     * Close any control-device addressing state that was already open before
+     * this run started -- another tool's abandoned Part 103 INITIALISE. Sent
+     * after quiescence, so the bus is already as quiet as it is going to get.
+     */
+    out->cross_part_terminate_requested = options->terminate_control_devices;
+    commissioning_try_terminate_control_devices(transport, out, false);
+
     bool termination_required = false;
     DaliError err = commissioning_start_unaddressed(
         transport,
@@ -797,6 +886,24 @@ DaliError dali_commissioning_commission_unaddressed(
         goto cleanup;
     }
     out->termination_required = true;
+
+    /*
+     * And again, now that INITIALISE has been on the wire. This is the send
+     * that earns its place: the state being closed is one the Part 102
+     * INITIALISE itself can open in a control device, so closing it beforehand
+     * proves nothing.
+     *
+     * It carries a known tension. A Part 103 special frame begins 0xC1, which
+     * is also the Part 102 ENABLE DEVICE TYPE opcode, and control gear is in an
+     * initialise window at this moment. Gear that mis-frames the 24-bit special
+     * as a 16-bit forward frame would read ENABLE DEVICE TYPE 0, which
+     * qualifies only the frame immediately after it -- the next frames here are
+     * specials, which are not device-type-qualified, so the stray enable
+     * expires without effect. Accepted deliberately: a phantom device in the
+     * search is a real fault with a real cost, and this is the documented
+     * remedy. Neither half has been seen on a bus.
+     */
+    commissioning_try_terminate_control_devices(transport, out, false);
     emit_progress(progress_cb,
                   progress_ctx,
                   DALI_COMMISSIONING_EVENT_INITIALISED,
@@ -811,6 +918,15 @@ DaliError dali_commissioning_commission_unaddressed(
                   0u);
 
     uint8_t next_search_from = options->first_short_address;
+    /*
+     * The random address of the last pair sent away as a duplicate. A duplicate
+     * does not advance assigned_count, so it does not advance the loop bound
+     * either: the only thing that stops the walk searching one address forever
+     * is that WITHDRAW takes the pair out of the search. If the same address
+     * comes back, it did not, and no amount of retrying will change that.
+     */
+    uint32_t last_duplicate_random = 0u;
+    bool has_last_duplicate = false;
     while (out->assigned_count < requested_count) {
         uint8_t short_address = 0u;
         if (!allocate_next_address(used_mask, next_search_from, &short_address)) {
@@ -851,13 +967,63 @@ DaliError dali_commissioning_commission_unaddressed(
                       short_address,
                       out->assigned_count);
 
-        bool verified = false;
-        err = program_and_verify(transport, short_address, &verified);
+        DaliCommissioningVerifyOutcome outcome =
+            DALI_COMMISSIONING_VERIFY_SILENT;
+        err = program_and_verify(transport, short_address, &outcome);
         if (err != DALI_OK) {
             out->last_error = err;
             goto cleanup;
         }
-        if (!verified) {
+        if (outcome == DALI_COMMISSIONING_VERIFY_MULTIPLE) {
+            /*
+             * Two gear share this random address. Take the short address back
+             * from both, drop them out of the search, and carry on: one
+             * collision must not cost the rest of the bus its addressing, the
+             * same reasoning the short-address scan applies to one contested
+             * address among sixty-four.
+             *
+             * The address is deliberately left unconsumed -- used_mask and
+             * next_search_from are untouched -- so the next device found takes
+             * the address this one gave back.
+             */
+            if (has_last_duplicate && last_duplicate_random == random_address) {
+                /*
+                 * The pair did not leave the search. WITHDRAW was reported
+                 * transmitted -- a failure would have aborted below -- so this
+                 * is gear that did not act on it, or a bus master undoing the
+                 * run. Either way the search cannot get past this address, and
+                 * looping is worse than stopping.
+                 */
+                out->duplicate_recovery_failed = true;
+                err = DALI_ERR_MALFORMED;
+                out->last_error = err;
+                goto cleanup;
+            }
+            last_duplicate_random = random_address;
+            has_last_duplicate = true;
+
+            record_duplicate(out, random_address);
+            emit_progress(progress_cb,
+                          progress_ctx,
+                          DALI_COMMISSIONING_EVENT_DUPLICATE_RANDOM_ADDRESS,
+                          random_address,
+                          short_address,
+                          out->assigned_count);
+
+            err = deaddress_and_withdraw(transport);
+            if (err != DALI_OK) {
+                /*
+                 * A pair that could not be withdrawn is still selectable, so
+                 * continuing would search the same random address forever. Fail
+                 * the run instead and say which half did not transmit.
+                 */
+                out->duplicate_recovery_failed = true;
+                out->last_error = err;
+                goto cleanup;
+            }
+            continue;
+        }
+        if (outcome != DALI_COMMISSIONING_VERIFY_CONFIRMED) {
             err = DALI_ERR_MALFORMED;
             out->last_error = err;
             goto cleanup;
@@ -927,6 +1093,13 @@ cleanup:
     }
 
     /*
+     * The cross-part unwind sits between the two, and for the same reason both
+     * of them exist: a control device left in addressing state answers the next
+     * tool's COMPARE. Attempted however the Part 102 TERMINATE went.
+     */
+    commissioning_try_terminate_control_devices(transport, out, true);
+
+    /*
      * Release after TERMINATE, and attempt it regardless of how TERMINATE went.
      * Order matters only in that the gear's fifteen-minute initialisation state
      * is the more dangerous one to leave set, so it is unwound first; both are
@@ -934,7 +1107,7 @@ cleanup:
      */
     if (out->quiescence_requested) {
         out->quiescence_release_attempted = true;
-        DaliError release_err = commissioning_release_quiescence(transport);
+        DaliError release_err = dali_discovery_quiescence_release(transport);
         out->quiescent_state_unknown =
             out->quiescence_started && release_err != DALI_OK;
         if (out->quiescence_error == DALI_OK) {

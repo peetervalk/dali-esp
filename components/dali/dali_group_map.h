@@ -64,6 +64,28 @@ uint8_t dali_group_map_pick(const DaliGroupMap *map, uint8_t group);
 #define DALI_GROUP_MAP_ALL_GROUPS 0xFFu
 bool dali_group_map_forget(DaliGroupMap *map, uint8_t addr, uint8_t group);
 
+/*
+ * Follow one gear that changed short address: every group `from` belonged to
+ * now lists `to` instead.
+ *
+ * This is the bookkeeping a re-address needs and a bare config command cannot
+ * supply. SET SHORT ADDRESS carries the new address in DTR0, so an integration
+ * watching the frame go past sees only that the gear at `from` moved somewhere,
+ * and has to drop what it knew and demand a rescan. A caller that chose both
+ * ends knows enough to move the membership instead, which keeps every group
+ * light's representative valid across the change.
+ *
+ * Like dali_group_map_forget() this describes no DALI command and sends no
+ * traffic -- the membership lives in the gear's own memory and did not change
+ * there; only the address it answers to did. Verified state is untouched for
+ * the same reason: a member that moved is still a member, and the group's
+ * membership is no less known than it was.
+ *
+ * A no-op if either address is out of range, if they are equal, or if `from`
+ * belonged to nothing. Returns true when a membership bit actually changed.
+ */
+bool dali_group_map_move(DaliGroupMap *map, uint8_t from, uint8_t to);
+
 /* True when every address previously known as a group member was positively
  * observed as control gear by a replacement scan. This lets integrations
  * reject a nominally complete scan that transiently missed a known device,

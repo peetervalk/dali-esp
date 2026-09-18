@@ -15,7 +15,7 @@ A reusable C protocol stack (`components/dali`) drives the bus — PHY, schedule
 - Diagnostic shell over TCP (`shell:`): the full native CLI — discover, identify, commissioning, live trace, rolling capture, JSON export — from a terminal, with no serial cable. The same shell, running the same code, as the serial console on a native ESP-IDF build
 - Free-text DALI command console in HA: queries, config, memory bank read/write, raw 16/24-bit frames
 - Protocol core is plain C with no ESPHome dependency; protocol and cross-task
-  helpers are covered by 26 host test suites, and CI additionally builds the
+  helpers are covered by 31 host test suites, and CI additionally builds the
   ESPHome component, the native ESP-IDF firmware, and a release tag as a
   consumer would fetch it
 
@@ -23,11 +23,49 @@ A reusable C protocol stack (`components/dali`) drives the bus — PHY, schedule
 
 | | |
 |---|---|
-| MCU | ESP32 (tested: ESP32-WROVER-E / ESP32-DevKitC-VE) |
+| MCU | ESP32 (classic), tested on ESP32-WROVER-E / ESP32-DevKitC-VE. Other variants are untested |
+| Cores | Two recommended; a single-core part is handled but has never been built or run here |
+| RAM | ~134 KiB of static DRAM at link time, 65 KiB of it the diagnostic shell. No PSRAM required |
+| Flash | 4 MB. ESPHome's default ESP32 layout is two 1.75 MB app slots plus a 448 KiB NVS partition, and NVS is where a saved backup lives |
 | DALI interface | MikroE [DALI 2 Click](https://www.mikroe.com/dali-2-click) |
 | Wiring | TX → GPIO18, RX → GPIO19 |
 
-Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The controller has no proven collision-detection/arbitration strategy. Existing DALI-1 pushbutton couplers in direct-control mode coexist on the installed buses, but simultaneous transmissions remain a risk; see `headless_dispatch`.
+Notes: GPIO16/17 are unavailable on WROVER-E — the PSRAM die uses them, and driving them corrupts PSRAM or the DALI line. This is a module-level wiring caveat, not a schema error: they are ordinary pins on WROOM, and the S3 puts PSRAM elsewhere, so `tx_pin`/`rx_pin` accept them and it is on you to avoid them on a WROVER. The pin schema does check what the chip can actually do, and rejects an input-only pin (GPIO34-39 on the classic ESP32) named as `tx_pin`. The controller has no proven collision-detection/arbitration strategy. Existing DALI-1 pushbutton couplers in direct-control mode coexist on the installed buses, but simultaneous transmissions remain a risk; see `headless_dispatch`.
+
+### Cores
+
+The DALI worker and the scan task both block on bus round-trips — a full scan for tens of seconds — so on a dual-core part they are pinned to Core 1 and the ESPHome main loop keeps Core 0 to itself. Two cores is what the firmware is tested on.
+
+A single-core target is handled rather than supported: `dali_core_affinity.h` requests no affinity when the part reports one core, because `xTaskCreatePinnedToCore()` fails outright against a core that does not exist. Nothing here has been built or run on one, and a scan there would share its core with Wi-Fi and the API for the whole walk.
+
+### Memory
+
+Both columns are the same tree (`dev`, 2026-09-04) built for the classic ESP32 with esp-idf: [dali_test.yaml](dali_test.yaml) — the CI config, which enables everything the component has — and the same config with the `shell:` block removed.
+
+| Segment | With `shell:` | Without | Region |
+|---|---|---|---|
+| Static DRAM (`.data` + `.bss` + `.noinit`) | 133.9 KiB (76%) | 69.1 KiB (39%) | 176.5 KiB (`dram0_0_seg`) |
+| IRAM (`.text` + `.vectors`) | 76.7 KiB (60%) | 76.7 KiB (60%) | 128 KiB (`iram0_0_seg`, default) |
+| App image | 1,053,739 B (57%) | 973,083 B (53%) | 1.75 MB partition |
+
+What is left of the static window — 42.6 KiB with the shell, 107.4 KiB without — joins the ~128 KiB D/IRAM pool as heap, less whatever Wi-Fi and the API hold at runtime. Every buffer in the protocol stack is fixed-size, so none of this grows with the number of fixtures on the bus, and none of it shrinks on a small one either. On a real board the number to watch is free heap, which ESPHome's `debug:` component reports; the link-time figure only says where you start.
+
+**The diagnostic shell is the largest single item, by a distance.** Its session caches — the input-instance cache, two capture rings, two inventories, the held backup — are 62 KiB of static `.bss` between them. `dali_shell.c` is compiled unconditionally (`proto_dali_shell.c` is a build shim), but nothing outside the shell's own TCP front end references it, so with no `shell:` block the linker drops all of it: **64.8 KiB of RAM and 78.8 KiB of flash back**. Once a bus is commissioned, that is the cheapest headroom on offer.
+
+**`sram1_as_iram: true` is inert at this size** IRAM sits at 76.7 KiB of the default 128 KiB — the same with or without the shell, whose code is all in flash — so there is no overflow for it to relieve. An image whose code really does land above `0x400A0000` needs a bootloader that knows the region, so a device OTA'd from a bootloader older than the option can fail to boot.
+
+### Persistent state
+
+Two things survive a reboot, both through ESPHome's preferences API — which on ESP32 means the NVS partition the default layout already provides. No extra partition, no filesystem, nothing to add to the board:
+
+| What | Size | Written when |
+|---|---|---|
+| Scan-verified group membership | 144 B | a scan, or an add-group/remove-group console command, changes it |
+| Address backup (`backup save`) | up to 2448 B | `backup save`, or a completed `backup import` |
+
+Both are staged in RAM by the task that produced them and written by the main loop, because the preferences API is Core 0 only. NVS is flushed on ESPHome's `flash_write_interval` — 60 s by default — or at a clean shutdown, so a `backup save` seconds before a power cut is not on flash yet. After a reboot, `backup status` reporting `loaded from storage` is the confirmation that one made it. Reboots and OTA updates keep it; erasing the chip or moving the partition layout does not.
+
+The native ESP-IDF serial firmware passes no persistence hooks at all, so a backup taken there lives until reboot and `backup export` is how it leaves the device. The shell says which case you are in; see [commissioning_readme.md](commissioning_readme.md).
 
 ## Getting started
 
@@ -59,6 +97,16 @@ Notes: GPIO16/17 are unavailable on WROVER-E (used by PSRAM). The controller has
      Timestamped reply-activity handling and the safety `TERMINATE` cleanup path
      are host-tested, not real-bus proof of multi-device commissioning. Use one
      unaddressed control gear at a time for now.
+
+     `backup save` records which physical unit — by its Bank 0 identification
+     number, which no addressing operation changes — holds which short address,
+     and `restore plan` / `restore apply` put them back afterwards using plain
+     addressed commands and no `INITIALISE` window. Take one before anything
+     that re-addresses in bulk. `backup export` prints it as the `backup import`
+     script that reads it back, which is how a backup is kept off a device with
+     no persistent store. `backup save`/`status` and `restore plan`/`apply` have
+     run correctly on a real bus; `backup import`/`export` and `restore groups`
+     are host-tested only.
 
      `export config` answers the other half: it prints the `dali:` block, and
      the `light:` and `sensor:` entries naming it, as YAML you can paste back.
@@ -193,7 +241,9 @@ text:
 - [dali_commands.md](dali_commands.md) — every verb and named command table, for the shell and the HA console
 - [dali_protocol.md](dali_protocol.md) — frame layouts, opcode tables by IEC part, event decoding
 - [dali_capability_matrix.md](dali_capability_matrix.md) — per-capability status: shared API, native CLI verb, host vector, real-bus result, ESPHome surface
+- [CHANGELOG.md](CHANGELOG.md) — per-release changes, with the C API and operator-visible migrations
 - [current_status.md](current_status.md) — project state, known limitations, roadmap
+- [project_log.md](project_log.md) — verification history, investigations, and the unreleased-change list behind those claims
 - [steinel_bank2_reference.md](steinel_bank2_reference.md) — Steinel HF 360 II memory bank tuning
 
 ## Scope and limitations
@@ -208,8 +258,12 @@ text:
   unaddressed gear at a time. A run brackets itself with broadcast Part 103
   START/STOP QUIESCENT MODE so control devices cannot transmit into a COMPARE
   reply window, but that too is host-tested only and cannot reach a device that
-  missed the broadcast. Equal-random-address recovery, cross-part addressing
-  interference, and multi-master arbitration are not implemented.
+  missed the broadcast. Two gear that draw the same random address are detected
+  at VERIFY, de-addressed, and left for a second run to place -- host-tested,
+  same caveat. Cross-part addressing interference is guarded in one direction —
+  a run brackets itself with Part 103 TERMINATE so a control device cannot sit in
+  its own addressing state and answer COMPARE as gear — but control-device
+  commissioning itself, and multi-master arbitration, are not implemented.
 - Implemented does not mean verified on hardware. Several paths — the DT6/DT8
   command sets, memory writes, input-device configuration — have host vectors but
   no recorded real-bus result; [dali_capability_matrix.md](dali_capability_matrix.md)

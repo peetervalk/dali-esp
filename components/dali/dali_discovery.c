@@ -83,6 +83,60 @@ static bool scan_error_is_absent(DaliError err)
     return err == DALI_ERR_TIMEOUT || err == DALI_ERR_MALFORMED;
 }
 
+/*
+ * Broadcast START QUIESCENT MODE, then wait for any event frame already on the
+ * wire to finish.
+ *
+ * Send-twice, no reply, address byte 0xFF: every control device, control gear
+ * untouched. Nothing acknowledges it, so a return of DALI_OK means the frame
+ * was transmitted and says nothing about whether anything heard it.
+ */
+DaliError dali_discovery_quiescence_start(
+    const DaliDiscoveryTransport *transport,
+    bool *transmitted_out)
+{
+    if (!transport_valid(transport) || transmitted_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    *transmitted_out = false;
+
+    DaliFrame frame;
+    DaliError err = dali_build_device_broadcast_command(
+        DALI_CMD_START_QUIESCENT_MODE, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    err = transport->transact(&frame, false, 0u, true, NULL, transport->ctx);
+    if (err != DALI_OK) {
+        return err;
+    }
+    *transmitted_out = true;
+
+    return dali_transport_delay_ms(transport,
+                                   DALI_DISCOVERY_QUIESCENT_SETTLE_MS);
+}
+
+/*
+ * Broadcast STOP QUIESCENT MODE through the cleanup path.
+ *
+ * cleanup selects the transport that ignores a latched front-end cancellation,
+ * because the alternative is an installation whose sensors stay silent after an
+ * aborted walk. No settle follows: the caller is on its way out.
+ */
+DaliError dali_discovery_quiescence_release(
+    const DaliDiscoveryTransport *transport)
+{
+    DaliFrame frame;
+    DaliError err = dali_build_device_broadcast_command(
+        DALI_CMD_STOP_QUIESCENT_MODE, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+    return dali_transport_transact_cleanup(transport, &frame, false, 0u, true,
+                                           NULL);
+}
+
 DaliError dali_discovery_inventory_reset(DaliDiscoveryInventory *inventory)
 {
     if (inventory == NULL) {
@@ -854,11 +908,34 @@ static void discovery_enrich_device(const DaliDiscoveryTransport *transport,
     DaliFrame instances_frame;
     if (dali_input_build_query_number_of_instances(addr, &instances_frame) == DALI_OK) {
         uint8_t count = 0u;
-        if (dali_discovery_query_u8(transport, &instances_frame, &count) == DALI_OK &&
-            count > 0u) {
+        DaliError inst_err =
+            dali_discovery_query_u8(transport, &instances_frame, &count);
+        if (inst_err == DALI_OK && count > 0u) {
             device->has_input_device = true;
             device->has_instance_count = true;
             device->instance_count = count;
+        } else if (inst_err == DALI_ERR_RX_ACTIVITY && !device->has_input_device) {
+            /*
+             * The same finding the top-level scan records at line 1013, reached
+             * by the other route. An address where control gear answered never
+             * takes that path — the scan probes the device space only when the
+             * gear query said absent — so before this, two control devices
+             * sharing a device short address were invisible whenever any gear
+             * happened to answer at the same number. That is not a corner case:
+             * it is exactly the hybrid units, which answer in both spaces.
+             *
+             * Deliberately does not set `present` or touch the instance count,
+             * for the reason the scan's copy does not: something is there and
+             * nothing is known about it.
+             *
+             * Skipped when this address already has a good device-space
+             * reading, which is the case on the input-only entry to this
+             * function: the instance count was just read successfully, so a
+             * second query that meets activity is a blip on one frame, not a
+             * second control device, and treating it as one would throw away a
+             * reading in hand.
+             */
+            device->has_undecodable_device_activity = true;
         }
     }
 
@@ -867,6 +944,22 @@ static void discovery_enrich_device(const DaliDiscoveryTransport *transport,
         if (dali_memory_read_bank0_identity(transport, addr, &identity) == DALI_OK) {
             device->has_identity = true;
             device->identity = identity;
+        }
+    }
+
+    /*
+     * The control device's own Bank 0, read from the device address space. Read
+     * whenever an input device answered, independently of whether control gear
+     * did: the two spaces are independent, and a unit answering both is not
+     * thereby one physical device — the identification numbers decide that, and
+     * this is what supplies them.
+     */
+    if (device->has_input_device) {
+        DaliMemoryBank0Identity device_identity;
+        if (dali_memory_read_device_bank0_identity(transport, addr,
+                                                   &device_identity) == DALI_OK) {
+            device->has_device_identity = true;
+            device->device_identity = device_identity;
         }
     }
 
@@ -921,18 +1014,18 @@ static void discovery_enrich_device(const DaliDiscoveryTransport *transport,
     }
 }
 
-DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
-                              const DaliDiscoveryTransport *transport,
-                              DaliDiscoveryFoundCb found_cb,
-                              void *found_ctx,
-                              uint8_t *found_out)
+/*
+ * The walk itself, split out so that everything wrapped around it runs on every
+ * exit path. There are five returns below and three of them are failures; a
+ * release that only covered the clean one would leave the bus deaf to events
+ * exactly when a scan had gone wrong.
+ */
+static DaliError discovery_scan_walk(DaliDiscoveryInventory *inventory,
+                                     const DaliDiscoveryTransport *transport,
+                                     DaliDiscoveryFoundCb found_cb,
+                                     void *found_ctx,
+                                     uint8_t *found_out)
 {
-    if (inventory == NULL ||
-        !transport_valid(transport) ||
-        !dali_transport_supports_atomic_sequence(transport)) {
-        return DALI_ERR_INVALID;
-    }
-
     DaliError reset_err = dali_discovery_inventory_reset(inventory);
     if (reset_err != DALI_OK) {
         return reset_err;
@@ -947,6 +1040,12 @@ DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
                 return err;
             }
             discovery_enrich_device(transport, addr, &inventory->devices[addr]);
+            /* Enrichment is the only route to a contested device address at a
+             * number where gear answered; the inventory-level counter is kept
+             * here because enrichment sees one device record, not the tally. */
+            if (inventory->devices[addr].has_undecodable_device_activity) {
+                inventory->undecodable_device_count++;
+            }
             if (found_cb != NULL) {
                 found_cb(addr, &inventory->devices[addr], found_ctx);
             }
@@ -975,9 +1074,30 @@ DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
          * pure DALI-2 input device that has no control gear (Part 303). */
         DaliFrame inst_q;
         uint8_t count = 0u;
-        if (dali_input_build_query_number_of_instances(addr, &inst_q) == DALI_OK &&
-            dali_discovery_query_u8(transport, &inst_q, &count) == DALI_OK &&
-            count > 0u) {
+        if (dali_input_build_query_number_of_instances(addr, &inst_q) != DALI_OK) {
+            continue;
+        }
+
+        DaliError inst_err = dali_discovery_query_u8(transport, &inst_q, &count);
+        if (inst_err == DALI_ERR_RX_ACTIVITY) {
+            /*
+             * Something answered in the device address space and could not be
+             * decoded — two control devices sharing a short address is the
+             * expected cause. Recorded rather than dropped: every other
+             * outcome here is silently treated as "no device", which made a
+             * contested device address invisible instead of merely unreadable.
+             *
+             * It deliberately does not set `present` and does not touch
+             * anything the control-gear free-address mask reads. The two
+             * address spaces are independent, and reserving a gear address
+             * because a control device collided at the same number would be a
+             * different bug from the one this fixes.
+             */
+            inventory->devices[addr].has_undecodable_device_activity = true;
+            inventory->undecodable_device_count++;
+            continue;
+        }
+        if (inst_err == DALI_OK && count > 0u) {
             DaliDiscoveryDeviceInfo *device = &inventory->devices[addr];
             if (!device->present) {
                 inventory->found_count++;
@@ -998,6 +1118,85 @@ DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
         *found_out = inventory->found_count;
     }
     return DALI_OK;
+}
+
+DaliError dali_discovery_scan_ex(DaliDiscoveryInventory *inventory,
+                                 const DaliDiscoveryTransport *transport,
+                                 DaliDiscoveryFoundCb found_cb,
+                                 void *found_ctx,
+                                 uint8_t *found_out,
+                                 const DaliDiscoveryScanOptions *options,
+                                 DaliDiscoveryScanResult *result_out)
+{
+    DaliDiscoveryScanResult result;
+    memset(&result, 0, sizeof(result));
+
+    if (inventory == NULL ||
+        !transport_valid(transport) ||
+        !dali_transport_supports_atomic_sequence(transport)) {
+        if (result_out != NULL) {
+            *result_out = result;
+        }
+        return DALI_ERR_INVALID;
+    }
+
+    /*
+     * Validation first, so a rejected call never leaves control devices
+     * quiesced by a bracket its walk was never going to run.
+     */
+    bool start_attempted = false;
+    if (options != NULL && options->quiesce_control_devices) {
+        result.quiescence_requested = true;
+        if (!dali_transport_supports_delay(transport)) {
+            /*
+             * Without a delay there is no settle, so an event already on the
+             * wire could still be mid-frame when the walk starts transmitting.
+             * Quiescence whose settle did not run reads as hardening that is
+             * not there, so it is refused outright rather than half-applied.
+             */
+            result.quiescence_error = DALI_ERR_INVALID;
+        } else {
+            start_attempted = true;
+            bool started = false;
+            result.quiescence_error =
+                dali_discovery_quiescence_start(transport, &started);
+            result.quiescence_started = started;
+        }
+    }
+
+    DaliError err = discovery_scan_walk(inventory, transport, found_cb,
+                                        found_ctx, found_out);
+
+    /*
+     * Released whenever a START was attempted, including when it reported
+     * failure: a frame that transmitted and then failed its settle has still
+     * reached the bus, and leaving that unreleased is the one outcome that
+     * silences an installation. Only what was never attempted is left alone.
+     */
+    if (start_attempted) {
+        result.quiescence_release_attempted = true;
+        DaliError release_err = dali_discovery_quiescence_release(transport);
+        result.quiescent_state_unknown =
+            result.quiescence_started && release_err != DALI_OK;
+        if (result.quiescence_error == DALI_OK) {
+            result.quiescence_error = release_err;
+        }
+    }
+
+    if (result_out != NULL) {
+        *result_out = result;
+    }
+    return err;
+}
+
+DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
+                              const DaliDiscoveryTransport *transport,
+                              DaliDiscoveryFoundCb found_cb,
+                              void *found_ctx,
+                              uint8_t *found_out)
+{
+    return dali_discovery_scan_ex(inventory, transport, found_cb, found_ctx,
+                                  found_out, NULL, NULL);
 }
 
 static void discovery_input_reset(DaliDiscoveryInputDevice *out, uint8_t addr)

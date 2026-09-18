@@ -136,6 +136,53 @@ typedef struct {
     void (*config_applied)(void *ctx, DaliTarget target, DaliCommandId id,
                            uint8_t param);
     /*
+     * Called after `address <from> set <to>` re-addressed one gear and both
+     * ends were confirmed on the bus: `to` answers, `from` is silent.
+     *
+     * This is what config_applied() cannot say. SET SHORT ADDRESS carries its
+     * destination in DTR0, so an integration told only "a config command went
+     * to a5" knows the gear moved but not where, and its only safe response is
+     * to drop everything keyed by a5 and ask for a rescan. The `address` verb
+     * chose both ends and then verified them, so it can name the move and let
+     * caches follow it instead.
+     *
+     * Only reached after verification succeeded: an unconfirmed move calls
+     * nothing, because a cache moved to an address that turns out to be wrong
+     * is worse than a cache dropped. Called on the session's task. NULL when
+     * nothing caches.
+     */
+    void (*short_address_moved)(void *ctx, uint8_t from, uint8_t to);
+    /*
+     * Called after `address <aN> clear` and `aN` was confirmed silent.
+     *
+     * The opposite of short_address_moved() in what the cache should do:
+     * nothing follows the gear, because the gear no longer has an address to
+     * follow it to. Group membership keyed by `addr` must be forgotten rather
+     * than moved — the unit keeps its own group registers through a
+     * de-address, so it reappears in those groups at whatever address a later
+     * `commission unaddressed` hands it, which only a scan can learn.
+     *
+     * The bar for calling this is lower than for a move, deliberately. A move
+     * that could not be confirmed calls nothing, because pointing a cache at
+     * an address the gear may not hold is worse than dropping it. Here the
+     * confirmed fact is that `addr` went silent, and a cache keyed by a silent
+     * address is stale whether the gear was cleared, lost power, or failed —
+     * the three are indistinguishable from the bus and want the same response.
+     * So this is called on silence, and the shell's own output carries the
+     * distinction the operator needs. Called on the session's task. NULL when
+     * nothing caches.
+     */
+    void (*short_address_cleared)(void *ctx, uint8_t addr);
+    /*
+     * Neither hook has a control-device counterpart, and that is a statement
+     * about the integration rather than an omission here: nothing on the other
+     * side caches a device short address. Lights are keyed by gear address,
+     * sensors by the device address in their own YAML, and `restore apply`
+     * already moves devices without notifying anything. `address d<N> set` and
+     * `address d<N> clear` therefore call nothing. Add a pair here if a cache
+     * ever keys on the device space.
+     */
+    /*
      * Print the integration's own configuration as the YAML block that would
      * produce it — what `export config` emits.
      *
@@ -158,6 +205,26 @@ typedef struct {
     void (*export_config)(void *ctx, const DaliCliOut *out,
                           const DaliDiscoveryInventory *inventory,
                           DaliShellInputLookupFn input_lookup);
+    /*
+     * Persist and reload the address backup across a reboot.
+     *
+     * These are hooks rather than shell code because durable storage belongs to
+     * the integration: the ESPHome component has the preferences API and the
+     * Core 0 affinity rule that comes with it, and the native firmware has
+     * neither. The shell owns the snapshot, its codec and its verbs; the
+     * integration owns only the bytes.
+     *
+     * `save` receives an encoded blob of `len` bytes, never more than
+     * DALI_SNAPSHOT_BLOB_MAX, and returns true when it is stored. `load` fills
+     * `buf` and writes the byte count to `*len`, returning false when nothing
+     * is stored — which is a normal cold start, not a fault.
+     *
+     * Both NULL is legitimate and means backups live only in RAM and in
+     * whatever the operator did with `backup export`. The shell says so rather
+     * than implying a durability it does not have.
+     */
+    bool (*snapshot_save)(void *ctx, const uint8_t *buf, uint32_t len);
+    bool (*snapshot_load)(void *ctx, uint8_t *buf, uint32_t *len);
     void  *ctx;
 } DaliShellHooks;
 

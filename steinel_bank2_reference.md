@@ -208,8 +208,8 @@ sequence never sends. Every reply comes from the Steinel. The gear-addressed
 
 ## References
 
-1. **Steinel DALI-2 Interface Description V1.5** — local copy at
-   `_local/94546_DALI-2 Interface Description_V1.5.pdf`. Authoritative for the
+1. **Steinel DALI-2 Interface Description V1.5** (document 94546), obtainable
+   from Steinel; not redistributed here. Authoritative for the
    Bank 2 offset map, the lock-byte protocol, type 107 capabilities, the scaling
    of global and per-direction values, and the Bluetooth activation byte
    (Bank 3, offset `0x03`).

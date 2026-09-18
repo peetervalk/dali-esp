@@ -15,6 +15,7 @@
 
 #include "unity.h"
 #include "dali_cli.h"
+#include "dali_commissioning.h"
 
 #include <string.h>
 
@@ -25,7 +26,10 @@ void tearDown(void) {}
  * Capture helper
  * --------------------------------------------------------------------------*/
 
-static char              s_capture[4096];
+/* Large enough for the whole verb table's help. This is the harness's limit,
+ * not the CLI's -- print_help() streams through the sink a row at a time -- so
+ * it grows with the table rather than the table shrinking to fit it. */
+static char              s_capture[8192];
 static DaliCliBufferSink s_sink;
 
 static DaliCliOut capture_begin(void)
@@ -404,6 +408,89 @@ static void test_parse_u8_bounds(void)
     TEST_ASSERT_FALSE(dali_cli_parse_u8("16", DALI_MAX_SCENE, &v));
     TEST_ASSERT_TRUE(dali_cli_parse_u8("255", 255u, &v));
     TEST_ASSERT_EQUAL_UINT8(255u, v);
+}
+
+static void test_parse_hex_bytes_appends_across_calls(void)
+{
+    uint8_t  buf[8] = {0};
+    uint32_t len    = 0u;
+
+    TEST_ASSERT_TRUE(dali_cli_parse_hex_bytes("DA11", buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL_UINT32(2u, len);
+    TEST_ASSERT_TRUE(dali_cli_parse_hex_bytes("0002", buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL_UINT32(4u, len);
+
+    const uint8_t expect[4] = { 0xDAu, 0x11u, 0x00u, 0x02u };
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expect, buf, 4);
+}
+
+static void test_parse_hex_bytes_accepts_either_case(void)
+{
+    uint8_t  buf[4] = {0};
+    uint32_t len    = 0u;
+
+    TEST_ASSERT_TRUE(dali_cli_parse_hex_bytes("aBcDeF01", buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL_UINT32(4u, len);
+
+    const uint8_t expect[4] = { 0xABu, 0xCDu, 0xEFu, 0x01u };
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expect, buf, 4);
+}
+
+static void test_parse_hex_bytes_rejects_an_odd_length(void)
+{
+    uint8_t  buf[8] = {0};
+    uint32_t len    = 0u;
+
+    /* Not "drop the last nibble": half a byte means the line lost a character,
+     * and every byte after it in the blob would be shifted. */
+    TEST_ASSERT_FALSE(dali_cli_parse_hex_bytes("ABC", buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL_UINT32(0u, len);
+}
+
+static void test_parse_hex_bytes_rejects_junk_without_appending(void)
+{
+    uint8_t  buf[8] = {0};
+    uint32_t len    = 0u;
+
+    TEST_ASSERT_TRUE(dali_cli_parse_hex_bytes("1122", buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL_UINT32(2u, len);
+
+    /* The bad character is in the third byte. The first two must not land:
+     * a partially applied chunk is a silently corrupted blob. */
+    TEST_ASSERT_FALSE(dali_cli_parse_hex_bytes("3344ZZ", buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL_UINT32(2u, len);
+    TEST_ASSERT_EQUAL_UINT8(0x00u, buf[2]);
+    TEST_ASSERT_EQUAL_UINT8(0x00u, buf[3]);
+
+    /* An 0x prefix is junk here too: this is a bare-hex format. */
+    TEST_ASSERT_FALSE(dali_cli_parse_hex_bytes("0x11", buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL_UINT32(2u, len);
+}
+
+static void test_parse_hex_bytes_stops_at_capacity(void)
+{
+    uint8_t  buf[4] = {0};
+    uint32_t len    = 0u;
+
+    TEST_ASSERT_TRUE(dali_cli_parse_hex_bytes("11223344", buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL_UINT32(4u, len);
+    TEST_ASSERT_FALSE(dali_cli_parse_hex_bytes("55", buf, sizeof(buf), &len));
+    TEST_ASSERT_EQUAL_UINT32(4u, len);
+}
+
+static void test_parse_hex_bytes_rejects_bad_arguments(void)
+{
+    uint8_t  buf[4] = {0};
+    uint32_t len    = 0u;
+
+    TEST_ASSERT_FALSE(dali_cli_parse_hex_bytes(NULL, buf, sizeof(buf), &len));
+    TEST_ASSERT_FALSE(dali_cli_parse_hex_bytes("11", NULL, sizeof(buf), &len));
+    TEST_ASSERT_FALSE(dali_cli_parse_hex_bytes("11", buf, sizeof(buf), NULL));
+    TEST_ASSERT_FALSE(dali_cli_parse_hex_bytes("", buf, sizeof(buf), &len));
+
+    /* A length already past capacity is a caller bug, not a full buffer. */
+    len = sizeof(buf) + 1u;
+    TEST_ASSERT_FALSE(dali_cli_parse_hex_bytes("11", buf, sizeof(buf), &len));
 }
 
 static void test_parse_target_forms(void)
@@ -1021,6 +1108,236 @@ static void test_special_commissioning_set(void)
  * and permits the easier one, so this asserts the set by name rather than by
  * whether the command happens to consume DTR0.
  */
+/*
+ * The `address` verb's shape.
+ *
+ * It is the checked tier over `config`/`config-dtr0`, so its arguments are
+ * addresses written the way targets are, and the keyword sits second rather
+ * than first. That last part is unusual enough in this table to be worth
+ * asserting: dali_cli_has_subcommand() does not care about position, and a
+ * handler that assumed tok[1] would silently accept `address set a5`.
+ */
+static void test_address_verb_shape(void)
+{
+    const DaliCliCommandSpec *spec = dali_cli_command_find("address");
+    TEST_ASSERT_NOT_NULL(spec);
+    TEST_ASSERT_EQUAL(DALI_CLI_CMD_ADDRESS, spec->id);
+
+    /*
+     * Subject and keyword, plus an argument on every arm but `clear` — which
+     * takes the address away and so has nothing to name. The spec declares the
+     * widest form, and the handler checks the exact shape per subcommand; what
+     * is asserted here is that a two-argument line reaches the handler at all,
+     * because the resolver rejects on arity before dispatch.
+     */
+    TEST_ASSERT_EQUAL_UINT8(2u, spec->min_args);
+    TEST_ASSERT_EQUAL_UINT8(3u, spec->max_args);
+
+    TEST_ASSERT_TRUE(dali_cli_has_subcommand(spec, "set"));
+    TEST_ASSERT_TRUE(dali_cli_has_subcommand(spec, "add"));
+    TEST_ASSERT_TRUE(dali_cli_has_subcommand(spec, "remove"));
+    TEST_ASSERT_TRUE(dali_cli_has_subcommand(spec, "clear"));
+    /* The config table's spellings are not this verb's. */
+    TEST_ASSERT_FALSE(dali_cli_has_subcommand(spec, "add-group"));
+    TEST_ASSERT_FALSE(dali_cli_has_subcommand(spec, "set-short-address-dtr0"));
+}
+
+/*
+ * The arity widening `clear` needed must not turn the other arms into
+ * two-argument verbs. `address a5 set` resolves — the bounds cannot express
+ * "three unless the keyword is clear" — so the handler is what refuses it, and
+ * this pins the resolver's half of that split: both lengths reach dispatch,
+ * neither one nor four does.
+ */
+static void test_address_clear_arity(void)
+{
+    DaliCliTokens             tokens;
+    const DaliCliCommandSpec *spec = NULL;
+
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_OK,
+                      dali_cli_resolve("address a5 clear", &tokens, &spec));
+    TEST_ASSERT_EQUAL_UINT8(3u, tokens.count);
+    /* Absent tokens are empty rather than stale, which is what lets the
+     * handler dispatch on count without reading past the end. */
+    TEST_ASSERT_EQUAL_STRING("", tokens.tok[3]);
+
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_OK,
+                      dali_cli_resolve("address a5 set a13", &tokens, &spec));
+    TEST_ASSERT_EQUAL_UINT8(4u, tokens.count);
+
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY,
+                      dali_cli_resolve("address a5", &tokens, &spec));
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_ARITY,
+                      dali_cli_resolve("address a5 clear now please",
+                                       &tokens, &spec));
+}
+
+/*
+ * `clear` is the same DALI command as `set` with a different DTR0, so it is the
+ * same gated operation. The gate lives in the shell; what is pinned here is
+ * that there is no second command it could be spelled with that might escape
+ * the commissioning set.
+ */
+static void test_address_clear_is_the_gated_operation(void)
+{
+    const DaliCliGearCommand *spec =
+        dali_cli_config_find("set-short-address-dtr0");
+    TEST_ASSERT_NOT_NULL(spec);
+    TEST_ASSERT_EQUAL(DALI_CMD_SET_SHORT_ADDRESS_DTR0, spec->id);
+    TEST_ASSERT_TRUE(dali_cli_config_is_commissioning(spec->id));
+
+    /* The value that means "no short address" is outside the encoded range, so
+     * it can never be a destination `set` would produce. */
+    uint8_t decoded = 0u;
+    TEST_ASSERT_NOT_EQUAL(DALI_OK,
+                          dali_commissioning_decode_short_address(
+                              DALI_COMMISSIONING_NO_SHORT_ADDRESS, &decoded));
+    for (uint8_t addr = 0u; addr <= DALI_MAX_SHORT_ADDRESS; addr++) {
+        TEST_ASSERT_NOT_EQUAL(DALI_COMMISSIONING_NO_SHORT_ADDRESS,
+                              dali_commissioning_encode_short_address(addr));
+    }
+}
+
+/*
+ * Both halves of an `address` line parse through dali_cli_parse_target(), which
+ * is what makes `a13` and `g1` self-describing: the handler type-checks what
+ * came back rather than guessing from the keyword. Assert the discrimination
+ * those refusals rest on.
+ */
+static void test_address_arguments_are_targets(void)
+{
+    DaliTarget v;
+
+    TEST_ASSERT_TRUE(dali_cli_parse_target("a13", &v));
+    TEST_ASSERT_EQUAL(DALI_ADDR_SHORT, v.type);
+    TEST_ASSERT_EQUAL_UINT8(13u, v.address);
+
+    TEST_ASSERT_TRUE(dali_cli_parse_target("g1", &v));
+    TEST_ASSERT_EQUAL(DALI_ADDR_GROUP, v.type);
+    TEST_ASSERT_EQUAL_UINT8(1u, v.address);
+
+    /* `address b set ...` and `address g1 set ...` are refused on this type,
+     * because neither subject can be read back off the bus. */
+    TEST_ASSERT_TRUE(dali_cli_parse_target("b", &v));
+    TEST_ASSERT_EQUAL(DALI_ADDR_BROADCAST, v.type);
+
+    /* A bare number is a short address, so `address a5 add 1` is caught as
+     * "add takes a group" rather than quietly meaning g1. */
+    TEST_ASSERT_TRUE(dali_cli_parse_target("1", &v));
+    TEST_ASSERT_EQUAL(DALI_ADDR_SHORT, v.type);
+}
+
+/*
+ * The device-space subject.
+ *
+ * `d<N>` is the only spelling that reaches the control-device arms, and the `d`
+ * is mandatory. That strictness is the safety property: every other address
+ * argument in this CLI accepts a bare number, so a device parser that did too
+ * would leave `address 5 clear` meaning gear and `address d5 clear` meaning a
+ * device with nothing on the line to say which -- and the two spaces are
+ * independent, so gear 5 and device 5 are unrelated units.
+ */
+static void test_parse_device_addr_requires_the_d_prefix(void)
+{
+    uint8_t v = 0xFFu;
+
+    TEST_ASSERT_TRUE(dali_cli_parse_device_addr("d0", &v));
+    TEST_ASSERT_EQUAL_UINT8(0u, v);
+    TEST_ASSERT_TRUE(dali_cli_parse_device_addr("d63", &v));
+    TEST_ASSERT_EQUAL_UINT8(63u, v);
+
+    /* A bare number is never a device address, and neither is the gear or
+     * group spelling. Each of these would be a write into the wrong space. */
+    TEST_ASSERT_FALSE(dali_cli_parse_device_addr("5", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_device_addr("a5", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_device_addr("g5", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_device_addr("b", &v));
+
+    /* Same bounds and same trailing-character rejection as everything else. */
+    TEST_ASSERT_FALSE(dali_cli_parse_device_addr("d64", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_device_addr("d", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_device_addr("d5x", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_device_addr(NULL, &v));
+}
+
+/*
+ * The gear parser must not accept the device spelling either. If it did,
+ * `address d5 set d7` would resolve as gear and re-address the wrong space --
+ * the exact confusion the separate parser exists to prevent.
+ */
+static void test_the_gear_parsers_reject_the_device_spelling(void)
+{
+    DaliTarget target;
+    uint8_t    v = 0u;
+
+    TEST_ASSERT_FALSE(dali_cli_parse_target("d5", &target));
+    TEST_ASSERT_FALSE(dali_cli_parse_short_addr("d5", &v));
+}
+
+/*
+ * A device line resolves to the same arity the gear one does, so both reach the
+ * handler and the handler is what splits them. `address d5 add g3` resolves
+ * here and is refused there, because the resolver cannot express "the group
+ * arms are gear only".
+ */
+static void test_address_device_lines_reach_the_handler(void)
+{
+    DaliCliTokens             tokens;
+    const DaliCliCommandSpec *spec = NULL;
+
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_OK,
+                      dali_cli_resolve("address d5 clear", &tokens, &spec));
+    TEST_ASSERT_EQUAL_UINT8(3u, tokens.count);
+    TEST_ASSERT_EQUAL_STRING("d5", tokens.tok[1]);
+
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_OK,
+                      dali_cli_resolve("address d5 set d7", &tokens, &spec));
+    TEST_ASSERT_EQUAL_UINT8(4u, tokens.count);
+    TEST_ASSERT_EQUAL_STRING("d7", tokens.tok[3]);
+
+    /* Resolves; the handler refuses it. */
+    TEST_ASSERT_EQUAL(DALI_CLI_RESOLVE_OK,
+                      dali_cli_resolve("address d5 add g3", &tokens, &spec));
+}
+
+/*
+ * The device re-addressing command must be the one the walk's own de-address
+ * uses, and its DTR0 sentinel must stay outside the encoded range -- otherwise
+ * `address d<N> clear` would write an address rather than remove one.
+ */
+static void test_device_clear_writes_a_value_no_address_encodes_to(void)
+{
+    const DaliCommandInfo *cmd =
+        dali_command_lookup(DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0);
+    TEST_ASSERT_NOT_NULL(cmd);
+    TEST_ASSERT_TRUE_MESSAGE(cmd->send_twice,
+                             "SET SHORT ADDRESS DTR0 is send-twice in both spaces");
+
+    for (uint8_t addr = 0u; addr <= DALI_MAX_SHORT_ADDRESS; addr++) {
+        TEST_ASSERT_NOT_EQUAL(DALI_COMMISSIONING_NO_SHORT_ADDRESS,
+                              dali_commissioning_encode_short_address(addr));
+    }
+}
+
+/*
+ * `set` re-addresses gear, so it must be gated wherever the config spelling is.
+ * The gate itself lives in the shell, but the fact it is the same operation is
+ * asserted here: if SET SHORT ADDRESS ever left the commissioning set, the
+ * `address` verb would need to stop being gated too, and this pins the pair.
+ */
+static void test_address_set_is_the_gated_operation(void)
+{
+    const DaliCliGearCommand *spec =
+        dali_cli_config_find("set-short-address-dtr0");
+    TEST_ASSERT_NOT_NULL(spec);
+    TEST_ASSERT_TRUE(dali_cli_config_is_commissioning(spec->id));
+
+    /* Group membership is not gated on either spelling. */
+    const DaliCliGearCommand *add = dali_cli_config_find("add-group");
+    TEST_ASSERT_NOT_NULL(add);
+    TEST_ASSERT_FALSE(dali_cli_config_is_commissioning(add->id));
+}
+
 static void test_config_commissioning_set(void)
 {
     const DaliCliGearCommand *spec =
@@ -1236,9 +1553,19 @@ int main(void)
     RUN_TEST(test_parse_u32_leading_zero_is_decimal);
     RUN_TEST(test_parse_u32_rejects_junk_and_overflow);
     RUN_TEST(test_parse_u8_bounds);
+    RUN_TEST(test_parse_hex_bytes_appends_across_calls);
+    RUN_TEST(test_parse_hex_bytes_accepts_either_case);
+    RUN_TEST(test_parse_hex_bytes_rejects_an_odd_length);
+    RUN_TEST(test_parse_hex_bytes_rejects_junk_without_appending);
+    RUN_TEST(test_parse_hex_bytes_stops_at_capacity);
+    RUN_TEST(test_parse_hex_bytes_rejects_bad_arguments);
     RUN_TEST(test_parse_target_forms);
     RUN_TEST(test_parse_target_rejects_out_of_range);
     RUN_TEST(test_parse_short_addr_and_instance);
+    RUN_TEST(test_parse_device_addr_requires_the_d_prefix);
+    RUN_TEST(test_the_gear_parsers_reject_the_device_spelling);
+    RUN_TEST(test_address_device_lines_reach_the_handler);
+    RUN_TEST(test_device_clear_writes_a_value_no_address_encodes_to);
     RUN_TEST(test_parse_level_distinguishes_mask);
     RUN_TEST(test_parse_len_token);
     RUN_TEST(test_parse_raw_frame);
@@ -1267,6 +1594,11 @@ int main(void)
 
     RUN_TEST(test_special_commissioning_set);
     RUN_TEST(test_config_commissioning_set);
+    RUN_TEST(test_address_verb_shape);
+    RUN_TEST(test_address_clear_arity);
+    RUN_TEST(test_address_clear_is_the_gated_operation);
+    RUN_TEST(test_address_arguments_are_targets);
+    RUN_TEST(test_address_set_is_the_gated_operation);
     RUN_TEST(test_config_broadcast_rejection_set);
 
     RUN_TEST(test_format_status_names_only_the_set_flags);

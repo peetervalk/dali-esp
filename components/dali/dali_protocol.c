@@ -101,6 +101,28 @@ static const DaliCommandInfo s_command_table[] = {
     CMD(DALI_CMD_QUERY_DEVICE_CONTENT_DTR2, "QUERY CONTENT DTR2 (device)", 0x38u, 0x38u, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_UINT8, false, true),
     CMD(DALI_CMD_START_QUIESCENT_MODE, "START QUIESCENT MODE", 0x1Du, 0x1Du, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_NONE, true, true),
     CMD(DALI_CMD_STOP_QUIESCENT_MODE, "STOP QUIESCENT MODE", 0x1Eu, 0x1Eu, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_NONE, true, true),
+    /* Takes the address from DTR0, encoded as (a << 1) | 1 exactly as the
+     * Part 102 form does — unlike the Part 103 *special* PROGRAM SHORT ADDRESS,
+     * which takes the raw 6-bit value. The two are different commands in
+     * different spaces; see dali_protocol.md. */
+    CMD(DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0, "SET SHORT ADDRESS DTR0 (device)", 0x14u, 0x14u, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_NONE, true, true),
+    CMD(DALI_CMD_DEVICE_TERMINATE, "TERMINATE (device)", 0x00u, 0x00u, DALI_CMD_FRAME_24BIT_SPECIAL, DALI_RESP_NONE, false, true),
+    /*
+     * The Part 103 addressing specials. Opcode numbers are not the Part 102
+     * ones and two of the encodings differ in ways that fail silently; see
+     * dali_protocol.md and the notes on DALI_CMD_DEVICE_INITIALISE and
+     * DALI_CMD_DEVICE_PROGRAM_SHORT_ADDRESS in dali_protocol.h.
+     */
+    CMD(DALI_CMD_DEVICE_INITIALISE, "INITIALISE (device)", 0x01u, 0x01u, DALI_CMD_FRAME_24BIT_SPECIAL, DALI_RESP_NONE, true, true),
+    CMD(DALI_CMD_DEVICE_RANDOMISE, "RANDOMISE (device)", 0x02u, 0x02u, DALI_CMD_FRAME_24BIT_SPECIAL, DALI_RESP_NONE, true, true),
+    CMD(DALI_CMD_DEVICE_COMPARE, "COMPARE (device)", 0x03u, 0x03u, DALI_CMD_FRAME_24BIT_SPECIAL, DALI_RESP_YES_NO, false, true),
+    CMD(DALI_CMD_DEVICE_WITHDRAW, "WITHDRAW (device)", 0x04u, 0x04u, DALI_CMD_FRAME_24BIT_SPECIAL, DALI_RESP_NONE, false, true),
+    CMD(DALI_CMD_DEVICE_SEARCH_ADDRH, "SEARCH ADDRH (device)", 0x05u, 0x05u, DALI_CMD_FRAME_24BIT_SPECIAL, DALI_RESP_NONE, false, true),
+    CMD(DALI_CMD_DEVICE_SEARCH_ADDRM, "SEARCH ADDRM (device)", 0x06u, 0x06u, DALI_CMD_FRAME_24BIT_SPECIAL, DALI_RESP_NONE, false, true),
+    CMD(DALI_CMD_DEVICE_SEARCH_ADDRL, "SEARCH ADDRL (device)", 0x07u, 0x07u, DALI_CMD_FRAME_24BIT_SPECIAL, DALI_RESP_NONE, false, true),
+    CMD(DALI_CMD_DEVICE_PROGRAM_SHORT_ADDRESS, "PROGRAM SHORT ADDRESS (device)", 0x08u, 0x08u, DALI_CMD_FRAME_24BIT_SPECIAL, DALI_RESP_NONE, false, true),
+    CMD(DALI_CMD_DEVICE_VERIFY_SHORT_ADDRESS, "VERIFY SHORT ADDRESS (device)", 0x09u, 0x09u, DALI_CMD_FRAME_24BIT_SPECIAL, DALI_RESP_YES_NO, false, true),
+    CMD(DALI_CMD_DEVICE_QUERY_SHORT_ADDRESS, "QUERY SHORT ADDRESS (device)", 0x0Au, 0x0Au, DALI_CMD_FRAME_24BIT_SPECIAL, DALI_RESP_UINT8, false, true),
 
     CMD(DALI_CMD_QUERY_INSTANCE_TYPE, "QUERY INSTANCE TYPE", 0x80u, 0x80u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
     CMD(DALI_CMD_QUERY_RESOLUTION, "QUERY RESOLUTION", 0x81u, 0x81u, DALI_CMD_FRAME_24BIT_INST, DALI_RESP_UINT8, false, true),
@@ -405,6 +427,25 @@ static DaliCommandId dtr_data_command_id(DaliDtrRegister reg)
         case DALI_DTR2: return DALI_CMD_DTR2_DATA;
         default:        return DALI_CMD_COUNT;
     }
+}
+
+DaliError dali_build_device_special(DaliCommandId id,
+                                    uint8_t param,
+                                    DaliFrame *out)
+{
+    if (out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    const DaliCommandInfo *cmd = dali_command_lookup(id);
+    if (cmd == NULL ||
+        cmd->frame_kind != DALI_CMD_FRAME_24BIT_SPECIAL ||
+        cmd->opcode_first != cmd->opcode_last) {
+        return DALI_ERR_INVALID;
+    }
+
+    *out = make_control_device_special(cmd->opcode_first, param);
+    return DALI_OK;
 }
 
 DaliError dali_build_special(DaliCommandId id,

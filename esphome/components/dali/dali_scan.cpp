@@ -479,6 +479,25 @@ static void scan_task(void *arg) {
             }
         }
     }
+    if (inventory.undecodable_device_count > 0u) {
+        /*
+         * The Part 103 device address space, which is independent of the gear
+         * one. Nothing reserves these -- there is no control-device
+         * commissioning to reserve them from -- so the warning is the whole
+         * remedy: the address is occupied by something unreadable rather than
+         * empty, which is what the device list above would otherwise imply.
+         */
+        ESP_LOGW(TAG, "%u device address(es) answered undecodably; likely "
+                      "control devices sharing an address",
+                 (unsigned)inventory.undecodable_device_count);
+        for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+            const DaliDiscoveryDeviceInfo *d =
+                dali_discovery_inventory_get(&inventory, addr);
+            if (d != nullptr && d->has_undecodable_device_activity) {
+                ESP_LOGW(TAG, "  d%u: contested (device space)", (unsigned)addr);
+            }
+        }
+    }
     log_inventory_json(&inventory);
     component->set_scan_level_profile_snapshot(&inventory);
     bool group_data_complete = rebuild_group_membership(&inventory, component);

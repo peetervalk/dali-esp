@@ -50,6 +50,20 @@ typedef struct {
      * result.
      */
     bool                     has_undecodable_activity;
+    /*
+     * The same thing one address space over: the Part 103 control-device probe
+     * drew reply-window activity that did not decode. Two control devices
+     * sharing a device short address is the expected cause.
+     *
+     * Tracked separately because the two spaces are independent -- a control
+     * device at numeric address 7 and control gear at numeric address 7 are
+     * different devices -- so this must never reach the control-gear
+     * free-address mask. It reserves the device address in
+     * dali_device_commissioning_used_mask_from_inventory(), for the reason the
+     * gear mask reserves its own: something answered, so the address is taken
+     * even though nothing could be read from it.
+     */
+    bool                     has_undecodable_device_activity;
     bool                     has_status;
     uint8_t                  status;
     bool                     has_groups;
@@ -73,6 +87,18 @@ typedef struct {
     uint8_t                  instance_count;
     bool                     has_identity;  /* Part 102 control-gear Bank 0 */
     DaliMemoryBank0Identity  identity;
+    /*
+     * Part 103 control-device Bank 0, read from the device address space.
+     *
+     * Separate from `identity` and never a fallback for it. A unit that is both
+     * control gear and a control device answers each space from its own Bank 0,
+     * and the two were observed reporting different GTINs and different
+     * identification numbers on the 2k bus — so these two fields at one array
+     * index are not evidence of one physical unit, and a restore must match each
+     * space against its own.
+     */
+    bool                     has_device_identity;
+    DaliMemoryBank0Identity  device_identity;
     bool                     has_scene_levels;
     uint8_t                  scene_levels[DALI_SCENE_COUNT];
     bool                     has_dt6;
@@ -92,6 +118,10 @@ typedef struct {
     uint8_t                 found_count;
     /* Addresses whose gear query drew undecodable reply-window activity. */
     uint8_t                 undecodable_count;
+    /* The same for the control-device probe, in the separate device address
+     * space. Counted apart from undecodable_count so neither number implies
+     * anything about the other space. */
+    uint8_t                 undecodable_device_count;
     DaliDiscoveryDeviceInfo devices[DALI_SHORT_ADDRESS_COUNT];
 } DaliDiscoveryInventory;
 
@@ -255,11 +285,92 @@ DaliError dali_discovery_query_dt6_dimming_curve(
     uint8_t addr,
     DaliDimCurve *curve_out);
 const char *dali_discovery_device_type_name(uint8_t type);
+/*
+ * Settle after a broadcast START QUIESCENT MODE: two extended frame durations,
+ * long enough for an event already on the wire to finish before the caller
+ * starts transmitting.
+ *
+ * Defined here rather than in dali_commissioning.h because the commissioning
+ * walk and the scan take the same bracket, and one copy is what stops them
+ * drifting. DALI_COMMISSIONING_QUIESCENT_SETTLE_MS is kept as an alias.
+ */
+#define DALI_DISCOVERY_QUIESCENT_SETTLE_MS \
+    ((2u * DALI_EXTENDED_FRAME_BITS * DALI_BIT_US) / 1000u)
+
+/*
+ * Optional scan behaviour. A NULL options pointer means "exactly as before",
+ * which is what every existing caller passes.
+ */
+typedef struct {
+    /*
+     * Broadcast START QUIESCENT MODE for the duration of the walk and STOP on
+     * the way out.
+     *
+     * A 64-address scan is minutes of back-to-back TX, and a control-device
+     * event arriving inside that is dropped for the state it arrived in. On a
+     * bus with a live occupancy sensor that is most of them, which is what made
+     * the scan's ignored-RX note track whether anyone was in the room.
+     * Silencing the devices for the walk removes the traffic rather than
+     * counting it.
+     *
+     * Off by default, and deliberately: while it is on the installation reports
+     * no occupancy at all, so it belongs to an operator-driven scan with
+     * somebody standing there, not to an unattended periodic one. Requires a
+     * transport that can delay; without one the bracket is refused rather than
+     * applied without its settle, and the result says so.
+     */
+    bool quiesce_control_devices;
+} DaliDiscoveryScanOptions;
+
+/*
+ * What the quiescence bracket did, filled in on every exit path.
+ *
+ * The fields mirror the ones DaliCommissioningResult carries for the same
+ * bracket so that one reporting routine can serve both. Silence is the normal
+ * case: the two worth a line are a START that never went out, and a release
+ * that failed and so left the installation's sensors quiet.
+ */
+typedef struct {
+    bool      quiescence_requested;
+    bool      quiescence_started;
+    bool      quiescence_release_attempted;
+    bool      quiescent_state_unknown;
+    DaliError quiescence_error;
+} DaliDiscoveryScanResult;
+
+/*
+ * The quiescence bracket on its own. Exposed because the commissioning walk
+ * takes the same one, and because the release has to be reachable from a
+ * caller's own cleanup path.
+ *
+ * Nothing acknowledges either frame, so success means transmitted, not
+ * quiesced: a bus with no control devices reports exactly the same.
+ * transmitted_out is set separately from the return value because the settle
+ * that follows can fail on its own, and the release must still run.
+ */
+DaliError dali_discovery_quiescence_start(
+    const DaliDiscoveryTransport *transport,
+    bool *transmitted_out);
+DaliError dali_discovery_quiescence_release(
+    const DaliDiscoveryTransport *transport);
+
 DaliError dali_discovery_scan(DaliDiscoveryInventory *inventory,
                               const DaliDiscoveryTransport *transport,
                               DaliDiscoveryFoundCb found_cb,
                               void *found_ctx,
                               uint8_t *found_out);
+
+/*
+ * The same walk with options. `options` and `result_out` may both be NULL, in
+ * which case this is dali_discovery_scan().
+ */
+DaliError dali_discovery_scan_ex(DaliDiscoveryInventory *inventory,
+                                 const DaliDiscoveryTransport *transport,
+                                 DaliDiscoveryFoundCb found_cb,
+                                 void *found_ctx,
+                                 uint8_t *found_out,
+                                 const DaliDiscoveryScanOptions *options,
+                                 DaliDiscoveryScanResult *result_out);
 
 DaliError dali_discovery_query_input_device(const DaliDiscoveryTransport *transport,
                                             uint8_t addr,

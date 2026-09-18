@@ -126,6 +126,24 @@ void DaliShellServer::bus_release_cb(void *ctx)
     }
 }
 
+bool DaliShellServer::snapshot_save_cb(void *ctx, const uint8_t *buf, uint32_t len)
+{
+    auto *self = static_cast<DaliShellServer *>(ctx);
+    if (self == nullptr || self->parent_ == nullptr || buf == nullptr) {
+        return false;
+    }
+    return self->parent_->save_address_backup(buf, len);
+}
+
+bool DaliShellServer::snapshot_load_cb(void *ctx, uint8_t *buf, uint32_t *len)
+{
+    auto *self = static_cast<DaliShellServer *>(ctx);
+    if (self == nullptr || self->parent_ == nullptr || buf == nullptr || len == nullptr) {
+        return false;
+    }
+    return self->parent_->load_address_backup(buf, len);
+}
+
 /*
  * `export config`. The `shell:` sub-block is this object's own configuration,
  * so it is filled in here rather than looked up: DaliComponent has no
@@ -177,6 +195,30 @@ void DaliShellServer::config_applied_cb(void *ctx, DaliTarget target,
         return;
     }
     self->parent_->on_config_applied(target, id, param);
+}
+
+/* `address <from> set <to>` moved one gear, and both ends were confirmed on the
+ * bus. Unlike config_applied_cb() this names where the gear went, so caches can
+ * follow it rather than being dropped. */
+void DaliShellServer::short_address_moved_cb(void *ctx, uint8_t from, uint8_t to)
+{
+    auto *self = static_cast<DaliShellServer *>(ctx);
+    if (self == nullptr || self->parent_ == nullptr) {
+        return;
+    }
+    self->parent_->on_short_address_moved(from, to);
+}
+
+/* `address <aN> clear` took the address away and `aN` was confirmed silent.
+ * The mirror of short_address_moved_cb(): nothing follows the gear, because it
+ * has no address to be followed to. */
+void DaliShellServer::short_address_cleared_cb(void *ctx, uint8_t addr)
+{
+    auto *self = static_cast<DaliShellServer *>(ctx);
+    if (self == nullptr || self->parent_ == nullptr) {
+        return;
+    }
+    self->parent_->on_short_address_cleared(addr);
 }
 
 /* ── Accept loop ─────────────────────────────────────────────────────────── */
@@ -263,7 +305,11 @@ void DaliShellServer::serve(int client_fd)
     session.hooks.bus_release = bus_release_cb;
     session.hooks.inventory_changed = inventory_changed_cb;
     session.hooks.config_applied = config_applied_cb;
+    session.hooks.short_address_moved = short_address_moved_cb;
+    session.hooks.short_address_cleared = short_address_cleared_cb;
     session.hooks.export_config = export_config_cb;
+    session.hooks.snapshot_save = snapshot_save_cb;
+    session.hooks.snapshot_load = snapshot_load_cb;
     session.hooks.ctx = this;
     session.policy = allow_commissioning_ ? DALI_SHELL_ALLOW_ALL : DALI_SHELL_ALLOW_RESET;
     session.aborted = aborted_cb;

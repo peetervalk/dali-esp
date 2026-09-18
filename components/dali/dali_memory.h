@@ -170,6 +170,13 @@ DaliError dali_memory_read_byte(const DaliMemoryTransport *transport,
  * Runs through dali_transport_run_sequence_atomic() in chunks of at most
  * DALI_MEMORY_MAX_SEQUENCE_READ_BYTES, each chunk re-issuing its own DTR1/DTR0
  * setup. A frame-only transport is rejected before any frame is sent.
+ *
+ * A chunk is atomic, so one dropped reply -- or a device that will not carry
+ * DTR0's auto-increment across a multi-read sequence -- fails the whole chunk.
+ * A failed chunk of more than one byte is therefore re-read a byte at a time,
+ * each byte with its own DTR1/DTR0, and the error is returned only if a
+ * single-byte read fails as well. buf holds whatever was read up to the
+ * failing byte.
  */
 DaliError dali_memory_read_bytes(const DaliMemoryTransport *transport,
                                  uint8_t                    short_addr,
@@ -185,3 +192,30 @@ DaliError dali_memory_read_bytes(const DaliMemoryTransport *transport,
 DaliError dali_memory_read_bank0_identity(const DaliMemoryTransport *transport,
                                           uint8_t                    short_addr,
                                           DaliMemoryBank0Identity   *out);
+
+/*
+ * The Part 103 control-device forms of the two reads above. Same chunking, same
+ * Bank 0 layout; they differ only in sending the 24-bit control-device framing.
+ *
+ * Verified on hardware 2026-09-02: a Steinel HF 360 II at device address 0
+ * returned a Bank 0 whose GTIN decodes to 4007841064280, a GTIN-13 whose
+ * 4007841 prefix is the manufacturer's own. A mis-stepped DTR0 auto-increment
+ * could not have produced that by chance, so both the read and its
+ * auto-increment are confirmed rather than merely host-tested.
+ *
+ * Note that a control device's identity is its own. A physical unit that is
+ * both control gear and a control device answers each space from a separate
+ * Bank 0, and on the bus tested those reported different GTINs and different
+ * identification numbers — so nothing may infer that gear address N and device
+ * address N are one unit.
+ */
+DaliError dali_memory_read_device_bytes(const DaliMemoryTransport *transport,
+                                        uint8_t                    short_addr,
+                                        uint8_t                    bank,
+                                        uint8_t                    offset,
+                                        uint8_t                   *buf,
+                                        uint8_t                    count);
+
+DaliError dali_memory_read_device_bank0_identity(const DaliMemoryTransport *transport,
+                                                 uint8_t                    short_addr,
+                                                 DaliMemoryBank0Identity   *out);

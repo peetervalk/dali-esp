@@ -8,6 +8,7 @@ extern "C" {
 #include "../../../components/dali/dali_frame.h"  // DaliError
 #include "../../../components/dali/dali_cli.h"    // DaliCliTokens
 #include "../../../components/dali/dali_discovery.h"
+#include "../../../components/dali/dali_snapshot.h"  // DALI_SNAPSHOT_BLOB_MAX
 }
 
 #include <atomic>
@@ -229,6 +230,8 @@ class DaliComponent : public Component {
   // the other forgets. Callable from a worker task; cache writes Core 0 owns
   // are deferred to loop().
   void on_config_applied(DaliTarget target, DaliCommandId id, uint8_t param);
+  void on_short_address_moved(uint8_t from, uint8_t to);
+  void on_short_address_cleared(uint8_t addr);
   // Called by the scan task before on_scan_complete(). Copies only control-gear
   // profile metadata; scan_done_'s release/acquire handoff publishes the copy.
   void set_scan_level_profile_snapshot(const DaliDiscoveryInventory *inventory);
@@ -266,6 +269,18 @@ class DaliComponent : public Component {
                           const DaliShellConfigInfo *shell,
                           const DaliDiscoveryInventory *inventory,
                           DaliShellInputLookupFn input_lookup);
+
+  // Address-backup persistence for the shell's `backup`/`restore` verbs. The
+  // shell owns the snapshot and its codec; these store and return the opaque
+  // blob. `len` is at most DALI_SNAPSHOT_BLOB_MAX on save, and on load carries
+  // the buffer size in and the stored size out. False from load means nothing
+  // is stored, which is an ordinary cold start rather than a fault.
+  //
+  // Both run on the shell task. The preferences API is Core 0 only, so the
+  // write is handed to loop() the way group membership is rather than being
+  // issued from here.
+  bool save_address_backup(const uint8_t *buf, uint32_t len);
+  bool load_address_backup(uint8_t *buf, uint32_t *len);
 
  protected:
   uint8_t tx_pin_{18};
@@ -342,6 +357,8 @@ class DaliComponent : public Component {
   // verified mask, saved to flash whenever a scan or console group edit dirties
   // the table so it survives reboots. Loaded once in setup().
   ESPPreferenceObject group_pref_;
+  // Address backup for `backup`/`restore`. Opaque blob owned by the shell.
+  ESPPreferenceObject backup_pref_;
   // Load persisted membership into the runtime table; true if valid data applied.
   bool load_group_membership();
   // Write the current runtime table to flash.

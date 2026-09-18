@@ -27,6 +27,12 @@ typedef enum {
     DALI_CMD_FRAME_SPECIAL    = 2,
     DALI_CMD_FRAME_24BIT_INST = 3,
     DALI_CMD_FRAME_24BIT_DEV  = 4,
+    /*
+     * IEC 62386-103 special commands: a 24-bit frame whose first byte is the
+     * fixed 0xC1 special-command address rather than a device address.
+     * Distinct from DALI_CMD_FRAME_24BIT_DEV, which addresses devices.
+     */
+    DALI_CMD_FRAME_24BIT_SPECIAL = 5,
 } DaliCommandFrameKind;
 
 typedef enum {
@@ -173,6 +179,67 @@ typedef enum {
     DALI_CMD_START_QUIESCENT_MODE,
     DALI_CMD_STOP_QUIESCENT_MODE,
 
+    /*
+     * IEC 62386-103 TERMINATE, the Part 103 special-command counterpart of
+     * DALI_CMD_TERMINATE. Closes a control device's own addressing state.
+     *
+     * It exists so that control-gear commissioning can close a window it opened
+     * by accident: a control device that observes the Part 102 INITIALISE can
+     * enter its own addressing state, generate a random address, and answer
+     * Part 102 COMPARE as gear that is not there. Quiescent mode does not cover
+     * that -- it stops a device transmitting on its own initiative, not
+     * responding to a query it was addressed with.
+     */
+    DALI_CMD_DEVICE_TERMINATE,
+
+    /*
+     * Part 103 device-level SET SHORT ADDRESS DTR0 (opcode 0x14, instance byte
+     * 0xFE, send-twice). The control-device counterpart of the Part 102 command
+     * of the same name, and what lets a control device be re-addressed without
+     * opening an addressing window — which is what makes a device-space restore
+     * possible at all.
+     *
+     * Its parameter is the *encoded* address (a << 1) | 1, matching the Part 102
+     * form. Do not confuse it with the Part 103 special PROGRAM SHORT ADDRESS,
+     * which takes the raw 6-bit value; sending one encoding to the other command
+     * programs the wrong address and reports nothing.
+     */
+    DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0,
+
+    /*
+     * The Part 103 addressing specials, opcodes 0x01..0x0A. Built with
+     * dali_build_device_special(), never dali_build_special(): the two spaces
+     * share command *names* and even some opcode numbers while meaning
+     * different things, which is why they deliberately do not share a builder.
+     *
+     * Two encodings differ from their Part 102 namesakes, and both fail quietly
+     * rather than loudly — the frame is well formed, it just addresses or
+     * programs something other than what was meant:
+     *
+     *  - DALI_CMD_DEVICE_INITIALISE takes a device *address byte*, where 0xFF
+     *    selects every control device and 0x00 selects only those without a
+     *    short address. That is inverted against Part 102 INITIALISE, whose
+     *    0x00 means all gear and 0xFF means unaddressed gear.
+     *
+     *  - DALI_CMD_DEVICE_PROGRAM_SHORT_ADDRESS takes the raw 6-bit address
+     *    0..63. The Part 102 special of the same name takes (a << 1) | 1, so
+     *    sending the Part 102 encoding here programs address 2n+1. Note that
+     *    DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0 above *does* use the encoded
+     *    form, because it reads DTR0 rather than carrying the address itself —
+     *    the two device commands disagree with each other, not just with
+     *    Part 102.
+     */
+    DALI_CMD_DEVICE_INITIALISE,
+    DALI_CMD_DEVICE_RANDOMISE,
+    DALI_CMD_DEVICE_COMPARE,
+    DALI_CMD_DEVICE_WITHDRAW,
+    DALI_CMD_DEVICE_SEARCH_ADDRH,
+    DALI_CMD_DEVICE_SEARCH_ADDRM,
+    DALI_CMD_DEVICE_SEARCH_ADDRL,
+    DALI_CMD_DEVICE_PROGRAM_SHORT_ADDRESS,
+    DALI_CMD_DEVICE_VERIFY_SHORT_ADDRESS,
+    DALI_CMD_DEVICE_QUERY_SHORT_ADDRESS,
+
     DALI_CMD_COUNT,
 } DaliCommandId;
 
@@ -259,6 +326,17 @@ DaliError dali_build_dapc_mask(DaliAddressType type,
                                DaliFrame *out);
 
 /* Build a special command frame. */
+/*
+ * Build an IEC 62386-103 special command: (0xC1 << 16) | (opcode << 8) | param.
+ *
+ * Separate from dali_build_special(), which builds the 16-bit Part 102 form.
+ * The two spaces share names and even opcode numbers while meaning different
+ * things, so they deliberately do not share a builder.
+ */
+DaliError dali_build_device_special(DaliCommandId id,
+                                    uint8_t param,
+                                    DaliFrame *out);
+
 DaliError dali_build_special(DaliCommandId id,
                              uint8_t param,
                              DaliFrame *out);

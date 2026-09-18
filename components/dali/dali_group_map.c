@@ -59,6 +59,30 @@ bool dali_group_map_forget(DaliGroupMap *map, uint8_t addr, uint8_t group)
     return changed;
 }
 
+bool dali_group_map_move(DaliGroupMap *map, uint8_t from, uint8_t to)
+{
+    if (map == NULL ||
+        from >= DALI_SHORT_ADDRESS_COUNT ||
+        to >= DALI_SHORT_ADDRESS_COUNT ||
+        from == to) {
+        return false;
+    }
+
+    const uint64_t from_bit = (uint64_t)1u << from;
+    const uint64_t to_bit   = (uint64_t)1u << to;
+    bool changed = false;
+
+    for (uint8_t g = 0u; g < DALI_GROUP_COUNT; g++) {
+        if ((map->members[g] & from_bit) == 0u) {
+            continue;
+        }
+        map->members[g] &= ~from_bit;
+        map->members[g] |= to_bit;
+        changed = true;
+    }
+    return changed;
+}
+
 bool dali_group_map_scan_covers_known_members(const DaliGroupMap *map,
                                               uint64_t observed_gear)
 {

@@ -74,8 +74,15 @@ class DaliShellServer : public Component {
                                DaliShellInputLookupFn input_lookup);
   static void inventory_changed_cb(void *ctx,
                                    const DaliDiscoveryInventory *inventory);
+  /* Address-backup persistence. The shell owns the snapshot and its codec;
+   * these move the bytes to and from flash, which is the integration's to own
+   * because the preferences API is. */
+  static bool snapshot_save_cb(void *ctx, const uint8_t *buf, uint32_t len);
+  static bool snapshot_load_cb(void *ctx, uint8_t *buf, uint32_t *len);
   static void config_applied_cb(void *ctx, DaliTarget target, DaliCommandId id,
                                 uint8_t param);
+  static void short_address_moved_cb(void *ctx, uint8_t from, uint8_t to);
+  static void short_address_cleared_cb(void *ctx, uint8_t addr);
 
   DaliComponent *parent_{nullptr};
   uint16_t       port_{2323};

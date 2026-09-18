@@ -184,9 +184,12 @@ static const DaliCliCommandSpec s_commands[] = {
     { DALI_CLI_CMD_SPECIAL, "special", "<name> [param]", "special/broadcast command", 1u, 2u, NULL },
     { DALI_CLI_CMD_CONFIG, "config", TARGET_ARG " <config-name> [param]", "addressed configuration command", 2u, 3u, NULL },
     { DALI_CLI_CMD_CONFIG_DTR0, "config-dtr0", TARGET_ARG " <config-name> <dtr0> [param]", "load DTR0 and configure atomically", 3u, 4u, NULL },
+    { DALI_CLI_CMD_ADDRESS, "address", "<aN|dN> set <aM|dM> | clear; <aN> add <gN> | remove <gN>", "change what one gear or control device answers to, verified", 2u, 3u,
+      "set add remove clear" },
 
     { DALI_CLI_CMD_MEMREAD, "memread", "<addr> <bank> <offset> [count]", "control-gear memory read (Part 102)", 3u, 4u, NULL },
     { DALI_CLI_CMD_MEMINFO, "meminfo", "<addr>", "control-gear Bank 0 identity", 1u, 1u, NULL },
+    { DALI_CLI_CMD_DEVINFO, "devinfo", "<addr>", "control-device Bank 0 identity (Part 103)", 1u, 1u, NULL },
     { DALI_CLI_CMD_DEVMEM, "devmem", "read|write <addr> <bank> <offset> [count|value]", "control-device memory (Part 103)", 4u, 5u,
       "read write" },
     { DALI_CLI_CMD_DTRCHECK, "dtrcheck", "<addr> <0|1|2> <0-255>", "load a control-device DTR and read it back", 3u, 3u, NULL },
@@ -202,8 +205,8 @@ static const DaliCliCommandSpec s_commands[] = {
     { DALI_CLI_CMD_SCAN, "scan", "", "scan short addresses, brief output", 0u, 0u, NULL },
     { DALI_CLI_CMD_DISCOVER, "discover", "", "scan short addresses, full output", 0u, 0u, NULL },
     { DALI_CLI_CMD_INVENTORY, "inventory", "", "print the last discovered inventory", 0u, 0u, NULL },
-    { DALI_CLI_CMD_COMMISSION, "commission", "unaddressed [first-addr] [max-devices]", "assign short addresses", 1u, 3u,
-      "unaddressed" },
+    { DALI_CLI_CMD_COMMISSION, "commission", "unaddressed|devices [first-addr] [max-devices]", "assign short addresses (gear, or control devices)", 1u, 3u,
+      "unaddressed devices" },
     { DALI_CLI_CMD_INSTANCES, "instances", "<addr>", "input-device instance types", 1u, 1u, NULL },
     { DALI_CLI_CMD_SENSOR, "sensor", "poll <addr> [instance]", "read input values", 2u, 3u, "poll" },
     { DALI_CLI_CMD_SMOKE, "smoke", "<addr>", "short read/write/read-back check", 1u, 1u, NULL },
@@ -214,6 +217,10 @@ static const DaliCliCommandSpec s_commands[] = {
     { DALI_CLI_CMD_IDENTIFY, "identify", "<addr>", "blink one short-addressed lamp", 1u, 1u, NULL },
     { DALI_CLI_CMD_QUIESCENT, "quiescent", "on|off <addr|all>", "Part 103 quiescent mode: silence control-device events", 2u, 2u,
       "on off" },
+    { DALI_CLI_CMD_BACKUP, "backup", "save|status|export|import <begin|HEX|end|abort>", "record which physical unit holds which short address", 1u, 3u,
+      "save export status import" },
+    { DALI_CLI_CMD_RESTORE, "restore", "plan|apply|groups [apply]", "put short addresses, or group membership, back the way the backup recorded them", 1u, 2u,
+      "plan apply groups" },
 };
 
 #define CLI_COMMAND_COUNT ((uint8_t)(sizeof(s_commands) / sizeof(s_commands[0])))
@@ -456,6 +463,47 @@ bool dali_cli_parse_u8(const char *text, unsigned max, uint8_t *out)
     return true;
 }
 
+bool dali_cli_parse_hex_bytes(const char *text,
+                              uint8_t    *out,
+                              uint32_t    capacity,
+                              uint32_t   *len)
+{
+    if (text == NULL || out == NULL || len == NULL || *len > capacity) {
+        return false;
+    }
+
+    size_t chars = 0u;
+    while (text[chars] != '\0') {
+        chars++;
+    }
+    if (chars == 0u || (chars % 2u) != 0u) {
+        return false;
+    }
+    if ((chars / 2u) > (size_t)(capacity - *len)) {
+        return false;
+    }
+
+    /* Validate the whole token before storing any of it, so a bad character
+     * half way along does not leave the first half appended. */
+    for (size_t i = 0u; i < chars; i++) {
+        unsigned nibble;
+        if (!cli_digit_value(text[i], 16u, &nibble)) {
+            return false;
+        }
+    }
+
+    uint32_t pos = *len;
+    for (size_t i = 0u; i < chars; i += 2u) {
+        unsigned hi;
+        unsigned lo;
+        (void)cli_digit_value(text[i], 16u, &hi);
+        (void)cli_digit_value(text[i + 1u], 16u, &lo);
+        out[pos++] = (uint8_t)((hi << 4) | lo);
+    }
+    *len = pos;
+    return true;
+}
+
 bool dali_cli_parse_target(const char *text, DaliTarget *out)
 {
     if (text == NULL || out == NULL) {
@@ -495,6 +543,14 @@ bool dali_cli_parse_short_addr(const char *text, uint8_t *out)
     return dali_cli_parse_u8(text[0] == 'a' ? text + 1 : text,
                              DALI_MAX_SHORT_ADDRESS,
                              out);
+}
+
+bool dali_cli_parse_device_addr(const char *text, uint8_t *out)
+{
+    if (text == NULL || text[0] != 'd') {
+        return false;
+    }
+    return dali_cli_parse_u8(text + 1, DALI_MAX_SHORT_ADDRESS, out);
 }
 
 bool dali_cli_parse_instance(const char *text, uint8_t *out)

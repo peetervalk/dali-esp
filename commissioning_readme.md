@@ -7,7 +7,7 @@ another room, an address that has to be freed, gear coming off the wall — skip
 to [Change a bus that is already
 commissioned](#5-change-a-bus-that-is-already-commissioned).
 
-**Last reviewed:** 2026-08-25
+**Last reviewed:** 2026-09-03
 
 `dali-starter.yaml` is mostly a shim: it brings up the bus and opens the
 diagnostic shell on a TCP port. The shell is the tool. The buttons and the
@@ -105,15 +105,23 @@ occupancy sensor or wall switch cannot put an event frame into a COMPARE reply
 window, where frame-like activity reads as YES and invents gear that is not
 there. Only control devices are affected; lights keep working throughout.
 
+A Part 103 `TERMINATE` goes out with it — before `INITIALISE`, again just after,
+and once more on the way out. Quiescence stops a sensor talking; this stops one
+that quietly entered its own addressing state when it saw the gear `INITIALISE`
+go past, and would then answer `COMPARE` as a fixture that does not exist. It is
+never acknowledged by anything, so the shell mentions it only if it could not be
+sent.
+
 Two consequences worth knowing. The release is unconditional, so a run also
 releases a quiescence you started by hand with `quiescent on all`. And if the
 release cannot be transmitted, the shell says so explicitly — control devices may
 stay silent, and `quiescent off all` is the fix.
 
 **It is still dependable only with a single unaddressed device on the bus.** The
-reply-activity and cleanup changes described here are not a multi-gear HIL result.
-Commission new gear one piece at a time until the equal-random-address and
-mixed-device cases below have been implemented and exercised on a real bus.
+reply-activity, cleanup, and equal-random-address handling described here are
+host-tested, not a multi-gear HIL result: the collision classification they all
+rest on has never met a real overlapping reply. Commission new gear one piece at
+a time until that has been exercised on a real bus.
 
 Before the walk starts, `commission` pre-scans the bus to learn which short
 addresses are already taken. An address that answers that pre-scan with
@@ -130,8 +138,23 @@ Scan complete: 3 device(s) found.
     a7: contested
 ```
 
-Resolving a contested address needs a hardware pass — pull one fixture, or
-re-address the pair one at a time. Nothing on the bus can separate them remotely.
+Nothing on the bus can separate two units *while they share the address* — no
+query can be answered by one of them alone. What can be done is to stop them
+sharing it. `address a7 clear` de-addresses both at once, and `commission
+unaddressed` then gives them distinct addresses, separating them by random
+address the way the walk separates anything else:
+
+```text
+address a7 clear
+commission unaddressed
+```
+
+That costs the original assignment, which was never recoverable: a contested
+address is not in any backup, because no identity can be read through the
+collision. Both units come back at whatever the walk hands them, and `identify`
+is how you work out which fixture is which afterwards. A hardware pass — pull
+one fixture, re-address the other — is still the alternative if you need one of
+them to keep `a7` specifically.
 
 COMPARE now distinguishes silence from observed but undecodable traffic:
 
@@ -186,15 +209,155 @@ A failed cleanup reports `cleanup terminate ERR ... initialisation state
 unknown`; the firmware also logs the final primary and cleanup state, so a TCP
 disconnect does not make that result disappear with the socket.
 
+#### When two gear share a random address
+
+RANDOMISE gives each piece of gear a 24-bit number. Two gear drawing the same
+one is roughly a 1-in-100,000 event on a twenty-fixture bus — rare, but the walk
+has no way to see it coming: the pair is selected together, programmed together,
+and withdrawn together, and every command succeeds.
+
+`VERIFY SHORT ADDRESS` is where it shows. Exactly one device is selected when
+VERIFY runs, so one reply decodes and two overlap into something that does not.
+The run reads that as "more than one device answered", takes the short address
+back off both with PROGRAM SHORT ADDRESS `0xFF`, drops the pair out of the
+search, and carries on:
+
+```text
+commission: found random=0x4C1E90 -> short 5
+commission: random=0x4C1E90 answered from two gear; short 5 taken back, both left unaddressed
+commission: found random=0x8823A1 -> short 5
+commission: assigned short 5 (count=1)
+```
+
+Note that short 5 is reused rather than skipped — the pair gave it back, so the
+next fixture found takes it.
+
+At the end:
+
+```text
+commission: 1 random address(es) held by two gear
+    random 0x4C1E90
+  note: each pair was de-addressed and left out of this run.
+  They are unaddressed gear now, not missing gear. Run 'commission unaddressed'
+  again - they re-randomise, and colliding twice is a 1-in-16M event.
+```
+
+**Run it again.** That is the whole remedy — no hardware pass, nothing to
+unplug. The pair is back to being unaddressed gear, which is the case
+`commission unaddressed` exists for, and the second run draws them new random
+numbers.
+
+Two things this does not claim. The de-address is transmitted, not confirmed:
+two devices answering QUERY SHORT ADDRESS with the same "no address" reply
+collide exactly as they did before, so there is nothing clean to read back. And
+the detection can fire on a single piece of gear with a marginal reply waveform.
+That costs an extra search round and possibly a different short address than you
+expected — it does not damage anything, which is why the run acts on it rather
+than stopping to ask.
+
+If the pair cannot be dropped out of the search — WITHDRAW refused, or gear that
+ignores it — the run stops rather than searching the same address forever, and
+says so. That is the one case where two gear may still be sharing a short
+address; the post-scan below is what tells you.
+
+#### Reading the post-scan
+
+A run that assigned anything, or that hit a duplicate, re-scans the bus
+afterwards and checks the result against what it thinks it did:
+
+```text
+commission: verifying with post-scan
+commission: post-scan found=18
+commission: post-scan confirmed 3 of 3 assignment(s)
+```
+
+`confirmed` counts assigned addresses that answered QUERY STATUS as control
+gear. Anything else is named:
+
+```text
+    a7: contested - two units answered as one
+commission: post-scan confirmed 2 of 3 assignment(s)
+  note: 1 assigned address(es) answered undecodably.
+  Two gear generated the same random address and were programmed together;
+  both hold that short address now and neither can be reached alone.
+  Separate them physically, then re-run the walk.
+```
+
+An assigned address answering undecodably means two gear hold it. Since the run
+itself now catches the equal-random-address case and hands the pair back
+unaddressed, seeing it here means the in-run detection missed — twins whose
+replies happened to decode cleanly — or the run reported that it could not drop
+a pair out of the search. The post-scan is the backstop for the first and the
+confirmation for the second. This one does need a hardware pass: pull one
+fixture, commission it alone, put it back.
+
+`assigned but silent in the post-scan` is the other failure. VERIFY confirmed the
+write, so the gear took the address and then did not answer the scan — a reply
+landing outside the attribution window, or gear that left the bus.
+
+Addresses that became contested *without* being assigned are listed separately.
+A run cannot program an address it never allocated, so that means the bus changed
+underneath the walk: another master, or gear that was mid-boot during the
+pre-scan. Contested addresses that were already there before the run are not
+reported here at all — they were held out of the free pool and never touched.
+
+One more line has no equivalent on a successful run:
+
+```text
+  note: address(es) occupied now that were free before and that this run
+  did not record as assignments:
+    a4: occupied, unrecorded
+```
+
+PROGRAM SHORT ADDRESS goes out before the walk records the assignment, and two
+of the abort paths sit between the two. A run that ends there leaves an
+addressed unit it never mentions — `a4` above is commissioned, and the run's own
+list does not say so. Nothing but this diff can see it.
+
+**A failed run gets the post-scan too**, which is the case it matters most in:
+the abort paths are the only ones that can leave a short address written but
+unrecorded, or — when the run reports it could not take a duplicate pair back —
+two units still sharing one. The scan is read-only, so it runs even when the
+cleanup TERMINATE could not be transmitted and the bus may still be in
+initialisation state; it says so when that is the case.
+
+`commission devices` checks itself the same way, in the control-device address
+space, and prints `d<N>` for the addresses it names. It takes the same
+START/STOP QUIESCENT MODE bracket as the gear walk.
+
+That last point reverses an earlier decision, and the reasoning is worth having.
+The device walk originally refused the bracket: quiescent mode silences control
+devices, and control devices are exactly what it searches for. But quiescent
+mode stops a device transmitting *on its own initiative* — it does not stop one
+answering a command it was addressed with, which you can see directly by running
+`discover` with `quiescent on` in force and watching devices and instances
+enumerate normally. So the silencing costs the walk nothing, while what it
+removes is the noise most likely to break it: a Part 103 walk searches the event
+sources themselves and asks about 25 `COMPARE` questions per device found, each
+with a reply window that a stray event frame turns into a false YES. Of the two
+walks, this is the one with more to gain from the bracket, not less.
+
+One part of that reasoning is still inference rather than observation: a device
+answering `COMPARE` from inside an open Part 103 addressing window, with no
+short address. Nothing in the clause separates that from the addressed-query
+case, and the broadcast address byte 0xFF does reach unaddressed devices, but
+the bus has not been asked that exact question. It is worth confirming in the
+same session as the first real `commission devices` run.
+
 The remaining commissioning work is explicit:
 
-- The cross-part TERMINATE guard is not implemented: a control device that
-  observes the Part 102 INITIALISE can still enter its own addressing state.
-  START/STOP QUIESCENT bracketing now runs, which stops a control device from
-  *transmitting* into the run, but a device that never received the broadcast is
-  unaffected and none of it is HIL-validated.
-- Two gear that generate the same 24-bit random address are not separated or
-  recovered today; they can be programmed and withdrawn together.
+- The cross-part TERMINATE guard now runs, alongside the START/STOP QUIESCENT
+  bracketing. The two cover different halves of the same problem: quiescence
+  stops a control device *transmitting* into the run, and the Part 103 TERMINATE
+  stops one sitting in its own addressing state and answering COMPARE as gear
+  that is not there — which is a state the Part 102 INITIALISE itself can put it
+  in. Neither reaches a device that never received the broadcast, and none of it
+  is HIL-validated. The reverse guard — bracketing control-device commissioning
+  with a Part 102 TERMINATE — is in place too, and is equally unvalidated.
+- Two gear that generate the same 24-bit random address are detected during the
+  run and sent back to being unaddressed, but they are not placed for you: a
+  second run is what gives them addresses. See "When two gear share a random
+  address" above. The detection has host vectors and no bus result.
 - DALI-2 priority/backoff and complete multi-master intervention handling remain
   open. Local atomic sequences do not stop another physical master.
 - Multi-gear, mixed Part 102/Part 103, cancellation-fault, and external-master
@@ -262,12 +425,13 @@ miss.
 
 | What changed on site | What to send |
 |---|---|
-| A fixture joins a room | `config a<N> add-group <G>` |
-| A fixture leaves a room | `config a<N> remove-group <G>` |
+| A fixture joins a room | `address a<N> add g<G>` |
+| A fixture leaves a room | `address a<N> remove g<G>` |
 | A whole room moves as one | `config g<S> add-group <D>`, then `config g<S> remove-group <S>` |
-| A fixture needs a different short address | `config-dtr0 a<N> set-short-address-dtr0 <encoded>` |
+| A fixture needs a different short address | `address a<N> set a<M>` |
 | A fixture is gone for good | `config-dtr0 a<N> set-short-address-dtr0 255`, then `group forget <N>` |
 | New gear on a bus that already works | `commission unaddressed` |
+| Anything that re-addresses in bulk | `backup save` first — see [Backup and restore](#backup-and-restore) |
 | The whole installation is being redone | Read [Starting over](#starting-over) before typing anything |
 
 Groups and short addresses live in each gear's own non-volatile memory, not in
@@ -298,6 +462,19 @@ query a5 groups-8-15     # bit N set means member of group N+8
 ```
 
 Moving one fixture from the hallway (group 1) to the kitchen (group 3):
+
+```text
+> address a5 add g3
+address: a5 is in g1 g3
+> address a5 remove g1
+address: a5 is in g3
+> max g3                 # it should light with the kitchen
+```
+
+`address` reads the membership back out of the gear after each edit and prints
+what it found. A group command is unacknowledged, so a driver that took the
+change and one that ignored it are identical from the bus until something asks —
+which is why the raw spelling below has you ask by hand:
 
 ```text
 query a5 groups-0-7      # before
@@ -364,6 +541,7 @@ Every surface that can change it also updates it:
 | `add-group` / `remove-group`, either surface | Applied immediately, and a light refresh is started |
 | **Scan DALI Bus** button | Rebuilt from the bus, replacing whatever was there |
 | `discover` or `commission` in the shell | Rebuilt the same way, from the same walk |
+| `restore groups apply` | Each edit applied as if typed, so the table follows without a rescan |
 | `set-short-address-dtr0` | Poll targets dropped, and a warning that only a scan can restore them |
 
 What a config command invalidates is decided in one place, whichever surface
@@ -394,11 +572,150 @@ remove-group <g>` is the right verb: it reconfigures the device.
 
 ### Short addresses on gear that already has one
 
-Every command that carries a short address as *data* rather than as an address
-byte carries it **encoded** as `(address << 1) | 1`, with `0xFF` meaning "no
-short address". Nothing in the shell does this conversion for you: the DTR0
-value for `set-short-address-dtr0`, and the parameters of `special program-short`
-and `special verify-short`, are all raw bytes in the range `0-255`.
+`address <subject> set <destination>` is the verb for this. Both arguments are
+written the way a target is, and it checks the bus rather than trusting the
+line you typed:
+
+```text
+> address a5 set a13
+address: a5 -> a13 (DTR0=27)
+address: a13 confirmed, a5 silent
+```
+
+Four things happen behind those two lines. The destination is probed and the
+move refused if anything answers there — two pieces of gear on one short address
+is the `contested` condition described above, and no query can be answered by
+one of them alone. The source is probed, so a typo'd subject fails instead
+of writing into silence. DTR0 and SET SHORT ADDRESS go out as one sequence, so
+nothing can redirect DTR0 between them. Then both ends are read back: `a13` must
+answer and `a5` must not.
+
+Only after that does the controller hear about the move, and because the verb
+named both ends it can move its group-membership bookkeeping with the gear
+instead of dropping it. A re-address through `address` does not cost you a
+rescan; the raw spelling below still does.
+
+Every refusal leaves the bus untouched and says which check failed:
+
+```text
+> address a5 set a13
+address: a13 already answers; refusing to move a5 onto it
+
+> address a5 set a13
+address: cannot tell whether a13 is free (rx-activity); nothing sent
+```
+
+The second is the important one. Undecodable activity in the reply window is
+what two units sharing an address sound like, so it is not read as "free".
+
+`set` is gated exactly as the raw spelling is: a session refuses it with
+`refused by session policy` unless the YAML says `allow_commissioning: true`.
+The verb is not reachable from the **DALI Command** text entity at all — like
+`scan` and `commission`, it claims the bus and runs a multi-frame workflow,
+which is not what that surface is for.
+
+#### Taking an address away
+
+`address <aN> clear` de-addresses one unit: it stops answering `aN` and answers
+nothing until something addresses it again. Same frames as `set`, with DTR0
+holding 255 instead of an encoded destination.
+
+```text
+> address a5 clear
+address: the stored backup has an anchored entry for a5, so 'restore apply' can
+  put this unit back after it is re-addressed
+address: a5 -> unaddressed (DTR0=255)
+address: a5 cleared -- gear on the bus now reports no short address
+address: run 'commission unaddressed' to give it an address again
+```
+
+What `clear` can prove is weaker than what `set` can, and the verb says which
+half it managed. Silence at `a5` is the direct observation, but it is also what
+a driver that lost power looks like, so a broadcast QUERY MISSING SHORT ADDRESS
+supplies the other side: is something now alive on the bus without an address.
+That is conclusive only as a *change* — on a bus that already had unaddressed
+gear the answer is the same before and after, and the verb says so instead of
+claiming a confirmation it did not get.
+
+The first line is the one to read before you type this on a fixture you care
+about. `restore` matches on the identification number, not the address, so an
+anchored backup entry is what makes a clear reversible — via `commission
+unaddressed` first, since restore only moves gear that already answers
+*something*. Without one, nothing records that this unit belongs on `a5`:
+
+```text
+address: no anchored backup entry for a5 -- once cleared, nothing records that
+  this unit belongs here
+```
+
+`clear` is gated exactly as `set` is; they are one DALI command differing only
+in what DTR0 holds. Its main use is the contested address described at the top
+of this document, where it is the step that makes a collision resolvable without
+a hardware pass.
+
+#### Control devices: `address d<N>`
+
+Everything above addresses control *gear*. Sensors, push-button couplers and
+other IEC 62386-103 control devices live in a separate 0..63 address space, and
+the same verb reaches them with a `d` prefix:
+
+```text
+> address d0 set d4
+address: d0 -> d4 (device DTR0=9)
+address: d4 confirmed, d0 silent
+
+> address d0 clear
+address: d0 -> unaddressed (device DTR0=255)
+```
+
+The `d` is not optional. Every other address argument in this shell accepts a
+bare number, so `address 5 clear` is gear 5 and always will be; without the
+prefix there would be nothing on the line to say which space you meant, and gear
+5 and device 5 are unrelated units that may be different physical products.
+`address d5 set a7` is refused for the same reason — a move never crosses
+spaces.
+
+The checks are the gear ones, over Part 103 frames: the destination is probed
+and the move refused if anything answers, the source is probed, the device DTR0
+and SET SHORT ADDRESS DTR0 go out as one sequence, and both ends are read back.
+The presence question is QUERY NUMBER OF INSTANCES rather than QUERY STATUS,
+which is the same question `discover` uses to decide a control device is there.
+
+Two things differ from the gear arms:
+
+**No group arms.** `address d5 add g3` is refused. Part 103 device groups exist,
+but nothing in this stack reads them back, and every arm of this verb proves its
+result by reading it.
+
+**`clear` proves less.** For gear, silence at the subject is backed by a
+broadcast QUERY MISSING SHORT ADDRESS — "and something on the bus is now
+unaddressed". Part 103 has no such query here, so silence is all you get, and a
+device that lost power looks identical. The verb says so and names the step that
+settles it:
+
+```text
+address: d0 is silent. Part 103 has no missing-address broadcast here, so that
+  is the whole of the evidence -- a device that dropped off the bus reads the
+  same
+address: run 'commission devices' to give it an address again; finding it there
+  is what confirms the clear
+```
+
+That is the normal workflow, not a workaround. `commission devices` only
+addresses devices that have none, so `address d<N> clear` followed by
+`commission devices` is how you re-commission a control device that is already
+addressed — and how you produce an unaddressed device to test the walk against
+in the first place.
+
+#### The raw spelling, and the encoding it needs
+
+`config-dtr0 <target> set-short-address-dtr0 <byte>` still does the write with
+no checks, and its argument is still the literal DTR0 byte. Every command that
+carries a short address as *data* rather than as an address byte carries it
+**encoded** as `(address << 1) | 1`, with `0xFF` meaning "no short address".
+Nothing in the raw spelling converts for you: that DTR0 value, and the
+parameters of `special program-short` and `special verify-short`, are all raw
+bytes in the range `0-255`.
 
 | Short address | Encoded byte |
 |---:|---|
@@ -414,12 +731,29 @@ Typing the plain number is not rejected, because it is a perfectly valid frame:
 bit 0 clear and is not a valid short address at all. Read the table before you
 type the command.
 
+`special program-short`, `special verify-short` and `special initialise` do at
+least say what their parameter means before they send it, so a misread line
+surfaces on the spot rather than at the next `scan`:
+
+```text
+> special program-short 5
+special: 5 is not a valid encoded short address
+special: a5 encodes as 11
+```
+
+The frame still goes out — sending exactly what you typed is what `special` is
+for, and an echo that refused would make it something else. `config-dtr0
+set-short-address-dtr0` prints no such line: its argument is the literal DTR0
+byte and stays that way.
+
 Re-addressing a fixture in place needs no INITIALISE window, no RANDOMISE, and
 nothing to terminate afterwards — SET SHORT ADDRESS is an ordinary addressed
-configuration command:
+configuration command. Written out by hand, the raw spelling and the checks the
+`address` verb does for you:
 
 ```text
 scan                                       # which addresses are occupied
+status a13                                 # and nothing answers the destination
 config-dtr0 a5 set-short-address-dtr0 27   # a5 becomes a13   ((13<<1)|1 = 27)
 config a13 save-persistent
 scan                                       # a5 gone, a13 present
@@ -439,10 +773,14 @@ Swapping two addresses needs a free third one to stage through, exactly as
 swapping two variables does:
 
 ```text
-config-dtr0 a5 set-short-address-dtr0 41    # a5 -> a20, an address nothing uses
-config-dtr0 a8 set-short-address-dtr0 11    # a8 -> a5
-config-dtr0 a20 set-short-address-dtr0 17   # a20 -> a8
+address a5 set a20     # a5 -> a20, an address nothing uses
+address a8 set a5      # a8 -> a5
+address a20 set a8     # a20 -> a8
 ```
+
+Each line refuses if its destination turns out to be occupied, so a staging
+address that was not as free as you thought stops the sequence rather than
+collapsing two fixtures onto one address.
 
 To take a fixture out of the address space entirely — because it is being
 removed, or because you want `commission unaddressed` to reassign it — write the
@@ -478,7 +816,7 @@ console refuses them regardless with `commissioning special; use the native CLI`
 
 | Name | What it does alone |
 |---|---|
-| `initialise <param>` | Opens a 15-minute initialisation window. `0` = all gear, `255` = only gear with no short address, encoded address = that one device |
+| `initialise <param>` | Opens a 15-minute initialisation window. `0` = all gear, `255` = only gear with no short address, encoded address = that one device. Echoes which of the three it read; an even parameter other than `0` selects nothing |
 | `randomise` | Every gear in the window draws a new 24-bit random address. **Cannot be undone** |
 | `search-h/m/l <byte>` | Loads one byte of the 24-bit search address that the next `compare` tests against |
 | `compare` | `yes` if any gear in the window has a random address at or below the search address |
@@ -517,6 +855,237 @@ Two rules that nothing enforces:
 2. `randomise` is irreversible. It does not change short addresses, but the
    random addresses a subsequent walk depends on are gone for good.
 
+### Backup and restore
+
+Everything above changes one address at a time and can be undone by typing the
+opposite. Commissioning cannot: it destroys short addresses in bulk, and a bus
+whose addresses have been shuffled has nothing left to tell you which fixture
+used to be which. `backup` and `restore` are the pair that makes that
+survivable.
+
+They work because of one fact. Every DALI-2 unit carries an 8-byte
+**identification number** at Bank 0 offset `0x0B`, and no addressing operation
+changes it — INITIALISE, RANDOMISE, PROGRAM SHORT ADDRESS and a broadcast
+de-address all leave it alone. Do not confuse it with the 24-bit *random
+address* RANDOMISE generates, which is temporary and exists only to make the
+search work. A record of which identification number held which short address is
+enough to put every address back afterwards, without a second walk.
+
+```text
+backup save        # scan, and record identity -> short address for both spaces
+backup status      # what is held, entry by entry
+restore plan       # what it would take to match the bus to that record
+restore apply      # do it
+```
+
+**Take one before anything that re-addresses.** The scan it runs is the same one
+`discover` runs, it changes nothing, and it takes seconds:
+
+```text
+backup: scanning
+backup: recorded 4 entries from 4 address(es)
+```
+
+Read the output for the one thing that matters, which is gear it could not
+anchor:
+
+```text
+backup: 1 entry has no identification number and cannot be restored
+  gear a5: id=unknown
+```
+
+That fixture will not come back on its own. Learn it now — a5 has to be
+re-addressed by hand afterwards — rather than during the restore.
+
+And the worse case, which is the quieter one:
+
+```text
+backup: 1 address(es) answered undecodably and are NOT recorded here
+  gear a7: contested
+backup: units sharing one short address answer as one, so no identity can be
+  read through them and nothing here can put them back
+backup: 'address <aN> clear' frees the gear ones for 'commission unaddressed'
+```
+
+A contested **control device** address gets different advice, because only the
+gear space has a verb for it: `address` is control-gear only, and the Part 103
+SET SHORT ADDRESS is reached from `restore` alone — which needs a unit that
+already answers as itself, which a contested one does not. That case still needs
+a hardware pass.
+
+An unanchored entry is at least an entry — the address is in the record and in
+`backup status`, and one fixture needs doing by hand. A contested address
+produces no entry at all: the scan marks it occupied but not *present*, and the
+snapshot records only what is present. Nothing about those units is in the
+backup, including their number, so without this line the first anyone would hear
+of it is a restore that puts back fewer fixtures than went in.
+
+#### Putting it back
+
+`restore` puts addresses back; it does not hand them out. It matches recorded
+identification numbers against gear that answers at some short address, so every
+unit it is going to move must already have one. After a bulk de-address that
+means `commission unaddressed` runs first — the walk gives every fixture an
+arbitrary address, and the restore turns that arbitrary result back into the
+addressing your configuration refers to. A recorded unit that answers nowhere is
+reported as a conflict, not waited for.
+
+`restore plan` re-scans, matches each recorded identification number to whatever
+holds it now, and prints the moves:
+
+```text
+restore: 3 matched, 1 already correct, 2 move(s)
+  1. gear a9 -> a2
+  2. gear a4 -> a9
+restore: run 'restore apply' to execute
+```
+
+`plan` is read-only, so run it as often as you like. `apply` executes the moves
+as ordinary addressed `SET SHORT ADDRESS` commands and needs
+`allow_commissioning: true` over TCP, exactly as `commission` does.
+
+**`restore` opens no INITIALISE window.** That is the property to hold on to:
+nothing it sends puts the bus into a state that has to be terminated, so it is
+safe on a live installation and safe to interrupt. If a move fails, it stops
+there and says so — the moves after it assumed the failed one landed. Run
+`restore plan` again and it will plan from the bus as it now stands.
+
+Two units that need to swap addresses cannot both move directly, so the plan
+stages one through a free address and places it on a later step. A swap with no
+free address anywhere fails closed rather than overwriting a fixture. Anything
+it cannot place safely — a unit that is not in the backup, a recorded unit that
+is no longer on the bus, two units answering with the same identification number
+— is listed as a conflict and left alone.
+
+A contested address counts as taken here too, and for the same reason the
+pre-scan holds it out of the free pool: something answers there, so putting a
+third unit on it would make the collision worse. It is never used as a target,
+never borrowed to stage a swap through, and never used to park a unit the backup
+has never seen. A move that wanted it says so, and says what to do:
+
+```text
+restore: 1 conflict(s):
+  gear a1: target contested (4)
+restore: free a contested target with 'address <aN> clear', then
+'commission unaddressed', then run this again
+```
+
+That sequence is worth doing before you take the rest of the restore as final.
+Clearing a4 and re-commissioning turns two units nothing could read into two
+units that answer separately and read back their own identification numbers — at
+which point a second `restore plan` can place them, and whatever the backup
+recorded for a4 comes back. Contested **device** addresses are reserved and
+reported the same way, but there is no verb that de-addresses a control device,
+so one of those needs a hardware pass.
+
+#### Putting group membership back
+
+Group membership is a separate verb, and usually you will not need it:
+
+```text
+restore groups            # what it would take to match the backup
+restore groups apply      # do it
+```
+
+The reason it is separate is that it repairs a different accident. Group
+membership lives in each gear's own memory, keyed to the gear rather than to the
+address it answers on, so a commissioning walk does not disturb it — run
+`restore groups` after a re-address and it will tell you there is nothing to do.
+What does destroy it is a `RESET`, a driver that lost its memory, or a
+group-addressed edit that emptied more than you meant.
+
+Because the match is by identification number and the edits go to wherever each
+gear answers *now*, this works on a scrambled bus and on a restored one alike.
+It does not need `restore apply` to have run first. When the current and
+recorded addresses differ the plan shows both:
+
+```text
+restore groups: 4 matched, 2 already correct, 2 change(s)
+  1. a5 now none -> g1 g3
+  2. a9 (backup a2) now g0 g1 -> g1 g4
+```
+
+Read that before applying it. This is the one part of a restore that can destroy
+something a restore cannot give back: a short address you can always move again,
+but a group membership only comes back from a record of what it was. If the
+backup predates a regrouping you did on purpose, applying it will undo the
+regrouping — which is why the plan prints the whole mask on both sides for every
+fixture instead of a count of edits, and why `restore apply` never touches
+groups.
+
+Two things it will not guess at, both reported and neither written: a gear the
+backup has but whose membership it never read (`no group data in backup` —
+treating that silence as "no groups" would empty the gear), and a gear whose
+current membership will not read back (`groups unreadable` — the additions would
+be right but nothing would say which groups to leave). Afterwards each gear is
+read back once and any that did not take the edits is flagged `MISMATCH`; group
+commands are unacknowledged, so that read-back is the only thing that tells a
+driver which took them from one which did not.
+
+Control gear only. Control devices have their own group scheme in Part 103 that
+the scan does not read. **Scenes are not captured at all** — nothing reads scene
+levels back, so a `RESET` still costs you those.
+
+#### Keeping the backup somewhere else
+
+Where a saved backup lives depends on which shell took it. The ESPHome shell
+writes it to flash, so it survives a reboot, and `backup status` tells you which
+you are looking at:
+
+```text
+backup: 4 entries, loaded from storage
+```
+
+That flash is the NVS partition ESPHome's default layout already provides — no
+extra partition, and nothing to configure. The shell task stages the blob and
+the main loop performs the write, because the preferences API is Core 0 only;
+NVS itself is flushed on ESPHome's `flash_write_interval`, 60 s by default, or
+at a clean shutdown. A `backup save` seconds before a power cut is therefore
+still in RAM when the lights go out, and `backup status` after the reboot is
+what tells you. Reboots and OTA updates keep it; erasing the chip does not.
+
+**The native serial CLI has no persistent store.** A backup taken there lives
+until reboot. `backup export` prints it as the script that reads it back:
+
+```text
+backup: 46 byte(s); the lines below re-import it
+backup import begin
+backup import 44424B31010200000000000000000A 1B2C3D4E5F60718293A4B5C6D7E8F9
+backup import 0A1B2C3D4E5F60718293A4B5C6D7E8 F9
+backup import end
+```
+
+Redirect that to a file and keep the file. To load it back, paste the file in.
+With the shell client:
+
+```sh
+python3 /config/dali-shell backup export > /config/dali_addresses.txt
+```
+
+The chunking is not decoration — a full 64-fixture snapshot is 4880 hex
+characters and the shell reads 80-character lines — so the export is printed in
+the shape the import accepts rather than as one line you would have to break up
+yourself.
+
+While an import is open, `backup save`, `backup export`, `backup status` and
+both `restore` verbs refuse and say why. That is deliberate: they share the
+buffer the paste is landing in, and a `backup save` typed halfway through an
+82-line paste would otherwise destroy it without a word. `backup import abort`
+discards a paste that went wrong, and any line that does not parse discards it
+for you — a blob missing a line in the middle can still decode into a
+plausible-looking snapshot, and that snapshot moves fixtures to the wrong
+addresses. Nothing an import can contain touches the backup already held: the
+blob is checked end to end before a byte of it is kept.
+
+#### What has not been proven
+
+**None of this has been run on a bus.** Both planners, the snapshot format, the
+cycle-staging, and the rejection paths all have host vectors; no `restore apply`
+and no `restore groups apply` has ever transmitted a frame to real gear. Treat a
+restore as a procedure to rehearse and verify with `discover`, not as a safety
+net to rely on — and note that it can only be as good as the identities and
+group masks `backup save` managed to read.
+
 ### Starting over
 
 There is no `decommission` verb, and no single line that returns the bus to
@@ -524,9 +1093,29 @@ factory addressing. The nearest sequence is a broadcast de-address followed by a
 fresh walk:
 
 ```text
+backup save                                # FIRST: record what is there now
 config-dtr0 b set-short-address-dtr0 255   # every gear loses its short address
-commission unaddressed
+commission unaddressed                     # every gear gets *an* address back
+restore plan                               # ...then put them back where they were
+restore apply
 ```
+
+Nothing in that sequence touches group membership, so there is no `restore
+groups` step in it. Add one only if you also issued a `reset`.
+
+The first line is not optional in practice. Once the second one has run, nothing
+on the bus knows which fixture used to be a3, and [Backup and
+restore](#backup-and-restore) is the only thing that will — so take the backup,
+read its output for gear it could not anchor, and keep a copy off the device
+with `backup export` if you are on the serial CLI, where it would not survive a
+reboot.
+
+Note the order. `restore` matches recorded identities against gear that answers
+at some short address, so it can only run **after** the fresh walk has given
+every unit one; on a bus that has just been de-addressed it finds nothing and
+reports every entry missing. The walk decides which fixture gets which address
+arbitrarily, and the restore is what turns that arbitrary result back into the
+addressing your configuration already refers to.
 
 Both lines need `allow_commissioning: true`, and neither is reachable from the
 **DALI Command** text entity at all — which is the point: this is the pair that

@@ -56,6 +56,8 @@ verb by verb.
 | Addressed queries (34 names) | `dali_control_build_query` | `query`, `status` | yes | yes | yes (console) |
 | Configuration commands (19 names) | `dali_control_build_config` | `config` | yes | partial | yes (console) |
 | DTR0-consuming configuration | `dali_control_build_config` + sequence | `config-dtr0` | yes | no | yes (console, minus `set-short-address-dtr0`) |
+| Checked re-address / regroup | `dali_group_map_move` + shell workflow | `address` | partial (map only) | no | shell only |
+| Checked control-device re-address | n/a — `SET SHORT ADDRESS DTR0` (Part 103) | `address <dN> set\|clear` | partial (parsing only) | no | shell only |
 | DTR0/1/2 load | `dali_control_build_dtr` | `dtr` | yes | yes | yes (console) |
 | Special/broadcast commands (18 names) | `dali_build_special` | `special` | yes | partial | partial (console) |
 | Arbitrary frame | n/a | `raw` | yes (parse only) | yes | yes (`raw`) |
@@ -81,6 +83,14 @@ cached level profile and triggers a refresh.
 | Inventory export | `dali_discovery_inventory_*` | `inventory`, `export inventory` | partial | yes | yes (YAML lines, shell) |
 | Configuration export | n/a — reads live entity state | `export config` | no | yes | shell only; the native build has no YAML to describe |
 | Commission unaddressed | `dali_commissioning_commission_unaddressed` | `commission unaddressed` | yes | partial | shell, opt-in |
+| Commission control devices | `dali_device_commissioning_commission_unaddressed` | `commission devices` | yes | no | shell, opt-in |
+| Post-scan verification | `dali_commissioning_audit` | automatic in both `commission` walks | yes | no | shell |
+| Address backup | `dali_snapshot_from_inventory` | `backup save`, `backup status` | yes | no | shell; persisted to flash |
+| Backup blob round trip | `dali_snapshot_encode` / `_decode` | `backup export`, `backup import` | yes | n/a — no bus traffic | shell |
+| Restore planning | `dali_restore_plan` | `restore plan` | yes | no | shell; moving aside a unit the backup never saw is host-only |
+| Restore execution | n/a — `SET SHORT ADDRESS DTR0` per move | `restore apply` | no | no | shell, opt-in |
+| Group restore planning | `dali_restore_plan_groups` | `restore groups` | yes | no | shell; control gear only |
+| Group restore execution | n/a — `ADD TO GROUP` / `REMOVE FROM GROUP` per bit | `restore groups apply` | no | no | shell, opt-in; read back per gear |
 | Identify blink | n/a | `identify` | no | yes | yes (button, shell) |
 | Smoke check | n/a | `smoke` | no | yes | shell |
 
@@ -99,8 +109,38 @@ limited operationally to one unaddressed control gear at a time until the
 multi-device path is exercised on hardware. A run now brackets itself with
 broadcast START/STOP QUIESCENT MODE — host-tested for ordering, settle,
 release-on-every-exit, and the two failure modes, but never run on a bus, and it
-cannot reach a device that does not receive the broadcast. Equal-random-address
-recovery and arbitration against another bus master remain open.
+cannot reach a device that does not receive the broadcast.
+
+Equal random addresses are handled as of 2026-08-26: VERIFY reply-window activity
+is read as co-selection, the pair is de-addressed with PROGRAM SHORT ADDRESS 0xFF
+and dropped from the search, the short address is left unconsumed, and the run
+continues -- a second run places them. Host vectors only, and it rests on the same
+undecodable-activity classification that has no physical collision capture behind
+it. Arbitration against another bus master remains open.
+
+Cross-part interference is guarded in both directions as of 2026-08-26: a gear
+run sends IEC 62386-103 TERMINATE before INITIALISE, again immediately after, and
+in the cleanup unwind, so a control device that entered its own addressing state
+on seeing the Part 102 INITIALISE cannot answer COMPARE as gear; the
+control-device walk sends a Part 102 TERMINATE at the same three points, for the
+mirror-image reason. Opt-in through
+`DaliCommissioningOptions.terminate_control_devices` and
+`DaliDeviceCommissioningOptions.terminate_control_gear`, non-fatal on failure,
+host vectors only. Discovery records undecodable activity in the control-device
+address space (`has_undecodable_device_activity`), which reserves that device
+address in the Part 103 free-address mask and nothing in the gear one — the two
+spaces are independent.
+
+Both walks check themselves against a post-scan as of 2026-09-03, on every exit
+that could have written an address, the failure paths included. The diff is
+`dali_commissioning_audit`: it partitions the addresses a run claims into
+confirmed, contested, and silent, and names two classes the run does not claim —
+an address occupied now that was free before and was never recorded as an
+assignment (the signature of an abort between PROGRAM SHORT ADDRESS and the
+assignment record), and an address newly contested that the run never assigned.
+Host vectors only. Every classification rests on the same undecodable-activity
+reading as the in-run duplicate detection, so a `contested` line is an inference
+that the hardware pass has yet to confirm.
 
 The shell rows are the same code the native CLI runs, reached through
 `esphome/components/dali/dali_shell_tcp.cpp`. Its commissioning entry point is
@@ -175,6 +215,9 @@ a gap.
 | Event dispatch rules | `dali_dispatch_*` | n/a | yes | yes | yes |
 | Quiescent mode | `dali_input_build_quiescent_mode[_broadcast]` | `quiescent on\|off <addr\|all>` | yes | no | yes (console) |
 | Commissioning quiescence bracket | `DaliCommissioningOptions.quiesce_control_devices` | automatic in `commission` | yes | no | n/a |
+| Device-walk quiescence bracket | `DaliDeviceCommissioningOptions.quiesce_control_devices` | automatic in `commission devices` | yes | no | n/a |
+| Cross-part TERMINATE bracket | `DaliCommissioningOptions.terminate_control_devices` | automatic in `commission` | yes | no | n/a |
+| Part 103 TERMINATE frame | `dali_build_device_special` / `DALI_CMD_DEVICE_TERMINATE` | via `commission` | yes | no | n/a |
 | Device broadcast (0xFF) | `dali_build_device_broadcast_command` | via `quiescent ... all` | yes | no | yes (console) |
 
 Configuration writes are experimental everywhere. The native CLI says so on every
@@ -221,7 +264,7 @@ native-only, and why:
 | `capture` | Rolling buffer with a terminal-shaped export; the bus monitor covers the live view |
 | `scan`, `discover`, `inventory`, `export inventory`, `identify` | Exposed as buttons and text sensors instead |
 | `export config` | A whole config block; the scan's `yaml_result` sensor carries the group map the console can fit |
-| `commission unaddressed` | No guarded workflow here; `special` refuses its primitives for the same reason |
+| `commission unaddressed`, `commission devices` | No guarded workflow here; `special` refuses its primitives for the same reason |
 | `config <t> set-short-address-dtr0` | Re-addresses gear from one typed line, the same reason `special program-short` is refused |
 | `meminfo`, `instances`, `sensor poll` | Each walks a device and decides the next query from the last reply, which needs a blocking transport. Covered by the scan and the sensor platform |
 | `smoke` | Composed of `devmem` write/read; run the parts |
@@ -255,4 +298,14 @@ use. Host- and compile-verified only; no bus has run it.
   releases what it started; the standalone verb does not, so a device left
   quiescent by hand stays silent until `quiescent off`, which is
   indistinguishable from a dead sensor.
+- Part 103 **device groups** have a decode path and no read or write path. They
+  are recognised as an event source (`DALI_EVENT_SOURCE_DEVICE_GROUP`) and
+  nowhere else: discovery does not query them, the snapshot does not record
+  them, `restore groups` is control gear only, and `address <dN> add <gN>` is
+  refused rather than sent because nothing could read the result back. A control
+  device that is replaced can be given its address back but not its group
+  membership.
+- `address <dN> clear` has one-sided evidence. Part 103 has no broadcast
+  QUERY MISSING SHORT ADDRESS in this stack, so silence at the subject is the
+  whole of the confirmation, and `commission devices` is what settles it.
 - Nothing here claims DALI Alliance certification or complete IEC 62386 coverage.
