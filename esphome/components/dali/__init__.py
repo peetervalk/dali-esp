@@ -16,6 +16,13 @@ from esphome.const import (
 )
 from esphome.core import CORE
 
+try:
+    # ESPHome 2026.9.0+ prunes the built-in ESP-IDF component list; drivers we
+    # use must be re-included or their headers are not on the include path.
+    from esphome.components.esp32 import include_builtin_idf_component
+except ImportError:  # older ESPHome builds every driver component
+    include_builtin_idf_component = None
+
 CODEOWNERS = ["@peetervalk"]
 DEPENDENCIES = ["esp32"]
 AUTO_LOAD = ["text_sensor"]
@@ -345,6 +352,10 @@ CONFIG_SCHEMA = cv.All(
 
 async def to_code(config):
     _copy_protocol_stack()
+
+    if include_builtin_idf_component is not None:
+        # dali_phy.c.inc drives the bus timing from a gptimer.
+        include_builtin_idf_component("esp_driver_gptimer")
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
