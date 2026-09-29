@@ -218,12 +218,100 @@ bool dali_restore_plan_is_clean(const DaliRestorePlan *plan);
  * Either value in the other space moves the unit to an address nobody chose,
  * and SET SHORT ADDRESS has no answer to say so.
  *
- * `restore apply` and the `address` verb's device arms both send this.
+ * These are the frames, not the procedure: `restore apply` and every `address`
+ * arm send them through dali_restore_write_short_address(), which reads DTR0
+ * back between the two.
  */
 DaliError dali_restore_build_move_sequence(DaliSnapshotSpace space,
                                            uint8_t           from,
                                            uint8_t           to,
                                            DaliSequence     *out);
+
+/* ---------------------------------------------------------------------------
+ * Writing a short address
+ *
+ * SET SHORT ADDRESS takes the new address from the unit's own DTR0, and the
+ * DTR0 load before it reaches every unit at once. A unit that misses the load
+ * but hears the pair takes whatever DTR0 already held, and that is rarely
+ * arbitrary. A Bank 0 read loads DTR0 with its offset on every unit and
+ * advances it only in the unit it reads, so after the identification read that
+ * confirms a move, every other unit holds 0x0B: the gear encoding of a5, and
+ * d11 in the device space. One lost load after a confirmation puts the next
+ * unit on a5, whoever holds it, and nothing about the pair says so. The 1k bus
+ * lost a frame of exactly such a move, harmlessly only because that unit was
+ * moving from a5.
+ *
+ * So the load is read back from the unit at `from`, in its own space, and the
+ * pair goes out only when the unit holds the value loaded. A unit that holds
+ * the right DTR0 can only take the right address, or ignore a pair it did not
+ * hear whole.
+ * --------------------------------------------------------------------------*/
+
+typedef enum {
+    /* The unit read DTR0 back as loaded, and the SET SHORT ADDRESS pair was
+     * sent. Sent is not moved: dali_restore_confirm_move() says whether it
+     * landed. */
+    DALI_RESTORE_WRITE_SENT = 0,
+    /* The read-back collided, the reading several units sharing `from` give,
+     * and the caller allowed the pair without it. */
+    DALI_RESTORE_WRITE_SENT_UNVERIFIED,
+    /* The unit read back another value after both loads. Nothing further was
+     * sent. */
+    DALI_RESTORE_WRITE_DTR0_MISMATCH,
+    /* Nothing answered the read-back after either load. Nothing further was
+     * sent. */
+    DALI_RESTORE_WRITE_DTR0_SILENT,
+    /* The last read-back could not be read: undecodable activity the caller
+     * did not allow, or another master's frame in the reply window. Nothing
+     * further was sent. */
+    DALI_RESTORE_WRITE_DTR0_UNREADABLE,
+} DaliRestoreWriteOutcome;
+
+typedef struct {
+    /* Meaningful only when the write returned DALI_OK. */
+    DaliRestoreWriteOutcome outcome;
+    /* Whether the SET SHORT ADDRESS pair had started going out. After an error
+     * this separates "nothing moved" from "the unit may have moved". */
+    bool      pair_attempted;
+    uint8_t   dtr0;         /* the value loaded, which the unit must read back */
+    uint8_t   loads;        /* 1, or 2 when the first read-back did not match  */
+    /* The first read-back, which a second load does not overwrite, so a write
+     * that then succeeded still says what the unit was holding. first_error
+     * is DALI_OK when it decoded as first_read. */
+    DaliError first_error;
+    uint8_t   first_read;
+    /* The read-back that decided the outcome, in the same form. */
+    DaliError last_error;
+    uint8_t   last_read;
+} DaliRestoreWriteResult;
+
+/*
+ * Re-address the unit at `from` in `space` to `to` (0..63), or take its
+ * address away with DALI_COMMISSIONING_NO_SHORT_ADDRESS. DTR0 and QUERY
+ * CONTENT DTR0 at `from` go out as one sequence, and SET SHORT ADDRESS (DTR0),
+ * send-twice, as a second one only when the reply is the value loaded. A
+ * read-back that is wrong, silent or unreadable gets one more load and read;
+ * when that fails too, nothing further is sent.
+ *
+ * `allow_collided_readback` is for clearing an address several units share.
+ * They answer the read-back together, which reads as undecodable activity
+ * rather than a value, and that is the one case the pair may go out unchecked.
+ *
+ * Needs a transport that runs atomic sequences. Returns DALI_ERR_INVALID on a
+ * bad argument or a transport without them, and the transport's error when a
+ * sequence could not run, with pair_attempted saying whether the unit may have
+ * moved. Otherwise DALI_OK, with the outcome in *result_out. *result_out, when
+ * given, is written on every path.
+ */
+DaliError dali_restore_write_short_address(const DaliTransport    *transport,
+                                           DaliSnapshotSpace       space,
+                                           uint8_t                 from,
+                                           uint8_t                 to,
+                                           bool                    allow_collided_readback,
+                                           DaliRestoreWriteResult *result_out);
+
+/* True for the two outcomes that sent the pair. */
+bool dali_restore_write_was_sent(DaliRestoreWriteOutcome outcome);
 
 /* ---------------------------------------------------------------------------
  * Confirming a move
@@ -240,7 +328,8 @@ typedef enum {
     /* `to` answers, `from` is silent, and the unit at `to` reads back the
      * identification number the move was planned for. */
     DALI_RESTORE_MOVE_CONFIRMED = 0,
-    /* Nothing answers at `to`. The write did not land, or the unit lost power. */
+    /* Nothing answers at `to`, and `from` still answers: the unit did not
+     * move. */
     DALI_RESTORE_MOVE_TARGET_SILENT,
     /* `from` still answers: the unit did not move, or something else is there. */
     DALI_RESTORE_MOVE_SOURCE_ANSWERS,
@@ -250,14 +339,19 @@ typedef enum {
      * expired wait — so nothing can be concluded. The probe's error is
      * reported alongside. */
     DALI_RESTORE_MOVE_UNREADABLE,
+    /* Nothing answers at `to` or at `from`. The unit took an address nobody
+     * chose, or lost power, and only a scan can say which. */
+    DALI_RESTORE_MOVE_UNIT_MISSING,
 } DaliRestoreMoveCheck;
 
 /*
  * Probe the bus after `move` was sent: `to` must answer, `from` must be
  * silent, and when the move carries an identification number the unit at `to`
- * must read it back. Presence is QUERY STATUS for control gear and QUERY NUMBER
- * OF INSTANCES for control devices, the questions discovery asks; the
- * identification is read from Bank 0 in the move's own address space.
+ * must read it back. When `to` is silent, `from` is probed too, because a unit
+ * that stayed put and one that went somewhere else want different recoveries.
+ * Presence is QUERY STATUS for control gear and QUERY NUMBER OF INSTANCES for
+ * control devices, the questions discovery asks; the identification is read
+ * from Bank 0 in the move's own address space.
  *
  * Needs a transport that can run atomic sequences, for the memory read.
  * Returns DALI_ERR_INVALID on a bad argument; otherwise DALI_OK with the
@@ -270,6 +364,7 @@ DaliError dali_restore_confirm_move(const DaliTransport  *transport,
                                     DaliError             *probe_error_out);
 
 const char *dali_restore_move_check_name(DaliRestoreMoveCheck check);
+const char *dali_restore_write_outcome_name(DaliRestoreWriteOutcome outcome);
 
 const char *dali_restore_conflict_name(DaliRestoreConflictKind kind);
 const char *dali_restore_space_name(DaliSnapshotSpace space);

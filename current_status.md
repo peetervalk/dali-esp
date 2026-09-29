@@ -1,10 +1,13 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-09-29, after checking the open Part 103 and bus-timing
-items against TI's MSPM0 DALI SDK, Silicon Labs AN1220 and the current
-`esp_dali` source. The findings are the two 2026-09-29 entries under
-Investigations in `project_log.md`, above the 2026-09-25 stack review; what is
-still open is in the prioritized list below.
+**Last updated:** 2026-09-30, after the seventh bus session, on 1k, and the
+fixes it led to. The session ran the `identify`, `backup save` and `restore
+apply` fixes, and a `restore apply` move that did not land showed that a lost
+DTR0 load re-addresses a unit to whatever DTR0 last held. Every short-address
+write now reads DTR0 back first, and the clear lines in the device log and
+`discover`'s version field no longer mislead; those are host-tested and
+compile-checked only. The record is in `project_log.md`; what is still open is
+in the prioritized list below.
 
 Annex to `AGENTS.md`. That file holds the architecture, the layer rules, the ISR
 and timing constraints, and the native/host build commands; this one holds what
@@ -88,7 +91,13 @@ native build, and a `dali_test.yaml` compile. Two have bus results of their
 own: `restore apply`'s per-move confirmation, on gear and device moves on 2k,
 and the reply window's frame-end reference, in a capture on 1k. The `restore
 apply` and `backup save` fixes that followed the 2k sessions, and the
-`identify` fix after them, are compile-checked only.
+`identify` fix after them, have run on 1k, `identify` from a mid level only. A
+1k site build compiled on ESPHome 2026.9.1 and ran, and `dali_test.yaml`
+passes `esphome config` on 2026.9.1; nothing has compiled `dali_test.yaml` on
+it. The DTR0 read-back before every short-address write, the source probe after
+a silent target, the reworded clear lines and the version display came after
+that session: 32/32 host suites, mutation-checked, and type-checked against
+the IDF and ESPHome flags, with no bus and no ESPHome compile behind them.
 
 ### Recorded hardware state
 
@@ -118,11 +127,18 @@ counters, captures, and what each did *not* cover — are in `project_log.md`.
   the next: the destination answered, the source was silent, and the Bank 0
   identification number there matched the backup's. A 7-entry backup went out
   through `backup export`, came back intact through `backup import`, and then
-  drove a restore.
+  drove a restore. On 1k, with 16 lamps in seven groups, `restore apply`
+  stopped at a move that did not land and sent nothing after it, and a re-plan
+  finished the restore. Each confirmed gear move took the integration's group
+  membership with it.
 - **`address <aN> clear` works on a single unit.** Its broadcast QUERY MISSING
   SHORT ADDRESS read silence before the clear and a decoded YES after. The
   cleared lamp kept its group membership through the clear and through the
-  `commission unaddressed` that re-addressed it.
+  `commission unaddressed` that re-addressed it. It also acts on that
+  membership while unaddressed: on 1k one followed `level g0 90` with no short
+  address.
+- **`identify` puts the lamp back.** On 1k it blinked a0 from level 160, ended
+  `identify: done, level 160 restored`, and the next `discover` read 160.
 - **The reply window runs from the frame end.** On 1k, a13's reply to a group
   query ended 14290 us after the forward frame's last data bit and was
   accepted on the first attempt: 6.79 ms of settling, inside IEC 62386-101's
@@ -234,8 +250,14 @@ Dated evidence for each of these is in `project_log.md`.
   `dali_restore_confirm_move()` checks each move on the bus — the unit answers
   at its destination, the source is silent, and the identification number there
   is the unit's — and `restore apply` sends nothing further after a move that
-  fails it. It has confirmed gear and device moves on 2k, staging hops
-  included; the stop after a failed move is host-tested only. The blob
+  fails it. It has confirmed gear and device moves on 2k and gear moves on 1k,
+  staging hops included, and on 1k it stopped after a move that did not land.
+  Every move is written by `dali_restore_write_short_address()`, which reads
+  DTR0 back from the unit before sending the SET SHORT ADDRESS pair and sends
+  nothing if it will not read back, so a unit that misses the load stays put
+  rather than taking whatever DTR0 held. When the destination is silent the
+  confirmation asks the source too, and tells a unit that stayed from one that
+  answers nowhere. Host-tested only. The blob
   round-trips both ways: `backup export` prints the `backup import` script that
   reproduces it, so a backup kept off the device can be loaded back — which is
   what the native CLI, having no persistent store, needs. It has round-tripped
@@ -289,7 +311,9 @@ Dated evidence for each of these is in `project_log.md`.
   spaces are independent, so a line that does not say which one it means is
   refused rather than resolved. The device arms are `set` and `clear` only: the
   group arms stay gear-only because Part 103 device groups have no read-back
-  path here, and every arm of this verb proves its result by reading it.
+  path here, and every arm of this verb proves its result by reading it. The
+  address arms also read DTR0 back from the unit before SET SHORT ADDRESS goes
+  out, as `restore apply` does.
 - `raw` sends one arbitrary 16- or 24-bit frame and `raw2` sends one twice
   through the send-twice path. Both are diagnostic escape hatches, not
   substitutes for the typed atomic verbs. A frame that is itself a commissioning
@@ -354,8 +378,10 @@ Dated evidence for each of these is in `project_log.md`.
   optional query or a missed known member retains the prior map and withholds
   generated YAML. `group forget <addr> [group]` retires a departed member
   without touching the bus. A re-address confirmed by `address` or by `restore
-  apply` moves the member without a scan. The `restore apply` half is
-  compile-checked only.
+  apply` moves the member without a scan; both have run on 1k. A clear retires
+  the entry, and the device log now says that only the group light's polling
+  changed: the gear keeps its groups and follows group and broadcast commands
+  with no address, as a cleared lamp on 1k did.
 - Sensor readings are one scheduler sequence, so a two-byte instance cannot have
   its latching query and latch read separated by other traffic. Matching
   Device/Instance events request an immediate authoritative poll; event
@@ -489,7 +515,11 @@ a sensor value.
   settle table and for collision detection, avoidance and recovery; its
   receiver accepts a send-twice pair whose stop conditions are up to 94 ms
   apart, looser than the scheduler's own bracket (`project_log.md`,
-  *Nothing spaces a forward frame from a received one*).
+  *Nothing spaces a forward frame from a received one*). A 1k `restore apply`
+  move lost a frame right after another unit's reply, which fits, but one miss
+  does not establish it. Every short-address write now prints `DTR0 needed a
+  second load` with the first read-back, so a bus can count missed loads
+  without a capture.
 - **The post-scan audit's contested path has no bus behind it.** Both walks
   self-check on every exit that could have written an address, and the diff
   (`dali_commissioning_audit`) is host-covered; `RX_ACTIVITY` has a real
@@ -533,18 +563,24 @@ The typed verb surface is in place; what is missing is evidence. Keep
 - Validate input-device configuration writes with read/write/read-back per
   parameter. `iconfig` success means transmitted; until this is done the whole
   surface stays experimental.
-- **Run the `restore apply` and `backup save` fixes on a bus.** Both are
-  compile-checked only, because no host vector reaches the shell. With one lamp
-  cleared, `backup save` should say that gear reports no short address and is
-  not recorded. After `restore apply`, the device log should have a `group
-  membership followed the move` line for each gear move of a grouped unit;
-  the old code logged nothing there. 1k, with lamps in several groups, is the
-  bus where the second fix matters.
-- **Run the `identify` fix on a bus.** It used to leave every lamp at min. It
-  now reads the level first and puts it back, which is compile-checked only.
-  From max, off and a level in between, the shell should end with `identify:
-  done, level N restored` or `identify: done, switched off again`, with the lamp
-  where it started. The Identify button should log `back to level N` or
+- **Run the DTR0 read-back on a bus.** Host-tested and mutation-checked; no
+  bus has seen it. Every `address` arm and every `restore apply` move now loads
+  DTR0, reads it back with QUERY CONTENT DTR0, and only then sends SET SHORT
+  ADDRESS. The seventh session's swap should now restore in one `restore
+  apply`, and every `DTR0 needed a second load` line is worth counting: each is
+  a load the unit missed, which is the P0 spacing question measured directly.
+  The device arms now depend on control devices answering Part 103 QUERY
+  CONTENT DTR0 (`0x36`), which no device here has been seen to do. Run
+  `dtrcheck 0 0 5` and `dtrcheck 1 0 5` on 2k before relying on `address dN`
+  or a device-space restore; a device that stays silent makes both refuse with
+  `DTR0 could not be checked`. The same session can check the reworded clear
+  lines in the device log and `discover` printing `v2.0` where it printed
+  `v4`.
+- **Finish the `identify` fix on a bus.** From a level in between it
+  restores: level 160 came back on 1k. From max and from off it has not run;
+  the shell should end with `identify: done, level N restored` and `identify:
+  done, switched off again`, with the lamp where it started. The ESPHome
+  Identify button has not run at all, and should log `back to level N` or
   `switched off again`.
 - Add host vectors for `identify`, `smoke`, `capture`, and the inventory JSON
   export, whose output formats are unasserted.

@@ -1523,6 +1523,22 @@ size_t dali_cli_format_status(char *buf, size_t cap, uint8_t raw)
     return len;
 }
 
+size_t dali_cli_format_gear_version(char *buf, size_t cap, uint8_t raw)
+{
+    if (buf == NULL || cap == 0u) {
+        return 0u;
+    }
+    buf[0] = '\0';
+
+    const unsigned major = (unsigned)(raw >> 2u);
+    const unsigned minor = (unsigned)(raw & 0x03u);
+
+    if (major < 2u) {
+        return cli_append(buf, cap, 0u, "version=0x%02X", (unsigned)raw);
+    }
+    return cli_append(buf, cap, 0u, "v%u.%u", major, minor);
+}
+
 size_t dali_cli_format_response(char             *buf,
                                 size_t            cap,
                                 const char       *name,

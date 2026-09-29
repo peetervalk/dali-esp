@@ -2921,10 +2921,16 @@ void DaliComponent::on_short_address_moved(uint8_t from, uint8_t to)
  * in the way that matters. A move keeps the group-membership entry and
  * re-points it, because the unit is still on the bus answering something. A
  * clear has to retire it. SET SHORT ADDRESS changes nothing but the address, so
- * the unit keeps its own group registers and will reappear in the same groups
- * at whatever address `commission unaddressed` hands it — an address not
- * knowable from here. Keeping the old entry would leave a group light polling
- * something that never answers; pointing it anywhere else would be a guess.
+ * the unit keeps its own group registers, goes on acting on group and broadcast
+ * commands while it has no address, and will reappear in the same groups at
+ * whatever address `commission unaddressed` hands it — an address not knowable
+ * from here. Keeping the old entry would leave a group light polling something
+ * that never answers; pointing it anywhere else would be a guess.
+ *
+ * The log line says that only this component's bookkeeping changed, because
+ * the obvious reading of "retired from its groups" is the wrong one: on the 1k
+ * bus a cleared lamp followed `level g0 90` right after this component logged
+ * exactly that.
  *
  * Reached on silence rather than on a proven clear, because the two cases the
  * shell cannot separate — cleared, or dropped off the bus — want exactly this
@@ -2934,24 +2940,40 @@ void DaliComponent::on_short_address_cleared(uint8_t addr)
 {
     if (addr >= DALI_SHORT_ADDRESS_COUNT) return;
 
+    const uint64_t bit = (uint64_t) 1u << addr;
+    uint16_t groups = 0u;
+
     portENTER_CRITICAL(&s_group_map_mux);
+    for (uint8_t g = 0u; g < DALI_GROUP_COUNT; g++) {
+        if ((s_group_map.members[g] & bit) != 0u) groups |= (uint16_t) (1u << g);
+    }
     bool groups_dropped =
         dali_group_map_forget(&s_group_map, addr, DALI_GROUP_MAP_ALL_GROUPS);
     portEXIT_CRITICAL(&s_group_map_mux);
 
     if (groups_dropped) {
         s_group_members_dirty_.store(true, std::memory_order_release);
-        ESP_LOGI(TAG, "a%u cleared: retired from every group it was known in",
-                 (unsigned) addr);
+
+        char names[DALI_GROUP_COUNT * 4u + 1u] = "";  /* "g15 " per group */
+        size_t len = 0u;
+        for (uint8_t g = 0u; g < DALI_GROUP_COUNT && len < sizeof(names); g++) {
+            if ((groups & (uint16_t) (1u << g)) == 0u) continue;
+            len += (size_t) snprintf(names + len, sizeof(names) - len, "%sg%u",
+                                     len > 0u ? " " : "", (unsigned) g);
+        }
+        ESP_LOGI(TAG,
+                 "a%u cleared: no longer polled for group state (%s); the gear "
+                 "keeps its groups and still follows group and broadcast "
+                 "commands",
+                 (unsigned) addr, names);
     }
 
-    external_profile_forget_mask_.fetch_or((uint64_t) 1u << addr,
-                                           std::memory_order_acq_rel);
+    external_profile_forget_mask_.fetch_or(bit, std::memory_order_acq_rel);
 
     ESP_LOGW(TAG,
-             "a%u no longer answers. Any entity configured with address: %u now "
-             "targets nothing -- the unit comes back only through 'commission "
-             "unaddressed', at an address only a scan can find",
+             "nothing answers at a%u now. Any entity configured with address: "
+             "%u targets nothing until 'commission unaddressed' re-addresses "
+             "the unit, at an address only a scan can find",
              (unsigned) addr, (unsigned) addr);
 
     external_refresh_request_.store(true, std::memory_order_release);

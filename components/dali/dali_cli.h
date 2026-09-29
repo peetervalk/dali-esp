@@ -591,6 +591,23 @@ void dali_cli_print_status_fields(const DaliCliOut *out, uint8_t raw);
  */
 size_t dali_cli_format_status(char *buf, size_t cap, uint8_t raw);
 
+/* Longest output of dali_cli_format_gear_version(), including the NUL. */
+#define DALI_CLI_VERSION_TEXT_MAX 16u
+
+/*
+ * Format a gear QUERY VERSION NUMBER byte for a one-line listing.
+ *
+ * IEC 62386-102:2014 packs the version as major.minor, major in bits 7..2 and
+ * minor in bits 1..0, so 0x08 is DALI-2 version 2.0 and prints "v2.0". Gear
+ * built to the earlier editions predate that packing and answer a small legacy
+ * number, which the packing would read as 0.x and claim a version nobody
+ * published, so anything below 2.0 prints as the raw byte: "version=0x01".
+ *
+ * Returns the length written, excluding the NUL; 0 when the buffer is
+ * unusable, in which case buf is left empty if it has room for that.
+ */
+size_t dali_cli_format_gear_version(char *buf, size_t cap, uint8_t raw);
+
 /*
  * Format one command reply under `name` as a single line, with no newline.
  *

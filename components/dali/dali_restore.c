@@ -833,6 +833,20 @@ bool dali_restore_plan_is_clean(const DaliRestorePlan *plan)
            !plan->incomplete;
 }
 
+/*
+ * The DTR0 value SET SHORT ADDRESS must find for the unit to take `to`. Part
+ * 102 reads (a << 1) | 1 from DTR0 and Part 103 the raw address; the 2k bus
+ * showed the difference, DTR0 = 5 putting a device on d5 rather than d2. Both
+ * read 0xFF as "none", which is never encoded.
+ */
+static uint8_t restore_short_address_dtr0(DaliSnapshotSpace space, uint8_t to)
+{
+    return (space == DALI_SNAPSHOT_SPACE_GEAR &&
+            to != DALI_COMMISSIONING_NO_SHORT_ADDRESS)
+               ? dali_commissioning_encode_short_address(to)
+               : to;
+}
+
 DaliError dali_restore_build_move_sequence(DaliSnapshotSpace space,
                                            uint8_t           from,
                                            uint8_t           to,
@@ -855,12 +869,7 @@ DaliError dali_restore_build_move_sequence(DaliSnapshotSpace space,
         return DALI_ERR_INVALID;
     }
 
-    /* Part 102 reads (a << 1) | 1 from DTR0 and Part 103 the raw address; the
-     * 2k bus showed the difference, DTR0 = 5 putting a device on d5 rather
-     * than d2. Both read 0xFF as "none", which is never encoded. */
-    const uint8_t dtr0 = (is_gear && to != DALI_COMMISSIONING_NO_SHORT_ADDRESS)
-                             ? dali_commissioning_encode_short_address(to)
-                             : to;
+    const uint8_t dtr0 = restore_short_address_dtr0(space, to);
 
     memset(out, 0, sizeof(*out));
     DaliError err;
@@ -888,6 +897,159 @@ DaliError dali_restore_build_move_sequence(DaliSnapshotSpace space,
 
     out->steps[1].send_twice = cmd->send_twice;
     out->step_count = 2u;
+    return DALI_OK;
+}
+
+/* Loads of DTR0 a write makes before it gives up: the first, and one more. */
+#define RESTORE_WRITE_LOADS 2u
+
+bool dali_restore_write_was_sent(DaliRestoreWriteOutcome outcome)
+{
+    return outcome == DALI_RESTORE_WRITE_SENT ||
+           outcome == DALI_RESTORE_WRITE_SENT_UNVERIFIED;
+}
+
+/*
+ * Run one load-and-read-back sequence. DALI_OK means the load went out and the
+ * read-back gave a reading, left in *read_err: DALI_OK with the byte in
+ * *read_value, or the error the reply window produced. Any other return is the
+ * transport failing -- the load did not go out, or the wait expired with the
+ * sequence's fate unknown -- and is the caller's to pass on.
+ */
+static DaliError restore_load_and_read_dtr0(const DaliTransport *transport,
+                                            const DaliSequence  *load,
+                                            DaliError           *read_err,
+                                            uint8_t             *read_value)
+{
+    DaliSequenceResult result;
+    DaliError err = dali_transport_run_sequence_atomic(transport, load, &result);
+
+    if (err == DALI_OK) {
+        const DaliFrame *reply = &result.replies[1];
+        if ((result.reply_mask & (1u << 1u)) == 0u ||
+            reply->bit_length != DALI_BACKWARD_FRAME_BITS) {
+            *read_err = DALI_ERR_MALFORMED;
+            return DALI_OK;
+        }
+        *read_err   = DALI_OK;
+        *read_value = (uint8_t)reply->data;
+        return DALI_OK;
+    }
+
+    if (result.failed_step == 1u &&
+        (err == DALI_ERR_TIMEOUT || err == DALI_ERR_RX_ACTIVITY ||
+         err == DALI_ERR_MALFORMED || err == DALI_ERR_INTERVENED)) {
+        *read_err = err;
+        return DALI_OK;
+    }
+    return err;
+}
+
+DaliError dali_restore_write_short_address(const DaliTransport    *transport,
+                                           DaliSnapshotSpace       space,
+                                           uint8_t                 from,
+                                           uint8_t                 to,
+                                           bool                    allow_collided_readback,
+                                           DaliRestoreWriteResult *result_out)
+{
+    if (result_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    memset(result_out, 0, sizeof(*result_out));
+    if (!dali_transport_supports_atomic_sequence(transport)) {
+        return DALI_ERR_INVALID;
+    }
+
+    /* The builder owns the frames and the argument checks, so the pair sent
+     * here and the frames it pins cannot disagree on what a unit reads. */
+    DaliSequence seq;
+    DaliError err = dali_restore_build_move_sequence(space, from, to, &seq);
+    if (err != DALI_OK) {
+        return err;
+    }
+    const DaliSequenceStep pair = seq.steps[1];
+
+    DaliFrame readback;
+    if (space == DALI_SNAPSHOT_SPACE_GEAR) {
+        const DaliTarget target = { .type = DALI_ADDR_SHORT, .address = from };
+        err = dali_control_build_query(target, DALI_CMD_QUERY_CONTENT_DTR0, 0u,
+                                       &readback);
+    } else {
+        err = dali_input_build_query_content_dtr0(from, &readback);
+    }
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    /*
+     * The load stays in step 0 and the read-back takes the pair's place. As in
+     * dali_input_build_dtr_check_sequence(), neither step has a retry budget: a
+     * read-back that fails is retried below with a fresh load, so every value
+     * read is the value just loaded.
+     */
+    memset(&seq.steps[1], 0, sizeof(seq.steps[1]));
+    seq.steps[1].frame       = readback;
+    seq.steps[1].needs_reply = true;
+    seq.step_count           = 2u;
+
+    DaliRestoreWriteResult result;
+    memset(&result, 0, sizeof(result));
+    result.dtr0 = restore_short_address_dtr0(space, to);
+
+    bool verified   = false;
+    bool unverified = false;
+    while (result.loads < RESTORE_WRITE_LOADS && !verified && !unverified) {
+        DaliError read_err = DALI_OK;
+        uint8_t   value    = 0u;
+
+        err = restore_load_and_read_dtr0(transport, &seq, &read_err, &value);
+        if (err != DALI_OK) {
+            *result_out = result;
+            return err;
+        }
+
+        if (result.loads == 0u) {
+            result.first_error = read_err;
+            result.first_read  = value;
+        }
+        result.loads++;
+        result.last_error = read_err;
+        result.last_read  = value;
+
+        if (read_err == DALI_OK && value == result.dtr0) {
+            verified = true;
+        } else if (allow_collided_readback &&
+                   (read_err == DALI_ERR_RX_ACTIVITY ||
+                    read_err == DALI_ERR_MALFORMED)) {
+            /* Units sharing `from` answering together. Retrying would collide
+             * the same way, and the caller asked to clear them anyway. */
+            unverified = true;
+        }
+    }
+
+    if (!verified && !unverified) {
+        result.outcome = (result.last_error == DALI_OK)
+                             ? DALI_RESTORE_WRITE_DTR0_MISMATCH
+                         : (result.last_error == DALI_ERR_TIMEOUT)
+                             ? DALI_RESTORE_WRITE_DTR0_SILENT
+                             : DALI_RESTORE_WRITE_DTR0_UNREADABLE;
+        *result_out = result;
+        return DALI_OK;
+    }
+
+    memset(&seq, 0, sizeof(seq));
+    seq.steps[0]   = pair;
+    seq.step_count = 1u;
+    result.pair_attempted = true;
+    err = dali_transport_run_sequence_atomic(transport, &seq, NULL);
+    if (err != DALI_OK) {
+        *result_out = result;
+        return err;
+    }
+
+    result.outcome = verified ? DALI_RESTORE_WRITE_SENT
+                              : DALI_RESTORE_WRITE_SENT_UNVERIFIED;
+    *result_out = result;
     return DALI_OK;
 }
 
@@ -951,7 +1113,17 @@ DaliError dali_restore_confirm_move(const DaliTransport  *transport,
         goto done;
     }
     if (!present) {
-        check = DALI_RESTORE_MOVE_TARGET_SILENT;
+        /* Then whether the unit stayed. A move that did nothing is repaired by
+         * planning again; a unit that answers at neither end went somewhere
+         * nobody chose, and only a scan finds it. */
+        probe_err = restore_probe_presence(transport, move->space, move->from,
+                                           &present);
+        if (probe_err != DALI_OK) {
+            check = DALI_RESTORE_MOVE_UNREADABLE;
+            goto done;
+        }
+        check = present ? DALI_RESTORE_MOVE_TARGET_SILENT
+                        : DALI_RESTORE_MOVE_UNIT_MISSING;
         goto done;
     }
 
@@ -1004,11 +1176,24 @@ const char *dali_restore_move_check_name(DaliRestoreMoveCheck check)
 {
     switch (check) {
         case DALI_RESTORE_MOVE_CONFIRMED:      return "confirmed";
-        case DALI_RESTORE_MOVE_TARGET_SILENT:  return "nothing answers at the target";
+        case DALI_RESTORE_MOVE_TARGET_SILENT:  return "nothing answers at the target, and the source still does";
         case DALI_RESTORE_MOVE_SOURCE_ANSWERS: return "the source still answers";
         case DALI_RESTORE_MOVE_WRONG_UNIT:     return "a different unit answers at the target";
         case DALI_RESTORE_MOVE_UNREADABLE:     return "unreadable";
+        case DALI_RESTORE_MOVE_UNIT_MISSING:   return "nothing answers at the target or the source";
         default:                               return "unknown";
+    }
+}
+
+const char *dali_restore_write_outcome_name(DaliRestoreWriteOutcome outcome)
+{
+    switch (outcome) {
+        case DALI_RESTORE_WRITE_SENT:            return "sent";
+        case DALI_RESTORE_WRITE_SENT_UNVERIFIED: return "sent without a DTR0 read-back";
+        case DALI_RESTORE_WRITE_DTR0_MISMATCH:   return "DTR0 did not load";
+        case DALI_RESTORE_WRITE_DTR0_SILENT:     return "nothing answered the DTR0 read-back";
+        case DALI_RESTORE_WRITE_DTR0_UNREADABLE: return "the DTR0 read-back was unreadable";
+        default:                                 return "unknown";
     }
 }
 

@@ -57,8 +57,8 @@ verb by verb.
 | Addressed queries (34 names) | `dali_control_build_query` | `query`, `status` | yes | yes | yes (console) |
 | Configuration commands (19 names) | `dali_control_build_config` | `config` | yes | partial | yes (console) |
 | DTR0-consuming configuration | `dali_control_build_config` + sequence | `config-dtr0` | yes | no | yes (console, minus `set-short-address-dtr0`) |
-| Checked re-address / regroup | `dali_group_map_move` + shell workflow | `address` | partial (map only) | partial (2k, 2026-09-03 and 2026-09-29: `set` with its occupied-destination refusal, `add`/`remove`, and `clear` of a single unit; `clear` of a contested address not run) | shell only |
-| Checked control-device re-address | `dali_restore_build_move_sequence` — Part 103 `SET SHORT ADDRESS DTR0` | `address <dN> set\|clear` | partial (parsing and frames; not the handler) | partial (`set` on 2k, 2026-09-29) | shell only |
+| Checked re-address / regroup | `dali_restore_write_short_address` (DTR0 read back before the pair) + `dali_group_map_move` + shell workflow | `address` | partial (the checked write and the map; not the handler) | partial (2k, 2026-09-03 and 2026-09-29: `set` with its occupied-destination refusal, `add`/`remove`, and `clear` of a single unit; `clear` of a contested address not run; the DTR0 read-back has not met a bus) | shell only |
+| Checked control-device re-address | `dali_restore_write_short_address` — Part 103 `SET SHORT ADDRESS DTR0`, device DTR0 read back first | `address <dN> set\|clear` | partial (parsing, frames and the checked write; not the handler) | partial (`set` on 2k, 2026-09-29, before the read-back existed) | shell only |
 | DTR0/1/2 load | `dali_control_build_dtr` | `dtr` | yes | yes | yes (console) |
 | Special/broadcast commands (18 names) | `dali_build_special` | `special` | yes | partial | partial (console) |
 | Arbitrary frame | n/a | `raw` | yes (parse, commissioning gate) | yes | partial (`raw`, minus commissioning frames) |
@@ -89,7 +89,7 @@ cached level profile and triggers a refresh.
 | Address backup | `dali_snapshot_from_inventory` | `backup save`, `backup status` | yes | partial (2k, 2026-09-03) | shell; persisted to flash |
 | Backup blob round trip | `dali_snapshot_encode` / `_decode` | `backup export`, `backup import` | yes | n/a — no bus traffic; round-tripped on the 2k node, 2026-09-29 | shell |
 | Restore planning | `dali_restore_plan` | `restore plan` | yes | partial (2k, 2026-09-29: dependency order, a swap in each space, and moving aside a unit the backup never saw; a contested target is host-only) | shell |
-| Restore execution | `SET SHORT ADDRESS DTR0` per move, each confirmed by `dali_restore_confirm_move` | `restore apply` | partial (move frames and confirmation; not the apply loop) | partial (2k, 2026-09-29: gear and device moves, staging hops and a move-aside included, each confirmed; the stop after a failed move is host-only) | shell, opt-in |
+| Restore execution | `dali_restore_write_short_address` per move (DTR0 read back before the pair), each confirmed by `dali_restore_confirm_move` | `restore apply` | partial (move frames, the checked write and confirmation; not the apply loop) | partial (2k and 1k, 2026-09-29: gear and device moves, staging hops and a move-aside included, each confirmed; 1k stopped after a move that did not land. The DTR0 read-back has not met a bus) | shell, opt-in |
 | Group restore planning | `dali_restore_plan_groups` | `restore groups` | yes | no | shell; control gear only |
 | Group restore execution | n/a — `ADD TO GROUP` / `REMOVE FROM GROUP` per bit | `restore groups apply` | no | no | shell, opt-in; read back per gear |
 | Identify blink | n/a | `identify` | no | yes | yes (button, shell) |

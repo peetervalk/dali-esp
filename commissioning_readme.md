@@ -454,7 +454,7 @@ config <target> remove-group <0-15>
 `discover` prints what each address currently believes:
 
 ```text
-05: present, LED, status=0x00, v2, level=254, groups=[1,3]
+05: present, LED, status=0x00, v2.0, level=254, groups=[1,3]
 ```
 
 and a single address can be asked without walking the whole bus:
@@ -976,6 +976,11 @@ restore apply: stopped after 1 of 2 move(s); re-run 'restore plan' to see what r
 ```
 
 Run `restore plan` again and it will plan from the bus as it now stands.
+
+Before each move is sent, the fixture is asked to read back the address it is
+about to take. A fixture that missed that load would otherwise take whatever
+its register last held, so a move that does not read back is not sent at all,
+and the run stops with `DTR0 did not load` instead.
 
 Two units that need to swap addresses cannot both move directly, so the plan
 stages one through a free address and places it on a later step. A swap with no

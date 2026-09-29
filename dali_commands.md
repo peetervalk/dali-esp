@@ -365,12 +365,12 @@ spellings are unchanged and still available.
 
 | Subverb | Sends | Checks |
 |---|---|---|
-| `set <aM>` | DTR0 + SET SHORT ADDRESS, one sequence | destination is empty and source answers, **before**; destination answers and source is silent, **after** |
+| `set <aM>` | DTR0 + QUERY CONTENT DTR0, then SET SHORT ADDRESS | destination is empty and source answers, **before**; DTR0 reads back at the source, **between**; destination answers and source is silent, **after** |
 | `add <gN>` | ADD TO GROUP | reads both group bytes back and prints the resulting membership |
 | `remove <gN>` | REMOVE FROM GROUP | the same read-back |
-| `clear` | the same sequence, DTR0 = 255 | subject answers, **before**; subject is silent and the bus reports unaddressed gear, **after** |
-| `set <dM>` | device DTR0 + SET SHORT ADDRESS DTR0 (Part 103), one sequence | the same two-sided check, over QUERY NUMBER OF INSTANCES |
-| `clear` on a `d<N>` | the same device sequence, DTR0 = 255 | subject answers, **before**; subject is silent, **after** — and only that; see below |
+| `clear` | the same frames, DTR0 = 255 | subject answers, **before**; DTR0 reads back, **between**; subject is silent and the bus reports unaddressed gear, **after** |
+| `set <dM>` | device DTR0 + QUERY CONTENT DTR0, then SET SHORT ADDRESS DTR0 (Part 103) | the same three checks, over QUERY NUMBER OF INSTANCES |
+| `clear` on a `d<N>` | the same device frames, DTR0 = 255 | subject answers, **before**; DTR0 reads back, **between**; subject is silent, **after** — and only that; see below |
 
 ```text
 > address a5 set a13
@@ -380,6 +380,57 @@ address: a13 confirmed, a5 silent
 > address a5 add g3
 address: a5 is in g1 g3
 ```
+
+### DTR0 is read back before the address is written
+
+SET SHORT ADDRESS takes the new address from the unit's DTR0, and the DTR0 load
+before it reaches every unit on the bus at once. A unit that misses the load but
+hears the pair takes whatever DTR0 already held — which after any memory read is
+that read's offset, and after the identification read `restore apply` does is
+`0x0B`, the gear encoding of a5. On the 1k bus one `restore apply` move lost a
+frame this way and was harmless only because that unit was moving *from* a5.
+
+So every arm, in both spaces, loads DTR0 and reads it back from the unit with
+QUERY CONTENT DTR0 in one sequence, and sends the SET SHORT ADDRESS pair as a
+second sequence only if the unit holds the value loaded. A read-back that is
+wrong, silent or unreadable gets one more load; if that fails too, nothing
+further is sent:
+
+```text
+> address a7 set a2
+address: a7 -> a2 (DTR0=5)
+address: DTR0 did not load: a7 read back 0x0B, not 0x05; nothing further sent
+```
+
+A second load that worked is still reported, because the first read-back is
+the evidence of a unit missing a load:
+
+```text
+> address a7 set a2
+address: a7 -> a2 (DTR0=5)
+address: DTR0 needed a second load: a7 first read back 0x0B
+address: a2 confirmed, a7 silent
+```
+
+With DTR0 right, a pair the unit did not hear whole can only do nothing, and
+when the destination is silent the source is asked too, to say which of the two
+cases this is:
+
+```text
+address: a2 does not answer after the write, and a7 still does -- the gear did not move
+address: neither a2 nor a7 answers after the write -- run 'scan' to find the gear
+```
+
+Clearing a contested address is the one exception. The units sharing it answer
+the read-back together, which collides rather than reading as a value, so that
+case sends the pair without the check and says so:
+
+```text
+address: the DTR0 read-back at a7 collided, as units sharing an address answer; sent without it
+```
+
+The raw spellings, `config-dtr0 <t> set-short-address-dtr0` and `raw2`, send
+exactly what they are given and read nothing back.
 
 ### `clear`, and what it can prove
 
@@ -479,8 +530,10 @@ The whole verb is absent from the console, like every other verb that claims the
 bus for a multi-frame workflow.
 
 A confirmed `clear` is reported to the integration the way a confirmed move is,
-but the bookkeeping is the opposite: group membership is **retired** rather than
-followed. The unit keeps its own group registers through a de-address, so it
+but the bookkeeping is the opposite: the integration's group-map entry is
+**retired** rather than followed, so no group light polls the silent address.
+The unit itself keeps its group registers through a de-address. It goes on
+acting on group and broadcast commands while it has no address, and it
 reappears in the same groups at whatever address `commission unaddressed` hands
 it — and that address is not knowable in advance, so only a scan can find it
 again. The threshold is lower than a move's, too: a move that cannot be
@@ -1140,8 +1193,10 @@ read-only and needs no policy. `restore apply` executes them, and is gated
 exactly as `commission` is: a shell session refuses it without
 `allow_commissioning: true`.
 
-A move is a plain addressed `SET SHORT ADDRESS DTR0` — DTR0 and the command in
-one contiguous sequence, in whichever address space the entry came from.
+A move is a plain addressed `SET SHORT ADDRESS DTR0`, in whichever address space
+the entry came from, written the way `address` writes one: DTR0 and QUERY
+CONTENT DTR0 at the unit as one sequence, then the send-twice pair only if the
+unit read the value back.
 **`restore` opens no `INITIALISE` window.** Nothing it sends can leave the bus
 in a state that needs terminating, so it is safe to run on a live installation
 and safe to interrupt: `apply` stops at the first move that fails or cannot be
@@ -1158,14 +1213,32 @@ why, and `apply` stops there:
 
 ```text
   1/2 a4 -> a1: OK
-  2/2 a9 -> a3: sent, not confirmed: nothing answers at the target
+  2/2 a9 -> a3: sent, not confirmed: nothing answers at the target, and the source still does
 restore apply: stopped after 1 of 2 move(s); re-run 'restore plan' to see what remains
 ```
 
-The other reasons are `the source still answers`, `a different unit answers at
-the target`, and `unreadable` followed by the error that stopped the read-back.
-A run that confirms every move ends with `restore apply: N move(s) applied, each
-confirmed on the bus`.
+The other reasons are `nothing answers at the target or the source` — the unit
+took an address nobody chose, or lost power, and `restore plan` looks for it by
+identification number — `the source still answers`, `a different unit answers
+at the target`, and `unreadable` followed by the error that stopped the
+read-back. A run that confirms every move ends with `restore apply: N move(s)
+applied, each confirmed on the bus`.
+
+Every move after the first follows a confirmation, whose identification read
+leaves `0x0B` — a5 encoded — in every other unit's DTR0. That is why the DTR0
+read-back matters most here. A move whose DTR0 does not read back is not sent,
+and stops the run the same way:
+
+```text
+  2/3 a5 -> a2: DTR0 did not load: a5 read back 0x0B, not 0x05; nothing further sent
+```
+
+A move that needed a second load says so under its own line:
+
+```text
+  2/3 a5 -> a2: OK
+    DTR0 needed a second load: a5 first read back 0x0B
+```
 
 Each confirmed gear move is also reported to the integration, the way `address`
 reports one. Its group membership follows the gear and its cached level

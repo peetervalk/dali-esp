@@ -1007,6 +1007,48 @@ static void test_format_status_fits_all_eight_flags(void)
         buf);
 }
 
+/*
+ * `discover` printed the version byte halved, so DALI-2 gear read "v4". The
+ * byte packs major.minor into 6 + 2 bits: 0x08 is 2.0.
+ */
+static void test_format_gear_version_unpacks_major_and_minor(void)
+{
+    char buf[DALI_CLI_VERSION_TEXT_MAX];
+
+    TEST_ASSERT_EQUAL_UINT(strlen("v2.0"),
+                           dali_cli_format_gear_version(buf, sizeof(buf), 0x08u));
+    TEST_ASSERT_EQUAL_STRING("v2.0", buf);
+
+    dali_cli_format_gear_version(buf, sizeof(buf), 0x09u);
+    TEST_ASSERT_EQUAL_STRING("v2.1", buf);
+
+    dali_cli_format_gear_version(buf, sizeof(buf), 0x0Cu);
+    TEST_ASSERT_EQUAL_STRING("v3.0", buf);
+
+    dali_cli_format_gear_version(buf, sizeof(buf), 0xFFu);
+    TEST_ASSERT_EQUAL_STRING("v63.3", buf);
+}
+
+/* Below 2.0 the packing would claim versions nobody published, so the byte
+ * prints as it came. */
+static void test_format_gear_version_prints_older_answers_raw(void)
+{
+    char buf[DALI_CLI_VERSION_TEXT_MAX];
+
+    dali_cli_format_gear_version(buf, sizeof(buf), 0x01u);
+    TEST_ASSERT_EQUAL_STRING("version=0x01", buf);
+
+    dali_cli_format_gear_version(buf, sizeof(buf), 0x00u);
+    TEST_ASSERT_EQUAL_STRING("version=0x00", buf);
+
+    /* The longest output there is, and it fits. */
+    TEST_ASSERT_EQUAL_UINT(strlen("version=0x07"),
+                           dali_cli_format_gear_version(buf, sizeof(buf), 0x07u));
+    TEST_ASSERT_EQUAL_STRING("version=0x07", buf);
+
+    TEST_ASSERT_EQUAL_UINT(0u, dali_cli_format_gear_version(NULL, 8u, 0x08u));
+}
+
 static void test_format_response_matches_the_printed_forms(void)
 {
     char buf[DALI_CLI_RESPONSE_LINE_MAX];
@@ -1748,6 +1790,8 @@ int main(void)
 
     RUN_TEST(test_format_status_names_only_the_set_flags);
     RUN_TEST(test_format_status_fits_all_eight_flags);
+    RUN_TEST(test_format_gear_version_unpacks_major_and_minor);
+    RUN_TEST(test_format_gear_version_prints_older_answers_raw);
     RUN_TEST(test_format_response_matches_the_printed_forms);
     RUN_TEST(test_format_response_reports_malformed);
     RUN_TEST(test_format_response_truncates_within_bounds);

@@ -28,6 +28,115 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-09-30 (DTR0 read-back, clear lines, version display; uncommitted on `dev`)
+
+Implements the fix proposed in *A lost DTR0 load re-addresses a unit to
+whatever DTR0 last held*, under Investigations, and two findings of the seventh
+session below. Nothing touched a bus.
+
+- `dali_restore_write_short_address()` sends DTR0 and QUERY CONTENT DTR0 at the
+  unit as one sequence, and SET SHORT ADDRESS as a second only when the unit
+  read the value back. After a wrong, silent or unreadable read-back it loads
+  once more, then gives up with nothing further sent. `restore apply` and all
+  four `address` arms write through it. The frames still come from
+  `dali_restore_build_move_sequence()`, so that builder's vectors keep pinning
+  them.
+- `dali_restore_confirm_move()` asks the source when the target is silent.
+  `TARGET_SILENT` now means the unit stayed, and the new `UNIT_MISSING` that it
+  answers at neither end. `address set` in both spaces reports the same
+  distinction.
+- `restore apply` reports a move to the integration when it is confirmed, no
+  longer when it is sent. The `config_applied` call is gone, and with it the
+  device log's `short address changed ... stale until the next scan` before
+  every restore move.
+- The ESPHome clear lines say what changed: the integration stopped polling the
+  address for group state, and the gear keeps its groups.
+- `discover` and `inventory` print the version as major.minor through
+  `dali_cli_format_gear_version()`, and anything below 2.0 as the raw byte.
+- `test_restore_confirm` grew from 17 vectors to 33. The mock bus now moves
+  units as SET SHORT ADDRESS would, and can make the unit miss a DTR0 load or a
+  pair. One vector pins the hazard on the builder's bare frames: a unit that
+  misses the load lands on a5, on top of the unit there. The write's vectors
+  run the same bus and leave every unit where it belongs. `test_cli` gained two
+  vectors, to 89. 32/32 suites pass.
+- Six mutants, each killed: the read-back always accepted (5 vectors fail), no
+  second load (5), no source probe after a silent target (1), a collided
+  read-back never allowed (1), `pair_attempted` never set (1), and the version
+  halved again (1).
+- `dali_shell.c`, `dali_cli.c` and `dali_restore.c` type-check clean with the
+  IDF 6.0.1 flags of `dali_group_map.c` from `build/compile_commands.json`.
+  `dali_component.cpp` type-checks clean with the flags of the 2026-08-13
+  `dali-1k` ESPHome build tree, whose headers predate 2026.9. An error injected
+  into each edited function was caught by both checks.
+
+Not covered: any bus; an ESPHome compile at 2026.9.1; any control device
+answering QUERY CONTENT DTR0 (`0x36`), which the device arms now depend on.
+
+### Verified on hardware 2026-09-29, seventh session (1k bus: `identify`, `backup save`, `restore apply` reporting and its stop, `dev`)
+
+The bus run the three local entries below asked for, on 1k, where the lamps sit
+in seven groups. Driven from the `dali-shell` script against the 1k node, with
+the device log captured alongside. The user reports the build as the latest
+commit, `398eda1`. The device log reads ESPHome 2026.9.1, compiled 23:12 that
+evening; Home Assistant and the workstation had both just moved to 2026.9.1.
+
+Bus at start: 16 LED gear at a0–a15, in groups 0 and 2–7. The lamps at a2 and
+a5 are in g6 and g0.
+
+- **`identify` puts a mid level back.** From level 160 at a0, `identify 0`
+  ended `identify: done, level 160 restored`, and the next `discover` read a0
+  at 160.
+- **`backup save` names gear it cannot record.** With a5 cleared, it read
+  `recorded 15 entries from 15 address(es)`, then `gear on the bus reports no
+  short address and is NOT recorded here` and the remedy. Once `commission
+  unaddressed` had put the unit back, it recorded 16 of 16 and printed neither
+  line. The broadcast QUERY MISSING SHORT ADDRESS behind the note read YES,
+  then silence.
+- **An unaddressed unit acts on its group commands.** a5 was cleared and
+  re-commissioned twice. Each walk assigned a5, the lowest free address, with
+  fresh randoms `0x4CDA55` and `0x3749A2`, and each post-scan confirmed 1 of 1.
+  Between the second clear and its walk, `level g0 90` went out. The next
+  `discover` read a5 at 90 in group 0, where the `off g0` before the clear had
+  left it off. A cleared unit keeps its group registers, as `dali_commands.md`
+  says, and still acts on them. This is the first bus reading of the second
+  half.
+- **The device log says the opposite.** Each clear logged `a5 cleared: retired
+  from every group it was known in`, then `a5 no longer answers ... the unit
+  comes back only through 'commission unaddressed'`. What was retired is the
+  integration's group-map entry, which only chooses the address a group light
+  polls. The user flagged the first line as misleading; the second overstates
+  the same way. P1 item in `current_status.md`.
+- **A swap by hand, and a restore that stopped.** `address a5 set a16`,
+  `address a2 set a5` and `address a16 set a2` swapped the two lamps. Each move
+  was confirmed and logged `group membership followed the move`. `restore plan`
+  read `16 matched, 14 already correct, 3 move(s)`, staging a2 -> a16, the
+  lowest free address. The first `restore apply` confirmed that hop, then
+  printed `2/3 a5 -> a2: sent, not confirmed: nothing answers at the target`
+  and `stopped after 1 of 3 move(s)`, and sent nothing further. That is the
+  first bus run of the stop after a failed move, which the 2k entries below
+  list as host-tested only. The next `restore plan` read 2 moves, a5 -> a2 and
+  a16 -> a5, so the unit at a5 had not moved. A second `restore apply`
+  confirmed both, and `discover` showed every lamp at its recorded address and
+  in its recorded group. Why the move failed is under Investigations, *A lost
+  DTR0 load re-addresses a unit to whatever DTR0 last held*.
+- **Each confirmed gear move reaches the integration.** The device log has
+  `group membership followed the move` for each of the three restore moves
+  that were confirmed, and nothing of the kind for the one that was not.
+- **Every restore move also logs `short address changed ... stale until the
+  next scan`, before it is confirmed.** `shell_restore_apply_move()` calls the
+  `config_applied` hook as soon as the frames are sent. The line was false for
+  the move that failed, and for the three that landed the next line
+  contradicts it. `address` makes no such call and logged none.
+- ESPHome logged `dali took a long time for an operation (338 ms)` once, at
+  23:27:43, before the first clear. Not investigated.
+- `dali_test.yaml` passes `esphome config` on 2026.9.1 on the workstation.
+
+Not covered:
+
+- `identify` from max and from off, and the ESPHome Identify button.
+- Which of the failed move's three frames the unit missed.
+- `restore groups`, and every contested-address path.
+
 ### Verified locally on 2026-09-29 (`identify` puts the level back; uncommitted on `dev`)
 
 Fixes the `identify` report in the sixth-session entry below. Nothing touched a
@@ -1674,6 +1783,83 @@ cleared by the 2026-08-14 entry above):
 ---
 
 # Investigations
+
+## A lost DTR0 load re-addresses a unit to whatever DTR0 last held — found 2026-09-30
+
+Found by reading the move that failed in the seventh session. The miss was
+observed once; the rest is read from source.
+
+### What the bus showed
+
+The second move of the first `restore apply`, a5 -> a2, sent DTR0 = `0x05` and
+then SET SHORT ADDRESS DTR0 twice to a5, and the scheduler reported all three
+frames sent. The confirmation found nothing at a2, and the next `restore plan`
+found the unit still at a5. By the device log's timestamps the three frames
+took about 70 ms, which is what three frames 22 Te apart take, so no stall
+split the pair. The unit missed one of the three frames, and nothing in the
+log says which.
+
+### Why this miss was harmless, and the next one need not be
+
+The move before it ended with its confirmation, which reads the identification
+number from Bank 0 at the destination. That read loads DTR1 = 0 and DTR0 =
+`0x0B` by broadcast, then advances DTR0 only in the unit it reads. So when move
+2 began, every other unit on the bus held DTR0 = `0x0B`, the one at a5
+included. `0x0B` is `(5 << 1) | 1`, the gear encoding of a5.
+
+- If the unit missed the DTR0 frame, SET SHORT ADDRESS ran with `0x0B` and
+  wrote a5 again.
+- If it missed a frame of the pair, SET SHORT ADDRESS did not run.
+
+Either way it stays at a5, which is what the re-plan found. The first case was
+harmless only because the move started *from* a5. Every move after the first
+in a plan begins with the same stale `0x0B`, so the same miss from any other
+source puts the unit on a5, whoever holds it. On 2k's fourth session the
+staging hop went to a5, so a miss on the next move would have put the second
+lamp on top of the staged one. The confirmation would then have reported
+`nothing answers at the target` and stopped. It reads the target first, so it
+would not have said that the unit had left its source, or that a5 was now
+contested.
+
+`address set` and `address clear` send the same unverified pair, and a miss
+there writes whatever the unit's DTR0 last held, typically an offset from the
+last memory read. The device space has the same shape: its Bank 0 read leaves
+the device DTR0 at `0x0B`, which Part 103 reads raw, as d11.
+
+### Which frame is the likelier miss
+
+The DTR0 frame was the only one of the three to follow another unit's backward
+frame, the last identification byte from a16. The pair followed our own DTR0
+frame by the 22 Te guard. The scheduler spaces nothing from a received frame,
+so the DTR0 frame went out about 2.9 ms plus task latency after that reply,
+where AN1220 waits 9.17 ms (*Nothing spaces a forward frame from a received
+one*, below).
+
+The evidence either way is thin:
+
+- Gear moves that load DTR0 straight after another unit's reply, with a value
+  other than the stale one: three on 2k, in the fourth and fifth sessions,
+  landed; this one on 1k did not.
+- The second apply's second move, a16 -> a5, also followed another unit's
+  reply. But it wanted `0x0B`, the stale value, so it would have landed
+  whether or not the load did. It tests nothing.
+- Every `address set` loads DTR0 straight after the moving unit's own reply to
+  the source probe. Three did so on 1k in this session, and all landed. A
+  receiver that treats another unit's backward frame as a framing error, and
+  waits longer before listening again, would miss only after another unit's
+  reply. That is a guess about the drivers, not a reading.
+
+### Fix, proposed and not implemented
+
+Read DTR0 back from the source before sending the pair. Send DTR0 and QUERY
+CONTENT DTR0 (`0x98`, device `0x36`) at `from` as one sequence, and the SET
+SHORT ADDRESS pair as a second sequence only if the reply is the value loaded.
+The unit then holds the right DTR0 whenever the pair runs, so a lost frame of
+the pair can only do nothing, and a lost load is named when it happens rather
+than surfacing as a silent target. A contested `clear` needs an exception,
+because two units answering the read-back may collide. Separately, the
+confirmation could probe the source when the target is silent, to tell "did not
+move" from "moved somewhere else".
 
 ## `restore apply` publishes the scan it planned from — found 2026-09-29
 
@@ -3334,6 +3520,68 @@ below landed after that tag.
 
 Add new entries here as breaks accumulate, and empty the section again at the
 next tag.
+
+### From the 2026-09-30 DTR0 read-back, clear-line and version fixes (host-tested, compile-checked)
+
+Operator-visible:
+
+- Every `address` arm (`aN set`, `aN clear`, `dN set`, `dN clear`) and every
+  `restore apply` move loads DTR0 and reads it back with QUERY CONTENT DTR0
+  (gear `0x98`, device `0x36`) before sending SET SHORT ADDRESS. A wrong,
+  silent or unreadable read-back gets one more load. If that fails too, nothing
+  further is sent, and the line reads `DTR0 did not load: a7 read back 0x0B,
+  not 0x05; nothing further sent` or `DTR0 could not be checked: ...`.
+  `restore apply` stops there, as for any failed move.
+- A write that needed the second load prints `DTR0 needed a second load: a7
+  first read back 0x0B`, on its own `address:` line or indented under the
+  `restore apply` move line.
+- Clearing a contested address sends the pair unchecked when the read-back
+  collides, and says `the DTR0 read-back at a7 collided, as units sharing an
+  address answer; sent without it`.
+- The device arms now need the device to answer QUERY CONTENT DTR0. One that
+  does not makes `address dN set|clear` and a device-space restore refuse.
+- `address aN set aM` and `dN set dM` probe the source when the destination is
+  silent: `... and aN still does -- the gear did not move`, or `neither aM nor
+  aN answers after the write -- run 'scan' to find the gear`. An undecodable
+  destination reads `whether aM answers after the write is unreadable (...)`.
+- A transport error during an `address` write says whether SET SHORT ADDRESS
+  had gone out: `<error> before SET SHORT ADDRESS; nothing moved`, or `<error>
+  while SET SHORT ADDRESS went out; run 'scan' before sending anything else`.
+  These replace `ERR <error> at sequence step N`. `restore apply` makes the
+  same distinction on the move line.
+- `restore apply`'s `nothing answers at the target` now reads `nothing answers
+  at the target, and the source still does`. A new reason, `nothing answers at
+  the target or the source`, reports a unit that answers at neither end.
+- `discover` and `inventory` print the gear version as major.minor (`v2.0`),
+  where they printed the byte halved (`v4`). A byte below 2.0 prints raw, as
+  `version=0x01`. `export inventory` and `smoke` still give the raw byte.
+
+C API:
+
+- New: `dali_restore_write_short_address()`, `DaliRestoreWriteOutcome`,
+  `DaliRestoreWriteResult`, `dali_restore_write_was_sent()` and
+  `dali_restore_write_outcome_name()`.
+- `DaliRestoreMoveCheck` gains `DALI_RESTORE_MOVE_UNIT_MISSING`, appended, so
+  existing values keep their numbers. `DALI_RESTORE_MOVE_TARGET_SILENT` now
+  also means that the source still answers; a caller switching on it must
+  handle the new value.
+- `dali_restore_confirm_move()` sends one more query when `to` is silent: the
+  probe of `from`.
+- New: `dali_cli_format_gear_version()` and `DALI_CLI_VERSION_TEXT_MAX`.
+- `restore apply` no longer calls `DaliShellHooks.config_applied`. Confirmed
+  gear moves still reach `short_address_moved`.
+
+ESPHome:
+
+- After `address aN clear` the device log reads `aN cleared: no longer polled
+  for group state (gX gY); the gear keeps its groups and still follows group
+  and broadcast commands`, where it read `retired from every group it was
+  known in`. The warning after it reads `nothing answers at aN now. Any entity
+  configured with address: N targets nothing until 'commission unaddressed'
+  re-addresses the unit, at an address only a scan can find`.
+- `restore apply` no longer logs `short address changed (target type=0
+  addr=N): group membership and poll targets are stale until the next scan`
+  for each move it sends. Confirmed moves log what they did, as before.
 
 ### From the 2026-09-29 `identify` fix (compile-checked)
 

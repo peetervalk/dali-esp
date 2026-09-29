@@ -1,6 +1,7 @@
 /*
- * test_restore_confirm.c — dali_restore_confirm_move(), and the frames of the
- * move it confirms (dali_restore_build_move_sequence())
+ * test_restore_confirm.c — dali_restore_confirm_move(), the frames of the move
+ * it confirms (dali_restore_build_move_sequence()), and the write that sends
+ * them (dali_restore_write_short_address())
  *
  * `restore apply` used to report a move as done once its frames were sent.
  * SET SHORT ADDRESS is unacknowledged, so a unit that silently discarded the
@@ -8,6 +9,11 @@
  * on the address the first never vacated. These vectors pin the check the
  * executor now runs after every move, against a mock bus that answers the
  * presence probes and the Bank 0 reads in both address spaces.
+ *
+ * The write came later, from a 1k move that lost a frame: a unit that misses
+ * the DTR0 load takes whatever DTR0 held. The mock moves units the way gear
+ * and devices do, and can make the unit miss a load or a pair, so these
+ * vectors can say where a unit ends up and not only which frames went out.
  */
 
 #include "unity.h"
@@ -32,6 +38,23 @@ static uint8_t   s_device_dtr1;
 /* When set, every transaction fails with it: a transport whose wait expired,
  * or a bus fault, before anything was learned. */
 static DaliError s_forced_error;
+/* DTR0 loads, in either space, that the unit being written does not hear. The
+ * mock keeps one DTR0 per space, so a missed load leaves the old value. */
+static uint8_t   s_dtr0_loads_to_miss;
+/* SET SHORT ADDRESS pairs the unit does not hear whole. */
+static uint8_t   s_pairs_to_miss;
+/* When set, a SET SHORT ADDRESS frame fails with it: a pair the transport
+ * could not finish sending. */
+static DaliError s_pair_error;
+
+/* Every frame the mock was handed, in order. */
+#define MOCK_LOG_MAX 24u
+typedef struct {
+    DaliFrame frame;
+    bool      send_twice;
+} MockSent;
+static MockSent  s_sent[MOCK_LOG_MAX];
+static uint8_t   s_sent_count;
 
 static void fill_identification(uint8_t *out, uint8_t seed)
 {
@@ -84,6 +107,64 @@ static DaliError memory_reply(const MockUnit *unit, uint8_t bank, uint8_t *offse
     return err;
 }
 
+/* A DTR0 load, unless the unit being written is due to miss it. */
+static void load_dtr0(uint8_t *dtr0, uint8_t value)
+{
+    if (s_dtr0_loads_to_miss > 0u) {
+        s_dtr0_loads_to_miss--;
+        return;
+    }
+    *dtr0 = value;
+}
+
+/*
+ * SET SHORT ADDRESS (DTR0), heard by the unit at `addr`. Gear takes
+ * (a << 1) | 1 and a device the raw value; both take 0xFF as "none", and any
+ * other value leaves the address alone. It is send-twice, so a lone frame does
+ * nothing. A unit moved onto an occupied address leaves it contested, which
+ * is what a unit that missed its DTR0 load risks.
+ */
+static void set_short_address(MockUnit *space, uint8_t addr, uint8_t dtr0,
+                              bool gear, bool send_twice)
+{
+    MockUnit *unit = &space[addr];
+    if (!send_twice || (!unit->present && !unit->contested)) {
+        return;
+    }
+    if (s_pairs_to_miss > 0u) {
+        s_pairs_to_miss--;
+        return;
+    }
+    if (dtr0 == 0xFFu) {
+        memset(unit, 0, sizeof(*unit));
+        return;
+    }
+
+    uint8_t to;
+    if (gear) {
+        if ((dtr0 & 0x81u) != 0x01u) {
+            return;
+        }
+        to = (uint8_t)(dtr0 >> 1u);
+    } else {
+        if (dtr0 >= DALI_SHORT_ADDRESS_COUNT) {
+            return;
+        }
+        to = dtr0;
+    }
+    if (to == addr) {
+        return;
+    }
+
+    if (space[to].present || space[to].contested) {
+        space[to].present   = false;
+        space[to].contested = true;
+    } else {
+        space[to] = *unit;
+    }
+    memset(unit, 0, sizeof(*unit));
+}
+
 static DaliError mock_transact(const DaliFrame *frame,
                                bool             needs_reply,
                                uint8_t          retries_left,
@@ -93,11 +174,15 @@ static DaliError mock_transact(const DaliFrame *frame,
 {
     (void)needs_reply;
     (void)retries_left;
-    (void)send_twice;
     (void)ctx;
 
     if (s_forced_error != DALI_OK) {
         return s_forced_error;
+    }
+    if (s_sent_count < MOCK_LOG_MAX) {
+        s_sent[s_sent_count].frame      = *frame;
+        s_sent[s_sent_count].send_twice = send_twice;
+        s_sent_count++;
     }
 
     if (frame->bit_length == DALI_FORWARD_FRAME_BITS) {
@@ -105,7 +190,7 @@ static DaliError mock_transact(const DaliFrame *frame,
         const uint8_t opcode    = (uint8_t)(frame->data & 0xFFu);
 
         if (addr_byte == 0xA3u) {          /* DTR0 DATA */
-            s_gear_dtr0 = opcode;
+            load_dtr0(&s_gear_dtr0, opcode);
             return DALI_OK;
         }
         if (addr_byte == 0xC3u) {          /* DTR1 DATA */
@@ -113,12 +198,23 @@ static DaliError mock_transact(const DaliFrame *frame,
             return DALI_OK;
         }
         if ((addr_byte & 0x01u) != 0u && addr_byte <= 0x7Fu) {
-            const MockUnit *unit = &s_gear[addr_byte >> 1u];
+            const uint8_t   addr = (uint8_t)(addr_byte >> 1u);
+            const MockUnit *unit = &s_gear[addr];
             if (opcode == 0x90u) {         /* QUERY STATUS */
                 return unit_reply(unit, 0x04u, reply_out);
             }
+            if (opcode == 0x98u) {         /* QUERY CONTENT DTR0 */
+                return unit_reply(unit, s_gear_dtr0, reply_out);
+            }
             if (opcode == 0xC5u) {         /* READ MEMORY LOCATION */
                 return memory_reply(unit, s_gear_dtr1, &s_gear_dtr0, reply_out);
+            }
+            if (opcode == 0x80u) {         /* SET SHORT ADDRESS (DTR0) */
+                if (s_pair_error != DALI_OK) {
+                    return s_pair_error;
+                }
+                set_short_address(s_gear, addr, s_gear_dtr0, true, send_twice);
+                return DALI_OK;
             }
         }
         return DALI_ERR_INVALID;
@@ -130,7 +226,7 @@ static DaliError mock_transact(const DaliFrame *frame,
         const uint8_t opcode    = (uint8_t)(frame->data & 0xFFu);
 
         if (addr_byte == 0xC1u && middle == 0x30u) {   /* device DTR0 */
-            s_device_dtr0 = opcode;
+            load_dtr0(&s_device_dtr0, opcode);
             return DALI_OK;
         }
         if (addr_byte == 0xC1u && middle == 0x31u) {   /* device DTR1 */
@@ -139,12 +235,20 @@ static DaliError mock_transact(const DaliFrame *frame,
         }
         if ((addr_byte & 0x01u) != 0u && addr_byte <= 0x7Fu &&
             middle == DALI_DEVICE_INSTANCE) {
-            const MockUnit *unit = &s_device[addr_byte >> 1u];
+            const uint8_t   addr = (uint8_t)(addr_byte >> 1u);
+            const MockUnit *unit = &s_device[addr];
             if (opcode == 0x35u) {         /* QUERY NUMBER OF INSTANCES */
                 return unit_reply(unit, 4u, reply_out);
             }
+            if (opcode == 0x36u) {         /* QUERY CONTENT DTR0 (device) */
+                return unit_reply(unit, s_device_dtr0, reply_out);
+            }
             if (opcode == 0x3Cu) {         /* READ MEMORY LOCATION (device) */
                 return memory_reply(unit, s_device_dtr1, &s_device_dtr0, reply_out);
+            }
+            if (opcode == 0x14u) {         /* SET SHORT ADDRESS (device) */
+                set_short_address(s_device, addr, s_device_dtr0, false, send_twice);
+                return DALI_OK;
             }
         }
         return DALI_ERR_INVALID;
@@ -226,6 +330,11 @@ void setUp(void)
     s_device_dtr0 = 0u;
     s_device_dtr1 = 0u;
     s_forced_error = DALI_OK;
+    s_dtr0_loads_to_miss = 0u;
+    s_pairs_to_miss = 0u;
+    s_pair_error = DALI_OK;
+    memset(s_sent, 0, sizeof(s_sent));
+    s_sent_count = 0u;
 }
 
 void tearDown(void) {}
@@ -244,11 +353,35 @@ void test_a_move_that_landed_is_confirmed(void)
     TEST_ASSERT_EQUAL(DALI_OK, probe_err);
 }
 
-/* The pair was discarded: nothing at the destination. */
+/* The pair was discarded: nothing at the destination, the unit still at its
+ * source. */
 void test_silence_at_the_target_is_reported(void)
 {
+    unit_at(s_gear, 5u, 5u);
     DaliRestoreMove move = move_of(DALI_SNAPSHOT_SPACE_GEAR, 5u, 8u, 5u);
     TEST_ASSERT_EQUAL(DALI_RESTORE_MOVE_TARGET_SILENT, check_move(&move, NULL));
+}
+
+/*
+ * Silent at both ends: the unit took an address nobody chose, or lost power.
+ * Calling that "did not move" would send the operator back to planning with a
+ * unit loose on the bus.
+ */
+void test_silence_at_both_ends_is_a_missing_unit(void)
+{
+    DaliRestoreMove move = move_of(DALI_SNAPSHOT_SPACE_GEAR, 5u, 8u, 5u);
+    TEST_ASSERT_EQUAL(DALI_RESTORE_MOVE_UNIT_MISSING, check_move(&move, NULL));
+}
+
+/* A silent target and an undecodable source prove neither reading. */
+void test_a_silent_target_with_an_unreadable_source_is_unreadable(void)
+{
+    s_gear[5].contested = true;
+    DaliRestoreMove move = move_of(DALI_SNAPSHOT_SPACE_GEAR, 5u, 8u, 5u);
+
+    DaliError probe_err = DALI_OK;
+    TEST_ASSERT_EQUAL(DALI_RESTORE_MOVE_UNREADABLE, check_move(&move, &probe_err));
+    TEST_ASSERT_EQUAL(DALI_ERR_RX_ACTIVITY, probe_err);
 }
 
 /*
@@ -434,6 +567,306 @@ void test_a_move_sequence_rejects_what_no_address_can_be(void)
 }
 
 /* --------------------------------------------------------------------------
+ * Writing a move: dali_restore_write_short_address()
+ *
+ * The 1k bus sent DTR0 and the pair for a5 -> a2, and the unit stayed at a5.
+ * Every unit but the one the previous confirmation read held 0x0B, a5 encoded,
+ * so a lost load there was harmless only because the unit was leaving a5.
+ * From anywhere else the same loss lands it on a5.
+ * -------------------------------------------------------------------------*/
+
+static DaliRestoreWriteResult write_move(DaliSnapshotSpace space, uint8_t from,
+                                         uint8_t to, bool allow_collided)
+{
+    DaliRestoreWriteResult result;
+    memset(&result, 0xA5, sizeof(result));   /* every field must be written */
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_restore_write_short_address(&s_transport, space, from,
+                                                       to, allow_collided,
+                                                       &result));
+    return result;
+}
+
+static void assert_sent(uint8_t index, uint32_t data, uint8_t bits, bool twice)
+{
+    TEST_ASSERT_TRUE(index < s_sent_count);
+    TEST_ASSERT_EQUAL_HEX32(data, s_sent[index].frame.data);
+    TEST_ASSERT_EQUAL_UINT8(bits, s_sent[index].frame.bit_length);
+    TEST_ASSERT_EQUAL(twice, s_sent[index].send_twice);
+}
+
+/* Whether any SET SHORT ADDRESS went out, in either space. */
+static bool pair_was_sent(void)
+{
+    for (uint8_t i = 0u; i < s_sent_count; i++) {
+        const uint32_t d = s_sent[i].frame.data;
+        if (s_sent[i].frame.bit_length == DALI_FORWARD_FRAME_BITS &&
+            (d >> 8u) <= 0x7Fu && (d & 0x100u) != 0u && (d & 0xFFu) == 0x80u) {
+            return true;
+        }
+        if (s_sent[i].frame.bit_length == DALI_EXTENDED_FRAME_BITS &&
+            (d & 0xFFFFu) == 0xFE14u) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* DTR0, the read-back at the unit, then the pair; and the move confirms. */
+void test_a_write_reads_dtr0_back_before_the_pair(void)
+{
+    unit_at(s_gear, 5u, 5u);
+    DaliRestoreWriteResult result =
+        write_move(DALI_SNAPSHOT_SPACE_GEAR, 5u, 2u, false);
+
+    TEST_ASSERT_EQUAL(DALI_RESTORE_WRITE_SENT, result.outcome);
+    TEST_ASSERT_EQUAL_HEX8(0x05u, result.dtr0);
+    TEST_ASSERT_EQUAL_UINT8(1u, result.loads);
+    TEST_ASSERT_EQUAL_UINT8(3u, s_sent_count);
+    assert_sent(0u, 0xA305u, DALI_FORWARD_FRAME_BITS, false);  /* DTR0 = a2    */
+    assert_sent(1u, 0x0B98u, DALI_FORWARD_FRAME_BITS, false);  /* read it, a5  */
+    assert_sent(2u, 0x0B80u, DALI_FORWARD_FRAME_BITS, true);   /* the pair, a5 */
+
+    DaliRestoreMove move = move_of(DALI_SNAPSHOT_SPACE_GEAR, 5u, 2u, 5u);
+    TEST_ASSERT_EQUAL(DALI_RESTORE_MOVE_CONFIRMED, check_move(&move, NULL));
+}
+
+/*
+ * Why the write exists, on the builder's bare frames: the unit at a7 misses the
+ * load and hears the pair while DTR0 still holds the 0x0B a Bank 0 read left.
+ * It lands on a5, on top of the unit already there.
+ */
+void test_bare_frames_follow_a_stale_dtr0(void)
+{
+    unit_at(s_gear, 7u, 7u);
+    unit_at(s_gear, 5u, 5u);
+    s_gear_dtr0 = DALI_MEMORY_BANK0_OFFSET_IDENTIFICATION;
+    s_dtr0_loads_to_miss = 1u;
+
+    DaliSequence seq;
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_restore_build_move_sequence(DALI_SNAPSHOT_SPACE_GEAR,
+                                                       7u, 2u, &seq));
+    TEST_ASSERT_EQUAL(DALI_OK, mock_transact_sequence(&seq, NULL, NULL));
+
+    TEST_ASSERT_FALSE(s_gear[7].present);
+    TEST_ASSERT_FALSE(s_gear[2].present);
+    TEST_ASSERT_TRUE(s_gear[5].contested);
+}
+
+/*
+ * The same bus through the write: the stale value reads back, DTR0 is loaded
+ * again, and the unit goes where it was sent. The first reading is kept as the
+ * evidence of what the unit held.
+ */
+void test_a_missed_load_is_loaded_again(void)
+{
+    unit_at(s_gear, 7u, 7u);
+    unit_at(s_gear, 5u, 5u);
+    s_gear_dtr0 = DALI_MEMORY_BANK0_OFFSET_IDENTIFICATION;
+    s_dtr0_loads_to_miss = 1u;
+
+    DaliRestoreWriteResult result =
+        write_move(DALI_SNAPSHOT_SPACE_GEAR, 7u, 2u, false);
+
+    TEST_ASSERT_EQUAL(DALI_RESTORE_WRITE_SENT, result.outcome);
+    TEST_ASSERT_EQUAL_UINT8(2u, result.loads);
+    TEST_ASSERT_EQUAL(DALI_OK, result.first_error);
+    TEST_ASSERT_EQUAL_HEX8(0x0Bu, result.first_read);
+    TEST_ASSERT_EQUAL(DALI_OK, result.last_error);
+    TEST_ASSERT_EQUAL_HEX8(0x05u, result.last_read);
+    TEST_ASSERT_TRUE(s_gear[2].present);
+    TEST_ASSERT_TRUE(s_gear[5].present);
+    TEST_ASSERT_FALSE(s_gear[5].contested);
+}
+
+/* A load that never lands sends no pair, and every unit stays put. */
+void test_a_load_that_never_lands_sends_no_pair(void)
+{
+    unit_at(s_gear, 7u, 7u);
+    unit_at(s_gear, 5u, 5u);
+    s_gear_dtr0 = DALI_MEMORY_BANK0_OFFSET_IDENTIFICATION;
+    s_dtr0_loads_to_miss = 2u;
+
+    DaliRestoreWriteResult result =
+        write_move(DALI_SNAPSHOT_SPACE_GEAR, 7u, 2u, false);
+
+    TEST_ASSERT_EQUAL(DALI_RESTORE_WRITE_DTR0_MISMATCH, result.outcome);
+    TEST_ASSERT_EQUAL_UINT8(2u, result.loads);
+    TEST_ASSERT_EQUAL(DALI_OK, result.last_error);
+    TEST_ASSERT_EQUAL_HEX8(0x0Bu, result.last_read);
+    TEST_ASSERT_FALSE(pair_was_sent());
+    TEST_ASSERT_TRUE(s_gear[7].present);
+    TEST_ASSERT_TRUE(s_gear[5].present);
+    TEST_ASSERT_FALSE(s_gear[5].contested);
+}
+
+/* With DTR0 right, a lost pair can only do nothing, and the confirmation
+ * finds the unit where it was. */
+void test_a_lost_pair_leaves_the_unit_where_it_was(void)
+{
+    unit_at(s_gear, 7u, 7u);
+    s_pairs_to_miss = 1u;
+
+    DaliRestoreWriteResult result =
+        write_move(DALI_SNAPSHOT_SPACE_GEAR, 7u, 2u, false);
+    TEST_ASSERT_EQUAL(DALI_RESTORE_WRITE_SENT, result.outcome);
+    TEST_ASSERT_TRUE(s_gear[7].present);
+
+    DaliRestoreMove move = move_of(DALI_SNAPSHOT_SPACE_GEAR, 7u, 2u, 7u);
+    TEST_ASSERT_EQUAL(DALI_RESTORE_MOVE_TARGET_SILENT, check_move(&move, NULL));
+}
+
+/* Nothing answers the read-back: nothing to write to, and nothing written. */
+void test_a_silent_readback_sends_no_pair(void)
+{
+    DaliRestoreWriteResult result =
+        write_move(DALI_SNAPSHOT_SPACE_GEAR, 7u, 2u, false);
+
+    TEST_ASSERT_EQUAL(DALI_RESTORE_WRITE_DTR0_SILENT, result.outcome);
+    TEST_ASSERT_EQUAL_UINT8(2u, result.loads);
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT, result.last_error);
+    TEST_ASSERT_FALSE(pair_was_sent());
+}
+
+/*
+ * Units sharing an address answer the read-back together. A move refuses that,
+ * since nothing could say what either holds; the clear that exists to separate
+ * them may go ahead without it.
+ */
+void test_a_collided_readback_is_refused_unless_allowed(void)
+{
+    s_gear[4].contested = true;
+
+    DaliRestoreWriteResult result =
+        write_move(DALI_SNAPSHOT_SPACE_GEAR, 4u, 9u, false);
+    TEST_ASSERT_EQUAL(DALI_RESTORE_WRITE_DTR0_UNREADABLE, result.outcome);
+    TEST_ASSERT_EQUAL_UINT8(2u, result.loads);
+    TEST_ASSERT_EQUAL(DALI_ERR_RX_ACTIVITY, result.last_error);
+    TEST_ASSERT_FALSE(pair_was_sent());
+    TEST_ASSERT_TRUE(s_gear[4].contested);
+
+    result = write_move(DALI_SNAPSHOT_SPACE_GEAR, 4u,
+                        DALI_COMMISSIONING_NO_SHORT_ADDRESS, true);
+    TEST_ASSERT_EQUAL(DALI_RESTORE_WRITE_SENT_UNVERIFIED, result.outcome);
+    TEST_ASSERT_EQUAL_UINT8(1u, result.loads);
+    TEST_ASSERT_TRUE(pair_was_sent());
+    TEST_ASSERT_FALSE(s_gear[4].contested);
+}
+
+/* A clear reads back 0xFF, the one DTR0 value that is not an encoded address. */
+void test_a_clear_reads_back_ff(void)
+{
+    unit_at(s_gear, 3u, 3u);
+    DaliRestoreWriteResult result =
+        write_move(DALI_SNAPSHOT_SPACE_GEAR, 3u,
+                   DALI_COMMISSIONING_NO_SHORT_ADDRESS, false);
+
+    TEST_ASSERT_EQUAL(DALI_RESTORE_WRITE_SENT, result.outcome);
+    TEST_ASSERT_EQUAL_HEX8(0xFFu, result.dtr0);
+    assert_sent(0u, 0xA3FFu, DALI_FORWARD_FRAME_BITS, false);
+    assert_sent(1u, 0x0798u, DALI_FORWARD_FRAME_BITS, false);
+    assert_sent(2u, 0x0780u, DALI_FORWARD_FRAME_BITS, true);
+    TEST_ASSERT_FALSE(s_gear[3].present);
+}
+
+/* A device reads back its own DTR0, raw, over its own 24-bit query. */
+void test_a_device_write_reads_its_own_dtr0_back(void)
+{
+    unit_at(s_device, 5u, 30u);
+    DaliRestoreWriteResult result =
+        write_move(DALI_SNAPSHOT_SPACE_DEVICE, 5u, 2u, false);
+
+    TEST_ASSERT_EQUAL(DALI_RESTORE_WRITE_SENT, result.outcome);
+    TEST_ASSERT_EQUAL_HEX8(0x02u, result.dtr0);
+    TEST_ASSERT_EQUAL_UINT8(3u, s_sent_count);
+    assert_sent(0u, 0xC13002u, DALI_EXTENDED_FRAME_BITS, false);
+    assert_sent(1u, 0x0BFE36u, DALI_EXTENDED_FRAME_BITS, false);
+    assert_sent(2u, 0x0BFE14u, DALI_EXTENDED_FRAME_BITS, true);
+    TEST_ASSERT_TRUE(s_device[2].present);
+    TEST_ASSERT_FALSE(s_device[5].present);
+}
+
+/* The device form of the hazard: its Bank 0 read leaves 0x0B too, which a
+ * device reads raw, as d11. */
+void test_a_device_that_misses_its_load_is_loaded_again(void)
+{
+    unit_at(s_device, 5u, 30u);
+    s_device_dtr0 = DALI_MEMORY_BANK0_OFFSET_IDENTIFICATION;
+    s_dtr0_loads_to_miss = 1u;
+
+    DaliRestoreWriteResult result =
+        write_move(DALI_SNAPSHOT_SPACE_DEVICE, 5u, 2u, false);
+
+    TEST_ASSERT_EQUAL(DALI_RESTORE_WRITE_SENT, result.outcome);
+    TEST_ASSERT_EQUAL_UINT8(2u, result.loads);
+    TEST_ASSERT_EQUAL_HEX8(0x0Bu, result.first_read);
+    TEST_ASSERT_TRUE(s_device[2].present);
+    TEST_ASSERT_FALSE(s_device[11].present);
+}
+
+/* A load that could not go out has learned nothing and sent no pair; the
+ * transport's error is passed on rather than read as a verdict. */
+void test_a_transport_failure_is_passed_on(void)
+{
+    unit_at(s_gear, 5u, 5u);
+    s_forced_error = DALI_ERR_WAIT_EXPIRED;
+
+    DaliRestoreWriteResult result;
+    TEST_ASSERT_EQUAL(DALI_ERR_WAIT_EXPIRED,
+                      dali_restore_write_short_address(&s_transport,
+                                                       DALI_SNAPSHOT_SPACE_GEAR,
+                                                       5u, 2u, false, &result));
+    TEST_ASSERT_EQUAL_UINT8(0u, result.loads);
+    TEST_ASSERT_FALSE(result.pair_attempted);
+    TEST_ASSERT_TRUE(s_gear[5].present);
+}
+
+/* A pair that failed on its way out may have moved the unit, and the result
+ * says so rather than leaving it to look like the load failing. */
+void test_a_failed_pair_says_it_was_attempted(void)
+{
+    unit_at(s_gear, 5u, 5u);
+    s_pair_error = DALI_ERR_BUS_STUCK;
+
+    DaliRestoreWriteResult result;
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK,
+                      dali_restore_write_short_address(&s_transport,
+                                                       DALI_SNAPSHOT_SPACE_GEAR,
+                                                       5u, 2u, false, &result));
+    TEST_ASSERT_EQUAL_UINT8(1u, result.loads);
+    TEST_ASSERT_TRUE(result.pair_attempted);
+}
+
+void test_a_write_rejects_what_it_cannot_run(void)
+{
+    DaliRestoreWriteResult result;
+    const DaliTransport frames_only = { .transact = mock_transact };
+
+    memset(&result, 0xA5, sizeof(result));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_restore_write_short_address(&frames_only,
+                                                       DALI_SNAPSHOT_SPACE_GEAR,
+                                                       5u, 2u, false, &result));
+    TEST_ASSERT_EQUAL_UINT8(0u, result.loads);   /* written even when refused */
+    TEST_ASSERT_FALSE(result.pair_attempted);
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_restore_write_short_address(NULL,
+                                                       DALI_SNAPSHOT_SPACE_GEAR,
+                                                       5u, 2u, false, &result));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_restore_write_short_address(&s_transport,
+                                                       DALI_SNAPSHOT_SPACE_GEAR,
+                                                       5u, 2u, false, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_restore_write_short_address(&s_transport,
+                                                       DALI_SNAPSHOT_SPACE_GEAR,
+                                                       DALI_SHORT_ADDRESS_COUNT,
+                                                       2u, false, &result));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_sent_count);
+}
+
+/* --------------------------------------------------------------------------
  * Arguments and names
  * -------------------------------------------------------------------------*/
 
@@ -460,7 +893,7 @@ void test_invalid_arguments_are_rejected(void)
 void test_every_verdict_has_a_name(void)
 {
     for (int check = DALI_RESTORE_MOVE_CONFIRMED;
-         check <= DALI_RESTORE_MOVE_UNREADABLE;
+         check <= DALI_RESTORE_MOVE_UNIT_MISSING;
          check++) {
         const char *name = dali_restore_move_check_name((DaliRestoreMoveCheck)check);
         TEST_ASSERT_NOT_NULL(name);
@@ -468,11 +901,30 @@ void test_every_verdict_has_a_name(void)
     }
 }
 
+void test_every_write_outcome_has_a_name(void)
+{
+    for (int outcome = DALI_RESTORE_WRITE_SENT;
+         outcome <= DALI_RESTORE_WRITE_DTR0_UNREADABLE;
+         outcome++) {
+        const char *name =
+            dali_restore_write_outcome_name((DaliRestoreWriteOutcome)outcome);
+        TEST_ASSERT_NOT_NULL(name);
+        TEST_ASSERT_TRUE(strcmp(name, "unknown") != 0);
+    }
+    TEST_ASSERT_TRUE(dali_restore_write_was_sent(DALI_RESTORE_WRITE_SENT));
+    TEST_ASSERT_TRUE(dali_restore_write_was_sent(DALI_RESTORE_WRITE_SENT_UNVERIFIED));
+    TEST_ASSERT_FALSE(dali_restore_write_was_sent(DALI_RESTORE_WRITE_DTR0_MISMATCH));
+    TEST_ASSERT_FALSE(dali_restore_write_was_sent(DALI_RESTORE_WRITE_DTR0_SILENT));
+    TEST_ASSERT_FALSE(dali_restore_write_was_sent(DALI_RESTORE_WRITE_DTR0_UNREADABLE));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_a_move_that_landed_is_confirmed);
     RUN_TEST(test_silence_at_the_target_is_reported);
+    RUN_TEST(test_silence_at_both_ends_is_a_missing_unit);
+    RUN_TEST(test_a_silent_target_with_an_unreadable_source_is_unreadable);
     RUN_TEST(test_a_unit_still_at_the_source_is_reported);
     RUN_TEST(test_a_different_unit_at_the_target_is_reported);
     RUN_TEST(test_a_collision_at_the_target_is_unreadable);
@@ -486,7 +938,21 @@ int main(void)
     RUN_TEST(test_a_gear_move_loads_the_encoded_destination);
     RUN_TEST(test_a_clear_loads_ff_in_both_spaces);
     RUN_TEST(test_a_move_sequence_rejects_what_no_address_can_be);
+    RUN_TEST(test_a_write_reads_dtr0_back_before_the_pair);
+    RUN_TEST(test_bare_frames_follow_a_stale_dtr0);
+    RUN_TEST(test_a_missed_load_is_loaded_again);
+    RUN_TEST(test_a_load_that_never_lands_sends_no_pair);
+    RUN_TEST(test_a_lost_pair_leaves_the_unit_where_it_was);
+    RUN_TEST(test_a_silent_readback_sends_no_pair);
+    RUN_TEST(test_a_collided_readback_is_refused_unless_allowed);
+    RUN_TEST(test_a_clear_reads_back_ff);
+    RUN_TEST(test_a_device_write_reads_its_own_dtr0_back);
+    RUN_TEST(test_a_device_that_misses_its_load_is_loaded_again);
+    RUN_TEST(test_a_transport_failure_is_passed_on);
+    RUN_TEST(test_a_failed_pair_says_it_was_attempted);
+    RUN_TEST(test_a_write_rejects_what_it_cannot_run);
     RUN_TEST(test_invalid_arguments_are_rejected);
     RUN_TEST(test_every_verdict_has_a_name);
+    RUN_TEST(test_every_write_outcome_has_a_name);
     return UNITY_END();
 }
