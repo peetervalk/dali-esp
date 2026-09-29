@@ -5143,27 +5143,82 @@ static void cmd_identify(const DaliCliTokens *t)
         return;
     }
 
+    /*
+     * Read the level to come back to before changing it. The blink ends on
+     * RECALL MIN LEVEL, so without this every identify left the lamp at min,
+     * whatever it had been. MASK is the gear saying it has no level to give,
+     * which is no more use here than silence.
+     */
+    uint8_t         before     = 0u;
+    const DaliError before_err = shell_query_u8(target, DALI_CMD_QUERY_ACTUAL_LEVEL,
+                                                0u, &before);
+    const bool      restorable = before_err == DALI_OK &&
+                                 before != DALI_DAPC_MASK_LEVEL;
+    if (!restorable) {
+        shell_printf("identify: level before unreadable (%s); a%u will be left "
+                     "at min\r\n",
+                     before_err == DALI_OK ? "MASK" : shell_err(before_err),
+                     (unsigned)addr);
+    }
+
     shell_printf("Blinking addr %u between min and max for %u seconds.\r\n",
            (unsigned)addr,
            (unsigned)((SHELL_IDENTIFY_CYCLES * SHELL_IDENTIFY_STEP_MS * 2u) / 1000u));
 
+    DaliError err = DALI_OK;
     for (uint8_t i = 0u; i < SHELL_IDENTIFY_CYCLES; i++) {
-        DaliError err = shell_send_no_reply(&max_frame, false);
+        err = shell_send_no_reply(&max_frame, false);
         if (err != DALI_OK) {
             shell_printf("identify: max ERR %s\r\n", shell_err(err));
-            return;
+            break;
         }
         vTaskDelay(pdMS_TO_TICKS(SHELL_IDENTIFY_STEP_MS));
 
         err = shell_send_no_reply(&min_frame, false);
         if (err != DALI_OK) {
             shell_printf("identify: min ERR %s\r\n", shell_err(err));
-            return;
+            break;
         }
         vTaskDelay(pdMS_TO_TICKS(SHELL_IDENTIFY_STEP_MS));
     }
 
-    shell_printf("identify: done\r\n");
+    if (!restorable) {
+        if (err == DALI_OK) {
+            shell_printf("identify: done\r\n");
+        }
+        return;
+    }
+
+    /*
+     * Put the level back even when the blink stopped early. An abort means the
+     * front end went away mid-blink, which is exactly when nobody is left to
+     * do it by hand, so this frame goes out through the abort-exempt path the
+     * discovery cleanup uses. OFF for 0, DAPC for anything else: DAPC fades at
+     * the gear's own fade time, and DALI has no instant way to reach an
+     * arbitrary level.
+     */
+    const char *done = err == DALI_OK ? "done, " : "";
+    DaliFrame   restore_frame;
+    DaliError   restore_err = before == 0u
+                            ? dali_control_build_off(target, &restore_frame)
+                            : dali_control_build_dapc(target, before, &restore_frame);
+    if (restore_err == DALI_OK) {
+        restore_err = shell_sched_sync_impl(&restore_frame, false, 0u, false,
+                                            NULL, false);
+    }
+    if (before == 0u) {
+        if (restore_err == DALI_OK) {
+            shell_printf("identify: %sswitched off again\r\n", done);
+        } else {
+            shell_printf("identify: switching off again ERR %s\r\n",
+                         shell_err(restore_err));
+        }
+    } else if (restore_err == DALI_OK) {
+        shell_printf("identify: %slevel %u restored\r\n", done, (unsigned)before);
+    } else {
+        shell_printf("identify: restoring level %u ERR %s\r\n",
+                     (unsigned)before, shell_err(restore_err));
+    }
 }
 
 /* ---------------------------------------------------------------------------

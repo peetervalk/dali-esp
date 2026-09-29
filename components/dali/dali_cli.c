@@ -214,7 +214,7 @@ static const DaliCliCommandSpec s_commands[] = {
     { DALI_CLI_CMD_FIND, "find", "switches [seconds]", "map switches by listening for events", 1u, 2u, "switches" },
     { DALI_CLI_CMD_EXPORT, "export", "inventory|config", "inventory as JSON, or the dali: YAML block for this device", 1u, 1u,
       "inventory config" },
-    { DALI_CLI_CMD_IDENTIFY, "identify", "<addr>", "blink one short-addressed lamp", 1u, 1u, NULL },
+    { DALI_CLI_CMD_IDENTIFY, "identify", "<addr>", "blink one short-addressed lamp, then restore its level", 1u, 1u, NULL },
     { DALI_CLI_CMD_QUIESCENT, "quiescent", "on|off <addr|all>", "Part 103 quiescent mode: silence control-device events", 2u, 2u,
       "on off" },
     { DALI_CLI_CMD_BACKUP, "backup", "save|status|export|import <begin|HEX|end|abort>", "record which physical unit holds which short address", 1u, 3u,

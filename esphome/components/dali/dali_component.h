@@ -167,7 +167,8 @@ class DaliComponent : public Component {
   // Callable from a worker task.
   bool try_claim_bus(const char *what);
   void release_bus();
-  // Blink diag_address_ between max and min for 10 s to identify a fixture.
+  // Blink diag_address_ between max and min for 10 s to identify a fixture,
+  // then put back the level it read before the first half-blink.
   void start_identify();
   // Record unsolicited bus frames for 30 s; publish result to couplers_result_.
   void start_find_couplers();
@@ -346,9 +347,12 @@ class DaliComponent : public Component {
 
   // Identify blink (Core 0 only).
   bool     identify_active_{false};
+  uint8_t  identify_address_{0};
   uint32_t identify_start_ms_{0};
   uint32_t identify_last_ms_{0};
   bool     identify_phase_{false};
+  bool     identify_level_asked_{false};  // the pre-blink level query is queued
+  bool     identify_blinked_{false};      // at least one half-blink was queued
   bool     identify_scan_paused_{false};
   uint32_t identify_scan_pause_ms_{0};
 
@@ -378,6 +382,8 @@ class DaliComponent : public Component {
   void report_diag_enqueue_(const char *what, DaliError err);
   // Publish current bus availability alongside its cumulative fault count.
   void update_bus_fault_();
+  // Queue the frame that ends an identify blink; false to retry next tick.
+  bool finish_identify_(uint32_t overdue_ms);
 
   // Console verb handlers. Split out of execute_command() only for length;
   // each is called with the resolved token list and runs on Core 0.

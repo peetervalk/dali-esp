@@ -84,10 +84,11 @@ before adding broad new device support.
   during development, not from a flashed `v2.0.0` build.
 
 **On `dev` since the tag:** the stack-review fixes pass 32/32 host suites, the
-native build, and a `dali_test.yaml` compile. Only one has a bus result of its
-own: `restore apply`'s per-move confirmation, on gear and device moves on 2k.
-The `restore apply` and `backup save` fixes that followed the 2k sessions are
-compile-checked only.
+native build, and a `dali_test.yaml` compile. Two have bus results of their
+own: `restore apply`'s per-move confirmation, on gear and device moves on 2k,
+and the reply window's frame-end reference, in a capture on 1k. The `restore
+apply` and `backup save` fixes that followed the 2k sessions, and the
+`identify` fix after them, are compile-checked only.
 
 ### Recorded hardware state
 
@@ -122,6 +123,11 @@ counters, captures, and what each did *not* cover — are in `project_log.md`.
   SHORT ADDRESS read silence before the clear and a decoded YES after. The
   cleared lamp kept its group membership through the clear and through the
   `commission unaddressed` that re-addressed it.
+- **The reply window runs from the frame end.** On 1k, a13's reply to a group
+  query ended 14290 us after the forward frame's last data bit and was
+  accepted on the first attempt: 6.79 ms of settling, inside IEC 62386-101's
+  5.5–10.5 ms. Measured from the old stamp after the stop bits, the same query
+  had read 12742–13120.
 - **No control gear on 2k answers past the reply window.** `rx_reply_late` reads
   0 across every measured walk. This retires the earlier late-reply reading; the
   backoff fix that reading produced still works, but its mechanism is now
@@ -408,8 +414,9 @@ stamp and were being read as silent. The decoded-frame window edge fixed it,
 confirmed on hardware. That stamp was taken after the stop bits, so measured
 from the frame's last data bit these drivers settle in roughly 5.8–7.5 ms:
 conformant, not faster than IEC 62386-101's 5.5 ms minimum. The PHY now stamps
-the frame end itself, so a collision among them is attributed rather than
-discarded; host-tested only. Group membership now reads from the bus
+the frame end itself, and a capture of a13 shows the window measured from it.
+That a collision among these drivers is now attributed rather than discarded
+is still host-tested only. Group membership now reads from the bus
 with no `query_address` anywhere in the YAML and is persisted to flash. The full
 investigation — captures, timings, and why a hand-picked margin does not survive
 this bus — is in `project_log.md`.
@@ -453,11 +460,13 @@ a sensor value.
 ### P0 — Protocol correctness and conformance
 
 - **Hardware validation of the stack-review fixes.** Host-tested and
-  mutation-checked. One has a bus result: `restore apply` printed `OK` for
+  mutation-checked. Two have bus results. `restore apply` printed `OK` for
   every gear and device move on 2k, which is the confirmation read-back
-  running. The cheapest next check: a capture should read every reply's
-  `since_tx_us` about 1664 higher than the same gear read before (1k's a13 read
-  12742–13120, in `project_log.md`).
+  running. A capture on 1k read a13's reply at `since_tx_us` 14290, against
+  12742–13120 from the old stamp, which is the frame-end stamp running. No bus
+  has yet exercised the undecodable edge those fixes moved to 5.5 ms from the
+  frame end. A single unit's reply decodes and is judged by the other edge;
+  overlapping replies are what reach this one.
 - **Hardware validation of the rest of the commissioning work.** Unmet by a
   bus: equal-random-address handling and `restore groups`. The
   single-unaddressed-device envelope no longer stands on nothing; the
@@ -467,7 +476,8 @@ a sensor value.
   the devices were actually quiescent at that point cannot be read back: QUERY
   QUIESCENT MODE (`0x40`) is not implemented.
 - **Prove bus timing beyond the local own-forward-frame guard.** TX-end and
-  observation timestamps are exported and host-tested; HIL must validate both
+  observation timestamps are exported and host-tested, and a 1k capture shows
+  the TX-end stamp at the frame end; HIL must still validate both
   attribution edges (5.5 ms undecodable, 3.664 ms decoded, both from the frame
   end) against the 28.664 ms close, physical collision behavior, and
   external-frame cases. DALI-2 priority/backoff
@@ -530,6 +540,12 @@ The typed verb surface is in place; what is missing is evidence. Keep
   membership followed the move` line for each gear move of a grouped unit;
   the old code logged nothing there. 1k, with lamps in several groups, is the
   bus where the second fix matters.
+- **Run the `identify` fix on a bus.** It used to leave every lamp at min. It
+  now reads the level first and puts it back, which is compile-checked only.
+  From max, off and a level in between, the shell should end with `identify:
+  done, level N restored` or `identify: done, switched off again`, with the lamp
+  where it started. The Identify button should log `back to level N` or
+  `switched off again`.
 - Add host vectors for `identify`, `smoke`, `capture`, and the inventory JSON
   export, whose output formats are unasserted.
 - Nothing in the shared-`dali_cli` migration, or the verb-parity work built on

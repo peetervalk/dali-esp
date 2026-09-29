@@ -677,6 +677,36 @@ static void on_diag_refresh_reply(DaliError result, const DaliFrame *reply, void
     portEXIT_CRITICAL(&s_string_mux);
 }
 
+/* ── Identify: the level to put back (Core 1 → Core 0) ──────────────────── */
+
+static constexpr uint32_t IDENTIFY_DURATION_MS     = 10000u;
+static constexpr uint32_t IDENTIFY_HALF_BLINK_MS   = 500u;
+/* How long past the end a refused restore frame is retried before giving up. */
+static constexpr uint32_t IDENTIFY_FINISH_RETRY_MS = 2000u;
+
+/* QUERY ACTUAL LEVEL's answer from before the blink: 0-254, or one of the
+ * negative states below. The query is queued ahead of the first half-blink and
+ * the scheduler runs its queue in order, so the answer is the lamp as the blink
+ * found it. The error is stored before the level, so a reader that sees
+ * NO_ANSWER sees the error behind it. */
+static constexpr int16_t IDENTIFY_LEVEL_PENDING   = -1;
+static constexpr int16_t IDENTIFY_LEVEL_NO_ANSWER = -2;
+static constexpr int16_t IDENTIFY_LEVEL_MASK      = -3;
+static std::atomic<int16_t> s_identify_level_{IDENTIFY_LEVEL_PENDING};
+static std::atomic<int>     s_identify_level_error_{DALI_OK};
+
+static void on_identify_level_reply(DaliError result, const DaliFrame *reply, void * /*ctx*/)
+{
+    int16_t level = IDENTIFY_LEVEL_NO_ANSWER;
+    if (result == DALI_OK && reply != nullptr) {
+        uint8_t raw = (uint8_t)(reply->data & 0xFFu);
+        /* MASK is the gear saying it has no level to give, not a level. */
+        level = raw == DALI_DAPC_MASK_LEVEL ? IDENTIFY_LEVEL_MASK : (int16_t)raw;
+    }
+    s_identify_level_error_.store((int)result, std::memory_order_relaxed);
+    s_identify_level_.store(level, std::memory_order_release);
+}
+
 /* ── Command result (Core 1 → Core 0) ───────────────────────────────────── */
 
 /* Sized for the longest line dali_cli_format_response() produces — a status
@@ -1380,26 +1410,40 @@ void DaliComponent::loop()
                 identify_last_ms_  += paused_ms;
                 identify_scan_paused_ = false;
             }
-            if ((uint32_t)(now - identify_last_ms_) >= 500u) {
-                DaliTarget t;
-                t.type    = DALI_ADDR_SHORT;
-                t.address = diag_address_;
+            DaliTarget t;
+            t.type    = DALI_ADDR_SHORT;
+            t.address = identify_address_;
+            uint32_t elapsed = now - identify_start_ms_;
+            if (elapsed >= IDENTIFY_DURATION_MS) {
+                if (finish_identify_(elapsed - IDENTIFY_DURATION_MS)) {
+                    identify_active_ = false;
+                    identify_scan_paused_ = false;
+                }
+            } else if (!identify_level_asked_) {
+                /* The first slot reads the level to come back to. The blink
+                 * waits for it to be queued, not answered: the queue runs in
+                 * order, so every half-blink goes out after the reply. */
+                DaliError err = dali_control_query(t, DALI_CMD_QUERY_ACTUAL_LEVEL, 0u,
+                                                   on_identify_level_reply, nullptr);
+                if (err == DALI_OK) {
+                    identify_level_asked_ = true;
+                } else {
+                    ESP_LOGW(TAG, "identify enqueue failed: %d; retrying", (int)err);
+                }
+            } else if ((uint32_t)(now - identify_last_ms_) >= IDENTIFY_HALF_BLINK_MS) {
                 bool next_phase = !identify_phase_;
                 DaliError err = next_phase ? dali_control_recall_max(t)
                                            : dali_control_recall_min(t);
                 if (err == DALI_OK) {
                     identify_last_ms_ = now;
                     identify_phase_   = next_phase;
+                    identify_blinked_ = true;
                 } else {
                     /* Retain the phase and the deadline so the next loop retries
                      * this half-blink; advancing on a rejected enqueue would
                      * silently drop it and stall the blink at one level. */
                     ESP_LOGW(TAG, "identify enqueue failed: %d; retrying", (int)err);
                 }
-            }
-            if ((uint32_t)(now - identify_start_ms_) >= 10000u) {
-                identify_active_ = false;
-                identify_scan_paused_ = false;
             }
         }
     }
@@ -3533,11 +3577,70 @@ void DaliComponent::start_identify()
 {
     if (identify_active_) return;
     ESP_LOGI(TAG, "Identify: short address %u (10 s)", (unsigned)diag_address_);
-    identify_active_   = true;
-    identify_phase_    = true;
-    identify_start_ms_ = millis();
-    identify_last_ms_  = millis() - 500u;  // fire immediately on first loop tick
+    s_identify_level_.store(IDENTIFY_LEVEL_PENDING, std::memory_order_relaxed);
+    /* Held for the whole blink: the level read at the start belongs to this
+     * lamp, and a Target Address changed mid-blink must not receive it. */
+    identify_address_     = diag_address_;
+    identify_active_      = true;
+    identify_phase_       = true;
+    identify_level_asked_ = false;
+    identify_blinked_     = false;
+    identify_start_ms_    = millis();
+    // fire immediately on the first loop tick after the level query
+    identify_last_ms_     = millis() - IDENTIFY_HALF_BLINK_MS;
     identify_scan_paused_ = false;
+}
+
+/*
+ * Put the lamp back once the blink is over: OFF for 0, DAPC for any other level
+ * (which fades at the gear's own fade time; DALI has no instant way to reach an
+ * arbitrary level), and RECALL MIN LEVEL when the level could not be read, so
+ * that it ends where the shell's identify does. Returns true when identify is
+ * finished, false to be called again on the next loop tick.
+ */
+bool DaliComponent::finish_identify_(uint32_t overdue_ms)
+{
+    if (!identify_blinked_) return true;  // nothing was sent, so nothing to undo
+
+    DaliTarget t;
+    t.type    = DALI_ADDR_SHORT;
+    t.address = identify_address_;
+    const int16_t level = s_identify_level_.load(std::memory_order_acquire);
+    DaliError err;
+    if (level == 0) {
+        err = dali_control_off(t);
+    } else if (level > 0) {
+        err = dali_control_set_level(t, (uint8_t)level);
+    } else {
+        err = dali_control_recall_min(t);
+    }
+
+    if (err != DALI_OK) {
+        if (overdue_ms < IDENTIFY_FINISH_RETRY_MS) return false;
+        ESP_LOGW(TAG, "Identify: short address %u, final frame refused: %d; "
+                 "left where the blink stopped", (unsigned)identify_address_, (int)err);
+        return true;
+    }
+
+    if (level == 0) {
+        ESP_LOGI(TAG, "Identify: short address %u switched off again",
+                 (unsigned)identify_address_);
+    } else if (level > 0) {
+        ESP_LOGI(TAG, "Identify: short address %u back to level %u",
+                 (unsigned)identify_address_, (unsigned)level);
+    } else {
+        const char *why = "not read";
+        if (level == IDENTIFY_LEVEL_MASK) {
+            why = "MASK";
+        } else if (level == IDENTIFY_LEVEL_NO_ANSWER) {
+            const char *name = dali_error_name(
+                (DaliError)s_identify_level_error_.load(std::memory_order_relaxed));
+            why = name != nullptr ? name : "error";
+        }
+        ESP_LOGW(TAG, "Identify: short address %u left at min; its level before "
+                 "was unreadable (%s)", (unsigned)identify_address_, why);
+    }
+    return true;
 }
 
 void DaliComponent::start_find_couplers()

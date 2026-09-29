@@ -67,7 +67,7 @@ physical DALI bus is single-master; another controller can still transmit.
 | `inventory` | Reprint the last discover without touching the bus |
 | `export inventory` | The same result as JSON — redirect it to a file |
 | `export config` | This device's `dali:` block as YAML, entities and all |
-| `identify <addr>` | Blink one fixture to confirm which address it is |
+| `identify <addr>` | Blink one fixture to confirm which address it is, then put its level back |
 | `find switches 300` | Listen for input-device events and map switches |
 | `instances <addr>` | What a control device actually offers |
 | `sensor poll <addr>` | Read an input instance's current value |
@@ -1203,8 +1203,9 @@ The button workflow:
    lines stream to the log prefixed with `YAML|`. A scan publishes ready-to-paste
    light YAML only when group discovery is complete; otherwise it keeps the
    previous map and asks you to retry.
-3. Set **Target Address** (0–63) and press **Identify** to blink that fixture.
-   Verify control with On / Off / Max / Min. (shell: `identify <addr>`)
+3. Set **Target Address** (0–63) and press **Identify** to blink that fixture
+   for 10 s. It goes back to the level it had before. Verify control with On /
+   Off / Max / Min. (shell: `identify <addr>`)
 4. **Bus Monitor** shows the last unsolicited frame. (shell: `trace on`)
 
 To turn a saved log session into a YAML file, when the shell is not an option:

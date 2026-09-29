@@ -28,6 +28,79 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-09-29 (`identify` puts the level back; uncommitted on `dev`)
+
+Fixes the `identify` report in the sixth-session entry below. Nothing touched a
+bus.
+
+- `cmd_identify()` reads QUERY ACTUAL LEVEL before blinking. Afterwards it
+  sends OFF for 0 or DAPC for 1–254 through the abort-exempt path, so a front
+  end that disconnects mid-blink still gets the lamp put back. A failed read,
+  or MASK, means no restore: the shell says so before the blink, and the lamp
+  ends at min as before.
+- The ESPHome Identify button queues the same query in its first slot and the
+  same restore when its 10 s are up. It relies on the scheduler running its
+  queue in order, so the query answers before the first half-blink, and on
+  every completion callback firing, a reset included. When the level is
+  unknown it ends on RECALL MIN LEVEL, as the shell does. A refused final frame
+  is retried for up to 2 s, then logged. The address is taken once, at the
+  start.
+- `dali_shell.c` and `dali_cli.c` type-check clean with the IDF 6.0.1 flags,
+  and an error injected into the new restore call was caught.
+  `dali_component.cpp` type-checks clean with the flags of the 2026-08-13
+  `dali-1k` ESPHome build tree, whose ESPHome headers predate 2026.9. The new
+  code uses no ESPHome API beyond logging and `millis()`. An error injected
+  into it was caught.
+- 32/32 host suites pass after the help-text change in `dali_cli.c`. No host
+  vector reaches either identify path.
+
+Not covered: any bus, and an ESPHome compile at the current version.
+
+### Verified on hardware 2026-09-29, sixth session (1k bus: reply-window reference, `dev`)
+
+The first bus result for the frame-end reference that the stack-review fixes
+introduced. One narrow capture, on the 1k node the user had just flashed with
+current `dev`. The exact ref is not recorded. The user expects it to include
+`985b6c6`, the commit that carries the fixes in the entry below.
+
+```text
+> query a13 groups-0-7
+groups-0-7: 0x08
+tx 0x1BC0  timestamp_us 75934772
+rx 0x08    timestamp_us 75949062  since_tx_us 14290
+```
+
+- The reply was accepted on the first attempt: two records, no retry. `0x08`
+  is group 3, which a13 has read since August.
+- In August the same query to the same gear read `since_tx_us` 12742, 12936
+  and 13120, measured from the old stamp after the stop bits. Moving the stamp
+  to the frame end predicts those plus 1664, which is 14406–14784. The reading
+  is 116 us under that span, and 1170–1548 us above the August readings. a13
+  wandered 378 us across its three August samples, so one sample cannot pin the
+  offset closer than that. It does place the stamp: a scheduler that had fallen
+  back to the task clock at TX return would read below the August figures, not
+  above them.
+- From the frame end, a13 settles in 14290 − 7500 = 6790 us. That is inside
+  5.5–10.5 ms and near the 7 ms nominal. The August samples, re-anchored, give
+  6906–7284 us.
+- The 2026-09-25 local entry named `dali_phy_tx()`'s completion loop and the
+  ISR's frame-end stamp as what a bus should see first. Both have now run:
+  every frame the node sends goes through that loop, and this capture shows the
+  stamp it leaves.
+
+Not covered: the undecodable edge, moved to 5.5 ms from the frame end, which
+judges overlapping replies rather than a single decoded one; the decoded edge
+at its boundary (3.664 ms), which a13 clears by about 3 ms; and the 28.664 ms
+close.
+
+The user also reported that `identify` leaves the lamp at min level, whether it
+started at max or off. That is what the code does. `cmd_identify()` sends
+RECALL MAX LEVEL and RECALL MIN LEVEL five times each, 1 s apart, ending on
+MIN, and never reads the level it started from. The ESPHome identify button is
+built the same way: it starts on MIN, sends a half-blink every 500 ms for 10 s
+and restores nothing, and which half it ends on depends on loop timing. The
+button is code reading only. Fixed in the entry above.
+
 ### Verified locally on 2026-09-29 (`restore apply` reports its moves, `backup save` warns about unaddressed gear; uncommitted on `dev`)
 
 Two fixes to `dali_shell.c` for what the fifth 2k session found. The first is
@@ -3261,6 +3334,28 @@ below landed after that tag.
 
 Add new entries here as breaks accumulate, and empty the section again at the
 next tag.
+
+### From the 2026-09-29 `identify` fix (compile-checked)
+
+Operator-visible:
+
+- `identify <addr>` reads QUERY ACTUAL LEVEL before it blinks and puts that
+  level back afterwards: OFF for a lamp that was off, DAPC for any other level,
+  which fades at the gear's own fade time. It ends with `identify: done, level
+  N restored` or `identify: done, switched off again`, where it used to print
+  `identify: done` and leave the lamp at min. A level it cannot read prints
+  `identify: level before unreadable (<reason>); aN will be left at min` before
+  the blink, and the lamp ends at min as before. The restore goes out even when
+  the front end disconnects mid-blink.
+- The verb's help text reads `blink one short-addressed lamp, then restore its
+  level`.
+
+ESPHome:
+
+- The Identify button restores the level the same way and logs `back to level
+  N` or `switched off again`, or `left at min` when the level was unreadable.
+  It blinks the address it started on, even if Target Address changes
+  mid-blink.
 
 ### From the 2026-09-29 shell fixes (compile-checked)
 

@@ -988,7 +988,7 @@ discover                                # short addresses, device types, groups
 inventory                               # reprint the last discover, no bus traffic
 export inventory                        # the same result as JSON
 export config                           # discovered devices as a YAML dali: block
-identify <addr>                         # blink one fixture
+identify <addr>                         # blink one fixture, then restore its level
 find switches [seconds]                 # listen for events and map switches
 events                                  # drain queued Part 103 events
 instances <addr>                        # what a control device offers
