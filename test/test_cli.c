@@ -1302,8 +1302,9 @@ static void test_address_device_lines_reach_the_handler(void)
 
 /*
  * The device re-addressing command must be the one the walk's own de-address
- * uses, and its DTR0 sentinel must stay outside the encoded range -- otherwise
- * `address d<N> clear` would write an address rather than remove one.
+ * uses, and its DTR0 sentinel must stay outside the range a device reads as an
+ * address -- otherwise `address d<N> clear` would write an address rather than
+ * remove one. The device space reads DTR0 raw, so that range is 0..63 itself.
  */
 static void test_device_clear_writes_a_value_no_address_encodes_to(void)
 {
@@ -1313,10 +1314,8 @@ static void test_device_clear_writes_a_value_no_address_encodes_to(void)
     TEST_ASSERT_TRUE_MESSAGE(cmd->send_twice,
                              "SET SHORT ADDRESS DTR0 is send-twice in both spaces");
 
-    for (uint8_t addr = 0u; addr <= DALI_MAX_SHORT_ADDRESS; addr++) {
-        TEST_ASSERT_NOT_EQUAL(DALI_COMMISSIONING_NO_SHORT_ADDRESS,
-                              dali_commissioning_encode_short_address(addr));
-    }
+    TEST_ASSERT_GREATER_THAN_UINT8(DALI_MAX_SHORT_ADDRESS,
+                                   DALI_COMMISSIONING_NO_SHORT_ADDRESS);
 }
 
 /*

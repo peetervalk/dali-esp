@@ -191,10 +191,9 @@ DaliError dali_device_commissioning_build_start_sequence(DaliSequence *out)
 
     DaliSequenceStep *initialise =
         &out->steps[DALI_COMMISSIONING_START_STEP_INITIALISE];
-    /* 0x00, not 0xFF. Part 103 INITIALISE is inverted against Part 102: this
-     * selects devices *without* a short address. Passing the Part 102 sentinel
-     * here would open an addressing window over every control device on the
-     * bus, including the ones already working. */
+    /* 0x7F: devices *without* a short address. Neither Part 102 value carries
+     * over -- 0xFF here opens the window over every control device on the bus,
+     * and 0x00 selects the device at d0. */
     err = dev_set_step(initialise,
                        DALI_CMD_DEVICE_INITIALISE,
                        DALI_DEVICE_INITIALISE_UNADDRESSED_PARAM);

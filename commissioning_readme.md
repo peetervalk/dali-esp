@@ -664,7 +664,7 @@ the same verb reaches them with a `d` prefix:
 
 ```text
 > address d0 set d4
-address: d0 -> d4 (device DTR0=9)
+address: d0 -> d4 (device DTR0=4)
 address: d4 confirmed, d0 silent
 
 > address d0 clear
@@ -710,21 +710,23 @@ addresses devices that have none, so `address d<N> clear` followed by
 addressed — and how you produce an unaddressed device to test the walk against
 in the first place.
 
-**Not yet, though.** `commission devices` sends INITIALISE with `0x00`, which
-Espressif's `esp_dali` gives as "devices without a short address". Beckhoff's
-documentation and TI's device firmware both read `0x00` as "the device at d0".
-If they are right, a device you have just cleared is not selected at all, and
-whatever still holds d0 — on 2k, the Steinel — is re-addressed to the first
-free address. The `set` arm has the matching doubt about its DTR0 value. Until
-the bus check in the P0 item of `current_status.md` has run, do not use this
-workflow on an installation.
+**Use a build from after 2026-09-29.** Earlier firmware, `v2.0.0` included, gets
+both device-space encodings wrong. Its `address d<N> set d<M>` loads DTR0 with
+`(M << 1) | 1` and sends the device to 2M+1, and its `commission devices` sends
+INITIALISE `0x00`, which selects the device at d0 rather than unaddressed ones.
+On 2k that walk found neither of two cleared devices. The device space takes
+every address raw, and INITIALISE `0x7F` means "no short address"; see
+`dali_protocol.md`. That `0x7F` finds cleared devices is host-tested and not
+yet bus-verified.
 
 #### The raw spelling, and the encoding it needs
 
 `config-dtr0 <target> set-short-address-dtr0 <byte>` still does the write with
-no checks, and its argument is still the literal DTR0 byte. Every command that
-carries a short address as *data* rather than as an address byte carries it
-**encoded** as `(address << 1) | 1`, with `0xFF` meaning "no short address".
+no checks, and its argument is still the literal DTR0 byte. Every gear command
+that carries a short address as *data* rather than as an address byte carries
+it **encoded** as `(address << 1) | 1`, with `0xFF` meaning "no short address".
+Control devices do not: their DTR0 and PROGRAM SHORT ADDRESS take the address
+itself.
 Nothing in the raw spelling converts for you: that DTR0 value, and the
 parameters of `special program-short` and `special verify-short`, are all raw
 bytes in the range `0-255`.

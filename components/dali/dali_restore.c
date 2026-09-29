@@ -1,4 +1,5 @@
 #include "dali_restore.h"
+#include "dali_commissioning.h"
 
 #include <string.h>
 
@@ -830,6 +831,64 @@ bool dali_restore_plan_is_clean(const DaliRestorePlan *plan)
            plan->move_count == 0u &&
            plan->conflict_total == 0u &&
            !plan->incomplete;
+}
+
+DaliError dali_restore_build_move_sequence(DaliSnapshotSpace space,
+                                           uint8_t           from,
+                                           uint8_t           to,
+                                           DaliSequence     *out)
+{
+    if (out == NULL || from >= DALI_SHORT_ADDRESS_COUNT ||
+        (to >= DALI_SHORT_ADDRESS_COUNT &&
+         to != DALI_COMMISSIONING_NO_SHORT_ADDRESS)) {
+        return DALI_ERR_INVALID;
+    }
+    if (space != DALI_SNAPSHOT_SPACE_GEAR && space != DALI_SNAPSHOT_SPACE_DEVICE) {
+        return DALI_ERR_INVALID;
+    }
+
+    const bool is_gear = (space == DALI_SNAPSHOT_SPACE_GEAR);
+    const DaliCommandId cmd_id = is_gear ? DALI_CMD_SET_SHORT_ADDRESS_DTR0
+                                         : DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0;
+    const DaliCommandInfo *cmd = dali_command_lookup(cmd_id);
+    if (cmd == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    /* Part 102 reads (a << 1) | 1 from DTR0 and Part 103 the raw address; the
+     * 2k bus showed the difference, DTR0 = 5 putting a device on d5 rather
+     * than d2. Both read 0xFF as "none", which is never encoded. */
+    const uint8_t dtr0 = (is_gear && to != DALI_COMMISSIONING_NO_SHORT_ADDRESS)
+                             ? dali_commissioning_encode_short_address(to)
+                             : to;
+
+    memset(out, 0, sizeof(*out));
+    DaliError err;
+    if (is_gear) {
+        const DaliTarget target = { .type = DALI_ADDR_SHORT, .address = from };
+        err = dali_control_build_dtr(DALI_DTR0, dtr0, &out->steps[0].frame);
+        if (err == DALI_OK) {
+            err = dali_control_build_config(target, cmd_id, 0u,
+                                            &out->steps[1].frame);
+        }
+    } else {
+        /* The device space has its own DTR0: a 24-bit control-device special,
+         * not the 16-bit gear one. Loading the gear DTR0 and then addressing a
+         * control device would send the command with whatever the device's own
+         * DTR0 happened to hold. */
+        err = dali_build_control_device_dtr_data(DALI_DTR0, dtr0,
+                                                 &out->steps[0].frame);
+        if (err == DALI_OK) {
+            err = dali_build_device_command(from, cmd_id, &out->steps[1].frame);
+        }
+    }
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    out->steps[1].send_twice = cmd->send_twice;
+    out->step_count = 2u;
+    return DALI_OK;
 }
 
 /*

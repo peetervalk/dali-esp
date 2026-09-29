@@ -204,6 +204,28 @@ DaliError dali_restore_plan(DaliRestorePlan              *out,
 bool dali_restore_plan_is_clean(const DaliRestorePlan *plan);
 
 /* ---------------------------------------------------------------------------
+ * Sending a move
+ * --------------------------------------------------------------------------*/
+
+/*
+ * The frames that re-address the unit at `from` to `to` in `space`: DTR0, then
+ * SET SHORT ADDRESS (DTR0) send-twice, as one sequence so nothing can redirect
+ * DTR0 between the two. `to` is 0..63, or DALI_COMMISSIONING_NO_SHORT_ADDRESS
+ * to take the address away.
+ *
+ * The spaces differ in both frames. Gear loads its 16-bit DTR0 with
+ * (to << 1) | 1; a control device loads its own 24-bit DTR0 with `to` raw.
+ * Either value in the other space moves the unit to an address nobody chose,
+ * and SET SHORT ADDRESS has no answer to say so.
+ *
+ * `restore apply` and the `address` verb's device arms both send this.
+ */
+DaliError dali_restore_build_move_sequence(DaliSnapshotSpace space,
+                                           uint8_t           from,
+                                           uint8_t           to,
+                                           DaliSequence     *out);
+
+/* ---------------------------------------------------------------------------
  * Confirming a move
  *
  * SET SHORT ADDRESS is send-twice and unacknowledged, and nothing on this bus

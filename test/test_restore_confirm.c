@@ -1,5 +1,6 @@
 /*
- * test_restore_confirm.c — dali_restore_confirm_move()
+ * test_restore_confirm.c — dali_restore_confirm_move(), and the frames of the
+ * move it confirms (dali_restore_build_move_sequence())
  *
  * `restore apply` used to report a move as done once its frames were sent.
  * SET SHORT ADDRESS is unacknowledged, so a unit that silently discarded the
@@ -11,6 +12,7 @@
 
 #include "unity.h"
 #include "dali_restore.h"
+#include "dali_commissioning.h"
 
 #include <string.h>
 
@@ -351,6 +353,87 @@ void test_a_device_is_identified_from_its_own_bank0(void)
 }
 
 /* --------------------------------------------------------------------------
+ * Sending a move: dali_restore_build_move_sequence()
+ *
+ * The frames `restore apply` and `address d<N>` send. Both once loaded a
+ * device's DTR0 with the gear encoding, which the host suites could not see
+ * because nothing pinned the frames; the 2k bus saw it, as a device sent to
+ * d2 that landed on d5.
+ * -------------------------------------------------------------------------*/
+
+static void assert_move_frames(DaliSnapshotSpace space, uint8_t from, uint8_t to,
+                               uint32_t dtr0_frame, uint32_t command_frame,
+                               uint8_t bits)
+{
+    DaliSequence seq;
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_restore_build_move_sequence(space, from, to, &seq));
+    TEST_ASSERT_EQUAL_UINT8(2u, seq.step_count);
+
+    TEST_ASSERT_EQUAL_HEX32(dtr0_frame, seq.steps[0].frame.data);
+    TEST_ASSERT_EQUAL_UINT8(bits, seq.steps[0].frame.bit_length);
+    TEST_ASSERT_FALSE(seq.steps[0].send_twice);
+
+    TEST_ASSERT_EQUAL_HEX32(command_frame, seq.steps[1].frame.data);
+    TEST_ASSERT_EQUAL_UINT8(bits, seq.steps[1].frame.bit_length);
+    TEST_ASSERT_TRUE(seq.steps[1].send_twice);
+}
+
+/* DTR0 = 2, raw, then SET SHORT ADDRESS to d5. The old frames loaded 5. */
+void test_a_device_move_loads_the_raw_destination(void)
+{
+    assert_move_frames(DALI_SNAPSHOT_SPACE_DEVICE, 5u, 2u,
+                       0xC13002u, 0x0BFE14u, DALI_EXTENDED_FRAME_BITS);
+    assert_move_frames(DALI_SNAPSHOT_SPACE_DEVICE, 62u, 0u,
+                       0xC13000u, 0x7DFE14u, DALI_EXTENDED_FRAME_BITS);
+    assert_move_frames(DALI_SNAPSHOT_SPACE_DEVICE, 0u, 63u,
+                       0xC1303Fu, 0x01FE14u, DALI_EXTENDED_FRAME_BITS);
+}
+
+/* Gear keeps (a << 1) | 1: a4 -> a1 loads 3, and a2 -> a13 loads 27. */
+void test_a_gear_move_loads_the_encoded_destination(void)
+{
+    assert_move_frames(DALI_SNAPSHOT_SPACE_GEAR, 4u, 1u,
+                       0xA303u, 0x0980u, DALI_FORWARD_FRAME_BITS);
+    assert_move_frames(DALI_SNAPSHOT_SPACE_GEAR, 2u, 13u,
+                       0xA31Bu, 0x0580u, DALI_FORWARD_FRAME_BITS);
+}
+
+/* "No address" is 0xFF in both spaces and is never encoded. */
+void test_a_clear_loads_ff_in_both_spaces(void)
+{
+    assert_move_frames(DALI_SNAPSHOT_SPACE_DEVICE, 0u,
+                       DALI_COMMISSIONING_NO_SHORT_ADDRESS,
+                       0xC130FFu, 0x01FE14u, DALI_EXTENDED_FRAME_BITS);
+    assert_move_frames(DALI_SNAPSHOT_SPACE_GEAR, 3u,
+                       DALI_COMMISSIONING_NO_SHORT_ADDRESS,
+                       0xA3FFu, 0x0780u, DALI_FORWARD_FRAME_BITS);
+}
+
+void test_a_move_sequence_rejects_what_no_address_can_be(void)
+{
+    DaliSequence seq;
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_restore_build_move_sequence(DALI_SNAPSHOT_SPACE_DEVICE,
+                                                       0u, 2u, NULL));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_restore_build_move_sequence(DALI_SNAPSHOT_SPACE_DEVICE,
+                                                       DALI_SHORT_ADDRESS_COUNT,
+                                                       2u, &seq));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_restore_build_move_sequence(DALI_SNAPSHOT_SPACE_GEAR,
+                                                       0u, DALI_SHORT_ADDRESS_COUNT,
+                                                       &seq));
+    /* 0x7F is the INITIALISE selector for "unaddressed", not an address. */
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_restore_build_move_sequence(DALI_SNAPSHOT_SPACE_DEVICE,
+                                                       0u, 0x7Fu, &seq));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_restore_build_move_sequence((DaliSnapshotSpace)7,
+                                                       0u, 2u, &seq));
+}
+
+/* --------------------------------------------------------------------------
  * Arguments and names
  * -------------------------------------------------------------------------*/
 
@@ -399,6 +482,10 @@ int main(void)
     RUN_TEST(test_a_device_move_is_confirmed_in_the_device_space);
     RUN_TEST(test_a_device_still_at_its_source_is_reported);
     RUN_TEST(test_a_device_is_identified_from_its_own_bank0);
+    RUN_TEST(test_a_device_move_loads_the_raw_destination);
+    RUN_TEST(test_a_gear_move_loads_the_encoded_destination);
+    RUN_TEST(test_a_clear_loads_ff_in_both_spaces);
+    RUN_TEST(test_a_move_sequence_rejects_what_no_address_can_be);
     RUN_TEST(test_invalid_arguments_are_rejected);
     RUN_TEST(test_every_verdict_has_a_name);
     return UNITY_END();

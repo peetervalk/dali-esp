@@ -199,10 +199,10 @@ typedef enum {
      * opening an addressing window — which is what makes a device-space restore
      * possible at all.
      *
-     * Its parameter is the *encoded* address (a << 1) | 1, matching the Part 102
-     * form. Do not confuse it with the Part 103 special PROGRAM SHORT ADDRESS,
-     * which takes the raw 6-bit value; sending one encoding to the other command
-     * programs the wrong address and reports nothing.
+     * DTR0 holds the *raw* address 0..63, or 0xFF for none -- not the
+     * (a << 1) | 1 form its Part 102 namesake reads. Loading the gear encoding
+     * sends the device to 2a+1 and reports nothing; the 2k bus did exactly that
+     * on 2026-09-29 (DTR0 = 5 put a device on d5, not d2).
      */
     DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0,
 
@@ -216,18 +216,17 @@ typedef enum {
      * rather than loudly — the frame is well formed, it just addresses or
      * programs something other than what was meant:
      *
-     *  - DALI_CMD_DEVICE_INITIALISE takes a device *address byte*, where 0xFF
-     *    selects every control device and 0x00 selects only those without a
-     *    short address. That is inverted against Part 102 INITIALISE, whose
-     *    0x00 means all gear and 0xFF means unaddressed gear.
+     *  - DALI_CMD_DEVICE_INITIALISE takes a selector: 0xFF every control
+     *    device, 0x7F only those without a short address, and 0..63 the one
+     *    device holding that raw address. Part 102 INITIALISE uses 0x00 for all
+     *    gear and 0xFF for unaddressed gear, so no value means the same thing
+     *    in both parts -- and 0x00 here is "the device at d0", not "all".
      *
      *  - DALI_CMD_DEVICE_PROGRAM_SHORT_ADDRESS takes the raw 6-bit address
      *    0..63. The Part 102 special of the same name takes (a << 1) | 1, so
-     *    sending the Part 102 encoding here programs address 2n+1. Note that
-     *    DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0 above *does* use the encoded
-     *    form, because it reads DTR0 rather than carrying the address itself —
-     *    the two device commands disagree with each other, not just with
-     *    Part 102.
+     *    sending the Part 102 encoding here programs address 2n+1.
+     *    DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0 above reads a raw DTR0 too:
+     *    every Part 103 address parameter is raw.
      */
     DALI_CMD_DEVICE_INITIALISE,
     DALI_CMD_DEVICE_RANDOMISE,

@@ -92,6 +92,10 @@ counters, captures, and what each did *not* cover — are in `project_log.md`.
   `contested` classification met a genuine physical two-unit collision — the
   first real collision behind `RX_ACTIVITY`, which every commissioning safety
   claim depends on.
+- **Control devices read every Part 103 address parameter raw.** On 2k, device
+  SET SHORT ADDRESS with DTR0 = 5 put the PB coupler on d5, and INITIALISE
+  `0x00` selected neither of two unaddressed devices. Both old values are fixed
+  on `dev`; the fix itself has not met a bus.
 - **No control gear on 2k answers past the reply window.** `rx_reply_late` reads
   0 across every measured walk. This retires the earlier late-reply reading; the
   backoff fix that reading produced still works, but its mechanism is now
@@ -424,28 +428,19 @@ a sensor value.
 
 ### P0 — Protocol correctness and conformance
 
-- **Part 103 addressing encodings: settle before the device session below.**
-  The evidence points against both of the values in the code (`project_log.md`,
-  *A device-side source sides with Beckhoff on both Part 103 encodings*).
-  INITIALISE (device) sends `0x00` for "unaddressed", from `esp_dali`.
-  Beckhoff's TwinCAT DALI library and TI's MSPM0 control-device firmware both
-  read `0x7F` as devices without a short address, `0x00`–`0x3F` as the one
-  device holding that address, and `0xFF` as all. Read that way, `0x00` selects
-  d0, which is the 2k Steinel. Device SET SHORT ADDRESS (DTR0) is fed
-  `(a << 1) | 1`, which no source gives: TI's firmware stores DTR0 raw, Tasmota
-  loads the raw address, and Beckhoff documents the Part 103 short address as
-  raw. If either is wrong, `commission devices` re-addresses the Steinel at d0
-  and `address dN set` misplaces units. Confirm on 2k under `quiescent on all`,
-  with frames that change no address: INITIALISE ×2 with `0xFF`, then with an
-  address nothing holds (`0x3F`), then `0x00`, then `0x7F`, each probed with
-  VERIFY SHORT ADDRESS 0 and closed with a TERMINATE that a second VERIFY
-  confirms. Expect YES, silence, the answer, silence. A YES on `0x3F` means the
-  device ignores the parameter and the `0x00` arm proves nothing — TI's own
-  filter has exactly that bug. `address d0 set d2` settles SET SHORT ADDRESS on
-  the same visit, before any code changes: it loads DTR0 = 5, so a device that
-  reads DTR0 raw lands on d5 and one that reads `(a << 1) | 1` on d2. The
-  frames, the outcome tables and the way back are in the log entry. Then change
-  both encodings, with vectors.
+- **Part 103 addressing encodings: fixed on `dev`, host-tested; 2k waits on a
+  flash.** The 2k bus showed both old values wrong (`project_log.md`, *Verified
+  on hardware 2026-09-29*): device SET SHORT ADDRESS (DTR0) reads DTR0 raw, and
+  INITIALISE (device) `0x00` selected neither of two unaddressed devices. `dev`
+  now loads device DTR0 raw — `address dN set` and `restore apply` both go
+  through `dali_restore_build_move_sequence()` — and sends INITIALISE `0x7F`.
+  `v2.0.0` has neither fix: on it, do not use `address dN set`, device-space
+  `restore apply`, or `commission devices`. **2k state:** the Steinel and the
+  PB coupler hold no short address. Next, on a `dev` build: `commission devices`
+  (expect 2 found — the first bus run of RANDOMISE, SEARCHADDR, COMPARE and
+  PROGRAM in the device space), then `restore plan` / `restore apply` from the
+  backup taken before the session; do not `backup save` first. If it still
+  finds nothing, the fault is further into the walk, not the selector.
 - **Hardware validation of the stack-review fixes.** Host-tested and
   mutation-checked, never on a bus. The cheapest checks: a capture should read
   every reply's `since_tx_us` about 1664 higher than the same gear read before
@@ -605,6 +600,16 @@ The typed verb surface is in place; what is missing is evidence. Keep
 
 ### P1 — Diagnostic shell correctness
 
+- **`address dN clear` cannot reach its contested arm when two control devices
+  share an address.** The arm opens on an undecodable reply, but on 2k the
+  Steinel and the PB coupler colliding at d0 read as silence: `address d0
+  clear` answered "does not answer", and `discover` counted both attempts as
+  ignored observations. One bare `raw 01FE35 len=24 wait` did read
+  `ERR malformed`. Two candidates, unsettled: the merged reply falls outside the
+  reply window and is dropped as noise, or a MALFORMED first attempt is retried
+  and the retry's silence replaces it. The workaround is raw DTR0 `0xFF` plus
+  `raw2 <addr>FE14 len=24`. Settle it with a capture of the collision before
+  touching the scheduler — every query shares that path.
 - **Re-derive why the retry backoff works.** `DALI_REPLY_TIMEOUT_BACKOFF_US`
   demonstrably fixed the 2k missing-lamp rate — 8/8 scans against 2/8 — but
   `rx_reply_late` reads 0 on that bus, so the late-straggler story asserted in

@@ -24,15 +24,18 @@
 #include "dali_commissioning.h"
 
 /*
- * INITIALISE's parameter is a device address byte, and it reads inverted
- * against Part 102: here 0x00 selects only devices without a short address and
- * 0xFF selects every control device, where Part 102 INITIALISE uses 0x00 for
- * all gear and 0xFF for unaddressed gear.
+ * INITIALISE's parameter is a selector: 0xFF every control device, 0x7F only
+ * devices without a short address, and 0..63 the one device holding that raw
+ * address. Part 102 INITIALISE uses 0x00 for all gear and 0xFF for unaddressed
+ * gear, so neither of its values carries over.
  *
- * Getting this backwards does not fail: it opens an addressing window over the
- * whole bus, including devices that already have an address and are working.
+ * Getting this wrong does not fail loudly. 0x00 -- the value this walk sent
+ * until 2026-09-29, taken from esp_dali -- selects the device at d0: on the 2k
+ * bus it found neither of two unaddressed devices, and on a bus where d0 is
+ * occupied it would re-address that device. 0xFF opens the window over every
+ * device, including the ones already working.
  */
-#define DALI_DEVICE_INITIALISE_UNADDRESSED_PARAM 0x00u
+#define DALI_DEVICE_INITIALISE_UNADDRESSED_PARAM 0x7Fu
 #define DALI_DEVICE_INITIALISE_ALL_PARAM         0xFFu
 
 /*
@@ -40,9 +43,8 @@
  * (a << 1) | 1 form the Part 102 special of the same name uses. 0xFF still
  * means "no short address", which is what the duplicate recovery writes.
  *
- * Note this disagrees with DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0 in the same
- * part, which does use the encoded form because it reads DTR0 rather than
- * carrying the address itself.
+ * DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0 reads the same raw form from DTR0.
+ * Every Part 103 address parameter is raw; only Part 102 encodes.
  */
 #define DALI_DEVICE_NO_SHORT_ADDRESS             0xFFu
 

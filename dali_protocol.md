@@ -327,7 +327,7 @@ single-send.
 | Opcode | Command | Sends |
 |---:|---|---|
 | `0x10` | RESET — not implemented | twice |
-| `0x14` | SET SHORT ADDRESS DTR0 — its DTR0 encoding is unsettled; see Part 103 special commands | twice |
+| `0x14` | SET SHORT ADDRESS DTR0 — DTR0 holds the raw address, `0xFF` for none; see Part 103 special commands | twice |
 | `0x15` | ENABLE WRITE MEMORY | twice |
 | `0x19`/`0x1A` | ADD TO DEVICE GROUPS 0-15 / 16-31, mask in DTR2:DTR1 — not implemented | twice |
 | `0x1B`/`0x1C` | REMOVE FROM DEVICE GROUPS 0-15 / 16-31, mask in DTR2:DTR1 — not implemented | twice |
@@ -382,7 +382,7 @@ data = (0xC1 << 16) | (special_opcode << 8) | parameter
 | Opcode | Name | Notes |
 |---:|---|---|
 | `0x00` | TERMINATE | Closes a Part 103 initialise window |
-| `0x01` | INITIALISE | Send twice; the parameter selects devices by address, and its encoding is unsettled (below) |
+| `0x01` | INITIALISE | Send twice; `0xFF` all, `0x7F` unaddressed, `0x00`–`0x3F` one device (below) |
 | `0x02` | RANDOMISE | Send twice |
 | `0x03` | COMPARE | |
 | `0x04` | WITHDRAW | |
@@ -405,26 +405,26 @@ Interference. `DTR0`/`DTR1 DATA` have met a bus inside every device-space
 Bank 0 read — `discover` has read device identities through them on 2k — and
 the other rows have no hardware result recorded here.
 
-Two encodings differ from their Part 102 namesakes, and using the Part 102 form
-silently does the wrong thing:
+**Every Part 103 address parameter is raw.** Only Part 102 encodes an address
+as `(short_addr << 1) | 1`, and using that form here silently does the wrong
+thing:
 
 - `PROGRAM SHORT ADDRESS` takes the **raw 6-bit address** `0..63`, and `0xFF`
   for none. The Part 102 special of the same name takes `(short_addr << 1) | 1`,
   so sending that encoding to a control device programs address `2n + 1`.
   `VERIFY SHORT ADDRESS` and the reply to `QUERY SHORT ADDRESS` are raw too.
   `esp_dali` and TI's device firmware agree.
-- `INITIALISE`'s parameter selects devices by address, and which value means
-  what is **the open question**. The code sends `0x00` for devices without a
-  short address and `0xFF` for all, both from `esp_dali`. Beckhoff's
-  `FB_DALI103Initialise` and TI's device firmware both read it as `0x7F` for
-  devices without a short address, `0x00`–`0x3F` for the one device holding
-  that address, and `0xFF` for all. Read that way, `0x00` selects d0.
-
-The device-level `SET SHORT ADDRESS DTR0` (`0x14`, above) has the same question
-in its DTR0 value. The code loads `(a << 1) | 1`, the Part 102 form, while TI's
-firmware stores DTR0 raw — `0..63`, `0xFF` clears, anything else is ignored —
-and Tasmota loads the raw address. The P0 item in `current_status.md` has the
-bus check that settles both.
+- The device-level `SET SHORT ADDRESS DTR0` (`0x14`, above) reads DTR0 raw:
+  `0..63`, `0xFF` clears. Hardware-verified on 2k on 2026-09-29, where the old
+  `(a << 1) | 1` value, DTR0 = 5 for d2, put a device on d5. TI's firmware and
+  Tasmota agree.
+- `INITIALISE`'s parameter is a selector: `0xFF` every device, `0x7F` devices
+  without a short address, `0x00`–`0x3F` the one device holding that address.
+  Part 102 uses `0x00` for all gear and `0xFF` for unaddressed gear, so no value
+  carries over. This stack sent `0x00`, from `esp_dali`, until 2026-09-29, when
+  it found neither of two unaddressed devices on 2k; Beckhoff's
+  `FB_DALI103Initialise` and TI's device firmware both give `0x7F`. That `0x7F`
+  selects them is host-tested, not yet bus-verified.
 
 Opcode values were transcribed from Espressif's `esp_dali`. TI's MSPM0 SDK
 routes every one of them to the same command in its Part 103 device firmware

@@ -503,17 +503,16 @@ result back after.
 
 ```text
 > address d0 set d4
-address: d0 -> d4 (device DTR0=9)
+address: d0 -> d4 (device DTR0=4)
 address: d4 confirmed, d0 silent
 ```
 
-That output assumes the device reads DTR0 the way this arm writes it,
-`(M << 1) | 1`, and nothing has shown that it does. TI's device firmware stores
-DTR0 raw, so a device like it lands on d9 and the read-back reports d4 not
-confirmed. `commission devices`, which the `clear` arm below relies on to find
-a cleared device, has the matching doubt about its INITIALISE parameter. Both
-are the open P0 item in `current_status.md`; until its bus check has run, treat
-the device arms and `commission devices` as experimental.
+DTR0 is the destination itself: a control device reads it raw, where gear reads
+`(M << 1) | 1`. Builds up to and including `v2.0.0` loaded the gear form here,
+so a device asked to go to d2 went to d5 — seen on 2k — and their
+`commission devices` sent an INITIALISE that does not select unaddressed
+devices. Do not use either on those builds. `restore apply` sends its device
+moves through the same builder as this arm.
 
 Two differences from the gear arms are worth knowing.
 

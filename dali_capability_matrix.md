@@ -309,7 +309,8 @@ use. Host- and compile-verified only; no bus has run it.
   membership.
 - `address <dN> clear` has one-sided evidence. Part 103 has no broadcast
   QUERY MISSING SHORT ADDRESS in this stack, so silence at the subject is the
-  whole of the confirmation, and `commission devices` is what settles it — once
-  its INITIALISE parameter is settled, which is the open P0 item in
-  `current_status.md`. The device query exists, `0x33`, and is not implemented.
+  whole of the confirmation, and `commission devices` is what settles it. Its
+  INITIALISE selector is `0x7F` since 2026-09-29, host-tested; the `0x00` it
+  sent before selected nothing on 2k. The device query exists, `0x33`, and is
+  not implemented.
 - Nothing here claims DALI Alliance certification or complete IEC 62386 coverage.

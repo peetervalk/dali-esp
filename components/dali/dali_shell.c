@@ -2952,48 +2952,22 @@ static ShellPresence shell_device_presence(uint8_t addr, DaliError *err_out)
 }
 
 /*
- * DTR0 then SET SHORT ADDRESS DTR0, both in the device space, as one contiguous
- * sequence so nothing can redirect DTR0 between the two frames.
- *
- * The DTR0 here is a 24-bit control-device special, not the 16-bit gear one.
- * Loading the gear DTR0 and then addressing a control device would send the
- * command with whatever the device's own DTR0 happened to hold -- a write to an
- * address nobody chose, rather than a failure.
- *
- * The device form takes the address encoded as (a << 1) | 1, the same as
- * Part 102, because it reads the value from DTR0. The Part 103 *special*
- * PROGRAM SHORT ADDRESS takes the raw 6-bit value instead; it is a different
- * command, used only inside an addressing window, and not this path.
+ * Device DTR0 then device SET SHORT ADDRESS DTR0, as one contiguous sequence.
+ * `to` is the plain destination, or DALI_COMMISSIONING_NO_SHORT_ADDRESS; the
+ * frames come from dali_restore_build_move_sequence(), the builder `restore
+ * apply` sends, so the two cannot drift apart on what a device reads from
+ * DTR0. They did once: both loaded (a << 1) | 1, which put a device the 2k bus
+ * asked to go to d2 on d5.
  */
-static DaliError shell_device_write_short_address(uint8_t addr, uint8_t dtr0)
+static DaliError shell_device_write_short_address(uint8_t addr, uint8_t to)
 {
-    const DaliCommandInfo *cmd =
-        dali_command_lookup(DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0);
-    DaliFrame dtr_frame;
-    DaliFrame config_frame;
-
-    DaliError err = dali_build_control_device_dtr_data(DALI_DTR0, dtr0,
-                                                       &dtr_frame);
-    if (err == DALI_OK) {
-        err = dali_build_device_command(addr,
-                                        DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0,
-                                        &config_frame);
-    }
-    if (err == DALI_OK && cmd == NULL) {
-        err = DALI_ERR_INVALID;
-    }
+    DaliSequence seq;
+    DaliError err = dali_restore_build_move_sequence(DALI_SNAPSHOT_SPACE_DEVICE,
+                                                     addr, to, &seq);
     if (err != DALI_OK) {
         dali_cli_print_error(&s_out, "address", err);
         return err;
     }
-
-    DaliSequence seq = {
-        .steps = {
-            { .frame = dtr_frame },
-            { .frame = config_frame, .send_twice = cmd->send_twice },
-        },
-        .step_count = 2u,
-    };
 
     DaliSequenceResult seq_result;
     err = shell_sched_sequence_sync(&seq, &seq_result);
@@ -3040,11 +3014,11 @@ static void shell_device_address_set(uint8_t from, uint8_t to)
         return;
     }
 
-    const uint8_t encoded = dali_commissioning_encode_short_address(to);
+    /* DTR0 is the destination itself: the device space does not encode. */
     shell_printf("address: d%u -> d%u (device DTR0=%u)\r\n",
-                 (unsigned)from, (unsigned)to, (unsigned)encoded);
+                 (unsigned)from, (unsigned)to, (unsigned)to);
 
-    if (shell_device_write_short_address(from, encoded) != DALI_OK) {
+    if (shell_device_write_short_address(from, to) != DALI_OK) {
         return;
     }
 
@@ -3121,11 +3095,8 @@ static void shell_device_address_clear(uint8_t addr)
                      (unsigned)addr);
     }
 
-    /*
-     * DTR0 carries the literal "no short address" value, not an encoded
-     * address. Putting 255 through dali_commissioning_encode_short_address()
-     * would write a different address rather than none.
-     */
+    /* DTR0 carries the literal "no short address" value, which is 0xFF in the
+     * device space and the gear space alike. */
     shell_printf("address: d%u -> unaddressed (device DTR0=%u)\r\n",
                  (unsigned)addr,
                  (unsigned)DALI_COMMISSIONING_NO_SHORT_ADDRESS);
@@ -6311,70 +6282,33 @@ static bool shell_restore_build_group_plan(const char           *verb,
     return true;
 }
 
-/* One move: DTR0 = encoded destination, then SET SHORT ADDRESS DTR0 to the unit
- * at its current address, as one contiguous sequence so nothing can redirect
- * DTR0 between the two frames. */
+/* One move: DTR0 = destination, then SET SHORT ADDRESS DTR0 to the unit at its
+ * current address, as one contiguous sequence so nothing can redirect DTR0
+ * between the two frames. The builder carries the per-space DTR0 encoding. */
 static DaliError shell_restore_apply_move(const DaliRestoreMove *move)
 {
-    if (move->to >= DALI_SHORT_ADDRESS_COUNT ||
-        move->from >= DALI_SHORT_ADDRESS_COUNT) {
-        return DALI_ERR_INVALID;
+    if (move->to >= DALI_SHORT_ADDRESS_COUNT) {
+        return DALI_ERR_INVALID;   /* a restore places units; it never clears */
     }
 
-    /*
-     * Both spaces take the address encoded as (a << 1) | 1 here, because both
-     * SET SHORT ADDRESS DTR0 commands read it from DTR0. The Part 103 *special*
-     * PROGRAM SHORT ADDRESS takes the raw 6-bit value instead — a different
-     * command, used only inside an addressing window, and not this path.
-     */
-    const uint8_t encoded = dali_commissioning_encode_short_address(move->to);
-    const bool    is_gear = (move->space == DALI_SNAPSHOT_SPACE_GEAR);
-
-    const DaliCommandId cmd_id = is_gear ? DALI_CMD_SET_SHORT_ADDRESS_DTR0
-                                         : DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0;
-    const DaliCommandInfo *cmd = dali_command_lookup(cmd_id);
-    if (cmd == NULL) {
-        return DALI_ERR_INVALID;
-    }
-
-    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = move->from };
-    DaliFrame  dtr_frame;
-    DaliFrame  config_frame;
-    DaliError  err;
-
-    if (is_gear) {
-        err = dali_control_build_dtr(DALI_DTR0, encoded, &dtr_frame);
-        if (err == DALI_OK) {
-            err = dali_control_build_config(target, cmd_id, 0u, &config_frame);
-        }
-    } else {
-        /* The device space has its own DTR0: a 24-bit control-device special,
-         * not the 16-bit gear one. Loading the gear DTR0 and then addressing a
-         * control device would send the command with whatever the device's own
-         * DTR0 happened to hold. */
-        err = dali_build_control_device_dtr_data(DALI_DTR0, encoded, &dtr_frame);
-        if (err == DALI_OK) {
-            err = dali_build_device_command(move->from, cmd_id, &config_frame);
-        }
-    }
+    DaliSequence seq;
+    DaliError err = dali_restore_build_move_sequence(move->space, move->from,
+                                                     move->to, &seq);
     if (err != DALI_OK) {
         return err;
     }
 
-    DaliSequence seq = {
-        .steps = {
-            { .frame = dtr_frame },
-            { .frame = config_frame, .send_twice = cmd->send_twice },
-        },
-        .step_count = 2u,
-    };
+    const bool is_gear = (move->space == DALI_SNAPSHOT_SPACE_GEAR);
+    const DaliTarget target = { .type = DALI_ADDR_SHORT, .address = move->from };
 
     DaliSequenceResult seq_result;
     err = shell_sched_sequence_sync(&seq, &seq_result);
     if (err == DALI_OK && is_gear) {
         /* Only the gear space has a cache on the other side of this hook; a
          * device short address is not something the integration tracks. */
-        shell_notify_config_applied(target, cmd_id, encoded);
+        shell_notify_config_applied(
+            target, DALI_CMD_SET_SHORT_ADDRESS_DTR0,
+            dali_commissioning_encode_short_address(move->to));
     }
     return err;
 }

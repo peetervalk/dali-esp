@@ -28,6 +28,84 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-09-29 (Part 103 encoding fix, uncommitted on `dev`)
+
+The fix for the two encodings the next entry found wrong on 2k. Nothing touched
+a bus.
+
+- `address d<N> set d<M>`, `address d<N> clear` and `restore apply` build their
+  frames with the new `dali_restore_build_move_sequence()`: device DTR0 raw,
+  gear DTR0 `(a << 1) | 1`, `0xFF` unencoded in both. Before, no host suite
+  linked the shell, so nothing pinned those frames — which is how both writers
+  loaded the gear form into devices unseen.
+- `DALI_DEVICE_INITIALISE_UNADDRESSED_PARAM` is `0x7F`. The device-commissioning
+  mock used to assert the constant, so it passed whatever the walk sent; it now
+  selects devices by the parameter the way a device does (`0xFF` all, `0x7F`
+  unaddressed, `0..63` that address), and a new vector puts an addressed device
+  at d0 beside an unaddressed one.
+- 32/32 host suites build and pass with MSYS2 UCRT64. `test_restore_confirm`
+  has 17 vectors (4 new: device, gear, clear, bad arguments);
+  `test_device_commissioning` 30 (1 new, 1 renamed).
+- Mutation-checked. Restoring `0x00` fails 12 device-commissioning vectors —
+  the in-order assignment reads "Expected 2 Was 0", which is the 2k result —
+  and the d0 vector sees the addressed device taken. Restoring the gear
+  encoding for devices fails the device-move vector (`0xC13005` for d2).
+
+### Verified on hardware 2026-09-29 (2k bus: both Part 103 addressing encodings, `v2.0.0`)
+
+Settles the two open encodings in *A device-side source sides with Beckhoff on
+both Part 103 encodings*, under Investigations; that entry stays as written.
+Driven from the `dali-shell` script against the 2k node, which the operator
+reports runs `v2.0.0`. Nothing in the code changed.
+
+Bus at start: a0–a4 lamps in group 0; d0 the Steinel (4 instances, id
+`05259F98068FE190`), d1 the DALI-2 PB coupler (1 instance, id
+`CA5A000E000000FF`). `backup save` recorded 7 entries from 5 addresses,
+including both device identities.
+
+**Device SET SHORT ADDRESS (DTR0) reads DTR0 raw.** `address d1 set d2` loaded
+device DTR0 = 5 and reported d2 silent. `raw 05FE35 len=24 wait` (QUERY NUMBER
+OF INSTANCES at d2) timed out; `raw 0BFE35 len=24 wait` (d5) answered 1. The
+coupler went to 5, as TI, Tasmota and Beckhoff have it, so `(a << 1) | 1` is
+wrong for the device space. On `v2.0.0` and `dev` alike, `address dN set dM`
+sends a device to 2M+1, and every device-space move in `restore apply` does the
+same.
+
+**The way-back recipe made a collision.** The investigation entry's "back from
+d5" frames return a unit to d0, because they were written for the Steinel.
+Run against the coupler, `dtrcheck 5 0 0` and `raw2 0BFE14 len=24` put it on d0
+beside the Steinel. `raw 01FE35 len=24 wait` then read `ERR malformed`;
+`discover` listed neither d0 nor d1 as an input device and noted 2 RX
+observations ignored. The recipe should have said "to the address it came
+from".
+
+**`address d0 clear` could not reach its contested arm.** It answered "d0 does
+not answer; nothing to clear": the presence probe read the two colliding
+replies as a timeout, not as undecodable activity, and only the latter opens
+the contested path. A collision of these two units is silence to the probe.
+
+**Cleared by hand**: device DTR0 = `0xFF` (`raw C130FF len=24`), then SET SHORT
+ADDRESS at d0 sent twice (`raw2 01FE14 len=24`). `0xFF` means "none" under
+either encoding. The `commission devices` pre-scan that followed read
+`occupied=0`, so both units left d0 and neither holds an address.
+
+**INITIALISE (device) `0x00` does not select unaddressed devices.** With both
+units unaddressed and no other control device on the bus, `commission devices`
+reported `no more unaddressed devices`, `assigned=0`. Every Part 103 special
+opcode this stack sends matches TI's device-side decoder (TERMINATE `00`
+through QUERY SHORT ADDRESS `0A`, DTR0 `30`), which leaves INITIALISE's
+parameter as the one input that disagrees with the independent sources. Read
+as TI and Beckhoff have it, `0x00` selected the device at d0 and d0 was empty.
+Not excluded: a fault further into the walk, since RANDOMISE, SEARCHADDR and
+COMPARE have never run on a bus. A `0x7F` rerun separates the two.
+
+**Left on the bus:** a0–a4 unchanged. The Steinel and the coupler both hold no
+short address, so everything keyed to d0 and d1 is dark until a build with both
+encodings fixed commissions them and `restore plan` / `restore apply` returns
+each to its recorded address by identification number. That depends on the
+backup taken at the start: a `backup save` before the restore would record both
+units as absent.
+
 ### Verified locally on 2026-09-25 (stack-review fixes, uncommitted on `dev`)
 
 Seven findings from the *Stack review* below, fixed in the working tree on top of
@@ -2936,6 +3014,26 @@ below landed after that tag.
 
 Add new entries here as breaks accumulate, and empty the section again at the
 next tag.
+
+### From the 2026-09-29 Part 103 encoding fix (host-tested)
+
+Operator-visible:
+
+- `address d<N> set d<M>` loads device DTR0 with `M`, not `(M << 1) | 1`, and
+  prints it that way (`device DTR0=4` for d4, was 9). On `v2.0.0` the verb
+  sent the device to 2M+1, or nowhere for M ≥ 32.
+- `restore apply` loads a device move's DTR0 raw as well. Gear moves are
+  unchanged.
+- `commission devices` sends INITIALISE `0x7F`, not `0x00`. `0x00` selects the
+  device at d0: on 2k it found neither of two unaddressed devices, and on a bus
+  whose d0 is occupied it would have re-addressed that device.
+
+C API:
+
+- `DALI_DEVICE_INITIALISE_UNADDRESSED_PARAM` is `0x7F` (was `0x00`).
+- New: `dali_restore_build_move_sequence()`, the DTR0 + SET SHORT ADDRESS
+  sequence for one re-address in either space, with `to` 0..63 or
+  `DALI_COMMISSIONING_NO_SHORT_ADDRESS`.
 
 ### From the 2026-09-25 stack-review fixes (host-tested)
 
