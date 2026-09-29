@@ -289,13 +289,18 @@ static bool shell_policy_allows(uint8_t flag, const char *verb)
  * Synchronous scheduler helper — device builds only
  *
  * Enqueues one transaction and blocks the calling task via FreeRTOS task
- * notification until the completion callback fires (or 200 ms elapses).
+ * notification until the completion callback fires, or until the transport
+ * budget for that transaction elapses (dali_transport_transaction_timeout_ms).
  * The DALI processing task must be calling dali_sched_run() concurrently.
+ *
+ * A wait that expires reports DALI_ERR_WAIT_EXPIRED, never DALI_ERR_TIMEOUT.
+ * The transaction may still be queued or on the wire, so nothing is known
+ * about the bus; TIMEOUT is what every caller reads as "nothing answered", and
+ * a presence probe that read it that way would call an occupied address free.
  * --------------------------------------------------------------------------*/
 #ifndef DALI_HOST_BUILD
 
 #define SHELL_SYNC_SLOT_COUNT 4u
-#define SHELL_SYNC_WAIT_MS  200u
 #define SHELL_RESET_WAIT_MS 1000u
 #define SHELL_IDENTIFY_CYCLES 5u
 #define SHELL_IDENTIFY_STEP_MS 1000u
@@ -416,7 +421,7 @@ static DiagSyncCtx *shell_sync_alloc_slot(TaskHandle_t waiting_task)
         if (!s_diag_sync_slots[i].in_use) {
             s_diag_sync_slots[i] = (DiagSyncCtx){
                 .waiting_task = waiting_task,
-                .result       = DALI_ERR_TIMEOUT,
+                .result       = DALI_ERR_WAIT_EXPIRED,
                 .reply        = {0u, 0u},
                 .has_reply    = false,
                 .sequence     = { .failed_step = DALI_SEQUENCE_NO_FAILED_STEP },
@@ -546,7 +551,7 @@ static DaliError shell_reset_sync(void)
         (void)ulTaskNotifyTake(pdTRUE, wait_ticks - elapsed);
     }
 
-    DaliError result = DALI_ERR_TIMEOUT;
+    DaliError result = DALI_ERR_WAIT_EXPIRED;
     bool completed;
     taskENTER_CRITICAL(&s_diag_sync_mux);
     completed = ctx->complete;
@@ -572,9 +577,10 @@ static DaliError shell_reset_sync(void)
 }
 
 /*
- * Enqueue frame, wait up to SHELL_SYNC_WAIT_MS for completion.
- * retries_left is the scheduler retry budget after the first attempt.
- * reply_out may be NULL when the reply data is not needed.
+ * Enqueue frame and wait for its completion, for as long as its retry budget
+ * can take plus queue headroom. retries_left is the scheduler retry budget
+ * after the first attempt. reply_out may be NULL when the reply data is not
+ * needed.
  */
 static DaliError shell_sched_sync_impl(const DaliFrame *frame,
                                        bool needs_reply,
@@ -619,7 +625,8 @@ static DaliError shell_sched_sync_impl(const DaliFrame *frame,
         return err;
     }
 
-    TickType_t wait_ticks = pdMS_TO_TICKS(SHELL_SYNC_WAIT_MS);
+    TickType_t wait_ticks =
+        pdMS_TO_TICKS(dali_transport_transaction_timeout_ms(retries_left));
     TickType_t start_tick = xTaskGetTickCount();
     while (!shell_sync_complete(ctx)) {
         TickType_t elapsed = xTaskGetTickCount() - start_tick;
@@ -629,7 +636,7 @@ static DaliError shell_sched_sync_impl(const DaliFrame *frame,
         (void)ulTaskNotifyTake(pdTRUE, wait_ticks - elapsed);
     }
 
-    DaliError result = DALI_ERR_TIMEOUT;
+    DaliError result = DALI_ERR_WAIT_EXPIRED;
     DaliFrame reply = {0u, 0u};
     bool has_reply = false;
     bool completed = false;
@@ -731,7 +738,7 @@ static DaliError shell_sched_sequence_sync(DaliSequence *seq,
         (void)ulTaskNotifyTake(pdTRUE, wait_ticks - elapsed);
     }
 
-    DaliError result = DALI_ERR_TIMEOUT;
+    DaliError result = DALI_ERR_WAIT_EXPIRED;
     DaliSequenceResult sequence = { .failed_step = DALI_SEQUENCE_NO_FAILED_STEP };
     bool has_sequence = false;
     bool completed = false;
@@ -1887,6 +1894,19 @@ static void cmd_raw(const DaliCliTokens *t, bool send_twice)
     if (!dali_cli_parse_raw_frame(t->tok[1], t->tok[2], &frame)) {
         g_dali_stats.raw_malformed++;
         dali_cli_print_usage(&s_out, dali_cli_command_for_id(id));
+        return;
+    }
+
+    /*
+     * The escape hatch is not a way round the policy. `special`, `config`,
+     * `address` and `restore apply` refuse these frames on a session without
+     * DALI_SHELL_ALLOW_COMMISSION; spelling one in hex must not succeed where
+     * its name is refused.
+     */
+    if (dali_cli_raw_frame_is_commissioning(&frame) &&
+        !shell_policy_allows(DALI_SHELL_ALLOW_COMMISSION,
+                             send_twice ? "raw2 (commissioning frame)"
+                                        : "raw (commissioning frame)")) {
         return;
     }
 
@@ -3763,7 +3783,11 @@ static uint8_t shell_discover_bus(bool detailed)
      */
     uint32_t early_rx_before = g_dali_stats.rx_reply_early;
     uint32_t late_rx_before  = g_dali_stats.rx_reply_late;
-    uint32_t event_rx_before = g_dali_stats.rx_event_unroutable +
+    /* Every event-shaped frame the walk saw, routed or not. Events are routed
+     * in every scheduler state now, so the unroutable bucket this note used to
+     * read stays at zero; counting only it would report a quiet bus. */
+    uint32_t event_rx_before = g_dali_stats.unsolicited_events_routed +
+                               g_dali_stats.rx_event_unroutable +
                                g_dali_stats.rx_event_no_subscriber;
     uint32_t other_rx_before = g_dali_stats.rx_reply_superseded +
                                g_dali_stats.rx_undecodable_ignored +
@@ -3826,7 +3850,8 @@ static uint8_t shell_discover_bus(bool detailed)
 
     uint32_t early_rx = g_dali_stats.rx_reply_early - early_rx_before;
     uint32_t late_rx  = g_dali_stats.rx_reply_late - late_rx_before;
-    uint32_t event_rx = (g_dali_stats.rx_event_unroutable +
+    uint32_t event_rx = (g_dali_stats.unsolicited_events_routed +
+                         g_dali_stats.rx_event_unroutable +
                          g_dali_stats.rx_event_no_subscriber) - event_rx_before;
     uint32_t other_rx = (g_dali_stats.rx_reply_superseded +
                          g_dali_stats.rx_undecodable_ignored +
@@ -6629,25 +6654,55 @@ static void cmd_restore(const DaliCliTokens *t)
         return;
     }
 
+    DaliDiscoveryTransport transport = shell_discovery_transport();
     uint8_t applied = 0u;
     for (uint8_t i = 0u; i < plan.move_count; i++) {
         const DaliRestoreMove *move = &plan.moves[i];
+        const char *prefix = move->space == DALI_SNAPSHOT_SPACE_GEAR ? "a" : "d";
+
+        /*
+         * Sent is not moved. SET SHORT ADDRESS is unacknowledged and nothing
+         * here detects a collision, so each move is confirmed on the bus --
+         * the unit answers at `to`, `from` is silent, and the identification
+         * number at `to` is the unit's -- before the next move is allowed to
+         * rely on it.
+         */
+        DaliRestoreMoveCheck check = DALI_RESTORE_MOVE_CONFIRMED;
+        DaliError probe_err = DALI_OK;
         DaliError err = shell_restore_apply_move(move);
-        shell_printf("  %u/%u %s%u -> %s%u: %s\r\n",
-               (unsigned)(i + 1u),
-               (unsigned)plan.move_count,
-               move->space == DALI_SNAPSHOT_SPACE_GEAR ? "a" : "d",
-               (unsigned)move->from,
-               move->space == DALI_SNAPSHOT_SPACE_GEAR ? "a" : "d",
-               (unsigned)move->to,
-               err == DALI_OK ? "OK" : shell_err(err));
+        if (err == DALI_OK) {
+            err = dali_restore_confirm_move(&transport, move, &check, &probe_err);
+        }
+
         if (err != DALI_OK) {
+            shell_printf("  %u/%u %s%u -> %s%u: %s\r\n",
+                         (unsigned)(i + 1u), (unsigned)plan.move_count,
+                         prefix, (unsigned)move->from,
+                         prefix, (unsigned)move->to, shell_err(err));
+        } else if (check != DALI_RESTORE_MOVE_CONFIRMED) {
+            shell_printf("  %u/%u %s%u -> %s%u: sent, not confirmed: %s%s%s\r\n",
+                         (unsigned)(i + 1u), (unsigned)plan.move_count,
+                         prefix, (unsigned)move->from,
+                         prefix, (unsigned)move->to,
+                         dali_restore_move_check_name(check),
+                         check == DALI_RESTORE_MOVE_UNREADABLE ? ", " : "",
+                         check == DALI_RESTORE_MOVE_UNREADABLE
+                             ? shell_err(probe_err) : "");
+        } else {
+            shell_printf("  %u/%u %s%u -> %s%u: OK\r\n",
+                         (unsigned)(i + 1u), (unsigned)plan.move_count,
+                         prefix, (unsigned)move->from,
+                         prefix, (unsigned)move->to);
+        }
+
+        if (err != DALI_OK || check != DALI_RESTORE_MOVE_CONFIRMED) {
             /*
-             * Stop at the first failure. The plan's later moves assume this one
-             * landed, so continuing would send a unit onto an address the plan
-             * believes was vacated and this one proves was not. Re-running
-             * `restore plan` against the bus as it now stands is the recovery,
-             * and it is safe because nothing here opened an addressing window.
+             * Stop at the first move that did not provably land. The plan's
+             * later moves assume it did, so continuing would send a unit onto
+             * an address the plan believes was vacated and the bus has not
+             * shown to be. Re-running `restore plan` against the bus as it now
+             * stands is the recovery, and it is safe because nothing here
+             * opened an addressing window.
              */
             shell_printf("restore apply: stopped after %u of %u move(s); "
                          "re-run 'restore plan' to see what remains\r\n",
@@ -6661,8 +6716,10 @@ static void cmd_restore(const DaliCliTokens *t)
     shell_bus_release();
 
     if (applied == plan.move_count) {
-        shell_printf("restore apply: %u move(s) applied\r\n", (unsigned)applied);
-        shell_printf("restore apply: verify with 'restore plan' or 'discover'\r\n");
+        shell_printf("restore apply: %u move(s) applied, each confirmed on the "
+                     "bus\r\n", (unsigned)applied);
+        shell_printf("restore apply: 'restore plan' shows anything the plan "
+                     "could not reach\r\n");
     }
 
     /* Short addresses moved, so every cached view of the bus is stale. */

@@ -134,7 +134,7 @@ named form.
 | `dt6` | yes | yes |
 | `dt8` | yes | no — held until real DT8 gear is available |
 | `iquery` `iconfig` `vendor` | yes | yes |
-| `raw` `raw2` `dtr` | yes | yes |
+| `raw` `raw2` `dtr` | yes | yes, minus commissioning frames |
 | `memread` `devmem` `dtrcheck` | yes | yes |
 | `quiescent` | yes | yes |
 | `meminfo` | yes | no — walks a bank, needs a blocking transport |
@@ -506,6 +506,14 @@ result back after.
 address: d0 -> d4 (device DTR0=9)
 address: d4 confirmed, d0 silent
 ```
+
+That output assumes the device reads DTR0 the way this arm writes it,
+`(M << 1) | 1`, and nothing has shown that it does. TI's device firmware stores
+DTR0 raw, so a device like it lands on d9 and the read-back reports d4 not
+confirmed. `commission devices`, which the `clear` arm below relies on to find
+a cleared device, has the matching doubt about its INITIALISE parameter. Both
+are the open P0 item in `current_status.md`; until its bus check has run, treat
+the device arms and `commission devices` as experimental.
 
 Two differences from the gear arms are worth knowing.
 
@@ -951,6 +959,18 @@ standard describes. `raw2` takes no `wait`: a send-twice command is a
 configuration write, not a query. A value that does not fit the stated width is
 rejected rather than transmitted as a differently framed command.
 
+A raw frame that *is* a commissioning command is gated as the named verbs are,
+because spelling a command in hex should not reach what spelling it by name
+cannot. The set is exactly what `special` and `config` hold back: `INITIALISE`,
+`RANDOMISE`, `WITHDRAW`, the `SEARCHADDR` loads, `PROGRAM SHORT ADDRESS` and the
+gear memory writes; `SET SHORT ADDRESS` to a short address, group or broadcast;
+and the 24-bit control-device forms of the addressing commands. `TERMINATE`,
+`COMPARE` and the verify and query specials only end or observe a window, and
+pass. A shell session refuses a gated frame without `allow_commissioning: true`
+(`raw (commissioning frame): refused by session policy`), and the console
+refuses it outright with `commissioning frame; use the native CLI`. The native
+serial CLI sends it as before.
+
 `dtr` loads one **control-gear** DTR by broadcast. A DTR is consumed by whichever
 command reads it next, so a value loaded this way survives only if nothing else
 transmits in between — including this component's own refresh queries. Prefer the
@@ -1011,10 +1031,10 @@ and the integration's own periodic scan, which runs with nobody present to
 accept a silent installation.
 
 Commissioning remains hardware-dependable only with a single unaddressed device
-on the bus. The receive path now attributes observations to a precise
-TX-end-relative reply window — opening at 5.5 ms for undecodable activity, which
-is the case `COMPARE` turns on, and closing at 27 ms — and distinguishes three
-cases during `COMPARE`:
+on the bus. The receive path now attributes observations to a reply window
+measured from the end of the forward frame — opening at 5.5 ms for undecodable
+activity, which is the case `COMPARE` turns on, and closing at 28.664 ms — and
+distinguishes three cases during `COMPARE`:
 
 - silence is NO;
 - qualified, response-like malformed activity is `DALI_ERR_RX_ACTIVITY`, which
@@ -1112,9 +1132,28 @@ A move is a plain addressed `SET SHORT ADDRESS DTR0` — DTR0 and the command in
 one contiguous sequence, in whichever address space the entry came from.
 **`restore` opens no `INITIALISE` window.** Nothing it sends can leave the bus
 in a state that needs terminating, so it is safe to run on a live installation
-and safe to interrupt: `apply` stops at the first failed move, and re-running
-`restore plan` against the bus as it now stands is the recovery. A plan the
-planner marks `incomplete` is refused rather than partially applied.
+and safe to interrupt: `apply` stops at the first move that fails or cannot be
+confirmed, and re-running `restore plan` against the bus as it now stands is the
+recovery. A plan the planner marks `incomplete` is refused rather than partially
+applied.
+
+**Sent is not moved.** `SET SHORT ADDRESS` has no answer, and every later move
+in a plan assumes the earlier ones landed, so each move is confirmed on the bus
+before the next is sent: something answers at the destination, nothing answers
+at the source, and the identification number read back at the destination is
+the one the plan moved. A move that passes prints `OK`. One that does not says
+why, and `apply` stops there:
+
+```text
+  1/2 a4 -> a1: OK
+  2/2 a9 -> a3: sent, not confirmed: nothing answers at the target
+restore apply: stopped after 1 of 2 move(s); re-run 'restore plan' to see what remains
+```
+
+The other reasons are `the source still answers`, `a different unit answers at
+the target`, and `unreadable` followed by the error that stopped the read-back.
+A run that confirms every move ends with `restore apply: N move(s) applied, each
+confirmed on the bus`.
 
 Cycles are handled. Two units that need to swap addresses cannot both move
 directly, so the plan stages one through a free address and places it on a later
@@ -1291,7 +1330,7 @@ something else.
 | `kind` | `tx` or `rx` |
 | `timestamp_us` | Free-running microsecond clock; only differences are meaningful |
 | `raw`, `raw_bits` | The frame and its width — 16 or 24 forward, 8 backward |
-| `since_tx_us` | On an `rx` record: the backward frame's **last edge**, measured from the preceding TX **bus release** |
+| `since_tx_us` | On an `rx` record: the backward frame's **last edge**, measured from the preceding TX **bus release** — the end of the forward frame's last data bit |
 
 `since_tx_us` is the field worth being careful with, because neither end of it
 is what a first reading assumes. It is anchored to the end of the forward
@@ -1299,10 +1338,16 @@ frame, not its start, and it runs to the end of the reply, not its beginning.
 A backward frame is nine bit periods — about 7.5 ms — so the settling time the
 standard talks about is `since_tx_us` minus 7500.
 
+"Bus release" is the end of the last data bit, before the two stop bits, which
+is where this project reads IEC 62386-101 as measuring from (see *Bus Timing*
+in `dali_protocol.md` for how firm that is). Captures taken before 2026-09-25 were
+anchored after the stop bits instead, so the same reply read 1664 us lower in
+them: add 1664 to compare an old capture with a new one.
+
 IEC 62386-101 gives that settling time as 5.5 to 10.5 ms, nominal 7 ms, so
 healthy gear lands at `since_tx_us` of roughly 13000-18000. The scheduler
 attributes anything from `DALI_REPLY_WINDOW_OPEN_US` (5.5 ms) through
-`DALI_REPLY_WINDOW_CLOSE_US` (27 ms) after release; a reply outside that is
+`DALI_REPLY_WINDOW_CLOSE_US` (28.664 ms) after release; a reply outside that is
 counted in `rx_reply_early` or `rx_reply_late` — the two halves of the old
 `rx_ignored_outside_reply`, which is now their sum together with five other
 classes — and reported by `discover` as N early / N late replies outside the
@@ -1323,7 +1368,7 @@ depends on whether the observation decoded:
 
 | Observation | Open edge | Rejected below `since_tx_us` |
 |---|---:|---:|
-| Decoded 8-bit backward frame | `DALI_REPLY_WINDOW_OPEN_DECODED_US` (2 ms, the RX self-echo suppression) | ~9500 |
+| Decoded 8-bit backward frame | `DALI_REPLY_WINDOW_OPEN_DECODED_US` (3.664 ms: the stop bits plus the RX settle suppression) | ~11200 |
 | Undecodable activity | `DALI_REPLY_WINDOW_OPEN_US` (5.5 ms, the standard's minimum) | ~13000 |
 
 The split is deliberate. A decoded backward frame arriving while a query is

@@ -85,11 +85,17 @@ static void restore_add_conflict(const RestoreConflictSink *sink,
     (*sink->count)++;
 }
 
-static bool restore_add_move(DaliRestorePlan    *plan,
-                             DaliSnapshotSpace   space,
-                             uint8_t             from,
-                             uint8_t             to,
-                             DaliRestoreMoveKind kind)
+/*
+ * `unit_addr` is where the moving unit was found on the bus, which is where its
+ * identification number is filed. It is not `from` after a staging hop.
+ */
+static bool restore_add_move(DaliRestorePlan       *plan,
+                             const RestoreBusUnits *units,
+                             DaliSnapshotSpace      space,
+                             uint8_t                from,
+                             uint8_t                to,
+                             DaliRestoreMoveKind    kind,
+                             uint8_t                unit_addr)
 {
     if (plan->move_count >= DALI_RESTORE_MAX_MOVES) {
         plan->incomplete = true;
@@ -97,10 +103,17 @@ static bool restore_add_move(DaliRestorePlan    *plan,
     }
 
     DaliRestoreMove *move = &plan->moves[plan->move_count];
+    memset(move, 0, sizeof(*move));
     move->space = space;
     move->from  = from;
     move->to    = to;
     move->kind  = kind;
+    if (units->has_ident[unit_addr]) {
+        move->has_identification = true;
+        memcpy(move->identification,
+               units->ident[unit_addr],
+               DALI_MEMORY_BANK0_IDENTIFICATION_LEN);
+    }
     plan->move_count++;
     return true;
 }
@@ -580,8 +593,9 @@ static void restore_plan_space(DaliRestorePlan    *plan,
             if ((occupied & ((uint64_t)1u << pending[i].dst)) != 0u) {
                 continue;
             }
-            if (!restore_add_move(plan, space, pending[i].cur, pending[i].dst,
-                                  DALI_RESTORE_MOVE_PLACE)) {
+            if (!restore_add_move(plan, units, space, pending[i].cur,
+                                  pending[i].dst, DALI_RESTORE_MOVE_PLACE,
+                                  pending[i].origin)) {
                 return;
             }
             occupied &= ~((uint64_t)1u << pending[i].cur);
@@ -617,8 +631,9 @@ static void restore_plan_space(DaliRestorePlan    *plan,
                 break;
             }
 
-            if (!restore_add_move(plan, space, pending[victim].cur, stage,
-                                  DALI_RESTORE_MOVE_STAGE)) {
+            if (!restore_add_move(plan, units, space, pending[victim].cur,
+                                  stage, DALI_RESTORE_MOVE_STAGE,
+                                  pending[victim].origin)) {
                 return;
             }
             occupied &= ~((uint64_t)1u << pending[victim].cur);
@@ -667,7 +682,8 @@ static void restore_plan_space(DaliRestorePlan    *plan,
             continue;
         }
 
-        if (!restore_add_move(plan, space, squatter, spare, DALI_RESTORE_MOVE_DISPLACE)) {
+        if (!restore_add_move(plan, units, space, squatter, spare,
+                              DALI_RESTORE_MOVE_DISPLACE, squatter)) {
             return;
         }
         occupied &= ~((uint64_t)1u << squatter);
@@ -814,6 +830,127 @@ bool dali_restore_plan_is_clean(const DaliRestorePlan *plan)
            plan->move_count == 0u &&
            plan->conflict_total == 0u &&
            !plan->incomplete;
+}
+
+/*
+ * Whether anything answers at `addr` in `space`, asked the way discovery asks
+ * it. DALI_OK with *present_out set means a decoded reply or a silent window;
+ * any other return is a reading that says neither, and the caller must not
+ * turn it into one.
+ */
+static DaliError restore_probe_presence(const DaliTransport *transport,
+                                        DaliSnapshotSpace    space,
+                                        uint8_t              addr,
+                                        bool                *present_out)
+{
+    uint8_t   reply = 0u;
+    DaliError err;
+
+    if (space == DALI_SNAPSHOT_SPACE_GEAR) {
+        err = dali_discovery_query_status(transport, addr, &reply);
+    } else {
+        DaliFrame frame;
+        err = dali_input_build_query_number_of_instances(addr, &frame);
+        if (err == DALI_OK) {
+            err = dali_discovery_query_u8(transport, &frame, &reply);
+        }
+    }
+
+    if (err == DALI_OK) {
+        *present_out = true;
+        return DALI_OK;
+    }
+    if (err == DALI_ERR_TIMEOUT) {
+        *present_out = false;
+        return DALI_OK;
+    }
+    return err;
+}
+
+DaliError dali_restore_confirm_move(const DaliTransport  *transport,
+                                    const DaliRestoreMove *move,
+                                    DaliRestoreMoveCheck  *check_out,
+                                    DaliError             *probe_error_out)
+{
+    if (!dali_transport_valid(transport) || move == NULL || check_out == NULL ||
+        move->from >= DALI_SHORT_ADDRESS_COUNT ||
+        move->to >= DALI_SHORT_ADDRESS_COUNT ||
+        (move->space != DALI_SNAPSHOT_SPACE_GEAR &&
+         move->space != DALI_SNAPSHOT_SPACE_DEVICE)) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliError probe_err = DALI_OK;
+    DaliRestoreMoveCheck check = DALI_RESTORE_MOVE_CONFIRMED;
+    bool present = false;
+
+    /* The destination first: silence there is the direct sign the write did
+     * not land, and it is the cheaper probe when it fails. */
+    probe_err = restore_probe_presence(transport, move->space, move->to, &present);
+    if (probe_err != DALI_OK) {
+        check = DALI_RESTORE_MOVE_UNREADABLE;
+        goto done;
+    }
+    if (!present) {
+        check = DALI_RESTORE_MOVE_TARGET_SILENT;
+        goto done;
+    }
+
+    probe_err = restore_probe_presence(transport, move->space, move->from, &present);
+    if (probe_err != DALI_OK) {
+        check = DALI_RESTORE_MOVE_UNREADABLE;
+        goto done;
+    }
+    if (present) {
+        check = DALI_RESTORE_MOVE_SOURCE_ANSWERS;
+        goto done;
+    }
+
+    /*
+     * Something answers at `to` and nothing at `from`. That is still not proof
+     * it is this unit: a unit the planning scan missed could already have been
+     * there, and two replies that happen to decode alike read as one. The
+     * identification number is the only thing that tells units apart.
+     */
+    if (move->has_identification) {
+        uint8_t ident[DALI_MEMORY_BANK0_IDENTIFICATION_LEN];
+        probe_err = (move->space == DALI_SNAPSHOT_SPACE_GEAR)
+            ? dali_memory_read_bytes(transport, move->to, DALI_MEMORY_BANK0,
+                                     DALI_MEMORY_BANK0_OFFSET_IDENTIFICATION,
+                                     ident, DALI_MEMORY_BANK0_IDENTIFICATION_LEN)
+            : dali_memory_read_device_bytes(transport, move->to, DALI_MEMORY_BANK0,
+                                            DALI_MEMORY_BANK0_OFFSET_IDENTIFICATION,
+                                            ident,
+                                            DALI_MEMORY_BANK0_IDENTIFICATION_LEN);
+        if (probe_err != DALI_OK) {
+            check = DALI_RESTORE_MOVE_UNREADABLE;
+            goto done;
+        }
+        if (!dali_snapshot_identification_equal(ident, move->identification)) {
+            check = DALI_RESTORE_MOVE_WRONG_UNIT;
+            goto done;
+        }
+    }
+
+done:
+    *check_out = check;
+    if (probe_error_out != NULL) {
+        *probe_error_out = (check == DALI_RESTORE_MOVE_UNREADABLE) ? probe_err
+                                                                   : DALI_OK;
+    }
+    return DALI_OK;
+}
+
+const char *dali_restore_move_check_name(DaliRestoreMoveCheck check)
+{
+    switch (check) {
+        case DALI_RESTORE_MOVE_CONFIRMED:      return "confirmed";
+        case DALI_RESTORE_MOVE_TARGET_SILENT:  return "nothing answers at the target";
+        case DALI_RESTORE_MOVE_SOURCE_ANSWERS: return "the source still answers";
+        case DALI_RESTORE_MOVE_WRONG_UNIT:     return "a different unit answers at the target";
+        case DALI_RESTORE_MOVE_UNREADABLE:     return "unreadable";
+        default:                               return "unknown";
+    }
 }
 
 const char *dali_restore_conflict_name(DaliRestoreConflictKind kind)

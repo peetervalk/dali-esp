@@ -95,14 +95,19 @@ void dali_phy_set_rx_callback(DaliPhyRxCallback cb, void *ctx);
 /*
  * Transmit a frame.  Blocks until transmission completes or timeout.
  * Must not be called from ISR context.
- * Returns DALI_ERR_BUSY if a TX is already in progress.
+ * Returns DALI_ERR_BUSY if a TX is already in progress, DALI_ERR_BUS_STUCK if
+ * the bus never went idle, and DALI_ERR_TIMING if the frame could not be
+ * clocked out on time.
  */
 DaliError dali_phy_tx(const DaliFrame *frame);
 
 /*
  * Return the ISR timestamp at which the most recent successful TX released the
- * bus. The scheduler uses this rather than task wake-up time to attribute RX
- * observations to the reply window.
+ * bus: the end of its last data bit, where the stop bits begin. That is the
+ * point IEC 62386-101 measures the forward-to-backward settling time from, and
+ * it is DALI_TX_STOP_BITS_US earlier than the moment dali_phy_tx() reports the
+ * transmission complete. The scheduler uses it rather than task wake-up time
+ * to attribute RX observations to the reply window.
  */
 DaliError dali_phy_get_last_tx_end_us(uint32_t *timestamp_out);
 

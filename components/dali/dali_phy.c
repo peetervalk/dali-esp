@@ -73,6 +73,9 @@ static DaliPhyRxDebugSnapshot s_rx_debug_snapshot;
 static uint8_t  s_tx_half_bits[DALI_TX_HALF_BIT_BUFFER_SIZE];
 static uint8_t  s_tx_total_half_bits;
 static uint8_t  s_tx_half_bit_idx;
+/* Index of the first stop half-bit: the moment it goes out, the last data bit
+ * has ended. dali_phy_encode_manchester() always appends four. */
+static uint8_t  s_tx_first_stop_half_bit;
 
 /* ---------------------------------------------------------------------------
  * TX state machine
@@ -90,6 +93,9 @@ static volatile uint32_t s_rx_ring_overflow_generation;
 static uint32_t          s_rx_ring_overflow_seen;
 static volatile uint8_t  s_last_tx_end_valid;
 static volatile uint32_t s_last_tx_end_us;
+/* Stamped by the TX ISR at the frame end of the transmission in progress, and
+ * published as s_last_tx_end_us only once that transmission completes. */
+static volatile uint32_t s_tx_frame_end_us;
 
 /* Task to notify when TX completes */
 #ifndef DALI_HOST_BUILD
@@ -509,14 +515,15 @@ static bool IRAM_ATTR dali_phy_tx_isr(gptimer_handle_t timer,
     s_tx_tick_count = 0u;
 
     if (s_tx_half_bit_idx >= s_tx_total_half_bits) {
-        /* All half-bits sent — bus released to idle. */
+        /* All half-bits sent, stop bits included — bus idle. */
         gpio_set_level(s_tx_gpio, tx_pin_level_for_bus_level(1u));
 
         /* Arm the settle-suppression window from the ISR so the deadline is
-         * precise (no FreeRTOS scheduling jitter).  The window must expire
-         * well before the 5.5 ms DALI minimum answer time. */
+         * precise (no FreeRTOS scheduling jitter). It runs from here, after
+         * the stop bits, so it ends DALI_TX_STOP_BITS_US + DALI_SETTLE_MS after
+         * the frame end: well before the 5.5 ms DALI minimum answer time. */
         uint32_t ts_us = (uint32_t)esp_timer_get_time() & RX_TS_VALUE_MASK;
-        s_last_tx_end_us = ts_us;
+        s_last_tx_end_us = s_tx_frame_end_us;
         s_rx_suppress_until_us = ts_us + (uint32_t)DALI_SETTLE_MS * 1000u;
         __asm__ __volatile__("" ::: "memory");
         s_last_tx_end_valid = 1u;
@@ -529,6 +536,13 @@ static bool IRAM_ATTR dali_phy_tx_isr(gptimer_handle_t timer,
         }
         s_isr_active = 0u;
         return higher_prio_woken == pdTRUE;
+    }
+
+    /* The first stop half-bit starts where the last data bit ended: the bus is
+     * released here, and IEC 62386-101 measures the forward-to-backward
+     * settling time from this instant, not from the end of the stop bits. */
+    if (s_tx_half_bit_idx == s_tx_first_stop_half_bit) {
+        s_tx_frame_end_us = (uint32_t)esp_timer_get_time() & RX_TS_VALUE_MASK;
     }
 
     /* Output current half-bit */
@@ -591,6 +605,7 @@ DaliError dali_phy_init(uint8_t tx_gpio, uint8_t rx_gpio)
     s_tx_tick_count     = 0u;
     s_tx_half_bit_idx   = 0u;
     s_tx_total_half_bits = 0u;
+    s_tx_first_stop_half_bit = 0u;
     s_isr_active        = 0u;
     s_rx_settle_suppression_active = 0u;
     s_rx_suppress_until_us         = 0u;
@@ -599,6 +614,7 @@ DaliError dali_phy_init(uint8_t tx_gpio, uint8_t rx_gpio)
     s_rx_ring_overflow_seen        = 0u;
     s_last_tx_end_valid            = 0u;
     s_last_tx_end_us               = 0u;
+    s_tx_frame_end_us              = 0u;
     s_rx_in_frame       = false;
     s_rx_interval_count = 0u;
     s_rx_edge_count     = 0u;
@@ -656,7 +672,17 @@ DaliError dali_phy_init(uint8_t tx_gpio, uint8_t rx_gpio)
         return DALI_ERR_INVALID;
     }
 
-    /* ESP_ERR_INVALID_STATE means another component already installed it. */
+    /*
+     * ESP_ERR_INVALID_STATE means another component already installed it.
+     *
+     * Deliberately not ESP_INTR_FLAG_IRAM. The service is shared: every
+     * handler on it would then have to be IRAM-safe, which this code cannot
+     * promise for other components' handlers, and the first installer's flags
+     * win anyway. So the RX edge interrupt is masked while the flash cache is
+     * off; an edge lost that way costs one reply, which the scheduler retries.
+     * The TX bit clock, whose stall would corrupt a frame on the wire, is the
+     * GPTIMER interrupt and is made cache-safe through sdkconfig instead.
+     */
     ret = gpio_install_isr_service(0);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(TAG, "gpio_install_isr_service failed: %d", ret);
@@ -722,6 +748,16 @@ DaliError dali_phy_tx(const DaliFrame *frame)
         frame->bit_length > DALI_MAX_FRAME_BITS) {
         return DALI_ERR_INVALID;
     }
+    /*
+     * One caller at a time, and it waits for its own completion, so DONE here
+     * is left over from a transmission whose wait expired while the ISR was
+     * still finishing it. That frame is over; reclaim the state rather than
+     * refusing every later transmission. BUSY would mean a concurrent caller,
+     * which stays refused.
+     */
+    if (s_tx_state == DALI_PHY_TX_DONE) {
+        s_tx_state = DALI_PHY_TX_IDLE;
+    }
     if (s_tx_state != DALI_PHY_TX_IDLE) {
         return DALI_ERR_BUSY;
     }
@@ -740,6 +776,7 @@ DaliError dali_phy_tx(const DaliFrame *frame)
     }
 
     s_tx_total_half_bits = len;
+    s_tx_first_stop_half_bit = (uint8_t)(len - 4u);
     s_tx_half_bit_idx    = 0u;
     s_tx_tick_count      = 0u;
     s_tx_state           = DALI_PHY_TX_BUSY;
@@ -749,21 +786,41 @@ DaliError dali_phy_tx(const DaliFrame *frame)
 
 #ifndef DALI_HOST_BUILD
     s_tx_notify_task = xTaskGetCurrentTaskHandle();
+    /* A completion notice left by a transmission whose wait expired would
+     * otherwise end this one at once, stopping it before its start bit. */
+    (void)ulTaskNotifyTake(pdTRUE, 0u);
     gptimer_set_raw_count(s_gptimer, 0);
     gptimer_start(s_gptimer);
 
-    /* Wait for TX_DONE notification from ISR, with generous timeout */
-    uint32_t timeout_ticks = pdMS_TO_TICKS(
+    /*
+     * Wait for the ISR to report the frame clocked out, with a generous
+     * timeout. Success is the ISR's DONE state, not merely a notification: a
+     * notice this task was sent for any other reason must not end the wait.
+     */
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(
         ((uint32_t)(1u + frame->bit_length + 2u) * DALI_BIT_US) / 1000u + 20u);
-    if (ulTaskNotifyTake(pdTRUE, timeout_ticks) == 0u) {
-        gptimer_stop(s_gptimer);
-        gpio_set_level(s_tx_gpio, tx_pin_level_for_bus_level(1u));
-        s_tx_state = DALI_PHY_TX_IDLE;
-        ESP_LOGW(TAG, "TX timeout");
-        return DALI_ERR_TIMEOUT;
+    const TickType_t wait_start = xTaskGetTickCount();
+    while (s_tx_state != DALI_PHY_TX_DONE) {
+        TickType_t elapsed = xTaskGetTickCount() - wait_start;
+        if (elapsed >= timeout_ticks) {
+            break;
+        }
+        (void)ulTaskNotifyTake(pdTRUE, timeout_ticks - elapsed);
     }
 
     gptimer_stop(s_gptimer);
+    if (s_tx_state != DALI_PHY_TX_DONE) {
+        gpio_set_level(s_tx_gpio, tx_pin_level_for_bus_level(1u));
+        s_tx_state = DALI_PHY_TX_IDLE;
+        /* The ISR can finish between the wait giving up and the stop above;
+         * drop the notice it would leave for the next transmission. */
+        (void)ulTaskNotifyTake(pdTRUE, 0u);
+        ESP_LOGW(TAG, "TX timeout");
+        /* A frame the PHY could not clock out on time, not a silent reply
+         * window: TIMEOUT would read to every caller as "nothing answered". */
+        return DALI_ERR_TIMING;
+    }
+
     s_tx_state = DALI_PHY_TX_IDLE;
     /* Settle suppression was armed in the TX ISR at the precise TX-done moment. */
     ESP_LOGD(TAG, "TX done");
@@ -903,6 +960,8 @@ DaliError dali_phy_reset(void)
     s_tx_state           = DALI_PHY_TX_IDLE;
     s_tx_half_bit_idx    = 0u;
     s_tx_total_half_bits = 0u;
+    s_tx_first_stop_half_bit = 0u;
+    s_tx_frame_end_us    = 0u;
     s_tx_tick_count      = 0u;
     s_isr_active         = 0u;
     s_rx_settle_suppression_active = 0u;

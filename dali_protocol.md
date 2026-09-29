@@ -85,12 +85,13 @@ Unsigned deltas make attribution wrap-safe; task scheduling latency does not mov
 an observation into or out of a reply window.
 
 For a transaction that expects a backward reply, the whole observation must be
-attributable to a window measured from that precise TX end: its first edge
-cannot precede the opening and its last edge cannot exceed the 27,000 us
-closing. The opening is 5,500 us for undecodable activity and 2,000 us for an
-observation that decoded as a complete backward frame; see Bus Timing for why
-the two differ. The outcomes are deliberately three-way rather than treating
-every decode failure as either a reply or silence:
+attributable to a window measured from that precise TX end — the end of the
+forward frame's last data bit: its first edge cannot precede the opening and
+its last edge cannot exceed the 28,664 us closing. The opening is 5,500 us for
+undecodable activity and 3,664 us for an observation that decoded as a complete
+backward frame; see Bus Timing for why the two differ. The outcomes are
+deliberately three-way rather than treating every decode failure as either a
+reply or silence:
 
 | Observation in the attributed window | Scheduler result | Meaning |
 |---|---|---|
@@ -99,6 +100,15 @@ every decode failure as either a reply or silence:
 | Malformed activity that does not meet the response-like qualification, or RX overflow | The corresponding malformed/overflow error | Ambiguous observation; abort rather than inventing an answer |
 | No observation | `DALI_ERR_TIMEOUT` | Silence |
 | Valid 16- or 24-bit forward frame | Intervention error | Another forward transaction occupied the reply window |
+
+The intervention row is reachable only by a frame short enough to fit. A 24-bit
+frame spans about 20.4 ms, so it has to start within 8.3 ms of our frame end,
+and a DALI-2 control device waits at least 13.5 ms after any frame before it
+transmits: its events never reach the row. One that starts inside the window
+outlasts it and is attributed to nothing — the transaction times out while it
+is on the wire, and it is routed as unsolicited once it completes. A 16-bit
+forward frame that starts before about 14.9 ms, such as a DALI-1 coupler's, can
+reach it.
 
 `DALI_ERR_RX_ACTIVITY` is not a general yes response. Only the Part 102 `COMPARE`
 operation maps it to YES, because overlapping affirmative backward replies may be
@@ -317,13 +327,26 @@ single-send.
 | Opcode | Command | Sends |
 |---:|---|---|
 | `0x10` | RESET — not implemented | twice |
-| `0x14` | SET SHORT ADDRESS DTR0 — not implemented | twice |
-| `0x15` | ENABLE WRITE MEMORY — not implemented | twice |
+| `0x14` | SET SHORT ADDRESS DTR0 — its DTR0 encoding is unsettled; see Part 103 special commands | twice |
+| `0x15` | ENABLE WRITE MEMORY | twice |
+| `0x19`/`0x1A` | ADD TO DEVICE GROUPS 0-15 / 16-31, mask in DTR2:DTR1 — not implemented | twice |
+| `0x1B`/`0x1C` | REMOVE FROM DEVICE GROUPS 0-15 / 16-31, mask in DTR2:DTR1 — not implemented | twice |
 | `0x1D` | START QUIESCENT MODE | twice |
 | `0x1E` | STOP QUIESCENT MODE | twice |
 | `0x30` | QUERY DEVICE STATUS — not implemented | reply |
+| `0x33` | QUERY MISSING SHORT ADDRESS — not implemented | reply |
 | `0x35` | QUERY NUMBER OF INSTANCES | reply |
 | `0x36`/`0x37`/`0x38` | QUERY CONTENT DTR0/DTR1/DTR2 | reply |
+| `0x3C` | READ MEMORY LOCATION — bank in DTR1, offset in DTR0 | reply |
+| `0x40` | QUERY QUIESCENT MODE — not implemented | reply |
+| `0x41`–`0x44` | QUERY DEVICE GROUPS 0-7 / 8-15 / 16-23 / 24-31 — not implemented | reply |
+
+The device-group, missing-address and quiescent-mode rows come from TI's MSPM0
+device firmware, with `esp_dali` agreeing on `0x33` and `0x41`–`0x44`; see
+`project_log.md`, 2026-09-29. In the group commands DTR1 is the low byte of the
+mask. The same source gives the QUERY DEVICE STATUS bits: 0 input-device error,
+1 quiescent mode, 2 missing short address, 3 application active, 4
+application-controller error, 5 power cycle seen, 6 reset state.
 
 Quiescent mode suppresses a control device's own bus activity — event frames
 above all — until `STOP QUIESCENT MODE` releases it. It matters beyond
@@ -331,7 +354,9 @@ commissioning: any operation wanting a quiet bus, such as a scan, a memory block
 read, or DT8 bring-up, competes with sensor traffic otherwise. Espressif's
 `esp_dali` records that some Part 102 gear mis-decode 24-bit event frames as DAPC
 brightness commands, which would make an unquiesced sensor a visible fault rather
-than only noise. Unverified here.
+than only noise. Unverified here. TI's device firmware also ends quiescent mode
+on its own 15 minutes after the last `START`; nothing here shows whether the
+Steinel does.
 
 Device address byte `0xFF` addresses all control devices.
 `dali_build_device_broadcast_command()` builds that form;
@@ -357,36 +382,54 @@ data = (0xC1 << 16) | (special_opcode << 8) | parameter
 | Opcode | Name | Notes |
 |---:|---|---|
 | `0x00` | TERMINATE | Closes a Part 103 initialise window |
-| `0x01` | INITIALISE | Send twice; parameter is a device address byte |
+| `0x01` | INITIALISE | Send twice; the parameter selects devices by address, and its encoding is unsettled (below) |
 | `0x02` | RANDOMISE | Send twice |
 | `0x03` | COMPARE | |
 | `0x04` | WITHDRAW | |
 | `0x05`/`0x06`/`0x07` | SEARCH ADDRH/M/L | |
 | `0x08` | PROGRAM SHORT ADDRESS | Raw 6-bit address |
-| `0x09` | VERIFY SHORT ADDRESS | |
-| `0x0A` | QUERY SHORT ADDRESS | |
+| `0x09` | VERIFY SHORT ADDRESS | Raw 6-bit address |
+| `0x0A` | QUERY SHORT ADDRESS | Replies with the raw address, `0xFF` for none |
 | `0x20` | WRITE MEMORY LOCATION | |
+| `0x21` | WRITE MEMORY LOCATION - NO REPLY | |
 | `0x30`/`0x31`/`0x32` | DTR0/DTR1/DTR2 DATA | |
 
-`TERMINATE` is implemented as of 2026-08-26: `DALI_CMD_FRAME_24BIT_SPECIAL` is
-the frame kind, `DALI_CMD_DEVICE_TERMINATE` the command, and
-`dali_build_device_special()` the builder. Nothing else in this table is, so
-control-device commissioning still has no path here. TERMINATE was built first
-because control-*gear* commissioning needs it — see Cross-Part Interference.
+Every row is implemented. The addressing specials, `0x00`–`0x0A`, are built by
+`dali_build_device_special()` with `DALI_CMD_FRAME_24BIT_SPECIAL` as the frame
+kind, and `dali_device_commissioning` runs them as `commission devices`; the
+DTR loads and memory writes have their own builders,
+`dali_build_control_device_dtr_data()` and
+`dali_cmd_control_device_write_memory_location*()`. `TERMINATE` came first, on
+2026-08-26, because control-*gear* commissioning needs it — see Cross-Part
+Interference. `DTR0`/`DTR1 DATA` have met a bus inside every device-space
+Bank 0 read — `discover` has read device identities through them on 2k — and
+the other rows have no hardware result recorded here.
 
-Two encodings differ from their Part 102 namesakes and are worth stating plainly,
-because using the Part 102 form silently does the wrong thing:
+Two encodings differ from their Part 102 namesakes, and using the Part 102 form
+silently does the wrong thing:
 
-- `PROGRAM SHORT ADDRESS` takes the **raw 6-bit address** `0..63`. The Part 102
-  special of the same name takes `(short_addr << 1) | 1`. Sending the Part 102
-  encoding to a control device programs address `2n + 1`.
-- `INITIALISE`'s parameter is a device address byte, where `0xFF` selects all
-  control devices and `0x00` selects only those without a short address. This
-  reads inverted against Part 102, whose `INITIALISE` takes `0x00` for all gear
-  and `0xFF` for unaddressed gear.
+- `PROGRAM SHORT ADDRESS` takes the **raw 6-bit address** `0..63`, and `0xFF`
+  for none. The Part 102 special of the same name takes `(short_addr << 1) | 1`,
+  so sending that encoding to a control device programs address `2n + 1`.
+  `VERIFY SHORT ADDRESS` and the reply to `QUERY SHORT ADDRESS` are raw too.
+  `esp_dali` and TI's device firmware agree.
+- `INITIALISE`'s parameter selects devices by address, and which value means
+  what is **the open question**. The code sends `0x00` for devices without a
+  short address and `0xFF` for all, both from `esp_dali`. Beckhoff's
+  `FB_DALI103Initialise` and TI's device firmware both read it as `0x7F` for
+  devices without a short address, `0x00`–`0x3F` for the one device holding
+  that address, and `0xFF` for all. Read that way, `0x00` selects d0.
 
-Opcode values are transcribed from Espressif's `esp_dali` and are not verified
-against the standard text or on a bus here.
+The device-level `SET SHORT ADDRESS DTR0` (`0x14`, above) has the same question
+in its DTR0 value. The code loads `(a << 1) | 1`, the Part 102 form, while TI's
+firmware stores DTR0 raw — `0..63`, `0xFF` clears, anything else is ignored —
+and Tasmota loads the raw address. The P0 item in `current_status.md` has the
+bus check that settles both.
+
+Opcode values were transcribed from Espressif's `esp_dali`. TI's MSPM0 SDK
+routes every one of them to the same command in its Part 103 device firmware
+(`project_log.md`, 2026-09-29), so there are two independent sources. Neither
+is the standard text.
 
 ### Part 301 push button — instance type 1
 
@@ -496,9 +539,11 @@ specials, which are not device-type-qualified, so a stray enable expires without
 effect. The trade is a bounded, argued risk against a phantom device that gets a
 short address programmed into nothing. Neither half has been seen on a bus.
 
-The reverse direction — bracketing control-device commissioning with a Part 102
-`TERMINATE` — is not implemented, because control-device commissioning is not.
-The guard is symmetric and should be designed once when it is.
+The reverse direction is implemented too. `commission devices` sends a Part 102
+`TERMINATE` before its `INITIALISE`, again immediately after it, and in the
+cleanup unwind (`DaliDeviceCommissioningOptions.terminate_control_gear`): gear
+left in an addressing window, or put in one by misframing the `0xC1` specials,
+would otherwise act on them. Host-tested only.
 
 ## Event Frames
 
@@ -576,30 +621,60 @@ Steinel HF 360 II memory-bank layout and its tuning workflow are in
 | GPTIMER tick | 104 us |
 | Bit period | ~833.3 us |
 | Half-bit period | ~416.7 us |
-| TX-to-RX settle suppression | 2 ms |
-| Attribution opens — undecodable activity | 5.5 ms after precise local TX end |
-| Attribution opens — decoded backward frame | 2 ms after precise local TX end |
-| Timestamped reply attribution closes | 27 ms after precise local TX end |
+| TX stop bits, held idle before the PHY reports TX complete | 1.664 ms (4 half-bits) |
+| TX-to-RX settle suppression, from TX complete | 2 ms |
+| Reply-window reference | End of the forward frame's last data bit |
+| Attribution opens — undecodable activity | 5.5 ms after the frame end |
+| Attribution opens — decoded backward frame | 3.664 ms after the frame end |
+| Timestamped reply attribution closes | 28.664 ms after the frame end |
 | Scheduler reply wait after TX handoff | 25 ms |
+| Retry hold-off after an expired reply window | 11.163 ms (11 bit periods + 2 ms), from the timeout |
+| Gap before our next forward frame | 22 Te (9.174 ms), from our own TX complete; a received frame arms none |
+| Idle required before transmitting | 2 bit periods (1.666 ms), counted from when the PHY starts polling |
+| RX frame end | 1.25 ms (1.5 bit periods) without an edge |
 | Send-twice window | 100 ms |
 | Post-RANDOMISE settle, before the first COMPARE | 100 ms |
 
 Every row above except the last is frame-level timing the PHY and scheduler
-enforce. The 2 ms handoff suppression plus the 25 ms reply wait gives the precise
-TX-end-relative 27 ms attribution close; observations are accepted by their
-captured edge timestamps, not by when task context delivers them.
+enforce. The PHY stamps the frame end when the first stop half-bit goes out,
+which is where IEC 62386-101 starts the forward-to-backward settling time, and
+reports the transmission complete only after the stop bits. The 2 ms handoff
+suppression plus the 25 ms reply wait, counted from that completion, gives the
+28.664 ms attribution close; observations are accepted by their captured edge
+timestamps, not by when task context delivers them.
+
+Until 2026-09-25 every edge was measured from the completion instead, 1.664 ms
+later, which put the undecodable open edge 1.664 ms past the standard's minimum
+and discarded collisions from gear answering early in the conformant range.
+
+The frame-end reference is this project's reading of IEC 62386-101, not a
+quoted clause; the text has not been checked on this point. The bus supports
+it: every driver measured on either installation answers inside 5.5–10.5 ms of
+the frame end, while measured from after the stop bits four 1k drivers answer
+below the minimum. The reasoning is in `project_log.md` (*Stack review* and its
+follow-up). Backward compatibility argues the same way: AN1220 and `esp_dali`
+put DALI-1's 7–22 Te reply after the stop bits, 4.58–10.83 ms from the last
+data bit, and 5.5–10.5 ms nests inside that only when measured from the frame
+end (`project_log.md`, 2026-09-29).
+
+A DALI-2 control device spaces its own forward frames far more widely than this
+table does. TI's device firmware waits 13.5, 14.9, 16.3, 17.9 or 19.5 ms after
+the last frame on the wire, whoever sent it, for priorities 1–5; DALI-1 wanted
+22 Te after a backward frame. Nothing here waits after a received frame beyond
+the idle check above, which is the open P0 timing item in `current_status.md`.
 
 The open edge has been two values since 2026-08-25, and which one applies is
 decided by whether the observation decoded. `DALI_REPLY_WINDOW_OPEN_US`
 (5,500 us) is the standard's minimum settling time and guards *undecodable*
 activity, because that is the path `COMPARE` reads as YES and where a wrong call
-invents gear. `DALI_REPLY_WINDOW_OPEN_DECODED_US` is derived from
-`DALI_SETTLE_MS` (2,000 us) and applies to a complete 8-bit backward frame,
+invents gear. `DALI_REPLY_WINDOW_OPEN_DECODED_US` is derived — the stop bits
+plus `DALI_SETTLE_MS` — and applies to a complete 8-bit backward frame,
 which carries none of that ambiguity while a query is outstanding: the local
 16-bit transmission cannot decode as one, ringing cannot, and another master's
-forward frame is caught by the intervening-frame branch. What is left is the
-PHY's own RX self-echo suppression. Deriving rather than choosing it is
-deliberate — a 1k-site DT6 driver answers between 4.12 and 5.85 ms on
+forward frame decodes at its own width — caught by the intervening-frame branch
+when it fits the window, and attributed to nothing when it does not. What is
+left is the PHY's own RX suppression, which is exactly that sum. Deriving rather than
+choosing it is deliberate — a 1k-site DT6 driver varies by 1.7 ms between
 consecutive queries, so any hand-picked margin gets overtaken. The RANDOMISE
 settle is a commissioning-sequence delay in
 `dali_commissioning`, raised from 15 ms on 2026-08-24 to match the figure
@@ -620,6 +695,14 @@ standard text and unexercised on a bus since the change.
 - Espressif `esp_dali` component (Apache-2.0), source of the Part 103 device and
   special opcode values and the cross-part interference notes —
   https://github.com/espressif/esp-iot-solution/tree/master/components/dali
+- TI MSPM0 SDK 2.11 DALI middleware (BSD-3-Clause): a Part 103/303 control
+  device and Part 102/207 gear, the device-side cross-check for the Part 103
+  opcodes and encodings, and the DALI-2 settle and collision timings —
+  https://www.ti.com/tool/MSPM0-SDK; user's guide
+  https://software-dl.ti.com/msp430/esd/MSPM0-SDK/2_10_00_04/docs/english/middleware/dali/doc_guide/doc_guide-srcs/MSPM0_DALI_Users_Guide.html
+- Silicon Labs AN1220, DALI Communication Using the EFR32 (DALI-1 frame
+  timing) —
+  https://www.silabs.com/documents/public/application-notes/an1220-efr32-dali.pdf
 - Beckhoff DALI frame timing and send-twice —
   https://infosys.beckhoff.com/content/1033/tcplclib_tc3_dali/12346803211.html
 - Beckhoff DALI-2 Query Input Value —

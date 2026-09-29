@@ -1,6 +1,7 @@
 # DALI Capability Matrix
 
-**Last reviewed:** 2026-08-25
+**Last reviewed:** 2026-08-25; the raw-frame and backup/restore rows updated
+2026-09-25
 
 One question per row: for a given DALI capability, what exists in the reusable C
 stack, whether the CLI exposes it, whether an independent host vector covers it,
@@ -60,8 +61,8 @@ verb by verb.
 | Checked control-device re-address | n/a — `SET SHORT ADDRESS DTR0` (Part 103) | `address <dN> set\|clear` | partial (parsing only) | no | shell only |
 | DTR0/1/2 load | `dali_control_build_dtr` | `dtr` | yes | yes | yes (console) |
 | Special/broadcast commands (18 names) | `dali_build_special` | `special` | yes | partial | partial (console) |
-| Arbitrary frame | n/a | `raw` | yes (parse only) | yes | yes (`raw`) |
-| Arbitrary frame, send-twice | scheduler `send_twice` | `raw2` | yes (parse only) | no | yes (`raw2`) |
+| Arbitrary frame | n/a | `raw` | yes (parse, commissioning gate) | yes | partial (`raw`, minus commissioning frames) |
+| Arbitrary frame, send-twice | scheduler `send_twice` | `raw2` | yes (parse, commissioning gate) | no | partial (`raw2`, minus commissioning frames) |
 
 Real-bus coverage for queries and DAPC comes from the two site deployments and
 recorded diagnostic sessions; a "partial" cell means some names in the group have
@@ -85,10 +86,10 @@ cached level profile and triggers a refresh.
 | Commission unaddressed | `dali_commissioning_commission_unaddressed` | `commission unaddressed` | yes | partial | shell, opt-in |
 | Commission control devices | `dali_device_commissioning_commission_unaddressed` | `commission devices` | yes | no | shell, opt-in |
 | Post-scan verification | `dali_commissioning_audit` | automatic in both `commission` walks | yes | no | shell |
-| Address backup | `dali_snapshot_from_inventory` | `backup save`, `backup status` | yes | no | shell; persisted to flash |
+| Address backup | `dali_snapshot_from_inventory` | `backup save`, `backup status` | yes | partial (2k, 2026-09-03) | shell; persisted to flash |
 | Backup blob round trip | `dali_snapshot_encode` / `_decode` | `backup export`, `backup import` | yes | n/a — no bus traffic | shell |
-| Restore planning | `dali_restore_plan` | `restore plan` | yes | no | shell; moving aside a unit the backup never saw is host-only |
-| Restore execution | n/a — `SET SHORT ADDRESS DTR0` per move | `restore apply` | no | no | shell, opt-in |
+| Restore planning | `dali_restore_plan` | `restore plan` | yes | partial (one-move plan, 2k) | shell; moving aside a unit the backup never saw is host-only |
+| Restore execution | `SET SHORT ADDRESS DTR0` per move, each confirmed by `dali_restore_confirm_move` | `restore apply` | partial (confirmation only) | partial (one gear move on 2k, before confirmation existed) | shell, opt-in |
 | Group restore planning | `dali_restore_plan_groups` | `restore groups` | yes | no | shell; control gear only |
 | Group restore execution | n/a — `ADD TO GROUP` / `REMOVE FROM GROUP` per bit | `restore groups apply` | no | no | shell, opt-in; read back per gear |
 | Identify blink | n/a | `identify` | no | yes | yes (button, shell) |
@@ -296,8 +297,9 @@ use. Host- and compile-verified only; no bus has run it.
   reachable only on the device.
 - Quiescent mode has frame-level host vectors but no bus result. Commissioning
   releases what it started; the standalone verb does not, so a device left
-  quiescent by hand stays silent until `quiescent off`, which is
-  indistinguishable from a dead sensor.
+  quiescent by hand stays silent until `quiescent off` — or until its own
+  timeout, 15 minutes in TI's device firmware and unknown for the Steinel —
+  which is indistinguishable from a dead sensor.
 - Part 103 **device groups** have a decode path and no read or write path. They
   are recognised as an event source (`DALI_EVENT_SOURCE_DEVICE_GROUP`) and
   nowhere else: discovery does not query them, the snapshot does not record
@@ -307,5 +309,7 @@ use. Host- and compile-verified only; no bus has run it.
   membership.
 - `address <dN> clear` has one-sided evidence. Part 103 has no broadcast
   QUERY MISSING SHORT ADDRESS in this stack, so silence at the subject is the
-  whole of the confirmation, and `commission devices` is what settles it.
+  whole of the confirmation, and `commission devices` is what settles it — once
+  its INITIALISE parameter is settled, which is the open P0 item in
+  `current_status.md`. The device query exists, `0x33`, and is not implemented.
 - Nothing here claims DALI Alliance certification or complete IEC 62386 coverage.

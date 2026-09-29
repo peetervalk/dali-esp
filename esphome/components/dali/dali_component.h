@@ -157,8 +157,14 @@ class DaliComponent : public Component {
   // light refresh pump and the diagnostic buttons exactly as a button-initiated
   // scan does, and the two cannot run at once.
   //
-  // Returns false when the bus is already claimed. Every true must be matched
-  // by one release_bus(). Callable from a worker task.
+  // A true return also means the scheduler has drained: nothing the component
+  // queued before the claim is still ahead of the caller's first frame. Blocks
+  // for up to a few seconds while that happens, so it must not be called from
+  // the loop task.
+  //
+  // Returns false when the bus is already claimed, or when queued traffic does
+  // not drain in time. Every true must be matched by one release_bus().
+  // Callable from a worker task.
   bool try_claim_bus(const char *what);
   void release_bus();
   // Blink diag_address_ between max and min for 10 s to identify a fixture.

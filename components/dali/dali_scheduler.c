@@ -470,11 +470,6 @@ static bool sched_is_unsolicited_event_frame(const DaliFrame *frame)
            frame->bit_length == DALI_EXTENDED_FRAME_BITS;
 }
 
-static bool sched_can_route_unsolicited_event(void)
-{
-    return s_state == SCHED_IDLE || s_state == SCHED_WAIT_REPLY;
-}
-
 static bool sched_has_event_subscriber(void)
 {
     for (uint8_t i = 0u; i < DALI_SCHED_MAX_EVENT_SUBSCRIBERS; i++) {
@@ -500,7 +495,6 @@ typedef enum {
     SCHED_IGNORE_REPLY_EARLY = 0,
     SCHED_IGNORE_REPLY_LATE,
     SCHED_IGNORE_REPLY_SUPERSEDED,
-    SCHED_IGNORE_EVENT_UNROUTABLE,
     SCHED_IGNORE_EVENT_NO_SUBSCRIBER,
     SCHED_IGNORE_UNDECODABLE,
     SCHED_IGNORE_UNCLASSIFIED,
@@ -517,9 +511,6 @@ static void sched_count_ignored(SchedIgnoreReason reason)
         break;
     case SCHED_IGNORE_REPLY_SUPERSEDED:
         g_dali_stats.rx_reply_superseded++;
-        break;
-    case SCHED_IGNORE_EVENT_UNROUTABLE:
-        g_dali_stats.rx_event_unroutable++;
         break;
     case SCHED_IGNORE_EVENT_NO_SUBSCRIBER:
         g_dali_stats.rx_event_no_subscriber++;
@@ -545,10 +536,8 @@ static void sched_count_ignored(SchedIgnoreReason reason)
  * UNCLASSIFIED rather than a guess: a bucket that admits it cannot tell is the
  * one thing the old counter never did.
  *
- * For an event-shaped frame the state is the reason it was dropped and the
- * missing subscriber is only a build detail, so the state is tested first — a
- * frame arriving in SCHED_TX would have been ignored however many subscribers
- * were listening.
+ * An event-shaped frame is routed whatever state the scheduler is in, so the
+ * only reason one reaches this path is that nothing subscribed to it.
  */
 static SchedIgnoreReason sched_classify_ignored(
     const DaliPhyRxObservation *observation)
@@ -556,9 +545,6 @@ static SchedIgnoreReason sched_classify_ignored(
     const DaliFrame *frame = &observation->frame;
 
     if (sched_is_unsolicited_event_frame(frame)) {
-        if (!sched_can_route_unsolicited_event()) {
-            return SCHED_IGNORE_EVENT_UNROUTABLE;
-        }
         return SCHED_IGNORE_EVENT_NO_SUBSCRIBER;
     }
 
@@ -579,13 +565,31 @@ static SchedIgnoreReason sched_classify_ignored(
     return SCHED_IGNORE_REPLY_LATE;
 }
 
+/*
+ * Hand an event-shaped frame to the subscribers, in any scheduler state.
+ *
+ * This used to admit only SCHED_IDLE and SCHED_WAIT_REPLY, and everything else
+ * was counted rx_event_unroutable and dropped. That lost real events, and not
+ * only during walks: when a frame is queued while a control device's event is
+ * on the wire, dali_phy_tx() waits for the event to end and then transmits, and
+ * the RX decode that completes the event runs only after that, with the
+ * scheduler in WAIT_SETTLE. Every event overlapping the start of a queued frame
+ * went nowhere -- for headless dispatch, a button press that did nothing.
+ *
+ * Nothing here needs the gate. Our own frames never reach this point (the PHY
+ * drops RX through TX and the settle after it), so a decoded 16/24-bit frame is
+ * always another master's. One that lands inside the active reply window has
+ * already invalidated the query on its way here and is routed as well, as it
+ * always was in WAIT_REPLY. And the fan-out runs from dali_phy_rx_process(),
+ * never from inside dali_sched_run(), so a subscriber that enqueues is doing a
+ * queue push, not re-entering the state machine.
+ */
 static void sched_route_unsolicited_or_ignore(
     const DaliPhyRxObservation *observation)
 {
     const DaliFrame *frame = &observation->frame;
 
-    if (sched_can_route_unsolicited_event() &&
-        sched_is_unsolicited_event_frame(frame) &&
+    if (sched_is_unsolicited_event_frame(frame) &&
         sched_has_event_subscriber()) {
         /* Counts frames routed, not deliveries: the counter answers "did this
          * frame reach the application", which does not change with the number
@@ -894,6 +898,17 @@ next:
             bool got_item;
             SCHED_ENTER_CRITICAL();
             got_item = queue_pop_locked(&entry);
+            /*
+             * Leave IDLE in the same critical section as the pop. Between the
+             * two, the queue is empty and the state still reads idle, so
+             * dali_sched_is_quiescent() would report a drained scheduler with a
+             * transaction about to go out -- and a caller waiting for the bus to
+             * drain would start on top of it. Only this task reads s_active, so
+             * setting the state before it is loaded below is safe.
+             */
+            if (got_item) {
+                s_state = SCHED_TX;
+            }
             SCHED_EXIT_CRITICAL();
             if (!got_item) {
                 return;
@@ -957,20 +972,34 @@ next:
                 }
                 goto next;
             }
-            uint32_t tx_done_us = sched_now_us();
+            /*
+             * Two different moments, kept apart on purpose.
+             *
+             * tx_return_us is when the call came back, stop bits included. It
+             * spaces the next forward frame and bounds a send-twice pair, both
+             * exactly as before the frame-end stamp existed.
+             *
+             * frame_end_us is where the last data bit ended, which is where
+             * IEC 62386-101 starts the settling time a reply is judged
+             * against. A PHY that can stamp it says so through
+             * get_last_tx_end_us(); without one the return time stands in,
+             * which is late by at least the stop bits.
+             */
+            const uint32_t tx_return_us = sched_now_us();
+            uint32_t frame_end_us = tx_return_us;
             if (s_ops.get_last_tx_end_us != NULL) {
-                uint32_t precise_tx_end_us = 0u;
-                if (s_ops.get_last_tx_end_us(&precise_tx_end_us) == DALI_OK) {
-                    tx_done_us = precise_tx_end_us;
+                uint32_t precise_frame_end_us = 0u;
+                if (s_ops.get_last_tx_end_us(&precise_frame_end_us) == DALI_OK) {
+                    frame_end_us = precise_frame_end_us;
                 }
             }
-            s_last_tx_us = tx_done_us;
+            s_last_tx_us = frame_end_us;
             s_have_last_tx_us = true;
-            sched_trace(DALI_SCHED_TRACE_TX, &s_active.frame, tx_done_us);
-            sched_arm_tx_gap(tx_done_us, DALI_FORWARD_INTERFRAME_US);
+            sched_trace(DALI_SCHED_TRACE_TX, &s_active.frame, frame_end_us);
+            sched_arm_tx_gap(tx_return_us, DALI_FORWARD_INTERFRAME_US);
             s_send_count++;
             if (s_active.send_twice && s_send_count == 2u &&
-                sched_send_twice_window_missed(tx_done_us, false)) {
+                sched_send_twice_window_missed(tx_return_us, false)) {
                 ESP_LOGE(TAG, "send-twice window crossed during phy_tx");
                 if (sched_finish_active_step(DALI_ERR_TIMING, NULL)) {
                     s_state = SCHED_TX;

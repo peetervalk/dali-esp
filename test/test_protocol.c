@@ -1135,7 +1135,7 @@ void test_error_name_covers_every_enumerator(void)
 {
     /* The point of the helper is that no defined code reaches an operator as a
      * bare number, so a new enumerator without a name has to fail here. */
-    for (int err = DALI_OK; err <= DALI_ERR_RX_ACTIVITY; err++) {
+    for (int err = DALI_OK; err <= DALI_ERR_WAIT_EXPIRED; err++) {
         const char *name = dali_error_name((DaliError)err);
         TEST_ASSERT_NOT_NULL_MESSAGE(name, "DaliError enumerator has no name");
         TEST_ASSERT_TRUE_MESSAGE(name[0] != '\0', "DaliError name is empty");
@@ -1150,11 +1150,14 @@ void test_error_name_spells_the_operator_visible_codes(void)
     /* The code the commissioning rebuild made reachable: it used to read as
      * "ERR 12" in the shell and as "err" in a Home Assistant text state. */
     TEST_ASSERT_EQUAL_STRING("rx activity", dali_error_name(DALI_ERR_RX_ACTIVITY));
+    /* Kept apart from "timeout" on purpose: a caller that stopped waiting has
+     * learned nothing about the bus. */
+    TEST_ASSERT_EQUAL_STRING("wait expired", dali_error_name(DALI_ERR_WAIT_EXPIRED));
 }
 
 void test_error_name_returns_null_for_unknown_codes(void)
 {
-    TEST_ASSERT_NULL(dali_error_name((DaliError)(DALI_ERR_RX_ACTIVITY + 1)));
+    TEST_ASSERT_NULL(dali_error_name((DaliError)(DALI_ERR_WAIT_EXPIRED + 1)));
     TEST_ASSERT_NULL(dali_error_name((DaliError)99));
     TEST_ASSERT_NULL(dali_error_name((DaliError)-1));
 }

@@ -520,6 +520,55 @@ void test_a_unit_the_backup_never_saw_is_moved_aside_so_the_restore_converges(vo
                                              DALI_RESTORE_CONFLICT_TARGET_OCCUPIED));
 }
 
+/*
+ * Every move names the unit it carries, so an executor can check that the unit
+ * answering at the destination afterwards is that one. Staging, placing and
+ * displacing all qualify, and the identity follows the unit through a staging
+ * hop rather than being read off whatever address the hop started from.
+ */
+void test_every_move_carries_the_identity_of_the_unit_it_moves(void)
+{
+    record(DALI_SNAPSHOT_SPACE_GEAR, 5u, 5u);
+    record(DALI_SNAPSHOT_SPACE_GEAR, 8u, 8u);
+    on_bus(8u, 5u);
+    on_bus(5u, 8u);            /* a two-cycle: staged */
+    record(DALI_SNAPSHOT_SPACE_GEAR, 3u, 3u);
+    on_bus(6u, 3u);            /* recorded at a3, answering on a6 */
+    on_bus(3u, 200u);          /* unrecorded and in the way: displaced */
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_FALSE(s_plan.incomplete);
+
+    /* seed_at[addr] is the identification seed of the unit there now. */
+    uint8_t seed_at[DALI_SHORT_ADDRESS_COUNT];
+    memset(seed_at, 0, sizeof(seed_at));
+    seed_at[8] = 5u;
+    seed_at[5] = 8u;
+    seed_at[6] = 3u;
+    seed_at[3] = 200u;
+
+    uint8_t staged = 0u;
+    uint8_t displaced = 0u;
+    for (uint8_t i = 0u; i < s_plan.move_count; i++) {
+        const DaliRestoreMove *move = &s_plan.moves[i];
+        TEST_ASSERT_TRUE(move->has_identification);
+
+        uint8_t expected[DALI_MEMORY_BANK0_IDENTIFICATION_LEN];
+        fill_identification(expected, seed_at[move->from]);
+        TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, move->identification,
+                                      DALI_MEMORY_BANK0_IDENTIFICATION_LEN);
+
+        seed_at[move->to]   = seed_at[move->from];
+        seed_at[move->from] = 0u;
+        staged    += (move->kind == DALI_RESTORE_MOVE_STAGE) ? 1u : 0u;
+        displaced += (move->kind == DALI_RESTORE_MOVE_DISPLACE) ? 1u : 0u;
+    }
+    TEST_ASSERT_EQUAL_UINT8(1u, staged);
+    TEST_ASSERT_EQUAL_UINT8(1u, displaced);
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
+}
+
 void test_moving_one_unit_aside_unblocks_the_chain_waiting_behind_it(void)
 {
     /* a1 is unrecorded and in the way; a2 belongs at a1 and a3 belongs at a2.
@@ -1009,6 +1058,7 @@ int main(void)
     RUN_TEST(test_a_target_held_by_an_immovable_unit_is_reported_not_overwritten);
     RUN_TEST(test_blocking_cascades_to_units_waiting_behind_the_blocked_one);
     RUN_TEST(test_a_unit_the_backup_never_saw_is_moved_aside_so_the_restore_converges);
+    RUN_TEST(test_every_move_carries_the_identity_of_the_unit_it_moves);
     RUN_TEST(test_moving_one_unit_aside_unblocks_the_chain_waiting_behind_it);
     RUN_TEST(test_a_cycle_is_broken_before_any_unit_is_moved_aside);
     RUN_TEST(test_a_unit_the_backup_never_saw_stays_put_when_the_space_is_full);

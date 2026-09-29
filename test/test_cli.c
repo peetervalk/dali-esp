@@ -1395,6 +1395,147 @@ static void test_config_broadcast_rejection_set(void)
     TEST_ASSERT_FALSE(dali_cli_config_rejects_broadcast(scene->id));
 }
 
+/* ---------------------------------------------------------------------------
+ * Raw frames and the commissioning policy
+ * --------------------------------------------------------------------------*/
+
+/*
+ * Every Part 102 special a raw frame can spell is classified exactly as the
+ * `special` verb classifies it by name. One list, read two ways: a special
+ * added to the gated set is gated in hex without anyone remembering to.
+ */
+static void test_raw_classifier_agrees_with_the_special_policy(void)
+{
+    for (uint8_t i = 0u; i < dali_cli_special_count(); i++) {
+        const DaliCliGearCommand *spec = dali_cli_special_at(i);
+        DaliFrame frame;
+        TEST_ASSERT_EQUAL(DALI_OK, dali_build_special(spec->id, 0x00u, &frame));
+        TEST_ASSERT_EQUAL_MESSAGE(dali_cli_special_is_commissioning(spec->id),
+                                  dali_cli_raw_frame_is_commissioning(&frame),
+                                  spec->name);
+    }
+
+    /* The two lines from the report, spelled as an operator would type them. */
+    DaliFrame initialise = { .data = 0xA500u, .bit_length = 16u };
+    DaliFrame randomise  = { .data = 0xA700u, .bit_length = 16u };
+    TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&initialise));
+    TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&randomise));
+}
+
+/* SET SHORT ADDRESS (DTR0) is gated whatever it is addressed to, including
+ * broadcast unaddressed, which no named verb can reach. Its neighbours are not. */
+static void test_raw_classifier_gates_set_short_address_on_every_target(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_command(DALI_ADDR_SHORT, 5u,
+                                                  DALI_CMD_SET_SHORT_ADDRESS_DTR0,
+                                                  0u, &frame));
+    TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&frame));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_command(DALI_ADDR_GROUP, 3u,
+                                                  DALI_CMD_SET_SHORT_ADDRESS_DTR0,
+                                                  0u, &frame));
+    TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&frame));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_command(DALI_ADDR_BROADCAST, 0u,
+                                                  DALI_CMD_SET_SHORT_ADDRESS_DTR0,
+                                                  0u, &frame));
+    TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&frame));
+    DaliFrame unaddressed = { .data = 0xFD80u, .bit_length = 16u };
+    TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&unaddressed));
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_command(DALI_ADDR_SHORT, 5u,
+                                                  DALI_CMD_ADD_TO_GROUP,
+                                                  3u, &frame));
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_command(DALI_ADDR_BROADCAST, 0u,
+                                                  DALI_CMD_RESET, 0u, &frame));
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
+
+    /* DAPC 0x80 to a5 has the opcode byte of SET SHORT ADDRESS but no selector
+     * bit: it sets a level, and must not be caught by the byte value alone. */
+    DaliFrame dapc = { .data = 0x0A80u, .bit_length = 16u };
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&dapc));
+}
+
+/* The Part 103 addressing steps are gated; the rest of the special space is
+ * not, which is the same line `special` draws for Part 102. */
+static void test_raw_classifier_gates_part_103_addressing(void)
+{
+    static const DaliCommandId gated[] = {
+        DALI_CMD_DEVICE_INITIALISE,
+        DALI_CMD_DEVICE_RANDOMISE,
+        DALI_CMD_DEVICE_WITHDRAW,
+        DALI_CMD_DEVICE_SEARCH_ADDRH,
+        DALI_CMD_DEVICE_SEARCH_ADDRM,
+        DALI_CMD_DEVICE_SEARCH_ADDRL,
+        DALI_CMD_DEVICE_PROGRAM_SHORT_ADDRESS,
+    };
+    static const DaliCommandId open[] = {
+        DALI_CMD_DEVICE_TERMINATE,
+        DALI_CMD_DEVICE_COMPARE,
+        DALI_CMD_DEVICE_VERIFY_SHORT_ADDRESS,
+        DALI_CMD_DEVICE_QUERY_SHORT_ADDRESS,
+    };
+    DaliFrame frame;
+
+    for (size_t i = 0u; i < sizeof(gated) / sizeof(gated[0]); i++) {
+        TEST_ASSERT_EQUAL(DALI_OK, dali_build_device_special(gated[i], 0x7Fu, &frame));
+        TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&frame));
+    }
+    for (size_t i = 0u; i < sizeof(open) / sizeof(open[0]); i++) {
+        TEST_ASSERT_EQUAL(DALI_OK, dali_build_device_special(open[i], 0u, &frame));
+        TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
+    }
+
+    /* Device DTR loads and memory writes are `devmem write`'s frames, and that
+     * verb is not gated. */
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_control_device_dtr_data(DALI_DTR0, 5u, &frame));
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
+    frame = dali_cmd_control_device_write_memory_location_no_reply(0x55u);
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
+}
+
+/* Device-level SET SHORT ADDRESS is `address dN set`'s frame; the instance
+ * byte is what separates it from an instance command sharing its opcode. */
+static void test_raw_classifier_gates_device_set_short_address(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_device_command(
+                                   7u, DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0, &frame));
+    TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&frame));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_device_broadcast_command(
+                                   DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0, &frame));
+    TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&frame));
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_device_broadcast_command(
+                                   DALI_CMD_START_QUIESCENT_MODE, &frame));
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
+    DaliFrame instance_command = dali_cmd_instance(7u, 0u, 0x14u);
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&instance_command));
+}
+
+/* Ordinary traffic, events, and odd widths pass. */
+static void test_raw_classifier_passes_everything_else(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_command(DALI_ADDR_SHORT, 0u,
+                                                  DALI_CMD_OFF, 0u, &frame));
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_command(DALI_ADDR_SHORT, 0u,
+                                                  DALI_CMD_QUERY_STATUS, 0u, &frame));
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
+
+    DaliFrame event = { .data = 0x008001u, .bit_length = 24u };
+    DaliFrame backward_width = { .data = 0xA5u, .bit_length = 8u };
+    DaliFrame odd_width = { .data = 0xA500u, .bit_length = 17u };
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&event));
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&backward_width));
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&odd_width));
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(NULL));
+}
+
 static void test_print_response_yes_no(void)
 {
     DaliFrame yes = backward(DALI_YES_RESPONSE);
@@ -1600,6 +1741,11 @@ int main(void)
     RUN_TEST(test_address_arguments_are_targets);
     RUN_TEST(test_address_set_is_the_gated_operation);
     RUN_TEST(test_config_broadcast_rejection_set);
+    RUN_TEST(test_raw_classifier_agrees_with_the_special_policy);
+    RUN_TEST(test_raw_classifier_gates_set_short_address_on_every_target);
+    RUN_TEST(test_raw_classifier_gates_part_103_addressing);
+    RUN_TEST(test_raw_classifier_gates_device_set_short_address);
+    RUN_TEST(test_raw_classifier_passes_everything_else);
 
     RUN_TEST(test_format_status_names_only_the_set_flags);
     RUN_TEST(test_format_status_fits_all_eight_flags);

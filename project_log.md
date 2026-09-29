@@ -28,6 +28,50 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-09-25 (stack-review fixes, uncommitted on `dev`)
+
+Seven findings from the *Stack review* below, fixed in the working tree on top of
+`7f26fef`; what changed is in *Stack review follow-up*, under Investigations.
+Nothing is committed and nothing touched a bus.
+
+- 32/32 host suites build and pass with MSYS2 UCRT64. `test_restore_confirm`
+  is new: 13 vectors against a mock bus of gear and device units that tracks
+  DTRs and auto-increments memory reads. With new and rewritten vectors,
+  `test_scheduler` has 87, `test_cli` 87, `test_protocol` 73,
+  `test_restore_plan` 37 and `test_transport` 15.
+- Three mutations, each caught and reverted:
+  - routing events only in `SCHED_IDLE` and `SCHED_WAIT_REPLY`, as before,
+    fails `test_event_during_tx_guard_is_routed`,
+    `test_24bit_rx_during_settle_is_routed` and
+    `test_event_on_the_wire_before_a_queued_query_is_routed`;
+  - anchoring the reply window to the TX return instead of the frame end fails
+    `test_precise_phy_tx_end_is_preferred_over_delayed_task_clock` and
+    `test_window_uses_frame_end_and_guard_uses_tx_return`;
+  - arming the 22 Te guard from the frame end, which shortens it by the stop
+    bits, fails the latter.
+- The native firmware builds on IDF 6.0.1: `dali_esp.bin` is `0x474f0` bytes,
+  72 % of the app partition free.
+- `dali_test.yaml` compiles on ESPHome 2026.9.0 (IDF 5.5.5). Its generated
+  sdkconfig has `CONFIG_GPTIMER_ISR_CACHE_SAFE`,
+  `CONFIG_GPTIMER_ISR_HANDLER_IN_IRAM` and `CONFIG_GPIO_CTRL_FUNC_IN_IRAM` set,
+  plus `CONFIG_ESP_TIMER_IN_IRAM`, which the TX ISR also relies on. Static RAM
+  is 138,248 B (76.5 %). The first compile read 139,000 B; reordering
+  `DaliRestoreMove` so its enums lead recovered 752 B. IRAM ends at
+  `0x40093464`, below the `0x400A0000` line the `sram1_as_iram` note in
+  `current_status.md` depends on.
+- No host vector reaches the ESPHome- and FreeRTOS-bound parts: the drain in
+  `try_claim_bus()`, the console's `raw` refusal, the sdkconfig options,
+  `dali_phy_tx()`'s completion loop, and the ISR's frame-end stamp. The last
+  two are what a bus should see first.
+
+### Verified locally on 2026-09-25 (host suites and CI state, `7f26fef`)
+
+31/31 host suites build and pass with the MSYS2 UCRT64 toolchain. CI is green at
+`7f26fef` on both `main` and `dev` (Host Tests, ESP-IDF Build, ESPHome Build),
+and the `v2.0.0` Release Packaging run passed. No ESPHome or IDF build was run
+locally and nothing touched a bus. Done as part of the stack review under
+Investigations, which is where the findings are.
+
 ### Verified on hardware 2026-09-04 (2k bus: retry and event-rate counters, `b64f81f`)
 
 One `discover` on 2k unquiesced, then `stats`; then `quiescent on all`, a second
@@ -1263,6 +1307,884 @@ cleared by the 2026-08-14 entry above):
 
 # Investigations
 
+## A device-side source sides with Beckhoff on both Part 103 encodings — found 2026-09-29
+
+Supersedes the source table and the proposed bus check in *Stack review
+follow-up* → *Part 103 addressing encodings: what the sources say*; that entry
+stays as written. The bus-timing findings from the same reading are the next
+entry. Nothing in the code changed, and nothing touched a bus.
+
+Three sources were read against the open items in `current_status.md`:
+
+- **TI MSPM0 SDK 2.11.00.07**, DALI middleware, in `_local/` and not tracked.
+  `source/ti/dali/dali_103/` is a Part 103:2014 control device with Part
+  303:2017 occupancy on top; `dali_102/` is Part 102:2014 gear with Part 207.
+  It is the first *device-side* implementation this project has read —
+  Beckhoff, `esp_dali`, Tasmota and python-dali are controllers or their
+  documentation — so it is the first source that shows how a device decodes
+  what a controller sends.
+- **Espressif `esp_dali` v1.1.0** (2026-06-10), the current `components/dali`
+  of `esp-iot-solution`, read from GitHub. It is where this project's Part 103
+  values came from.
+- **Silicon Labs AN1220** rev 0.3, a DALI-1 physical-layer note for the EFR32.
+  Nothing on Part 103 or DALI-2; it is used only in the next entry.
+
+### How far TI can be read
+
+It is a demonstration stack, and its defects decide what it is evidence for:
+
+- INITIALISE's address filter in `DALI_103_initialise()` returns early only
+  when the parameter is `0x7F` and the device has an address. Any other
+  parameter — `0x00`, or an address the device does not hold — opens the
+  window.
+- Instance-number addressing never matches: `DALI_ControlDevice_InstCheck()`
+  returns `instMask << InstByte` with `instMask` still 0.
+- Device-group addressing ANDs the membership mask with the group *number*.
+- Event messages check neither quiescent mode nor the instance's event
+  priority; they go out with whatever settle time the last transmission set.
+- The Part 102 side answers `COMPARE` and QUERY MISSING SHORT ADDRESS with
+  `0x00` for NO instead of staying silent, and its `INITIALISE` ignores its
+  parameter.
+
+So TI is evidence for opcodes, encodings and intent — what its authors meant a
+device to do — not for edge behaviour, and never for conformance.
+
+### The two encodings
+
+**INITIALISE (device).** The cases `DALI_103_initialise()` distinguishes are
+Beckhoff's: `0xFF` for every device, `0x7F` for devices whose short address is
+MASK, and otherwise the parameter compared with the device's own raw short
+address. The logic combining them is wrong, as above, but the cases are not in
+doubt. Under them `0x00` selects d0.
+
+**SET SHORT ADDRESS (device, `0x14`).** `DALI_103_setShortAddr()` sets MASK
+when DTR0 is `0xFF`, stores DTR0 as it stands when it is below `0x40`, and
+otherwise keeps the old address. The same SDK decodes the Part 102 command the
+other way: `DALI_setShortAddress()` in `dali_102/dali_target_command.c` accepts
+DTR0 only when `(DTR0 & 0x81) == 0x01` and stores `DTR0 >> 1`. One team, two
+parts, two encodings on purpose — the argument Beckhoff's two INITIALISE pages
+made, now from device firmware. Under TI's decoding this project's
+`(M << 1) | 1` puts a device on d(2M+1) for M < 32 and is ignored for M ≥ 32,
+as *Stack review follow-up* predicted.
+
+PROGRAM SHORT ADDRESS, VERIFY SHORT ADDRESS and the QUERY SHORT ADDRESS reply
+are raw in TI, which is what this project already sends and decodes. VERIFY is
+answered only by a device in its initialisation state, which is what makes it
+the probe for the bus check below.
+
+**`esp_dali` v1.1.0** still sends `0x00` for unaddressed devices;
+`dali_103_commission()` comments "0xFF selects all input devices; 0x00 selects
+devices without short address". It defines device `0x14`, "[2x] Set input
+device short address from DTR0", and never calls it. No source this project
+has read ever gave `(a << 1) | 1` for the device command: that came from the
+Part 102 analogy alone.
+
+These two tables supersede the one in *Stack review follow-up*.
+
+| INITIALISE (device) | What it is | No short address | One device | All |
+|---|---|---|---|---|
+| Beckhoff `FB_DALI103Initialise` | controller library | `0x7F` | `0x00`–`0x3F` | `0xFF` |
+| TI `DALI_103_initialise()` | device firmware | `0x7F` | raw address | `0xFF` |
+| Espressif `esp_dali` v1.1.0 | controller | `0x00` | — | `0xFF` |
+| Tasmota `xdrv_75_dali.ino` | controller | `0xFF` | — | `0x7F` |
+
+Tasmota still decides nothing, for the reason the earlier entry gives.
+
+| Device SET SHORT ADDRESS | DTR0 encoding |
+|---|---|
+| TI `DALI_103_setShortAddr()` | raw `0`–`63`; `0xFF` clears; anything else ignored |
+| Tasmota | raw: `0x14 // REPEAT - DTR0 0..63` |
+| Beckhoff | raw, by inference from `shortAddress` `0…63, 255` |
+| `esp_dali` v1.1.0 | opcode only; no encoding stated or used |
+| this project | `(a << 1) \| 1`, from no source |
+
+### TI's own bug changes the bus check
+
+The check proposed on 2026-09-25 — INITIALISE `0x00` twice, VERIFY SHORT
+ADDRESS 0, TERMINATE, with a YES meaning `0x00` selected the Steinel — has a
+second explanation for a YES: a device that ignores INITIALISE's parameter
+answers the same way, and TI's firmware is one. Its filter rejects only `0x7F`
+on an addressed device, so the `0x7F` arm the earlier entry added would not
+expose it either. What separates the two readings is an address nothing holds.
+The revised check adds that arm and a positive control, confirms every
+TERMINATE with a second VERIFY, and changes no address. It runs under
+`quiescent on all` so that a0's own events cannot cost it a reply; see the next
+entry.
+
+```text
+discover                  # the Steinel at d0, 4 instances; d63 empty
+quiescent on all
+special terminate         # close any Part 102 window
+raw C10000 len=24         # TERMINATE (device): close any Part 103 window
+raw C10900 len=24 wait    # VERIFY SHORT ADDRESS 0: baseline, expect timeout
+
+# four arms, parameter PP = FF, 3F, 00, 7F, in that order
+raw2 C101PP len=24        # INITIALISE (device) PP, sent twice
+raw C10900 len=24 wait    # VERIFY 0: an FF reply = selected, timeout = not
+raw C10000 len=24         # TERMINATE (device)
+raw C10900 len=24 wait    # expect timeout: the window is closed
+
+special terminate
+quiescent off all
+```
+
+| `FF` | `3F` | `00` | `7F` | Reading |
+|---|---|---|---|---|
+| YES | — | YES | — | `0x00` selects d0, as Beckhoff and TI say; the constant becomes `0x7F` |
+| YES | — | — | — | `0x00` does not select an addressed device; "unaddressed" is still unproven, since that needs an unaddressed device |
+| YES | YES | any | any | The Steinel ignores the parameter: the other arms prove nothing, and neither value keeps an addressed device out |
+| YES | — | any | YES | `0x7F` selected an addressed device, against both sources: stop and look |
+| — | any | any | any | The probe is not getting through: repeat, and stop if `FF` stays silent |
+
+`—` is a timeout. Undecodable activity on a VERIFY is inconclusive, since at
+most one device should be answering. Run the four arms twice: one lost reply
+must not decide a row. The INITIALISE frames are gated as commissioning
+frames, so the TCP shell needs `allow_commissioning: true`; the native serial
+CLI sends them as they are.
+
+**SET SHORT ADDRESS can be settled on the same visit, before any code
+changes**, at the cost of moving the Steinel off d0 for a minute.
+`address d0 set d2` on the current firmware loads DTR0 = 5. A device that reads
+DTR0 raw goes to d5, one that reads `(a << 1) | 1` goes to d2, and the verb's
+own read-back shows which did not happen.
+
+```text
+discover                  # d2 and d5 must be empty in device space
+backup save               # so 'restore plan' can find the unit by identity
+quiescent on all
+address d0 set d2         # loads device DTR0 = 5, reads both ends back
+raw 05FE35 len=24 wait    # QUERY NUMBER OF INSTANCES at d2
+raw 0BFE35 len=24 wait    # ... and at d5
+
+# back from d5, if that is where it went; the verb would load 1, i.e. d1
+dtrcheck 5 0 0            # device DTR0 = 0, read back at d5
+raw2 0BFE14 len=24        # SET SHORT ADDRESS at d5, sent twice
+raw 01FE35 len=24 wait    # 4 instances at d0 again
+
+quiescent off all
+```
+
+| After `address d0 set d2` the Steinel answers at | Reading |
+|---|---|
+| d2 — the verb confirms d2 and d0 silent | the device reads `(a << 1) \| 1`; this project's encoding is right for it |
+| d5 | raw, as TI, Tasmota and Beckhoff have it |
+| d0 — d2 not confirmed, d0 still answers | the write was not taken; neither encoding shown |
+| none of these | find it with `discover`, or with `restore plan` by identification number |
+
+Moving it back depends on where it went. From d2, `address d2 set d0` loads
+DTR0 = 1 and is correct under that reading. From d5 the verb would load 1 too,
+which the raw reading sends to d1, so use the raw frames above. Do not use
+`restore apply` to put it back: its device moves load the same `(a << 1) | 1`.
+
+### Opcodes: a second independent source
+
+`dali_protocol.md` said the Part 103 special-command opcodes were transcribed
+from `esp_dali` and unverified. TI's device dispatch, `dali_cd_comm.c`, routes
+every opcode this project sends to the same command:
+
+- specials `0x00`–`0x0A`, `0x20`, `0x21` and `0x30`–`0x32`, under first byte
+  `0xC1`;
+- device commands `0x14`, `0x15`, `0x1D`, `0x1E`, `0x35`–`0x38` and `0x3C`;
+- instance configuration `0x61`–`0x68`;
+- the Part 303 opcodes it implements, `0x20`–`0x24` and `0x2C`–`0x2F`, with
+  timer units of 10 s for hold, 1 s for report and 50 ms for deadtime;
+- the bit-replicated occupancy value, `0x00`/`0x55`/`0xAA`/`0xFF`;
+- all five event-source layouts, bit for bit, with scheme numbers 0–4 matching
+  SET EVENT SCHEME;
+- the 16 DT6 opcodes its gear side dispatches.
+
+TI has no instance queries (`0x80` and up), no `0x69`/`0x6A`, and nothing from
+Part 301 or 304, so those rows keep only their existing sources. It also
+dispatches three specials with their own first byte — `0xC5` DIRECT WRITE
+MEMORY, `0xC7` DTR1:DTR0 and `0xC9` DTR2:DTR1 — which this stack does not
+send.
+
+One `esp_dali` error turned up on the way: its `DALI_103_QUERY_SHORT_ADDRESS`
+is `0x3F`, which is QUERY MANUFACTURER SPECIFIC MODE in TI's dispatch, and its
+own comment says QUERY SHORT ADDRESS is not a device-level command. Nothing
+here uses it.
+
+The Steinel's 30 s occupancy frame from the 2026-09-04 capture, `0x00840C`,
+decodes under TI's layout as device 0, instance 1, event information `0x00C`:
+movement and occupied clear, bits 2 and 3 set. TI sets bit 3 for a movement
+sensor and never sets bit 2, so it does not account for that frame; a typed
+Part 303 profile still needs the standard's event table.
+
+### Device-level opcodes this stack lacks
+
+From TI's dispatch, with `esp_dali` agreeing where noted. They are in
+`dali_protocol.md`, *Device-level commands*, marked not implemented.
+
+- QUERY DEVICE GROUPS 0–7, 8–15, 16–23 and 24–31: `0x41`–`0x44`, one byte
+  each (TI, `esp_dali`).
+- ADD TO DEVICE GROUPS 0–15 and 16–31: `0x19` and `0x1A`; REMOVE FROM DEVICE
+  GROUPS: `0x1B` and `0x1C`. Send-twice, with the 16-bit mask in DTR2:DTR1,
+  DTR1 the low byte (TI only).
+- QUERY MISSING SHORT ADDRESS: `0x33` (TI, `esp_dali`). The device counterpart
+  of the broadcast query that backs `address <aN> clear`; `address <dN> clear`
+  has only silence today.
+- QUERY QUIESCENT MODE: `0x40` (TI). QUERY DEVICE STATUS: `0x30` (TI,
+  `esp_dali`); its bits are 0 input-device error, 1 quiescent mode, 2 missing
+  short address, 3 application active, 4 application-controller error, 5 power
+  cycle seen, 6 reset state.
+
+The device-group address byte is `10GGGGG1`, 32 groups.
+
+### What a device RESET clears
+
+TI's `DALI_103_reset()` sets device groups to 0, every instance's groups to
+MASK, its event filter to the reset value and its event scheme to 0 — instance
+addressing — and resets the random and search addresses. It keeps the short
+address, and ignores commands for 300 ms. The Steinel emits in scheme 2,
+device/instance (`0x008001`, `0x00840C`); after a RESET its events would carry
+instance type and number and no device address, and would stop matching the
+Device/Instance events that trigger this integration's sensor polls. Restoring
+a reset device therefore needs each instance's configuration — scheme, filter,
+priority, instance groups — as well as its device groups and address. These
+are TI's reset values; the standard's table has not been checked.
+
+### Quiescent mode
+
+TI ends quiescent mode on its own 15 minutes after the last START QUIESCENT
+MODE, and the initialisation state 15 minutes after the last INITIALISE
+(`QUIESCENT_MODE_COUNTER` and `INITIALISE_STATE_COUNTER`, both 900 s);
+`esp_dali` gives the same 15 minutes for initialisation. On a device that does
+this, a release that never lands costs at most 15 minutes of silence. Whether
+the Steinel does is not known. QUERY QUIESCENT MODE would let the shell read
+each device's state back after a release instead of inferring it.
+
+TI answers `COMPARE` on its initialisation state alone; quiescent mode does not
+enter into it. That is one implementation agreeing with what 2k showed for
+addressed queries, on the question `commissioning_readme.md` leaves open. Its
+events ignore quiescent mode altogether, which is a bug, so it says nothing
+about what quiescence silences.
+
+### Documentation corrected alongside
+
+- `dali_protocol.md`. The reply-window paragraph near the top still gave the
+  27,000 µs close and 2,000 µs decoded opening that the stack-review fixes made
+  28,664 and 3,664. The device-level table listed SET SHORT ADDRESS DTR0 and
+  ENABLE WRITE MEMORY as not implemented, and the specials section said only
+  TERMINATE was; all are implemented. Cross-Part Interference said the Part 102
+  TERMINATE around `commission devices` did not exist; it does. The INITIALISE
+  encoding was stated as fact. The file also gains the two memory commands the
+  code already sent without a row, WRITE MEMORY LOCATION - NO REPLY (`0x21`)
+  and the device READ MEMORY LOCATION (`0x3C`); the device-level rows above; a
+  note on what the intervention row can reach; four TX-spacing rows under Bus
+  Timing, with the reference stacks' spacing beside them; the DALI-1 argument
+  for the frame-end reference from the next entry; and TI and AN1220 as
+  sources.
+- `current_status.md`: the P0 encoding item and its check, the P0 timing item,
+  and the P1 items on the backoff, device groups and the quiescence bracket.
+- `dali_commands.md` and `commissioning_readme.md`: the `address d0 set d4`
+  example and the clear-then-`commission devices` workflow assumed the
+  `esp_dali` encodings, and now say they are unproven. The readme's claim that
+  a stray event frame becomes a false YES in a `COMPARE` window is corrected.
+- `dali_capability_matrix.md`: the quiescent note allows for the device's own
+  timeout, and the `address <dN> clear` note says `commission devices` settles
+  it only once the INITIALISE parameter is settled.
+
+## Nothing spaces a forward frame from a received one — found 2026-09-29
+
+Adds to *A candidate mechanism for the retry backoff*, in *Stack review*, and
+to *The 2k "late gear" reading was event traffic*; supersedes neither. Read
+from source, like the previous entry, and not measured.
+
+### What the references do
+
+- **TI** (`dali_103/dali_timings.h`, `dali_103/dali_gpio_comm.c`). A backward
+  frame waits 5.5 ms. A forward frame waits by priority: 13.5, 14.9, 16.3, 17.9
+  or 19.5 ms for priorities 1–5. Those are minimums; the "14–21 ms" this log
+  has quoted is priorities 2–5 with their maxima. SET EVENT PRIORITY accepts
+  2–5, and TI defaults to 4. Both waits run from the stop condition of the last
+  frame on the wire, whoever sent it, and the stop condition is a 2 ms timer
+  from the last bus-falling edge: 1.2–1.6 ms after a frame's last edge,
+  depending on its final bits. A collision is found by comparing each RX
+  half-bit with what was sent, then handled by avoidance (stop) or recovery (a
+  1.3 ms break, then a retry after 4.3 ms). The receiver accepts a send-twice
+  pair whose two stop conditions are 2.4–94 ms apart — looser than this
+  scheduler's bracket, which runs from before the first PHY call to after the
+  second returns.
+- **AN1220**, DALI-1. Forward frames at least 22 Te apart, and at least 22 Te
+  after a backward frame; it pads every forward frame with 24 idle half-bits to
+  guarantee both. The reply starts 7–22 Te after the forward frame's stop bits,
+  and the controller declares no answer if none has started by 22 Te.
+- **`esp_dali`**. A 25 ms reply timeout, which its comment derives as "7–22 Te
+  + BF frame 22 Te = max ~18.3 ms" plus margin, then a fixed 20 ms after every
+  transaction, whether or not anything answered.
+
+### What this stack does
+
+The 22 Te guard is armed from our own TX return only
+(`sched_arm_tx_gap(tx_return_us, DALI_FORWARD_INTERFRAME_US)` in
+`dali_scheduler.c`); a received frame arms nothing.
+`wait_for_bus_idle_before_tx()` wants 2 bit periods, 1.666 ms, of idle, counted
+from when it starts polling. RX closes a frame after 1.25 ms without an edge.
+
+So our next forward frame follows a gear reply by about 2.9 ms plus task
+latency, and follows an event by about 1.7 ms if a frame was already waiting in
+the PHY when the event ended. TI would wait at least 13.5 ms after either,
+AN1220 9.17 ms after a reply, and `esp_dali` 20 ms. `dali_protocol.md` already
+said the scheduler derives no gap from received frames; these are the numbers.
+
+### The intervened path cannot see a DALI-2 event
+
+`sched_observation_in_reply_window()` accepts an observation only if its first
+edge is at least 5.5 ms and its last edge at most 28.664 ms after our frame
+end. A 24-bit frame spans 20.4–20.8 ms from first edge to last, so it qualifies
+only if it starts 5.5–8.3 ms after our frame, and a DALI-2 device honouring
+even priority 1 starts after 13.5 ms. A 16-bit forward frame spans 13.8–14.2 ms
+and qualifies if it starts before about 14.9 ms, so a DALI-1 coupler can reach
+the path; a DALI-2 event cannot.
+
+Three consequences:
+
+- "Never fired on either bus" is structural, and says nothing about whether
+  events land in our reply windows.
+- The counter on the intervened path proposed on 2026-09-04 would read zero
+  for event traffic. It is still worth having for 16-bit frames.
+- An event that starts inside a reply window outlasts it and is attributed to
+  nothing: the transaction times out while the event is on the wire, and the
+  event is routed as unsolicited once it completes. For `COMPARE` that is a
+  NO, which is correct when no device matched. A clean event frame therefore
+  cannot become a false YES; a garbled or truncated frame that begins and ends
+  inside the window can. `commissioning_readme.md` said a stray event frame
+  would do it, and now says this.
+
+### The emitter mechanism, from the device side
+
+The 2026-09-25 candidate was that a frame queued behind an event goes out
+~1.7 ms after it, under a 2.4 ms stop condition, and that the emitter is the
+unit most exposed. TI's receiver shows how an emitter loses such a frame. It
+decodes a capture only when its own TX status is idle — the comment reads
+"Decode captured bits only if the signal is received from another device" —
+and that status returns to idle only at the stop condition after its own
+frame. A frame whose first edge arrives earlier is folded into the capture of
+the emitter's own and discarded with it. At 1.7 ms, TI's 2 ms timer leaves a
+few tenths of a millisecond of margin; a 2.4 ms timer loses it for some bit
+patterns. That fits the query to a0 being the one seen lost on 2026-09-04. Not
+measured.
+
+### Whether that explains the backoff depends on a0's event priority
+
+Take a query that went unanswered — to an absent address, or to a present lamp
+that lost it — with times from our frame end. a0's pending event starts after
+its stop detection (1.2–1.6 ms) plus its priority's settle, and lasts 20.8 ms.
+Our timeout is processed about 28.7 ms in, the backoff then holds 11.16 ms, and
+the PHY counts its 1.666 ms of idle from when it starts polling. Without the
+backoff the retry always goes out 1.7 ms after the event ends. With it,
+nominally:
+
+| a0 event priority | Event on the wire | Retry after the event ends |
+|---:|---|---|
+| 2 | ~16.5–37.3 ms | ~4.2 ms |
+| 3 | ~17.9–38.7 ms | ~2.8 ms |
+| 4 | ~19.5–40.3 ms | 1.7 ms |
+| 5 | ~21.1–41.9 ms | 1.7 ms |
+
+At priority 2 or 3 the backoff outlasts the event and the retry clears a 2.4 ms
+stop condition; at 4 or 5 the event outlasts the backoff, and the retry lands
+where it did without it. The timeout is counted in whole ticks, so the backoff
+can end a millisecond or two either side of nominal: 2 usually clears, 5 never
+does, and 3 and 4 depend on where the tick falls. A 2.4 ms stop detection at
+a0, rather than TI's, makes every event 0.8 ms later and narrows each margin by
+as much. `iquery 0 <instance> event-priority` for instances 0–3 is read-only
+and settles which case 2k is in. If the answer is 4 or 5, this mechanism does
+not explain 8/8, and the decisive test in the 2026-09-03 entry — the
+pre-backoff build under `quiescent on all` — is still the way to close it.
+
+### The frame-end reference, from the DALI-1 side
+
+AN1220 and `esp_dali` put DALI-1's 7–22 Te reply window after the forward
+frame's stop bits, which from its last data bit is 11–26 Te, or 4.58–10.83 ms.
+DALI-2's 5.5–10.5 ms falls inside that only when measured from the last data
+bit. Measured after the stop bits it would reach 12.2 ms from the last data
+bit, and a DALI-1 controller that stops listening at 22 Te — AN1220's does —
+would miss conformant DALI-2 gear. Backward compatibility therefore argues for
+the reading `dali_frame.h` adopted on 2026-09-25. An inference from two
+application notes, not a clause of IEC 62386-101.
+
+### `DALI_REPLY_TIMEOUT_MS`
+
+Its comment, under "Confirmed from IEC 62386-101", reads "22 ms spec + 3 ms
+margin". AN1220's no-answer point is 22 Te, 9.17 ms after the stop bits, not
+22 ms, and `esp_dali` reaches its own 25 ms another way. A DALI-2 reply that
+starts at the 10.5 ms limit is complete about 18 ms after the frame end, so
+attribution runs about 10 ms past the last conformant reply, into the time when
+DALI-2 devices may begin transmitting. Not changed: the comment is code, and
+the window's length is a stack decision.
+
+## Stack review follow-up: seven fixes, the Part 103 evidence, and a GPIO ISR-service conflict — 2026-09-25
+
+Supersedes the *Stack review* entry below for the seven findings fixed here;
+that entry stays as written. Vectors and builds are in *Verified locally on
+2026-09-25 (stack-review fixes)*. None of it has been on a bus.
+
+### What changed, finding by finding
+
+**Occupied addresses read as free through the TCP shell.** All three proposed
+parts. `try_claim_bus()` raises the gate, then polls `dali_sched_is_quiescent()`
+for up to `BUS_CLAIM_DRAIN_WAIT_MS` (5 s), and lowers the gate and refuses the
+claim if the queue has not drained. Every blocking wait that expires — the
+shell's single-frame, sequence and reset waits, and the scan task's frame wait —
+returns the new `DALI_ERR_WAIT_EXPIRED`. Neither `scan_error_is_absent()` nor
+the presence probes read that as absence, because it is neither TIMEOUT nor
+MALFORMED. The single-frame wait is sized by
+`dali_transport_transaction_timeout_ms()` from the retry budget;
+`SHELL_SYNC_WAIT_MS` and `SCAN_SYNC_FRAME_WAIT_MS` are gone.
+
+**`restore apply` confirmation.** `dali_restore_confirm_move()` probes the
+destination (gear QUERY STATUS, device QUERY NUMBER OF INSTANCES), then the
+source, then reads the 8-byte identification number at the destination in the
+move's own space and compares it with the number the plan now carries on each
+move. The shell stops at the first move that is not confirmed and says why. One
+deviation from the proposal: every move is checked by identity, not only
+placements. The plan knows the unit on a staging hop and on a displacement too
+(for a displaced unit, the number read from the bus), so there was no reason to
+settle for presence there. Not done: re-quiescing for the apply. A lost move is
+now reported rather than silent; if one turns up on a bus, the bracket is the
+next step.
+
+**Reply-window reference.** The TX ISR stamps `s_tx_frame_end_us` as the first
+stop half-bit goes out, and completion copies it to `s_last_tx_end_us`; RX
+settle suppression is still armed at completion. The scheduler measures the
+reply window and `since_tx_us` from the frame end, but keeps the 22 Te
+inter-frame guard and the send-twice check on the TX return, so neither gets
+1.664 ms shorter. `DALI_REPLY_WINDOW_OPEN_DECODED_US` is now
+`DALI_TX_STOP_BITS_US + DALI_SETTLE_MS` = 3664 and `DALI_REPLY_WINDOW_CLOSE_US`
+28664: the same instants as before, expressed from the new reference. Only the
+undecodable edge moved, 1.664 ms earlier, to 5.5 ms from the frame end.
+
+The reading of IEC 62386-101 behind it is still unchecked against the text; a
+search on 2026-09-25 found no public source quoting the reference point. The
+evidence is the bus. From the frame end, the four fast 1k drivers settle in
+5.8–7.5 ms and the ceiling drivers in 8.1–9.1 ms, all inside 5.5–10.5 ms. From
+after the stop bits, the four answer as early as 4.12 ms, below the minimum.
+`dali_frame.h` and `dali_protocol.md` now say this rather than cite the
+standard flatly.
+
+**`raw`/`raw2` policy.** As proposed. `dali_cli_raw_frame_is_commissioning()`
+covers the 16-bit specials `dali_cli_special_is_commissioning()` names, which
+include the gear memory writes, so their raw spelling is gated as `special`
+gates them. It also covers SET SHORT ADDRESS on any command address (short,
+group, broadcast unaddressed, broadcast), the 24-bit `0xC1` addressing specials
+by their middle byte, and device SET SHORT ADDRESS on instance byte `0xFE`.
+TERMINATE, COMPARE, VERIFY and the queries pass. The shell checks it through
+`DALI_SHELL_ALLOW_COMMISSION`; the console refuses outright.
+
+**ESPHome TX cache safety and `dali_phy_tx()` completion.** `to_code()` adds
+`CONFIG_GPTIMER_ISR_CACHE_SAFE` and `CONFIG_GPIO_CTRL_FUNC_IN_IRAM`. The ISR's
+other callees were checked in the generated sdkconfig: `esp_timer_get_time()`
+is in IRAM (`CONFIG_ESP_TIMER_IN_IRAM`), and `vTaskNotifyGiveFromISR()` stays
+there under `CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH`, which moves only
+non-ISR functions. `dali_phy_tx()` reclaims a DONE state a previous frame left,
+drains any stale notification before starting the timer, and loops until the
+ISR's state reads `DALI_PHY_TX_DONE` rather than trusting a notification. On
+timeout it stops the timer, releases the line, drains the late notice, and
+returns `DALI_ERR_TIMING`. It used to return `DALI_ERR_TIMEOUT`, the code upper
+layers read as a silent reply window. Not done: the IRAM-safe RX interrupt,
+because of the conflict at the end of this entry.
+
+**Events dropped in `SCHED_TX` and `WAIT_SETTLE`.** As proposed.
+`sched_route_unsolicited_or_ignore()` hands any 16- or 24-bit event frame to
+the subscribers in every scheduler state; the intervening-frame check inside a
+live reply window is unchanged. `rx_event_unroutable` is no longer incremented
+and stays in `dali_stats_t`, so the struct layout and the `stats` line keep
+their shape. The `discover` event note now sums routed, unroutable and
+no-subscriber events, since counting only the unroutable bucket would now
+report a quiet bus.
+
+**`dali_sched_is_quiescent()` race**, from *Smaller findings*. `SCHED_IDLE`
+sets `SCHED_TX` inside the critical section that pops the transaction.
+
+`DaliRestoreMove` was also reordered so its two enums lead. With the
+identification number appended after them, the 188-move static plan grew by
+2,256 B; reordered, by 1,504 B.
+
+### Part 103 addressing encodings: what the sources say
+
+Not changed. The evidence now points one way on both encodings, but a harmless
+bus check settles the first, and addressing constants are a stack change that
+waits for a go-ahead.
+
+INITIALISE (device) — three sources, three mappings:
+
+| Source | Devices without a short address | One device, by address | All devices |
+|---|---|---|---|
+| Beckhoff `Tc3_DALI`, `FB_DALI103Initialise` | `0x7F` | `0x00`–`0x3F` | `0xFF` |
+| Espressif `esp_dali` documentation | `0x00` | — | `0xFF` |
+| Tasmota `xdrv_75_dali.ino` | `0xFF` | — | `0x7F` |
+
+Beckhoff is the only one that documents all three cases, and its Part 102 page,
+`FB_DALI102Initialise`, gives the familiar Part 102 table instead — `0x00` all,
+`2#0AAA_AAA1` one address, `0xFF` unaddressed — so the Part 103 table is a
+deliberate difference, not a copy. Espressif's `0x00` is where this project's
+value came from; under Beckhoff's table it selects d0. Tasmota's values are
+swapped against Beckhoff's, but its "all" mode clears every device address
+before sending `0x7F`, which works under either table, so its behaviour decides
+nothing. python-dali defines the command and documents no parameter values.
+
+If Beckhoff is right, `commission devices` on 2k initialises the Steinel at d0
+rather than unaddressed devices, randomises it, and programs it to the first
+free address — off d0, so every sensor entity keyed to it goes quiet. The
+planned "clear the Steinel, then re-commission it" test would find nothing
+instead: once cleared, the Steinel has no address, and `0x00` selects the
+device at d0.
+
+Device SET SHORT ADDRESS (DTR0) is fed `(a << 1) | 1`. Tasmota's define reads
+`0x14 // REPEAT - DTR0 0..63` and clears by loading MASK. Beckhoff gives the
+Part 103 `shortAddress` variable as `0…63, 255` with 255 as MASK, and
+`FB_DALI103ProgramShortAddress` as taking `0…63, 255`; no Beckhoff SET SHORT
+ADDRESS page turned up to quote, so that half is inference. Raw is the likelier
+encoding.
+If it is raw, `address dN set dM` writes DTR0 = 2M+1: for M < 32 the unit lands
+on d(2M+1) and the verb's read-back reports the failure; for M ≥ 32 the value is
+neither 0–63 nor MASK and presumably ignored. `clear` is unaffected: `0xFF`
+either way.
+
+The check changes no address: INITIALISE (device) `0x00` twice, VERIFY SHORT
+ADDRESS `0`, TERMINATE. A YES means `0x00` selected the Steinel at d0, as
+Beckhoff's table says; silence means it did not. Repeating with `0x7F`
+(expect silence, the Steinel is addressed) and `0xFF` (expect YES) covers the
+rest of the table. Change the SET SHORT ADDRESS encoding only after that, and
+prove it with one `address dN set dM`, whose read-back is the test.
+
+### The DALI PHY can disable ESPHome's pin interrupts
+
+`dali_phy_init()` installs the GPIO ISR service with
+`gpio_install_isr_service(0)` and accepts `ESP_ERR_INVALID_STATE`, so it works
+whoever installs first. ESPHome's `ESP32InternalGPIOPin::attach_interrupt()`
+(`esp32/gpio.cpp`, 2026.9.0) does not return the favour. It keeps a static
+`isr_service_installed` flag, calls
+`gpio_install_isr_service(ESP_INTR_FLAG_LEVEL3)` the first time, and on
+anything but `ESP_OK` logs `attach_interrupt(): call to
+gpio_install_isr_service() failed` and returns before `gpio_isr_handler_add()`.
+The pin's interrupt type and enable are already set by then, so it interrupts
+into a service with no handler for it.
+
+`DaliComponent` and `GPIOBinarySensor` both return `setup_priority::HARDWARE`,
+and ESPHome orders setup with a stable insertion sort, so registration order
+decides. When the DALI component goes first, a `gpio` binary sensor never
+updates: on ESP32 it is interrupt-driven by default (the schema falls back to
+polling only for expander pins, ESP8266 GPIO16, and shared pins) and disables
+its loop between interrupts. Anything else attaching a pin interrupt after
+DALI's setup fails the same way. Neither tracked config has one, and this is
+read from source, not reproduced. `use_interrupt: false` on the sensor is the
+workaround.
+
+The fix also decides the IRAM-safe RX item, so the options:
+
+1. Install the RX handler after ESPHome's setup has run. ESPHome then always
+   owns the service and DALI takes its accepted `ESP_ERR_INVALID_STATE` path.
+   RX stays masked during flash writes, as it is today.
+2. Attach RX through ESPHome's pin API. Same service, same limitation, but no
+   ordering hazard by construction.
+3. Upstream: have ESPHome accept an installed service. DALI could then keep
+   installing first and choose `ESP_INTR_FLAG_IRAM` for everyone, which obliges
+   every handler on the service, ESPHome's included, to be IRAM-safe.
+
+## Stack review: faults where the code meets what the host suites stand in for — found 2026-09-25
+
+A fresh read of the whole stack at `7f26fef` (`v2.0.0` plus the sample-config
+pin bump), looking for bugs, edge cases, and claims in `current_status.md` that
+no longer hold. No code changed and nothing touched a bus.
+
+The core modules held up under a close read: the scheduler, the restore
+planner, the commissioning walk, light write arbitration (including its
+interleavings with stale readings), the snapshot codec, the CLI parsers, and
+Part 103 event decoding. The findings cluster where the code meets something a
+host test can only imitate: the IEC timing reference, the ESP-IDF interrupt
+configuration, the blocking shell transport, other bus masters, and the network.
+Nothing below is hardware-verified. Where a finding rests on my reading of an
+IEC text rather than on the code, it says so and says what would settle it.
+
+### Occupied addresses can read as free through the TCP shell
+
+Three facts combine:
+
+- `DaliComponent::try_claim_bus()` only raises the gate. It does not wait for
+  work already queued by the refresh pump, sensor polls or light writes to
+  drain. The button scan's task does (`scan_wait_for_quiescent_scheduler()`);
+  none of the eight claimed shell workflows does.
+- `shell_sched_sync_impl()` waits `SHELL_SYNC_WAIT_MS` = 200 ms for a single
+  frame, whatever its retry budget and whatever is queued ahead of it.
+- When that wait expires it returns `DALI_ERR_TIMEOUT`, the code the scheduler
+  uses for a silent reply window.
+
+QUERY STATUS to a present address answers in ~35 ms, so 165 ms of queued work
+ahead of it is enough. That is not rare: `release_bus()` requests a full refresh
+pass at the end of every claimed workflow, and every sensor poll that fell due
+during the claim is admitted in the same loop pass (due timestamps do not
+advance while paused). The next verb an operator types after `discover` is the
+likeliest moment. A device-type enumeration is ~200 ms on its own. On 2k, four
+Steinel sensor polls plus one refresh item is more.
+
+When the wait expires on an occupied address, `shell_address_presence()` maps it
+to `ABSENT`. `address aN set aM` then writes onto an occupied `aM`, and a
+`commission` pre-scan offers an occupied address as free — a0 first, since it
+is probed first. Native UART builds are unaffected: nothing else enqueues there.
+
+Fix, in order of value:
+
+1. Drain in `try_claim_bus()`: after raising the gate, wait (bounded, as the
+   scan task does) for `dali_sched_is_quiescent()`, and refuse the claim if the
+   queue does not drain. One change covers every claimed workflow.
+2. Give an expired completion wait its own error, so no caller can read "we
+   stopped waiting" as "the bus was silent". Presence probes and
+   `scan_error_is_absent()` then treat it as unknown.
+3. Size the single-frame wait from its retry budget, the way
+   `dali_transport_sequence_timeout_ms()` sizes sequences.
+
+### `restore apply` does not confirm a move before the next one depends on it
+
+`shell_restore_apply_move()` reports transmission. A send-twice SET SHORT
+ADDRESS pair that a unit silently discards reads as `OK`, and the loop moves on.
+Another master can corrupt the pair and nothing here can detect a collision. In
+a cycle, a staging hop that did not land is followed by the placement onto the
+address it was meant to vacate. That puts two units on one address, from the
+verb whose header says it never does. Quiescence is released at the end of the
+planning scan, so control-device events are flowing during the apply.
+
+Fix: after each move, probe `to` present and `from` silent, exactly as `address
+set` does, and stop on anything else. For a placement, also compare the Bank 0
+identification number at `to` with the snapshot entry. Consider re-quiescing for
+the apply. The status file's "convergent on re-run" holds only once this is in.
+
+### The reply window is measured from after the stop bits
+
+`dali_phy_tx_isr()` stamps `s_last_tx_end_us` when `s_tx_half_bit_idx` reaches
+the total, one half-bit after the last *stop* half-bit went out: 4 half-bits,
+1.664 ms after the last data bit ended. Every attribution edge is relative to
+that stamp.
+
+My reading of IEC 62386-101:2014 is that the 5.5–10.5 ms forward-to-backward
+settling time runs from the end of the forward frame's last bit, with the stop
+condition inside it. That needs confirming against the standard text. If it
+holds:
+
+- `DALI_REPLY_WINDOW_OPEN_US` opens 7.16 ms after the frame, not 5.5 ms.
+  Undecodable activity from conformant gear that starts between the two is
+  counted `rx_undecodable_ignored`, and the window times out. That covers a
+  COMPARE collision (read as NO), a contested QUERY STATUS (read as absent, so
+  free), and VERIFY's MULTIPLE. The decoded edge is unaffected.
+- The 1k figures were measured from the same stamp (*1k bus: gear that replies
+  just before the attribution window opens*, below). 4.12–7.4 ms after "TX bus
+  release" is 5.8–9.1 ms after the last data bit, inside the standard's range.
+  The "non-conformant" conclusion there, and in the comment on
+  `DALI_REPLY_WINDOW_OPEN_DECODED_US`, is probably a reference-point artefact.
+  Those four drivers are exactly the ones whose collisions the undecodable edge
+  discards.
+
+Fix: stamp the frame end in the ISR when the first stop half-bit goes out (the
+bus is released there), measure both open edges from it with their current
+values, and add 1.664 ms to the close so the effective deadline is unchanged.
+Leave the settle suppression where it is. Update the scheduler vectors and both
+comments. Check on 1k with a narrow capture of a two-unit COMPARE.
+
+### Part 103 addressing encodings are unverified and look wrong
+
+`dali_protocol.md` already says the Part 103 special opcodes were "transcribed
+from Espressif's `esp_dali` and are not verified against the standard text or on
+a bus". Two parameter encodings built on them need checking before the P0
+hardware session that plans to use them:
+
+- `DALI_DEVICE_INITIALISE_UNADDRESSED_PARAM` is `0x00`. My understanding of IEC
+  62386-103 is that INITIALISE (device) takes a raw short address (0–63 selects
+  that device), `0x7F` selects devices without a short address, and `0xFF` all.
+  If so, `commission devices` on 2k initialises the Steinel at d0, randomises
+  it, and programs it to the first free device address. Every sensor entity
+  keyed to address 0 goes quiet. The planned "clear the Steinel, then
+  re-commission it" would find nothing, because `0x00` would then select a
+  device that no longer exists.
+- `DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0` is fed `(a << 1) | 1`. Part 103
+  PROGRAM SHORT ADDRESS is raw (the project's notes agree), and I would expect
+  SET SHORT ADDRESS (DTR0) in the same part to be raw too; the comment's reason,
+  "because it reads DTR0", does not decide an encoding. If it is raw, `address
+  dN set dM` lands at 2M+1, or is ignored for M ≥ 32, and a device-space
+  `restore apply` misplaces units. `clear` is unaffected: 0xFF means none either
+  way.
+
+Fix: settle both from the standard text, cross-checked against an independent
+implementation such as python-dali rather than `esp_dali` again. A
+non-destructive bus check settles the first: on 2k, send INITIALISE (device)
+`0x00` twice, VERIFY SHORT ADDRESS `0`, then TERMINATE. A YES from the Steinel
+means `0x00` selected d0.
+
+### `raw` and `raw2` bypass the commissioning policy
+
+The console refuses the commissioning specials and SET SHORT ADDRESS,
+explicitly "so the gate cannot be walked around by choosing the other
+spelling". The shell's `special`, `config`, `address` and `restore apply` honour
+`DALI_SHELL_ALLOW_COMMISSION`. But `raw2 A500 len=16` followed by `raw2 A700
+len=16` (INITIALISE all, RANDOMISE) goes through on both. The TCP port is
+unauthenticated, and `allow_commissioning: false` is the default.
+
+Fix: one shared classifier in `dali_cli.c`, `dali_cli_raw_frame_is_commissioning()`,
+covering:
+
+- the 16-bit specials `dali_cli_special_is_commissioning()` names;
+- addressed SET SHORT ADDRESS (odd address byte, opcode 0x80);
+- the 24-bit Part 103 addressing specials (0xC1 0x01..0x08);
+- device SET SHORT ADDRESS (instance 0xFE, opcode 0x14).
+
+Refuse through the policy in `cmd_raw()` and in `console_raw_()`, and give the
+classifier host vectors.
+
+### The TX bit clock is not cache-safe in ESPHome builds
+
+The native `sdkconfig.defaults` sets `CONFIG_GPTIMER_ISR_CACHE_SAFE`,
+`CONFIG_GPIO_CTRL_FUNC_IN_IRAM` and related options.
+`esphome/components/dali/__init__.py` sets no sdkconfig options at all. Both
+generated ESPHome sdkconfigs on disk have `GPTIMER_ISR_CACHE_SAFE` and
+`GPIO_CTRL_FUNC_IN_IRAM` unset. The RX handler goes through
+`gpio_install_isr_service(0)`, without `ESP_INTR_FLAG_IRAM`, in both builds.
+
+A non-IRAM interrupt is masked while the flash cache is off, which ESPHome does
+for every NVS commit: light restore state, the group map, the address backup. A
+commit during a transmission holds the bus at whatever half-bit it was on. The
+frame is corrupted on the wire and still counted in `tx_frames_ok`, and RX edges
+during a commit are lost. If the stall also trips the `dali_phy_tx()` timeout
+at the wrong moment, a late DONE notification is left pending. The next
+`ulTaskNotifyTake()` then returns at once and stops that frame before its start
+bit, and it too is reported sent.
+
+Fix:
+
+- Call `add_idf_sdkconfig_option()` for `CONFIG_GPTIMER_ISR_CACHE_SAFE` and
+  `CONFIG_GPIO_CTRL_FUNC_IN_IRAM` in `to_code()`.
+- Register the RX interrupt as IRAM-safe, checking what happens when another
+  component installs the shared ISR service first.
+- In `dali_phy_tx()`, drain notifications before starting and after a timeout,
+  and require `s_tx_state == DALI_PHY_TX_DONE` before reporting success.
+
+Bench check: stream frames while forcing preference writes, and compare
+`tx_frames_ok` against a capture.
+
+### Events decoded while the scheduler is in `SCHED_TX` or `WAIT_SETTLE` are dropped
+
+*Ignored events arrive in our gaps*, below, reads `rx_event_unroutable` as a
+counter that overstates collisions. It is also lost data, outside walks too:
+`sched_route_unsolicited_or_ignore()` gives such a frame to no subscriber, so
+dispatch and poll-on-event never see it.
+
+There is a deterministic path. With an event on the wire, a newly queued
+frame's `dali_phy_tx()` busy-waits for it to end and then transmits.
+`dali_phy_rx_process()` cannot run meanwhile, so the event completes only after
+our TX, with the scheduler in `WAIT_SETTLE`. So any event that overlaps the
+start of a locally queued frame is dropped. For headless dispatch, that is a
+button press that does nothing.
+
+Fix: route unsolicited 16/24-bit frames in every state, and keep the
+intervening-frame invalidation for frames inside the active reply window. The
+fan-out's contract (no blocking, no re-entry) already holds in any state, and
+enqueueing from a subscriber is only a queue push. Host vector: an event
+delivered in `SCHED_TX` and in `WAIT_SETTLE` reaches the subscribers.
+
+### A candidate mechanism for the retry backoff
+
+This adds to the collision reading in *Ignored events arrive in our gaps*
+rather than replacing it.
+
+`wait_for_bus_idle_before_tx()` wants 2 bit periods (1.67 ms) of idle, and the
+scheduler's 22 Te spacing counts only from our own transmissions. So when a
+control-device event ends while a frame is queued, that frame starts ~1.7 ms
+later. That is under the 2.4 ms a DALI-2 receiver needs to see a stop
+condition, and far under any multi-master forward-frame settling time. A
+receiver that discards the frame produces a silent timeout.
+
+The unit most exposed is the emitter, which has just finished transmitting:
+a0, whose own QUERY NUMBER OF INSTANCES went missing on 2026-09-04. A retry
+fired the instant the window closes (27 ms, longer than the Steinel's 14–21 ms
+priority settling) tends to find the next event in progress and repeat the
+pattern. The backoff breaks that phase.
+
+Test: have the RX ISR keep the last edge time (it already has the timestamp),
+count transmissions started less than 2.4 ms after it, and correlate that with
+lost replies to present gear. If it tracks, require at least 2.4 ms since the
+last observed edge — better, a proper settling time after another master's
+forward frame — and re-measure without the backoff.
+
+### Smaller findings
+
+- `DaliComponent::load_address_backup()` calls `backup_pref_.load()` on the
+  shell task. ESPHome 2026.9's `ESP32PreferenceBackend::load()` walks the
+  unlocked `s_pending_save` vector, which `save()` (a `push_back`) and `sync()`
+  mutate on the loop task. That is a data race with a reallocation in it. Load
+  the blob once in `setup()` and serve `load_address_backup()` from
+  `s_address_backup` only.
+- `DaliShellServer` never sets `SO_SNDTIMEO`. A client that stops reading
+  without closing, such as a laptop asleep mid-`discover`, blocks `send()`
+  inside the workflow. The bus gate stays raised, and quiescence or an open
+  INITIALISE window may stay in force, until lwIP gives up minutes later. The
+  idle timeout is only checked between lines. Set a send timeout of a few
+  seconds, treat `EAGAIN` as peer lost, and consider `SO_KEEPALIVE`.
+- The 33rd light, 17th sensor and 33rd dispatch rule are dropped by
+  `register_light()`, `register_input_sensor()` and `add_dispatch_entry()` with
+  only a boot-time log line. An unregistered light never receives a level
+  profile, so it can never transmit. Validate the counts in the schema, and size
+  the light registry for 64 + 16 + 1.
+- `discovery_scan_walk()` aborts the whole walk on any per-address error other
+  than TIMEOUT, MALFORMED or RX_ACTIVITY. One `INTERVENED` from a coupler's
+  button press ends a 45 s scan. Retry the address once; if the error persists,
+  record the address as unreadable and reserved, and carry on.
+- `restore_find_spare()` can stage or displace onto an address the backup
+  records for a unit that is currently missing. If that unit is only unpowered,
+  it comes back to a contested address. Prefer spares outside
+  `dali_snapshot_used_mask()`.
+- The `v2.0.0` tag's `dali-starter.yaml` and README pin `v1.3.0`; `7f26fef`
+  moved them after tagging. Make the pin bump part of the release-prep commit,
+  and have `release-packaging.yml` assert that a tag's starter config pins that
+  tag.
+- ESPHome 2026.9 pins `loopTask` to core 1 (`esp32/core.cpp`), the core
+  `dali_worker_core()` gives the DALI, scan and shell tasks. Every "Core 0" note
+  in the component, and the rationale in `dali_core_affinity.h`, is wrong.
+  Synchronization is unaffected, since spinlocks and atomics work on one core.
+  But the DALI task's busy-waits (1.67 ms per frame, 33 ms per attempt on a
+  stuck bus) run at priority 10 on the loop's core. Correct the comments, and
+  let the idle check use the ISR's last-edge time instead of polling.
+- The TCP shell's single-frame verbs (`status`, `query`, `raw`, `config` and
+  others) do not observe the scan gate, so they interleave with a button scan.
+  The P0 item's "new scheduler client outside `DaliComponent`" already exists.
+- `dali_sched_run()` pops under the lock but sets `SCHED_TX` after releasing
+  it, so `dali_sched_is_quiescent()` can report quiescent while a popped
+  transaction is about to transmit. Set the state inside the same critical
+  section.
+- `dali_rb_clear()` zeroes both indices. In the native build the ISRs run on
+  core 0 (installed from `app_main`) and the DALI task on core 1, so a push in
+  flight during `reset` can leave `head` far ahead of `tail`. Clear from the
+  consumer side only, by setting `tail = head`.
+- `dali_shell.h` exports `DALI_SHELL_CAPTURE_MAX` 64 and the switch-mapping and
+  sensor-cache limits at 16. `dali_shell.c` uses private values of 128, 32 and
+  64, and never reads the public ones.
+- HA brightness maps linearly onto light output and ignores ESPHome's
+  `gamma_correct` (default 2.8). A DALI light therefore sits much brighter at
+  mid-slider than any other ESPHome light, and the dimmer half of the arc power
+  range lives in the bottom few percent of the slider. This is a decision to
+  make on purpose, not a bug.
+- `devmem write` is not policy-gated, although the Part 102 memory-write
+  specials are.
+- The sensor poll sequence gives QUERY INPUT VALUE no retry, although
+  restarting the latch is safe.
+- A `backup import` blob carries no checksum, so a mistyped hex digit can
+  decode as a plausible snapshot.
+- `trace on` on the native CLI writes to UART0 from the DALI task. Once the
+  1 KB TX buffer fills, it blocks reply handling.
+
+### Status claims corrected
+
+- `main` is `v2.0.0` plus `7f26fef`, not the tag itself.
+- The ESPHome version the schema and compile were checked against is 2026.9.0.
+  One "Not yet verified" line still said 2026.8.1.
+- "The Home Assistant text surface blocks raw commissioning primitives": it
+  blocks the `special` and `config` spellings, but `raw` and `raw2` are open.
+- The restore's "convergent on re-run" depends on each move landing, which the
+  executor does not check.
+
+Checked and still accurate: 31/31 host suites pass; light write arbitration; the
+scan gate for every component-owned producer; `discover`'s silent enumeration
+failure; no addressing fault reaching Home Assistant; console `OK` meaning
+queued.
+
 ## `restore` treated a contested address as free — found 2026-09-04
 
 Found while adding `address <aN> clear`, in the module that had the strongest
@@ -2008,11 +2930,67 @@ options struct carries `terminate_control_gear` as the mirror of
 
 # Unreleased API and operator-visible changes
 
-Raw material for the next release notes. Nothing is pending: this section was
-emptied into [CHANGELOG.md](CHANGELOG.md) when **v2.0.0** shipped on 2026-09-18.
+Raw material for the next release notes. The section was emptied into
+[CHANGELOG.md](CHANGELOG.md) when **v2.0.0** shipped on 2026-09-18; everything
+below landed after that tag.
 
 Add new entries here as breaks accumulate, and empty the section again at the
 next tag.
+
+### From the 2026-09-25 stack-review fixes (host-tested)
+
+C API:
+
+- `DaliError` gains `DALI_ERR_WAIT_EXPIRED` (13), appended: a blocking caller
+  stopped waiting, and nothing is known about the bus. The shell's and the scan
+  task's blocking transports return it where they used to return
+  `DALI_ERR_TIMEOUT`. A caller that switches on `DaliError` should treat it as
+  unknown, never as absent.
+- `dali_phy_tx()` returns `DALI_ERR_TIMING`, not `DALI_ERR_TIMEOUT`, when a
+  frame does not complete in time, and reports success only once the ISR has
+  reached `DALI_PHY_TX_DONE`.
+- `dali_phy_get_last_tx_end_us()` and the scheduler's `get_last_tx_end_us` hook
+  now report the end of the forward frame's last data bit, 1.664 ms earlier
+  than before. New `DALI_TX_STOP_BITS_US`. `DALI_REPLY_WINDOW_OPEN_DECODED_US`
+  goes from 2000 to 3664 and `DALI_REPLY_WINDOW_CLOSE_US` from 27000 to 28664:
+  the same instants from the new reference. `DALI_REPLY_WINDOW_OPEN_US` keeps
+  its value and so opens 1.664 ms earlier.
+- `DaliRestoreMove` changes layout: `kind` moves ahead of `from` and `to`, and
+  `has_identification` and `identification[8]` are appended. Positional
+  initializers break; there are none in-tree.
+- New: `dali_restore_confirm_move()`, `DaliRestoreMoveCheck`,
+  `dali_restore_move_check_name()`, `dali_transport_transaction_timeout_ms()`,
+  `dali_cli_raw_frame_is_commissioning()`.
+- The scheduler routes unsolicited event frames to subscribers in every state.
+  `rx_event_unroutable` stays in `dali_stats_t` but is no longer incremented.
+- `dali_sched_is_quiescent()` no longer reports quiescent between dequeuing a
+  transaction and transmitting it.
+
+ESPHome:
+
+- The component sets `CONFIG_GPTIMER_ISR_CACHE_SAFE` and
+  `CONFIG_GPIO_CTRL_FUNC_IN_IRAM`, so the first build after upgrading is a full
+  rebuild.
+- A shell workflow's bus claim waits up to 5 s for queued work to drain and is
+  refused if it does not, logging `queued traffic did not drain; claim refused`.
+- The **DALI Command** text entity refuses a `raw`/`raw2` commissioning frame
+  with `commissioning frame; use the native CLI`.
+
+Operator-visible:
+
+- `since_tx_us` in `capture` and `trace` runs from the frame end: add 1664 to
+  compare a capture taken before this change.
+- `raw`/`raw2` of a commissioning frame on the TCP shell needs
+  `allow_commissioning: true`, and prints `raw (commissioning frame): refused
+  by session policy` without it.
+- `restore apply` confirms each move and stops at the first it cannot. Its
+  lines read `OK` or `sent, not confirmed: <reason>`, and a clean run ends with
+  `restore apply: N move(s) applied, each confirmed on the bus` in place of
+  `verify with 'restore plan' or 'discover'`.
+- `wait expired` can appear where `timeout` did when the shell stopped waiting
+  on a busy bus.
+- `discover`'s event note counts every event that arrived during the walk, so
+  it reads higher on the same bus. `stats`' `event unroutable` stays at 0.
 
 **One thing to do differently.** This section was not emptied when `v1.3.0`
 shipped, so by the time it was read for the v2.0.0 notes it had silently

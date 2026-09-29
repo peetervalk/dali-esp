@@ -1,6 +1,10 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-09-18, at the `v2.0.0` release.
+**Last updated:** 2026-09-29, after checking the open Part 103 and bus-timing
+items against TI's MSPM0 DALI SDK, Silicon Labs AN1220 and the current
+`esp_dali` source. The findings are the two 2026-09-29 entries under
+Investigations in `project_log.md`, above the 2026-09-25 stack review; what is
+still open is in the prioritized list below.
 
 Annex to `AGENTS.md`. That file holds the architecture, the layer rules, the ISR
 and timing constraints, and the native/host build commands; this one holds what
@@ -15,7 +19,7 @@ per-capability API/verb/vector/hardware status in `dali_capability_matrix.md`.
 
 | | |
 |---|---|
-| Latest tag | `v2.0.0`, which is what `main` points at |
+| Latest tag | `v2.0.0`. `main` is the tag plus `7f26fef`, which moved the sample configs' pins to `v2.0.0`; the tagged tree itself still pins `v1.3.0` |
 | Last hardware-tested release | `v1.1.1` as a tagged build. The `v2.0.0` tree has real-bus results (below), taken from `dev` rather than from a flashed tag |
 | `dev` vs `main` | level at the tag; `dev` accumulates work between releases |
 
@@ -72,6 +76,9 @@ before adding broad new device support.
   the compile is what covers the C++ layer and the vendored C.
 - **Not a hardware pass.** The real-bus results below were taken from `dev`
   during development, not from a flashed `v2.0.0` build.
+
+**On `dev` since the tag:** the stack-review fixes pass 32/32 host suites, the
+native build, and a `dali_test.yaml` compile. None has been on a bus.
 
 ### Recorded hardware state
 
@@ -136,7 +143,7 @@ Established on or before the `v1.1.1` flash of 2026-08-14:
   real collision, but the commission run that followed was clean, so the audit's
   classification is still an inference.
 - `manifest.json`'s `>=2026.6.0` ESPHome floor, which is tested against nothing
-  but whatever `pip install esphome` last resolved to. The 2026.8.1 end is now
+  but whatever `pip install esphome` last resolved to. The 2026.9.0 end is
   covered at both stages — schema validation and a full compile of the C++ layer
   and vendored C — but nothing establishes the floor itself.
 - Independent conformance of every protocol constant, timing boundary, memory
@@ -172,6 +179,10 @@ Dated evidence for each of these is in `project_log.md`.
   chosen, applies to an observation that decoded as a complete backward frame.
   The asymmetry is the safety: qualified undecodable activity must not be read
   as a reply, because COMPARE maps it to YES and invents gear that is not there.
+  Both edges, and the 28.664 ms close, are measured from the end of the forward
+  frame's last data bit, which the TX ISR stamps as the first stop half-bit goes
+  out. Until 2026-09-25 they ran from after the stop bits, which put the
+  undecodable edge 1.664 ms past the standard's minimum. Host-tested only.
 - Part 103 events decode into canonical source fields, reject command and
   reserved frames, and preserve all ten event-information bits. Independent
   vectors cover all five normal source schemes.
@@ -189,8 +200,11 @@ Dated evidence for each of these is in `project_log.md`.
 - `dali_snapshot` records which *physical* unit (by Bank 0 identification
   number) holds which short address; `dali_restore` turns a snapshot plus a live
   bus into an ordered move list of plain addressed SET SHORT ADDRESS traffic. No
-  INITIALISE window, interruptible at any point, and convergent on re-run. The
-  blob round-trips both ways: `backup export` prints the
+  INITIALISE window, interruptible at any point, and convergent on re-run.
+  `dali_restore_confirm_move()` checks each move on the bus — the unit answers
+  at its destination, the source is silent, and the identification number there
+  is the unit's — and `restore apply` sends nothing further after a move that
+  fails it. Host-tested only. The blob round-trips both ways: `backup export` prints the
   `backup import` script that reproduces it, so a backup kept off the device can
   be loaded back — which is what the native CLI, having no persistent store,
   needs. `dali_snapshot_decode()` validates a blob in full before writing, so a
@@ -246,7 +260,10 @@ Dated evidence for each of these is in `project_log.md`.
   path here, and every arm of this verb proves its result by reading it.
 - `raw` sends one arbitrary 16- or 24-bit frame and `raw2` sends one twice
   through the send-twice path. Both are diagnostic escape hatches, not
-  substitutes for the typed atomic verbs.
+  substitutes for the typed atomic verbs. A frame that is itself a commissioning
+  command — what `dali_cli_raw_frame_is_commissioning()` recognises, the same
+  set `special` and `config` hold back — needs `DALI_SHELL_ALLOW_COMMISSION`, as
+  the named verbs do.
 - `identify`, `smoke`, `capture`, and the inventory JSON export have no host
   vectors of their own; they are composed from covered primitives, but their
   output formats are unasserted.
@@ -269,10 +286,10 @@ Dated evidence for each of these is in `project_log.md`.
 - The console covers control-gear output and configuration, control-gear and
   control-device memory, DTR loads, non-commissioning special commands, DT6,
   Part 103 instance query and configuration, vendor helpers, quiescent mode,
-  `raw`/`raw2`, and the local `queue`/`group` verbs. It is the shell's verb set
-  minus what needs a terminal or a blocking transport — so no `backup`,
-  `restore`, or `commission`. `dali_capability_matrix.md` lists the exclusions
-  with reasons.
+  `raw`/`raw2` minus commissioning frames, and the local `queue`/`group` verbs.
+  It is the shell's verb set minus what needs a terminal or a blocking
+  transport — so no `backup`, `restore`, or `commission`.
+  `dali_capability_matrix.md` lists the exclusions with reasons.
 - Console `OK` means **queued**, not executed or device-acknowledged. Async
   commands publish `pending`, replace it on completion, and ignore callbacks
   belonging to an older submitted command. Replies are decoded by the same
@@ -322,8 +339,19 @@ Dated evidence for each of these is in `project_log.md`.
   DALI-task creation is checked and fails the component rather than running
   without a bus task.
 - The TCP shell exposes the guarded `commission` verb only when
-  `allow_commissioning: true`. The Home Assistant text surface blocks raw
-  commissioning primitives and has no dedicated workflow entity.
+  `allow_commissioning: true`. The Home Assistant text surface refuses the
+  commissioning spellings of `special`, `config`, `raw` and `raw2`, and has no
+  dedicated workflow entity.
+- A multi-frame shell workflow claims the bus through `try_claim_bus()`, which
+  raises the gate and then waits up to 5 s for the queue to drain; a claim that
+  cannot drain is refused rather than granted over queued refresh or poll work.
+  A blocking wait that expires reports `DALI_ERR_WAIT_EXPIRED`, never the
+  `DALI_ERR_TIMEOUT` that means silence, and is sized from the transport's
+  retry budget rather than a fixed 200 ms.
+- The ESPHome component turns on `CONFIG_GPTIMER_ISR_CACHE_SAFE` and
+  `CONFIG_GPIO_CTRL_FUNC_IN_IRAM` itself, as the native `sdkconfig.defaults`
+  does, so the TX bit clock keeps running through NVS commits. The RX edge
+  interrupt still does not (P0).
 
 ## Installation State
 
@@ -347,9 +375,13 @@ always agree within a commit.
 
 ### 1k site: gear that answers just before the attribution window opens
 
-Four of sixteen fixtures settle faster than IEC 62386-101's 5.5 ms minimum
-(measured 4.12–5.85 ms) and were being read as silent. The decoded-frame window
-edge fixed it, confirmed on hardware. Group membership now reads from the bus
+Four of sixteen fixtures answered 4.12–5.85 ms after the controller's TX-end
+stamp and were being read as silent. The decoded-frame window edge fixed it,
+confirmed on hardware. That stamp was taken after the stop bits, so measured
+from the frame's last data bit these drivers settle in roughly 5.8–7.5 ms:
+conformant, not faster than IEC 62386-101's 5.5 ms minimum. The PHY now stamps
+the frame end itself, so a collision among them is attributed rather than
+discarded; host-tested only. Group membership now reads from the bus
 with no `query_address` anywhere in the YAML and is persisted to flash. The full
 investigation — captures, timings, and why a hand-picked margin does not survive
 this bus — is in `project_log.md`.
@@ -362,12 +394,15 @@ four instances continuously, only one of which is occupancy, so the count tracks
 elapsed time rather than whether anyone is in the corridor; Home Assistant's
 recorder stores only value changes and so shows almost none of this traffic.
 
-"Unroutable" is a weaker claim than the note's wording suggests. `SCHED_TX`
-covers the inter-frame guard as well as the frame, so an event arriving in a
-guard gap — on an idle bus, colliding with nothing — is classified the same way
-as one arriving mid-transmission, and a sizeable share of a walk sits in that
-state. An event that genuinely landed inside a reply window would set
-`s_reply_intervened` and abort the scan with `DALI_ERR_INTERVENED`, which has
+The counts recorded so far are of events the scheduler classed "unroutable",
+which was a subset: `SCHED_TX` covers the inter-frame guard as well as the
+frame, so an event in a guard gap on an idle bus was classed the same as one
+arriving mid-transmission — and was then given to no subscriber. Since
+2026-09-25 an event reaches its subscribers in every scheduler state,
+`rx_event_unroutable` stays at zero, and the note counts every event that
+arrived during the walk, so the same bus will read higher N than before. An
+event that genuinely landed inside a reply window still sets
+`s_reply_intervened` and aborts the scan with `DALI_ERR_INTERVENED`, which has
 never happened on either bus. What is real is the *volume*: while a walk runs
 the wire carries at least 3.2x the idle rate, most likely the sensor
 retransmitting after losing its slot. Investigation in `project_log.md`.
@@ -389,22 +424,58 @@ a sensor value.
 
 ### P0 — Protocol correctness and conformance
 
+- **Part 103 addressing encodings: settle before the device session below.**
+  The evidence points against both of the values in the code (`project_log.md`,
+  *A device-side source sides with Beckhoff on both Part 103 encodings*).
+  INITIALISE (device) sends `0x00` for "unaddressed", from `esp_dali`.
+  Beckhoff's TwinCAT DALI library and TI's MSPM0 control-device firmware both
+  read `0x7F` as devices without a short address, `0x00`–`0x3F` as the one
+  device holding that address, and `0xFF` as all. Read that way, `0x00` selects
+  d0, which is the 2k Steinel. Device SET SHORT ADDRESS (DTR0) is fed
+  `(a << 1) | 1`, which no source gives: TI's firmware stores DTR0 raw, Tasmota
+  loads the raw address, and Beckhoff documents the Part 103 short address as
+  raw. If either is wrong, `commission devices` re-addresses the Steinel at d0
+  and `address dN set` misplaces units. Confirm on 2k under `quiescent on all`,
+  with frames that change no address: INITIALISE ×2 with `0xFF`, then with an
+  address nothing holds (`0x3F`), then `0x00`, then `0x7F`, each probed with
+  VERIFY SHORT ADDRESS 0 and closed with a TERMINATE that a second VERIFY
+  confirms. Expect YES, silence, the answer, silence. A YES on `0x3F` means the
+  device ignores the parameter and the `0x00` arm proves nothing — TI's own
+  filter has exactly that bug. `address d0 set d2` settles SET SHORT ADDRESS on
+  the same visit, before any code changes: it loads DTR0 = 5, so a device that
+  reads DTR0 raw lands on d5 and one that reads `(a << 1) | 1` on d2. The
+  frames, the outcome tables and the way back are in the log entry. Then change
+  both encodings, with vectors.
+- **Hardware validation of the stack-review fixes.** Host-tested and
+  mutation-checked, never on a bus. The cheapest checks: a capture should read
+  every reply's `since_tx_us` about 1664 higher than the same gear read before
+  (1k's a13 read 12742–13120, in `project_log.md`), and one `restore apply` on
+  2k should print `OK` per move, which is the confirmation read-back running.
 - **Hardware validation of the rest of the commissioning work.** Unmet by a
   bus: equal-random-address handling, control-device commissioning, `backup
   import`/`export`, and `restore groups`. The single-unaddressed-device envelope
   no longer stands on nothing; the equal-random path is where it is still an
   assumption. The control-device half is no longer blocked on a fixture:
   `address <dN> clear` de-addresses a control device, so the 2k Steinel can be
-  cleared and re-commissioned in one session. Worth settling in the same
+  cleared and re-commissioned in one session — but not before the Part 103
+  encodings above are settled. Worth settling in the same
   session: whether a device answers COMPARE from inside an addressing window
   while quiescent, which is the one part of the new bracket's reasoning the bus
   has not been asked.
 - **Prove bus timing beyond the local own-forward-frame guard.** TX-end and
   observation timestamps are exported and host-tested; HIL must validate both
-  attribution edges (5.5 ms undecodable, 2 ms decoded) against the 27 ms close,
-  physical collision behavior, and external-frame cases. DALI-2 priority/backoff
+  attribution edges (5.5 ms undecodable, 3.664 ms decoded, both from the frame
+  end) against the 28.664 ms close, physical collision behavior, and
+  external-frame cases. DALI-2 priority/backoff
   remains open, as does a deadline-aware PHY call when a repeat would cross the
-  100 ms limit.  
+  100 ms limit. Nothing spaces a forward frame from a *received* one: ours
+  follows a reply by about 2.9 ms and an event by as little as 1.7 ms, where
+  TI's DALI-2 device firmware waits 13.5–19.5 ms after any frame, by priority,
+  and DALI-1 wanted 22 Te after a reply. TI's SDK is a compact reference for the
+  settle table and for collision detection, avoidance and recovery; its
+  receiver accepts a send-twice pair whose stop conditions are up to 94 ms
+  apart, looser than the scheduler's own bracket (`project_log.md`,
+  *Nothing spaces a forward frame from a received one*).
 - **The post-scan audit's contested path has no bus behind it.** Both walks
   self-check on every exit that could have written an address, and the diff
   (`dali_commissioning_audit`) is host-covered; `RX_ACTIVITY` has a real
@@ -413,10 +484,20 @@ a sensor value.
 
 ### P0 — Transaction and runtime reliability
 
-- If new scheduler clients are added outside `DaliComponent`, add a true
-  scheduler admission reservation for scans. The current quiescence check plus
-  component-wide gate covers present local producers but is not an atomic
-  check-and-reserve primitive.
+- **The RX edge interrupt is not IRAM-safe.** The TX bit clock now is, in both
+  builds, but the RX handler goes through the GPIO ISR service installed without
+  `ESP_INTR_FLAG_IRAM`. Every NVS commit (light restore state, group map,
+  backup) masks it, so a backward frame or event arriving during one loses
+  edges and decodes as silence or garbage. The service is shared with ESPHome,
+  which installs it on its own terms, so this and the P1 ISR-service conflict
+  below want one fix.
+- Add a true scheduler admission reservation for scans. The premise this item
+  used to wait for, a scheduler client outside `DaliComponent`, already exists:
+  the TCP shell's single-frame verbs do not observe the scan gate and can
+  interleave with a button scan. The quiescence check plus component-wide gate
+  is still not an atomic check-and-reserve primitive, though
+  `dali_sched_is_quiescent()` no longer reports quiescent between dequeue and
+  `SCHED_TX`, and a claim now waits for queued work to drain.
 - Give the remaining fire-and-forget scheduler clients the confirmed-transmission
   treatment the light entities have. Console `OK`, the refresh pump, and
   headless dispatch still report or act on admission rather than transmission.
@@ -451,6 +532,41 @@ The typed verb surface is in place; what is missing is evidence. Keep
 
 ### P1 — ESPHome correctness and architecture
 
+- **The DALI PHY can break every other GPIO interrupt in the firmware.**
+  `dali_phy_init()` installs the shared GPIO ISR service with flags `0` and
+  accepts `ESP_ERR_INVALID_STATE` if someone got there first. ESPHome's
+  `ESP32InternalGPIOPin::attach_interrupt()` installs it with
+  `ESP_INTR_FLAG_LEVEL3` and treats `ESP_ERR_INVALID_STATE` as failure: it logs
+  an error and returns *without registering its handler*. So when the DALI
+  component sets up first (both sit at `setup_priority::HARDWARE`, and
+  registration order breaks the tie), anything that attaches a pin interrupt
+  later is dead — most visibly a `gpio` binary sensor, which on ESP32 defaults
+  to interrupt mode and stops polling. Neither tracked config has one. Read
+  from ESPHome 2026.9.0 source, not reproduced. `use_interrupt: false` on the
+  sensor is the workaround. Fixes, cheapest first: move the install out of
+  `setup()` so ESPHome always installs first; attach RX through ESPHome's own
+  pin API; or fix ESPHome upstream to accept an installed service. The
+  IRAM-safe RX item in P0 depends on which.
+- **`load_address_backup()` calls ESPHome preferences from the shell task.**
+  `ESP32PreferenceBackend::load()` walks the unlocked pending-save vector that
+  the loop task's `save()`/`sync()` mutate. That is a data race. Fix: load once
+  in `setup()` and serve from `s_address_backup`.
+- **The TCP shell has no send timeout.** A client that stops reading without
+  closing blocks the session task inside a workflow. The bus gate stays raised,
+  and quiescence or an open INITIALISE window may stay in force, until lwIP
+  gives up. Fix: `SO_SNDTIMEO` of a few seconds, treat `EAGAIN` as peer lost,
+  and consider `SO_KEEPALIVE`.
+- **Entity limits fail silently.** The 33rd light, 17th sensor and 33rd
+  dispatch rule are dropped with a boot-time log line. An unregistered light
+  never gets a profile and can never transmit. Fix: reject over-limit configs in
+  the schema, and size the light registry for 64 + 16 + 1.
+- **ESPHome runs its loop on core 1, not core 0.** ESPHome 2026.9 pins
+  `loopTask` to the core `dali_worker_core()` also gives the DALI, scan and
+  shell tasks. Synchronization is unaffected, but every "Core 0" comment and the
+  `dali_core_affinity.h` rationale are wrong, and the PHY's pre-TX busy-wait
+  (1.67 ms per frame, 33 ms per attempt on a stuck bus) runs on the loop's core.
+  Fix the comments; let the idle check use an ISR-recorded last-edge time.
+
 - **No addressing fault reaches Home Assistant.** `bus_fault` is a PHY liveness
   signal (`"OK"` / `"Bus stuck: N"`) and reports correctly, but nothing surfaces
   a contested short address — the one failure the bus cannot undo remotely; it
@@ -466,7 +582,15 @@ The typed verb surface is in place; what is missing is evidence. Keep
   <gN>` is refused rather than sent because nothing could read the result back.
   A control device that is replaced can be given its address back but not its
   group membership. Wanted, in order: a query path in discovery, a `groups`
-  field on the device snapshot entry, then the planner and the verb arm.
+  field on the device snapshot entry, then the planner and the verb arm. The
+  opcodes are in `dali_protocol.md` now: QUERY DEVICE GROUPS `0x41`–`0x44` from
+  TI and `esp_dali`, ADD and REMOVE `0x19`–`0x1C` from TI alone. Groups are not
+  all a device RESET loses: in TI's firmware it also resets every instance's
+  event scheme, filter and groups, so a reset Steinel's events would stop
+  matching the Device/Instance events that trigger sensor polls, and a restore
+  would need instance configuration too. The same sources give device QUERY
+  MISSING SHORT ADDRESS (`0x33`), which would back `address <dN> clear` as the
+  broadcast query backs the gear arm.
 - Extend the compact Part 103 dispatch key if a site needs to distinguish
   Device-Group from Instance-Group sources or match instance type. The canonical
   event/capture path retains these fields; the five-field rule key does not. No
@@ -487,13 +611,32 @@ The typed verb surface is in place; what is missing is evidence. Keep
   the comment on the constant in `dali_frame.h` and the one on
   `sched_retry_active_step()` in `dali_scheduler.c` is not what is happening.
   Two ways of measuring it are ruled out: `TX retries` is dominated by absent
-  addresses, and the `s_reply_intervened` path aborts the whole scan rather than
-  losing a single address, which no walk on either bus has ever done. The cheap
-  test is the silently lost instance enumeration on 2k — run `discover`
+  addresses, and the `s_reply_intervened` path cannot fire for a DALI-2 event at
+  all — a 24-bit frame has to start within 8.3 ms of ours to end inside the
+  window, and a DALI-2 device waits at least 13.5 ms. A counter there would read
+  zero for event traffic, though it would still catch DALI-1 couplers. The
+  cheap test is the silently lost instance enumeration on 2k — run `discover`
   repeatedly, count how often the enumeration line is missing, then repeat under
   `quiescent on all`; if event traffic is losing queries to present gear, the
-  rate should go to zero. Also worth adding: a counter on the intervened path,
-  the one reply-loss mode that increments nothing today.
+  rate should go to zero. A candidate mechanism from the stack review: the PHY
+  needs only 1.67 ms of idle before transmitting, and the 22 Te spacing counts
+  only from our own frames. So a frame queued behind a control-device event
+  goes out about 1.7 ms after it, under DALI-2's 2.4 ms stop condition. The
+  emitter, a0, is the unit most exposed, and TI's device firmware shows how one
+  loses such a frame: it discards anything that starts before its own stop
+  detection. Whether that explains the backoff depends on a0's event priority.
+  At 2 or 3 the event ends before the backoff does and the retry goes out clear
+  of it; at 4 or 5 the event outlasts the backoff and the retry lands 1.7 ms
+  after it either way. `iquery 0 <instance> event-priority` settles which,
+  read-only. Count TX starts within 2.4 ms of the last RX edge before changing
+  anything.
+- **One intervening frame aborts a whole scan.** `discovery_scan_walk()`
+  returns on any per-address error other than TIMEOUT, MALFORMED or
+  RX_ACTIVITY, so a coupler button press during a reply window ends a 45 s
+  walk. Fix: retry the address once, then record it as unreadable and reserved.
+- **`restore_find_spare()` can use a missing unit's recorded address.** If that
+  unit is only unpowered, it comes back to a contested address. Fix: prefer
+  spares outside `dali_snapshot_used_mask()`, with a host vector.
 - **`discover` hides a failed input-device enumeration.** The post-scan loop in
   `cmd_discover` only prints on `DALI_OK` from
   `dali_discovery_query_input_device()` and has no else branch, so a lost query
@@ -507,8 +650,11 @@ The typed verb surface is in place; what is missing is evidence. Keep
   unattended walk that silences occupancy for minutes is a trade nobody is
   present to accept. Host-covered and mutation-checked; no bus has seen it. What
   to watch for is the failure direction — a release that does not land leaves
-  the installation's sensors quiet, and the shell's line saying so is the only
-  thing that would tell an operator to run `quiescent off all`.
+  the installation's sensors quiet until the device's own timeout, 15 minutes in
+  TI's firmware and unknown for the Steinel, and the shell's line saying so is
+  the only thing that would tell an operator to run `quiescent off all`. QUERY
+  QUIESCENT MODE (`0x40`, not implemented) would let the release be read back
+  per device rather than inferred.
 - **`address <aN> clear` has never run on a bus.** Added with the `backup save`
   contested warning; host-covered only at the CLI layer (arity, subcommand, and
   that the "no short address" value is outside the encoded range), because the
@@ -538,6 +684,10 @@ The typed verb surface is in place; what is missing is evidence. Keep
 
 ### P1 — Release and verification quality
 
+- **The tagged tree must pin its own tag.** At `v2.0.0`, `dali-starter.yaml`
+  and the README still pin `v1.3.0`; `7f26fef` fixed that after tagging. Fix:
+  bump the pins in the release-prep commit, and have `release-packaging.yml`
+  fail when a tag's starter config names a different ref.
 - **Empty the unreleased-change list as part of tagging, not after it.** The
   v2.0.0 notes were written from a list that had not been emptied at `v1.3.0`
   and so claimed two releases' worth of breaks as pending; each item had to be
@@ -572,6 +722,20 @@ The typed verb surface is in place; what is missing is evidence. Keep
   collisions, queue pressure, bus faults, and power restoration.
 - Add DT1 and other device types only when an installation requires them,
   following the DT6/DT8 module pattern.
+- Decide the brightness mapping on purpose. HA brightness maps linearly onto
+  light output and bypasses ESPHome's `gamma_correct` (default 2.8). A DALI
+  light is therefore much brighter at mid-slider than other ESPHome lights, and
+  the dim half of the arc range sits in the bottom few percent of the slider.
+- Small hardening items from the stack review:
+  - `dali_rb_clear()` should drain from the consumer side (`tail = head`). In
+    the native build the ISRs and the DALI task run on different cores.
+  - The stale `DALI_SHELL_*_MAX` macros in `dali_shell.h` should be deleted;
+    `dali_shell.c` does not use them.
+  - `devmem write` should be policy-gated, as the Part 102 memory writes are.
+  - The retry-safe QUERY INPUT VALUE step in sensor polls should get one retry.
+  - `backup import` blobs should carry a checksum.
+  - Native `trace on` should stop writing to UART from the DALI task; it blocks
+    once the TX buffer fills.
 
 ## Operational Constraints
 
@@ -596,10 +760,13 @@ The typed verb surface is in place; what is missing is evidence. Keep
   unconditionally through the `proto_dali_shell.c` shim, but nothing outside
   `dali_shell_tcp.cpp` references it, so `--gc-sections` drops the whole of it
   when the block is absent. Every file-scope buffer added there is paid for on
-  each board that does run the shell.
+  each board that does run the shell. On 2026-09-25 `dali_test.yaml` reads
+  135.0 KiB (138,248 B); the restore plan's per-move identification number,
+  added that day so `restore apply` can confirm each move, is 1.5 KiB of it.
 - **`sram1_as_iram` is inert at this IRAM level.** IRAM is
   76.7 KiB of the default 128 KiB and this build's `.iram0.text` ends at
-  `0x4009369F`. IDF reserves D/IRAM out of the heap only in proportion to what
+  `0x4009369F` — `0x40093464` on 2026-09-25, with the cache-safe GPTIMER and
+  GPIO options on. IDF reserves D/IRAM out of the heap only in proportion to what
   the app's IRAM actually uses above `0x400A0000` — `_sram1_iram_len` in
   `memory.ld.in`, clamped at zero — so below that line the option costs
   nothing and buys nothing. Above it the heap pays byte for byte, and the image
@@ -628,7 +795,7 @@ The typed verb surface is in place; what is missing is evidence. Keep
 | `esphome/components/dali/proto_dali_*.c` | Shims pulling the vendored C in behind ESPHome's source glob |
 | `dali-starter.yaml` | Tracked starter/commissioning firmware |
 | `dali_test.yaml` | Tracked CI coverage config; the widest configuration this repo compiles against its own tree |
-| `test/` | 31 host suites and the vendored Unity runner |
+| `test/` | 32 host suites and the vendored Unity runner |
 | `tools/dali-shell` | Operator-side script for the TCP shell |
 | `AGENTS.md` | Architecture, layer rules, timing/ISR constraints, build commands |
 | `project_log.md` | Verification history and investigations |
@@ -665,7 +832,7 @@ Four workflows in `.github/workflows/`:
 
 | Workflow | Covers | Trigger |
 |---|---|---|
-| `host-tests.yml` | 31 host suites, cmake/ctest over `test/` | push main/dev, PR to main |
+| `host-tests.yml` | 32 host suites, cmake/ctest over `test/` | push main/dev, PR to main |
 | `idf-build.yml` | Native firmware, `idf.py build` for esp32 on IDF 6.0.1 | push main/dev, PR to main |
 | `esphome-build.yml` | Source/shim/`SRCS` agreement, config discovery, per-config schema validation, and compile of every `type: local` config | push main/dev, PR to main |
 | `release-packaging.yml` | `esphome compile` from a git tag in an empty directory | tag `v*`, manual |

@@ -795,6 +795,90 @@ bool dali_cli_config_is_commissioning(DaliCommandId id)
     return id == DALI_CMD_SET_SHORT_ADDRESS_DTR0;
 }
 
+/* First byte of every IEC 62386-103 special command. */
+#define CLI_RAW_DEVICE_SPECIAL_ADDRESS 0xC1u
+/* Last group address byte with the selector bit set: 16 gear groups end at
+ * 0x9F, 32 control-device groups at 0xBF. */
+#define CLI_RAW_LAST_GEAR_GROUP_BYTE   0x9Fu
+#define CLI_RAW_LAST_DEVICE_GROUP_BYTE 0xBFu
+
+/* An address byte that carries a standard command rather than DAPC or a
+ * special: a short address, a group, broadcast unaddressed, or broadcast, all
+ * with the selector bit set. */
+static bool raw_is_command_address(uint8_t addr_byte, uint8_t last_group_byte)
+{
+    if ((addr_byte & 0x01u) == 0u) {
+        return false;
+    }
+    return addr_byte <= last_group_byte ||
+           addr_byte == 0xFDu ||
+           addr_byte == DALI_BROADCAST_COMMAND_ADDRESS;
+}
+
+static bool raw_device_special_is_commissioning(DaliCommandId id)
+{
+    switch (id) {
+        case DALI_CMD_DEVICE_INITIALISE:
+        case DALI_CMD_DEVICE_RANDOMISE:
+        case DALI_CMD_DEVICE_WITHDRAW:
+        case DALI_CMD_DEVICE_SEARCH_ADDRH:
+        case DALI_CMD_DEVICE_SEARCH_ADDRM:
+        case DALI_CMD_DEVICE_SEARCH_ADDRL:
+        case DALI_CMD_DEVICE_PROGRAM_SHORT_ADDRESS:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool dali_cli_raw_frame_is_commissioning(const DaliFrame *frame)
+{
+    if (frame == NULL) {
+        return false;
+    }
+
+    if (frame->bit_length == DALI_FORWARD_FRAME_BITS) {
+        const uint8_t addr_byte = (uint8_t)((frame->data >> 8u) & 0xFFu);
+        const uint8_t opcode    = (uint8_t)(frame->data & 0xFFu);
+
+        /* Part 102 specials are identified by their first byte alone. */
+        const DaliCommandInfo *special =
+            dali_command_lookup_opcode(DALI_CMD_FRAME_SPECIAL, addr_byte);
+        if (special != NULL) {
+            return dali_cli_special_is_commissioning(special->id);
+        }
+        if (raw_is_command_address(addr_byte, CLI_RAW_LAST_GEAR_GROUP_BYTE)) {
+            const DaliCommandInfo *cmd =
+                dali_command_lookup_opcode(DALI_CMD_FRAME_16BIT, opcode);
+            return cmd != NULL && dali_cli_config_is_commissioning(cmd->id);
+        }
+        return false;
+    }
+
+    if (frame->bit_length == DALI_EXTENDED_FRAME_BITS) {
+        const uint8_t addr_byte = (uint8_t)((frame->data >> 16u) & 0xFFu);
+        const uint8_t middle    = (uint8_t)((frame->data >> 8u) & 0xFFu);
+        const uint8_t opcode    = (uint8_t)(frame->data & 0xFFu);
+
+        /* Part 103 specials carry their opcode in the middle byte. */
+        if (addr_byte == CLI_RAW_DEVICE_SPECIAL_ADDRESS) {
+            const DaliCommandInfo *special =
+                dali_command_lookup_opcode(DALI_CMD_FRAME_24BIT_SPECIAL, middle);
+            return special != NULL &&
+                   raw_device_special_is_commissioning(special->id);
+        }
+        if (middle == DALI_DEVICE_INSTANCE &&
+            raw_is_command_address(addr_byte, CLI_RAW_LAST_DEVICE_GROUP_BYTE)) {
+            const DaliCommandInfo *cmd =
+                dali_command_lookup_opcode(DALI_CMD_FRAME_24BIT_DEV, opcode);
+            return cmd != NULL && cmd->id == DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0;
+        }
+        return false;
+    }
+
+    return false;
+}
+
 bool dali_cli_config_rejects_broadcast(DaliCommandId id)
 {
     return id == DALI_CMD_ADD_TO_GROUP || id == DALI_CMD_REMOVE_FROM_GROUP;

@@ -333,9 +333,12 @@ answering a command it was addressed with, which you can see directly by running
 `discover` with `quiescent on` in force and watching devices and instances
 enumerate normally. So the silencing costs the walk nothing, while what it
 removes is the noise most likely to break it: a Part 103 walk searches the event
-sources themselves and asks about 25 `COMPARE` questions per device found, each
-with a reply window that a stray event frame turns into a false YES. Of the two
-walks, this is the one with more to gain from the bracket, not less.
+sources themselves and asks about 25 `COMPARE` questions per device found, and
+event traffic can spoil any of them. A frame garbled inside the reply window
+reads as YES, and a probe sent right behind an event may never be heard. (A
+clean event frame is too long to fit inside the window, so it is never read as
+a reply; see `project_log.md`, 2026-09-29.) Of the two walks, this is the one
+with more to gain from the bracket, not less.
 
 One part of that reasoning is still inference rather than observation: a device
 answering `COMPARE` from inside an open Part 103 addressing window, with no
@@ -707,6 +710,15 @@ addresses devices that have none, so `address d<N> clear` followed by
 addressed — and how you produce an unaddressed device to test the walk against
 in the first place.
 
+**Not yet, though.** `commission devices` sends INITIALISE with `0x00`, which
+Espressif's `esp_dali` gives as "devices without a short address". Beckhoff's
+documentation and TI's device firmware both read `0x00` as "the device at d0".
+If they are right, a device you have just cleared is not selected at all, and
+whatever still holds d0 — on 2k, the Steinel — is re-addressed to the first
+free address. The `set` arm has the matching doubt about its DTR0 value. Until
+the bus check in the P0 item of `current_status.md` has run, do not use this
+workflow on an installation.
+
 #### The raw spelling, and the encoding it needs
 
 `config-dtr0 <target> set-short-address-dtr0 <byte>` still does the write with
@@ -806,7 +818,10 @@ session refuses it with `refused by session policy` unless the YAML says
 `allow_commissioning: true`; the **DALI Command** text entity refuses it
 outright with `commissioning config; use the native CLI`, the same answer it
 gives `special program-short`. Gating one spelling of re-addressing and not the
-other would have refused the harder one and permitted the easier one.
+other would have refused the harder one and permitted the easier one. For the
+same reason `raw` and `raw2` are gated when the frame they carry is a
+commissioning command — this one or any of the primitives below — with
+`commissioning frame; use the native CLI` on the text entity.
 
 ### The nine primitives, by hand
 
@@ -946,9 +961,20 @@ as ordinary addressed `SET SHORT ADDRESS` commands and needs
 
 **`restore` opens no INITIALISE window.** That is the property to hold on to:
 nothing it sends puts the bus into a state that has to be terminated, so it is
-safe on a live installation and safe to interrupt. If a move fails, it stops
-there and says so — the moves after it assumed the failed one landed. Run
-`restore plan` again and it will plan from the bus as it now stands.
+safe on a live installation and safe to interrupt.
+
+`SET SHORT ADDRESS` has no answer, so `apply` checks each move before sending
+the next: the fixture answers at its new address, nothing answers at the old
+one, and the identification number read there is the one the plan moved. A
+confirmed move prints `OK`. If a move fails or cannot be confirmed, it stops
+there and says why — the moves after it assumed that one landed:
+
+```text
+  2/2 a4 -> a9: sent, not confirmed: the source still answers
+restore apply: stopped after 1 of 2 move(s); re-run 'restore plan' to see what remains
+```
+
+Run `restore plan` again and it will plan from the bus as it now stands.
 
 Two units that need to swap addresses cannot both move directly, so the plan
 stages one through a free address and places it on a later step. A swap with no
@@ -1079,12 +1105,14 @@ blob is checked end to end before a byte of it is kept.
 
 #### What has not been proven
 
-**None of this has been run on a bus.** Both planners, the snapshot format, the
-cycle-staging, and the rejection paths all have host vectors; no `restore apply`
-and no `restore groups apply` has ever transmitted a frame to real gear. Treat a
-restore as a procedure to rehearse and verify with `discover`, not as a safety
-net to rely on — and note that it can only be as good as the identities and
-group masks `backup save` managed to read.
+**Very little of this has been run on a bus.** `backup save` and a one-move
+`restore plan` / `restore apply` worked on the 2k installation on 2026-09-03,
+before `apply` confirmed its moves; the confirmation itself, cycle-staging,
+moving aside a unit the backup never saw, the rejection paths, and `restore
+groups apply` have host vectors and nothing more. Treat a restore as a procedure
+to rehearse and verify with `discover`, not as a safety net to rely on — and
+note that it can only be as good as the identities and group masks `backup
+save` managed to read.
 
 ### Starting over
 

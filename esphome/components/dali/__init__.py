@@ -5,6 +5,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 import esphome.pins as pins
 from esphome.components import text_sensor
+from esphome.components.esp32 import add_idf_sdkconfig_option
 from esphome.const import (
     CONF_ID,
     CONF_INPUT,
@@ -356,6 +357,21 @@ async def to_code(config):
     if include_builtin_idf_component is not None:
         # dali_phy.c.inc drives the bus timing from a gptimer.
         include_builtin_idf_component("esp_driver_gptimer")
+
+    # The TX bit clock is a GPTIMER alarm every 104 us. An ISR that is not
+    # cache-safe is masked whenever the flash cache is off, which ESPHome does
+    # for every NVS commit (light restore state, the group map, the address
+    # backup): a frame in flight then holds the bus at whatever half-bit it was
+    # on, and is still counted as sent. The native build sets the same options
+    # in sdkconfig.defaults. The TX ISR calls gpio_set_level(), which has to be
+    # in IRAM once the ISR can run with the cache off.
+    #
+    # The RX edge interrupt stays on the shared GPIO ISR service, which ESPHome
+    # itself installs non-IRAM; making it IRAM-safe would require every handler
+    # on that service to be. An edge lost to a flash commit costs one reply,
+    # which the scheduler retries.
+    add_idf_sdkconfig_option("CONFIG_GPTIMER_ISR_CACHE_SAFE", True)
+    add_idf_sdkconfig_option("CONFIG_GPIO_CTRL_FUNC_IN_IRAM", True)
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)

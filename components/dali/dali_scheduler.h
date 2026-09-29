@@ -170,9 +170,15 @@ typedef struct {
      */
     uint32_t  (*get_time_us)(void);
     /*
-     * Optional exact bus-release time for the most recent successful TX.
-     * Timestamp-producing PHY implementations should provide it when tx()
-     * can return noticeably after the waveform ends.
+     * Optional exact bus-release time for the most recent successful TX: the
+     * end of the frame's last data bit, before any stop bits. Every reply-
+     * window edge in dali_frame.h is measured from it, because that is where
+     * IEC 62386-101 starts the forward-to-backward settling time.
+     *
+     * Without it the scheduler measures from the moment tx() returned, which
+     * is late by at least the stop bits, and the undecodable open edge moves
+     * late with it. The inter-frame guard and the send-twice bound always use
+     * the return time.
      */
     DaliError (*get_last_tx_end_us)(uint32_t *timestamp_out);
 } DaliSchedOps;
@@ -318,6 +324,10 @@ DaliSchedState dali_sched_state(void);
  * True only when no transaction is active or queued and no reset barrier is
  * pending. Intended for an exclusive workflow to wait until previously
  * admitted work has drained before it starts enqueueing.
+ *
+ * A dequeued transaction leaves SCHED_IDLE inside the same critical section
+ * that removed it from the queue, so there is no instant at which work taken
+ * off the queue reads as drained.
  */
 bool dali_sched_is_quiescent(void);
 

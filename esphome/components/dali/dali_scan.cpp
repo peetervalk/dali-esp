@@ -111,7 +111,7 @@ static bool scan_sync_acquire() {
         return false;
     }
     s_scan_slot.waiting_task = xTaskGetCurrentTaskHandle();
-    s_scan_slot.result       = DALI_ERR_TIMEOUT;
+    s_scan_slot.result       = DALI_ERR_WAIT_EXPIRED;
     s_scan_slot.reply        = {};
     s_scan_slot.has_reply    = false;
     s_scan_slot.sequence     = {};
@@ -169,8 +169,11 @@ static void scan_sequence_result_init(DaliSequenceResult *result, DaliError erro
     result->failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
 }
 
-// One DALI round-trip is ~50 ms; 500 ms leaves ample headroom for a single frame.
-static constexpr uint32_t SCAN_SYNC_FRAME_WAIT_MS = 500u;
+// How long a single frame may take is the shared transport budget for its retry
+// count (dali_transport_transaction_timeout_ms), the same figure the shell waits.
+// An expired wait reports DALI_ERR_WAIT_EXPIRED, never DALI_ERR_TIMEOUT: the
+// walk reads TIMEOUT as "nothing at this address", and a wait that gave up has
+// learned nothing about the address at all.
 static constexpr uint32_t SCAN_DRAIN_WAIT_MS = 5000u;
 
 static bool scan_wait_for_quiescent_scheduler() {
@@ -212,7 +215,9 @@ static DaliError scan_sync_transact(const DaliFrame *frame,
     }
 
     ScanSyncCtx taken = {};
-    if (!scan_sync_wait(SCAN_SYNC_FRAME_WAIT_MS, &taken)) return DALI_ERR_TIMEOUT;
+    if (!scan_sync_wait(dali_transport_transaction_timeout_ms(retries_left), &taken)) {
+        return DALI_ERR_WAIT_EXPIRED;
+    }
 
     if (reply_out != nullptr && taken.has_reply) *reply_out = taken.reply;
     return taken.result;
@@ -245,8 +250,8 @@ static DaliError scan_sync_sequence_transact(const DaliSequence *seq,
 
     ScanSyncCtx taken = {};
     if (!scan_sync_wait(dali_transport_sequence_timeout_ms(seq), &taken)) {
-        scan_sequence_result_init(result_out, DALI_ERR_TIMEOUT);
-        return DALI_ERR_TIMEOUT;
+        scan_sequence_result_init(result_out, DALI_ERR_WAIT_EXPIRED);
+        return DALI_ERR_WAIT_EXPIRED;
     }
 
     if (!taken.has_sequence) {

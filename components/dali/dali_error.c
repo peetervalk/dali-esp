@@ -30,6 +30,7 @@ static const char *const s_error_names[] = {
     [DALI_ERR_INTERVENED]  = "intervened",
     [DALI_ERR_FULL]        = "table full",
     [DALI_ERR_RX_ACTIVITY] = "rx activity",
+    [DALI_ERR_WAIT_EXPIRED] = "wait expired",
 };
 
 const char *dali_error_name(DaliError err)

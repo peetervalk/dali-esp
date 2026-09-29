@@ -1746,6 +1746,13 @@ void DaliComponent::console_raw_(const DaliCliTokens &t, bool send_twice, void *
         return;
     }
 
+    /* Held to the same rule as `special` and `config` below: the text box does
+     * not send commissioning frames, whichever spelling they arrive in. */
+    if (dali_cli_raw_frame_is_commissioning(&frame)) {
+        set_cmd_result("commissioning frame; use the native CLI");
+        return;
+    }
+
     bool wait_reply = false;
     if (t.count == 4u) {
         if (strcmp(t.tok[3], "wait") != 0) {
@@ -3471,13 +3478,40 @@ void DaliComponent::start_scan()
     }
 }
 
+/* Many times the longest thing a component producer queues (a device-type
+ * enumeration is ~200 ms), and short enough that a claim which cannot drain is
+ * reported instead of leaving a terminal hanging. The scan task waits as long. */
+static constexpr uint32_t BUS_CLAIM_DRAIN_WAIT_MS = 5000u;
+
 bool DaliComponent::try_claim_bus(const char *what)
 {
+    const char *who = what != nullptr ? what : "shell";
     if (scan_running_.exchange(true)) {
         ESP_LOGW(TAG, "%s: bus already in use", what != nullptr ? what : "claim");
         return false;
     }
-    ESP_LOGI(TAG, "Bus claimed by %s", what != nullptr ? what : "shell");
+
+    /*
+     * The gate stops new component traffic, not traffic already queued: the
+     * refresh pump's current query, the sensor polls that fell due, a light
+     * command. A workflow that starts on top of those spends its first reply
+     * waits queued behind them — and release_bus() starts a refresh pass, so
+     * the verb typed right after another one meets exactly that. The shell once
+     * read the resulting expired wait as an empty address, which let `address
+     * set` write onto an occupied one. Wait for the queue to drain, as the
+     * button scan does, and refuse the claim if it will not.
+     */
+    const uint32_t started_ms = millis();
+    while (!dali_sched_is_quiescent()) {
+        if ((uint32_t)(millis() - started_ms) >= BUS_CLAIM_DRAIN_WAIT_MS) {
+            scan_running_.store(false, std::memory_order_release);
+            ESP_LOGW(TAG, "%s: queued traffic did not drain; claim refused", who);
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    ESP_LOGI(TAG, "Bus claimed by %s", who);
     return true;
 }
 

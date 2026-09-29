@@ -21,42 +21,67 @@
 #define DALI_SETTLE_MS                2u    /* RX self-echo suppression after TX */
 #define DALI_REPLY_TIMEOUT_MS        25u    /* max wait for backward frame (ms) — 22 ms spec + 3 ms margin */
 /*
- * Earliest accepted reply activity, measured from the precise local TX end.
- * IEC 62386-101 gives the forward-to-backward settling time as a range; this is
- * its minimum, so gear answering at the fast end of the range is attributed to
- * its own reply window rather than discarded as stray activity. Do not raise it
- * towards the nominal 7 ms: everything between would then time out.
+ * The two stop bits the PHY clocks out after a frame's last data bit: four
+ * half-bit periods of idle bus, at DALI_TICKS_PER_HALF_BIT timer ticks each.
+ * The PHY reports a transmission complete only after them, and starts its RX
+ * settle suppression from that later moment.
+ *
+ * Every reply-window edge below is measured from the frame end instead — the
+ * instant the last data bit ended and the bus was released — because that is
+ * where IEC 62386-101 starts the forward-to-backward settling time. The two
+ * points are this far apart, and treating them as one put the undecodable open
+ * edge 1.664 ms later than the standard's minimum.
+ *
+ * That reference is this project's reading, not a quoted clause: the text has
+ * not been checked on this point. What supports it is the bus. Every driver
+ * measured on either installation answers inside the 5.5-10.5 ms range from the
+ * frame end, while from after the stop bits four 1k drivers answer below the
+ * minimum. See the stack review follow-up in project_log.md.
+ */
+#define DALI_TX_STOP_BITS_US (4u * DALI_TICKS_PER_HALF_BIT * DALI_TIMER_TICK_US)
+/*
+ * Earliest accepted reply activity, measured from the end of the forward
+ * frame's last data bit. IEC 62386-101 gives the forward-to-backward settling
+ * time as a range starting there; this is its minimum, so gear answering at the
+ * fast end of the range is attributed to its own reply window rather than
+ * discarded as stray activity. Do not raise it towards the nominal 7 ms:
+ * everything between would then time out.
+ *
+ * It matters most for undecodable activity, which is what two or more replies
+ * look like when they overlap. That is COMPARE's YES when several gear match,
+ * and a contested address's answer to QUERY STATUS, so an edge set too late
+ * does not merely lose a reply: it reads a collision as silence.
  */
 #define DALI_REPLY_WINDOW_OPEN_US   5500u
 /*
  * The open edge for an observation that decoded as a complete backward frame.
  *
- * Derived from DALI_SETTLE_MS rather than chosen, because for a decoded frame
- * that is the only floor with a physical meaning. The 5.5 ms edge above exists
- * to keep *undecodable* activity from being read as a reply — the case that
- * matters, because COMPARE maps qualified activity to YES and so invents gear
- * that is not there. A complete 8-bit backward frame, arriving while a query is
- * outstanding, carries none of that ambiguity: our own 16-bit transmission
- * cannot decode as one, ringing cannot, and another master's forward frame is
- * caught by the intervening-frame branch. What remains is the PHY's own RX
- * self-echo suppression, which is DALI_SETTLE_MS.
+ * Derived rather than chosen, because for a decoded frame the only floor with a
+ * physical meaning is the earliest edge the PHY can observe at all: it drops
+ * RX through the stop bits and for DALI_SETTLE_MS after them. The 5.5 ms edge
+ * above exists to keep *undecodable* activity from being read as a reply — the
+ * case that matters, because COMPARE maps qualified activity to YES and so
+ * invents gear that is not there. A complete 8-bit backward frame, arriving
+ * while a query is outstanding, carries none of that ambiguity: our own 16-bit
+ * transmission cannot decode as one, ringing cannot, and another master's
+ * forward frame is caught by the intervening-frame branch.
  *
- * The alternative was a hand-picked margin, and the 1k installation showed why
- * that loses. Four LED-strip drivers settle in 5.24-5.62 ms, straddling the
- * standard's 5.5 ms minimum. One DT6 driver at a0 varies from 4.12 to 5.85 ms
- * on the same device between consecutive queries — 25% faster than the minimum
- * at its worst — which made it look like it answered some opcodes and not
- * others until three captures showed the failures falling wherever the edge
- * happened to be. Any fixed margin gets chased by the next such device.
- *
- * IEC 62386-101 makes this gear non-conformant. Refusing to read it makes the
- * installation unusable, which is the worse answer, and the verb that asked
- * reported a timeout while a correctly decoded byte sat in the buffer.
+ * The 1k installation is why this is not a hand-picked margin. Its fastest
+ * drivers answer 5.8-7.5 ms after the frame end, and one DT6 driver varies by
+ * 1.7 ms between consecutive queries. Those figures were first read against a
+ * stamp taken after the stop bits, which made the gear look faster than the
+ * standard's minimum; see the stack review in project_log.md. Measured from
+ * the frame end they are inside the standard's range, and a fixed margin near
+ * the minimum would still be chased by the next such device.
  */
-#define DALI_REPLY_WINDOW_OPEN_DECODED_US ((uint32_t)DALI_SETTLE_MS * 1000u)
-/* The scheduler starts its 25 ms wait after the 2 ms TX/RX handoff. Keep that
- * existing effective deadline while attributing timestamped RX observations. */
-#define DALI_REPLY_WINDOW_CLOSE_US (((uint32_t)DALI_SETTLE_MS + (uint32_t)DALI_REPLY_TIMEOUT_MS) * 1000u)
+#define DALI_REPLY_WINDOW_OPEN_DECODED_US \
+    (DALI_TX_STOP_BITS_US + (uint32_t)DALI_SETTLE_MS * 1000u)
+/* The scheduler starts its 25 ms wait after the 2 ms TX/RX handoff, and that
+ * handoff begins only once the stop bits are out. Keep that effective deadline,
+ * expressed from the frame end, while attributing timestamped RX observations. */
+#define DALI_REPLY_WINDOW_CLOSE_US \
+    (DALI_TX_STOP_BITS_US + \
+     ((uint32_t)DALI_SETTLE_MS + (uint32_t)DALI_REPLY_TIMEOUT_MS) * 1000u)
 /* Reject isolated pulses as commissioning replies. A corrupted backward frame
  * must still span the first edge through the final data-bit region at the
  * decoder's -25% timing tolerance, and contain several real transitions. */
@@ -147,6 +172,14 @@ typedef enum {
     DALI_ERR_INTERVENED = 10,   /* another forward frame invalidated a reply  */
     DALI_ERR_FULL       = 11,   /* fixed-capacity registration table is full  */
     DALI_ERR_RX_ACTIVITY = 12,  /* reply-window activity was not decodable    */
+    /*
+     * A blocking caller stopped waiting before the scheduler reported. Not a
+     * statement about the bus: the transaction may still be queued, may be on
+     * the wire, or may already have succeeded. Deliberately distinct from
+     * DALI_ERR_TIMEOUT, which means the reply window stayed silent, so that no
+     * caller can read "we gave up waiting" as "nothing answered".
+     */
+    DALI_ERR_WAIT_EXPIRED = 13,
 } DaliError;
 
 /*
@@ -202,9 +235,10 @@ typedef struct {
     /* Backward frame arriving when a reply was already latched, or after a
      * forward frame intervened. A duplicate, not a timing signal. */
     volatile uint32_t rx_reply_superseded;
-    /* Event-shaped frame (16/24-bit) observed in a state that cannot route it.
-     * Any bus carrying an active control device makes this large during a
-     * walk; it measures event traffic, not a fault. */
+    /* No longer incremented. It counted event-shaped frames dropped because
+     * the scheduler was in SCHED_TX or WAIT_SETTLE when they were decoded;
+     * those are now routed in every state. Kept so the struct layout and the
+     * `stats` output stay stable. */
     volatile uint32_t rx_event_unroutable;
     /* Event-shaped frame in a routable state with no subscriber registered.
      * A fact about how this build is wired, not about the bus. */

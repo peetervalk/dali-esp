@@ -149,11 +149,21 @@ typedef enum {
     DALI_RESTORE_MOVE_DISPLACE,
 } DaliRestoreMoveKind;
 
+/* The two enums lead so the byte fields pack behind them: a plan holds
+ * DALI_RESTORE_MAX_MOVES of these statically, and the order costs 4 bytes each. */
 typedef struct {
     DaliSnapshotSpace   space;
+    DaliRestoreMoveKind kind;
     uint8_t             from;
     uint8_t             to;
-    DaliRestoreMoveKind kind;
+    /*
+     * The unit this move carries, by the Bank 0 identification number it was
+     * matched on, so an executor can confirm that what answers at `to`
+     * afterwards is that unit. Every move the planner emits has one: nothing
+     * is moved that could not be told apart from every other unit.
+     */
+    bool                has_identification;
+    uint8_t             identification[DALI_MEMORY_BANK0_IDENTIFICATION_LEN];
 } DaliRestoreMove;
 
 typedef struct {
@@ -192,6 +202,52 @@ DaliError dali_restore_plan(DaliRestorePlan              *out,
 
 /* True when there is nothing to do and nothing wrong: no moves, no conflicts. */
 bool dali_restore_plan_is_clean(const DaliRestorePlan *plan);
+
+/* ---------------------------------------------------------------------------
+ * Confirming a move
+ *
+ * SET SHORT ADDRESS is send-twice and unacknowledged, and nothing on this bus
+ * detects a collision, so "transmitted" says nothing about whether the unit
+ * moved. The plan's later moves assume it did: a staging hop that silently did
+ * not land is followed by a placement onto the address it was meant to vacate,
+ * which puts two units on one address. An executor confirms each move before
+ * sending the next one, and stops on anything but CONFIRMED.
+ * --------------------------------------------------------------------------*/
+
+typedef enum {
+    /* `to` answers, `from` is silent, and the unit at `to` reads back the
+     * identification number the move was planned for. */
+    DALI_RESTORE_MOVE_CONFIRMED = 0,
+    /* Nothing answers at `to`. The write did not land, or the unit lost power. */
+    DALI_RESTORE_MOVE_TARGET_SILENT,
+    /* `from` still answers: the unit did not move, or something else is there. */
+    DALI_RESTORE_MOVE_SOURCE_ANSWERS,
+    /* `to` answers with a different identification number. */
+    DALI_RESTORE_MOVE_WRONG_UNIT,
+    /* A probe could not be read — undecodable activity, a bus error, or an
+     * expired wait — so nothing can be concluded. The probe's error is
+     * reported alongside. */
+    DALI_RESTORE_MOVE_UNREADABLE,
+} DaliRestoreMoveCheck;
+
+/*
+ * Probe the bus after `move` was sent: `to` must answer, `from` must be
+ * silent, and when the move carries an identification number the unit at `to`
+ * must read it back. Presence is QUERY STATUS for control gear and QUERY NUMBER
+ * OF INSTANCES for control devices, the questions discovery asks; the
+ * identification is read from Bank 0 in the move's own address space.
+ *
+ * Needs a transport that can run atomic sequences, for the memory read.
+ * Returns DALI_ERR_INVALID on a bad argument; otherwise DALI_OK with the
+ * verdict in *check_out. *probe_error_out, when given, receives the error of
+ * the probe that decided an UNREADABLE verdict and DALI_OK for every other.
+ */
+DaliError dali_restore_confirm_move(const DaliTransport  *transport,
+                                    const DaliRestoreMove *move,
+                                    DaliRestoreMoveCheck  *check_out,
+                                    DaliError             *probe_error_out);
+
+const char *dali_restore_move_check_name(DaliRestoreMoveCheck check);
 
 const char *dali_restore_conflict_name(DaliRestoreConflictKind kind);
 const char *dali_restore_space_name(DaliSnapshotSpace space);

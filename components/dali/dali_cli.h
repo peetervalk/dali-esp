@@ -388,6 +388,25 @@ const DaliCliGearCommand *dali_cli_config_find(const char *name);
 bool dali_cli_config_is_commissioning(DaliCommandId id);
 
 /*
+ * True for a raw frame that is one of the commands the two predicates above
+ * gate, in either address space — so `raw` and `raw2` cannot send what the
+ * named verbs refuse.
+ *
+ * Covered, and nothing else:
+ *   - a 16-bit special command dali_cli_special_is_commissioning() names;
+ *   - a 16-bit SET SHORT ADDRESS (DTR0), whatever it is addressed to;
+ *   - a 24-bit Part 103 special that is an addressing step: INITIALISE,
+ *     RANDOMISE, WITHDRAW, SEARCHADDRH/M/L, PROGRAM SHORT ADDRESS;
+ *   - a 24-bit device-level SET SHORT ADDRESS (DTR0).
+ *
+ * The line follows the named verbs exactly. Part 103 memory writes stay
+ * outside because `devmem write` is not gated either; TERMINATE, COMPARE,
+ * VERIFY and QUERY SHORT ADDRESS stay outside because `special` allows them.
+ * A frame of any other length is never matched: gear and devices discard it.
+ */
+bool dali_cli_raw_frame_is_commissioning(const DaliFrame *frame);
+
+/*
  * True for the config commands a broadcast target must not carry.
  *
  * ADD TO GROUP and REMOVE FROM GROUP qualify because the runtime group-query
