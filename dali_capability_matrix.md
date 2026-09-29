@@ -84,7 +84,7 @@ cached level profile and triggers a refresh.
 | Inventory export | `dali_discovery_inventory_*` | `inventory`, `export inventory` | partial | yes | yes (YAML lines, shell) |
 | Configuration export | n/a — reads live entity state | `export config` | no | yes | shell only; the native build has no YAML to describe |
 | Commission unaddressed | `dali_commissioning_commission_unaddressed` | `commission unaddressed` | yes | partial | shell, opt-in |
-| Commission control devices | `dali_device_commissioning_commission_unaddressed` | `commission devices` | yes | no | shell, opt-in |
+| Commission control devices | `dali_device_commissioning_commission_unaddressed` | `commission devices` | yes | yes (2k, 2026-09-29) | shell, opt-in |
 | Post-scan verification | `dali_commissioning_audit` | automatic in both `commission` walks | yes | no | shell |
 | Address backup | `dali_snapshot_from_inventory` | `backup save`, `backup status` | yes | partial (2k, 2026-09-03) | shell; persisted to flash |
 | Backup blob round trip | `dali_snapshot_encode` / `_decode` | `backup export`, `backup import` | yes | n/a — no bus traffic | shell |
@@ -309,8 +309,7 @@ use. Host- and compile-verified only; no bus has run it.
   membership.
 - `address <dN> clear` has one-sided evidence. Part 103 has no broadcast
   QUERY MISSING SHORT ADDRESS in this stack, so silence at the subject is the
-  whole of the confirmation, and `commission devices` is what settles it. Its
-  INITIALISE selector is `0x7F` since 2026-09-29, host-tested; the `0x00` it
-  sent before selected nothing on 2k. The device query exists, `0x33`, and is
+  whole of the confirmation, and `commission devices` is what settles it: on 2k
+  it found both of two cleared devices. The device query exists, `0x33`, and is
   not implemented.
 - Nothing here claims DALI Alliance certification or complete IEC 62386 coverage.

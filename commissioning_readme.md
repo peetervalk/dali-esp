@@ -710,14 +710,13 @@ addresses devices that have none, so `address d<N> clear` followed by
 addressed — and how you produce an unaddressed device to test the walk against
 in the first place.
 
-**Use a build from after 2026-09-29.** Earlier firmware, `v2.0.0` included, gets
-both device-space encodings wrong. Its `address d<N> set d<M>` loads DTR0 with
-`(M << 1) | 1` and sends the device to 2M+1, and its `commission devices` sends
-INITIALISE `0x00`, which selects the device at d0 rather than unaddressed ones.
-On 2k that walk found neither of two cleared devices. The device space takes
-every address raw, and INITIALISE `0x7F` means "no short address"; see
-`dali_protocol.md`. That `0x7F` finds cleared devices is host-tested and not
-yet bus-verified.
+**Use a build from `48009a8` or later.** Earlier firmware, `v2.0.0` included,
+gets both device-space encodings wrong. Its `address d<N> set d<M>` loads DTR0
+with `(M << 1) | 1` and sends the device to 2M+1, and its `commission devices`
+sends INITIALISE `0x00`, which selects the device at d0 rather than unaddressed
+ones. On 2k that walk found neither of two cleared devices; the fixed build's
+`0x7F` found both, and `restore plan` then matched them to the backup. The
+device space takes every address raw; see `dali_protocol.md`.
 
 #### The raw spelling, and the encoding it needs
 

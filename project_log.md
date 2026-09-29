@@ -28,6 +28,36 @@ supersedes.
 
 # Verification history
 
+### Verified on hardware 2026-09-29, later (2k bus: control-device commissioning, `dev`)
+
+The first bus run of the Part 103 commissioning walk, and the recovery the
+earlier 2k entry left open. Driven from the `dali-shell` script against the 2k
+node on a `dev` build carrying the encoding fix, committed as `48009a8`; the
+exact flashed ref is not recorded.
+
+Bus at start: a0–a4 lamps; the Steinel and the PB coupler both unaddressed.
+
+- **`commission devices` found both devices with INITIALISE `0x7F`.** Pre-scan
+  `occupied=0`; the search found random `0xE1F4F7` and programmed it to d0,
+  then `0xFE0E00` to d1; `no more unaddressed devices`; TERMINATE. The post-scan
+  found 5 addresses and confirmed 2 of 2 assignments. This settles INITIALISE
+  on the bus, the first control-device COMPARE, SEARCHADDR, PROGRAM SHORT
+  ADDRESS and VERIFY traffic, and the device post-scan. The walk takes its
+  quiescence bracket unconditionally and printed no bracket failure.
+- **`discover` put each unit back where it was:** d0 with 4 input instances,
+  the Steinel, and d1 with 1, the coupler. The Steinel drew the lower random
+  address and the walk assigns in search order, so the original layout came
+  back by chance.
+- **`restore plan` matched all 7 units to the backup taken before the earlier
+  session** — `7 matched, 7 already correct, 0 move(s)` — so it read both
+  device identification numbers through the new addresses.
+
+Not covered: no device-space move ran, so the raw DTR0 in `address dN set` and
+in `restore apply` has host vectors only. Equal random addresses did not arise.
+The lamps read `status=0x00, level=0` against `0x04, 85` in the earlier
+session. Nothing in this session addressed gear, and the node was reflashed in
+between; the change is not attributed here.
+
 ### Verified locally on 2026-09-29 (Part 103 encoding fix, uncommitted on `dev`)
 
 The fix for the two encodings the next entry found wrong on 2k. Nothing touched
@@ -3015,7 +3045,7 @@ below landed after that tag.
 Add new entries here as breaks accumulate, and empty the section again at the
 next tag.
 
-### From the 2026-09-29 Part 103 encoding fix (host-tested)
+### From the 2026-09-29 Part 103 encoding fix (`48009a8`; `commission devices` hardware-verified, device moves host-tested)
 
 Operator-visible:
 

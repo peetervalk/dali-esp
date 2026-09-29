@@ -29,6 +29,12 @@ control-device commissioning — none of which any earlier tag had. It is a
 breaking release for C API consumers and for out-of-tree build systems;
 `CHANGELOG.md` has the migration.
 
+**`v2.0.0` gets both Part 103 addressing encodings wrong**, and so do its
+device arms. `address dN set dM` sends a device to 2M+1, a device-space
+`restore apply` does the same, and `commission devices` finds no unaddressed
+device. `dev` fixes all three from `48009a8`; do not use them on the tag. Gear
+addressing is unaffected.
+
 `dali-starter.yaml` and the README example pin the current tag, so a new
 installation gets released code by default. Work lands on `dev` between
 releases, and pointing an installation there is a deliberate move: compile and
@@ -92,10 +98,12 @@ counters, captures, and what each did *not* cover — are in `project_log.md`.
   `contested` classification met a genuine physical two-unit collision — the
   first real collision behind `RX_ACTIVITY`, which every commissioning safety
   claim depends on.
-- **Control devices read every Part 103 address parameter raw.** On 2k, device
-  SET SHORT ADDRESS with DTR0 = 5 put the PB coupler on d5, and INITIALISE
-  `0x00` selected neither of two unaddressed devices. Both old values are fixed
-  on `dev`; the fix itself has not met a bus.
+- **Control-device commissioning works on 2k, and every Part 103 address
+  parameter is raw.** Device SET SHORT ADDRESS with DTR0 = 5 put the PB coupler
+  on d5, and INITIALISE `0x00` selected neither of two unaddressed devices. On
+  the fixed build, `commission devices` with INITIALISE `0x7F` found both,
+  programmed them to d0 and d1, confirmed both in its post-scan, and `restore
+  plan` matched all 7 units to the backup by identification number.
 - **No control gear on 2k answers past the reply window.** `rx_reply_late` reads
   0 across every measured walk. This retires the earlier late-reply reading; the
   backoff fix that reading produced still works, but its mechanism is now
@@ -136,11 +144,11 @@ Established on or before the `v1.1.1` flash of 2026-08-14:
   memory operations, and vendor helpers. No write path reads its value back.
 - **Equal-random-address handling** — the largest untested slice. The two units
   commissioned so far drew distinct randoms, so the path never ran.
-- Control-device commissioning (`commission devices`) on a real bus, and the
-  quiescence bracket it now takes. `address <dN> clear` makes the fixture
-  reachable for the first time: until it existed there was no way to produce an
-  unaddressed control device from the shell, so the walk could not be run
-  against anything.
+- **Device-space moves on the fixed build.** `address dN set dM` and a
+  device-space `restore apply` now load DTR0 raw, and neither has run since:
+  the 2k recovery landed both units on their recorded addresses, so `restore
+  plan` had nothing to move. One `address d1 set d2` and back, followed by
+  `restore plan`, covers both.
 - `backup import`, `backup export`, and `restore groups` against real gear.
   `backup save`/`status` and `restore plan`/`apply` are now covered.
 - The commissioning post-scan audit's own contested path. The scan path met a
@@ -428,19 +436,6 @@ a sensor value.
 
 ### P0 — Protocol correctness and conformance
 
-- **Part 103 addressing encodings: fixed on `dev`, host-tested; 2k waits on a
-  flash.** The 2k bus showed both old values wrong (`project_log.md`, *Verified
-  on hardware 2026-09-29*): device SET SHORT ADDRESS (DTR0) reads DTR0 raw, and
-  INITIALISE (device) `0x00` selected neither of two unaddressed devices. `dev`
-  now loads device DTR0 raw — `address dN set` and `restore apply` both go
-  through `dali_restore_build_move_sequence()` — and sends INITIALISE `0x7F`.
-  `v2.0.0` has neither fix: on it, do not use `address dN set`, device-space
-  `restore apply`, or `commission devices`. **2k state:** the Steinel and the
-  PB coupler hold no short address. Next, on a `dev` build: `commission devices`
-  (expect 2 found — the first bus run of RANDOMISE, SEARCHADDR, COMPARE and
-  PROGRAM in the device space), then `restore plan` / `restore apply` from the
-  backup taken before the session; do not `backup save` first. If it still
-  finds nothing, the fault is further into the walk, not the selector.
 - **Hardware validation of the stack-review fixes.** Host-tested and
   mutation-checked, never on a bus. The cheapest checks: a capture should read
   every reply's `since_tx_us` about 1664 higher than the same gear read before
@@ -571,6 +566,22 @@ The typed verb surface is in place; what is missing is evidence. Keep
   `"Contested: a4"`. The same shape one layer along, group membership changes do
   not reach the integration either, so a group light entity cannot know its
   membership changed underneath it.
+- **Decide: what an input sensor shows when its device stops answering.** Today
+  it holds its last value indefinitely. `DaliInputSensor` publishes only after a
+  complete read (`on_input_value_done()` in `dali_component.cpp`); a failed poll
+  publishes nothing and nothing marks the entity stale. On 2k, "Zone 2 Lux" sat
+  at 54 lx for as long as the Steinel shared d0 with the coupler and then had no
+  address, which reads in Home Assistant as a working sensor. Unconfirmed that
+  54 was the last good reading rather than a collided read that decoded; HA's
+  history would tell. Occupancy is the costly case: `zone2_occ` is a template
+  text sensor pushed from `zone2_occ_raw`, so a dead sensor stuck on present
+  keeps the zone occupied. To decide: whether to go stale at all; after what
+  (N consecutive failed polls, or a time since the last good read scaled by
+  `poll_interval`); what to publish — `NAN` shows as "unknown" in Home
+  Assistant but also fires `on_value` with NaN, so site lambdas like the
+  occupancy mapping must handle it; whether it is per-sensor YAML with a
+  default; and whether text and binary entities derived in YAML follow
+  automatically or need their own handling.
 - **Part 103 device groups are decode-only.** They are recognised as an event
   source and nowhere else: discovery does not query them, the snapshot does not
   record them, `restore groups` is control gear only, and `address <dN> add

@@ -422,9 +422,9 @@ thing:
   without a short address, `0x00`–`0x3F` the one device holding that address.
   Part 102 uses `0x00` for all gear and `0xFF` for unaddressed gear, so no value
   carries over. This stack sent `0x00`, from `esp_dali`, until 2026-09-29, when
-  it found neither of two unaddressed devices on 2k; Beckhoff's
-  `FB_DALI103Initialise` and TI's device firmware both give `0x7F`. That `0x7F`
-  selects them is host-tested, not yet bus-verified.
+  it found neither of two unaddressed devices on 2k. Beckhoff's
+  `FB_DALI103Initialise` and TI's device firmware both give `0x7F`, and on 2k
+  `0x7F` found both. Hardware-verified.
 
 Opcode values were transcribed from Espressif's `esp_dali`. TI's MSPM0 SDK
 routes every one of them to the same command in its Part 103 device firmware
