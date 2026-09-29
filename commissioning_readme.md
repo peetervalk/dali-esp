@@ -1106,14 +1106,17 @@ blob is checked end to end before a byte of it is kept.
 
 #### What has not been proven
 
-**Very little of this has been run on a bus.** `backup save` and a one-move
-`restore plan` / `restore apply` worked on the 2k installation on 2026-09-03,
-before `apply` confirmed its moves; the confirmation itself, cycle-staging,
-moving aside a unit the backup never saw, the rejection paths, and `restore
-groups apply` have host vectors and nothing more. Treat a restore as a procedure
-to rehearse and verify with `discover`, not as a safety net to rely on — and
-note that it can only be as good as the identities and group masks `backup
-save` managed to read.
+**The address path has run on a bus.** On the 2k installation on 2026-09-29,
+`backup save`, `export` and `import` and `restore plan` / `restore apply` all
+worked, with every move confirmed. That included dependent moves, a swap staged
+through a spare address, and moving aside a unit the backup had never seen.
+These have host vectors and nothing more: `apply` stopping at a move it cannot
+confirm, a restore planned against a contested address, the rejection paths,
+and `restore groups apply`.
+
+A restore is only as good as what `backup save` managed to read. A save cannot
+record gear that has no short address. It warns when the bus reports any, so
+give that gear an address with `commission unaddressed` and save again.
 
 ### Starting over
 

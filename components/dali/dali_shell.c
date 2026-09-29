@@ -5999,6 +5999,17 @@ static void cmd_backup(const DaliCliTokens *t)
     uint8_t unanchored = 0u;
     shell_fill_missing_identities(inventory, &transport);
 
+    /*
+     * Gear with no short address is invisible to the walk above: it answers
+     * nothing addressed, so it is not in the inventory, the snapshot, the entry
+     * count or the output. Asked here, inside the same claim, because nothing
+     * else in a save would ever mention it. Reported below with the contested
+     * addresses, which go missing the same way. The device space has no
+     * counterpart: Part 103 QUERY MISSING SHORT ADDRESS is not implemented.
+     */
+    DaliError              missing_err = DALI_OK;
+    const ShellUnaddressed missing     = shell_unaddressed_probe(&missing_err);
+
     shell_inventory_replace(inventory);
     shell_bus_release();
 
@@ -6080,6 +6091,29 @@ static void cmd_backup(const DaliCliTokens *t)
             shell_printf("backup: nothing here de-addresses a control device, "
                          "so a contested d<N> needs a hardware pass\r\n");
         }
+    }
+
+    /*
+     * Warned, not refused: saving with a unit deliberately left unaddressed is
+     * a legitimate thing to do, and the operator is the one who knows whether
+     * this is that. What must not happen is a save that drops a fixture and
+     * says nothing.
+     */
+    if (missing == SHELL_UNADDRESSED_SOME &&
+        missing_err == DALI_ERR_RX_ACTIVITY) {
+        shell_printf("backup: more than one unit on the bus reports no short "
+                     "address, and none of them is recorded here\r\n");
+        shell_printf("backup: run 'commission unaddressed', then 'backup save' "
+                     "again, to include them\r\n");
+    } else if (missing == SHELL_UNADDRESSED_SOME) {
+        shell_printf("backup: gear on the bus reports no short address and is "
+                     "NOT recorded here\r\n");
+        shell_printf("backup: run 'commission unaddressed', then 'backup save' "
+                     "again, to include it\r\n");
+    } else if (missing == SHELL_UNADDRESSED_UNREADABLE) {
+        shell_printf("backup: whether any gear has no short address is "
+                     "unreadable (%s); a unit with none would be missing "
+                     "here\r\n", shell_err(missing_err));
     }
 
     uint32_t len = 0u;
@@ -6645,6 +6679,20 @@ static void cmd_restore(const DaliCliTokens *t)
             break;
         }
         applied++;
+
+        /*
+         * The same report `address set` makes, on a stricter confirmation: both
+         * ends and the identification number at `to`. One move at a time, in
+         * plan order, is what keeps the integration's caches in step with the
+         * bus — the plan only moves a unit onto an address the bus has already
+         * shown vacated, so each report lands on a slot the previous one freed.
+         * Device moves report nothing; see the hooks in dali_shell.h.
+         */
+        if (move->space == DALI_SNAPSHOT_SPACE_GEAR &&
+            s_session.hooks.short_address_moved != NULL) {
+            s_session.hooks.short_address_moved(s_session.hooks.ctx,
+                                                move->from, move->to);
+        }
     }
 
     shell_bus_release();
@@ -6656,11 +6704,15 @@ static void cmd_restore(const DaliCliTokens *t)
                      "could not reach\r\n");
     }
 
-    /* Short addresses moved, so every cached view of the bus is stale. */
-    DaliDiscoveryInventory *inventory = &s_inventory_scratch;
-    if (s_session.hooks.inventory_changed != NULL && shell_inventory_snapshot(inventory)) {
-        s_session.hooks.inventory_changed(s_session.hooks.ctx, inventory);
-    }
+    /*
+     * Nothing is published as a whole here. The only inventory this session
+     * holds is the scan the plan was built from, which is the bus as it stood
+     * before the first move: handing that to the integration filed every moved
+     * gear's groups under the address it had just left, and persisted them
+     * there. Each confirmed gear move was reported above as it landed, and a
+     * move that could not be confirmed reports nothing, as it does for
+     * `address`.
+     */
 }
 
 static void cmd_dtrcheck(const DaliCliTokens *t)

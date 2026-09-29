@@ -1121,6 +1121,19 @@ identity could not be read is still recorded, and `backup save` names it on the
 spot, because a fixture that cannot be put back is something to learn before the
 restore rather than during it.
 
+Gear with no short address cannot be recorded at all, because nothing answers
+for it. So `backup save` also broadcasts QUERY MISSING SHORT ADDRESS, and says
+so when anything answers YES:
+
+```text
+backup: gear on the bus reports no short address and is NOT recorded here
+backup: run 'commission unaddressed', then 'backup save' again, to include it
+```
+
+The save still completes, since leaving a unit unaddressed can be deliberate.
+Control devices have no such check, because the Part 103 query is not
+implemented.
+
 `restore plan` re-scans, matches each backup entry to the unit now holding its
 identification number, and prints the moves that would put every one back. It is
 read-only and needs no policy. `restore apply` executes them, and is gated
@@ -1153,6 +1166,11 @@ The other reasons are `the source still answers`, `a different unit answers at
 the target`, and `unreadable` followed by the error that stopped the read-back.
 A run that confirms every move ends with `restore apply: N move(s) applied, each
 confirmed on the bus`.
+
+Each confirmed gear move is also reported to the integration, the way `address`
+reports one. Its group membership follows the gear and its cached level
+profile is re-read, with no rescan. A move that was not confirmed reports
+nothing.
 
 Cycles are handled. Two units that need to swap addresses cannot both move
 directly, so the plan stages one through a free address and places it on a later
@@ -1291,10 +1309,14 @@ Nothing an import can contain damages the backup already held: the blob is
 validated in full — magic, version, entry count, exact length, and every entry's
 address space and short address — before the first byte is written.
 
-**No part of this has met a bus.** Both planners, the snapshot format, and the
-blob's rejection paths have host vectors; the moves and the group edits have
-been transmitted nowhere. See `commissioning_readme.md` for the workflow this
-belongs to.
+**Everything here except `restore groups` has met a bus.** `backup save`,
+`status`, `export` and `import`, `restore plan` and `restore apply` have run on
+real gear and control devices. That covers dependent moves, a swap staged
+through a spare address, moving aside a unit the backup had never seen, and the
+per-move confirmation in both spaces. Both `restore groups` verbs have host
+vectors only. `current_status.md` has what is verified and `project_log.md` the
+sessions behind it. See `commissioning_readme.md` for the workflow this belongs
+to.
 
 ## Diagnostics
 

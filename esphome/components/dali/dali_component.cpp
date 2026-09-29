@@ -2827,7 +2827,9 @@ void DaliComponent::on_config_applied(DaliTarget target, DaliCommandId id,
  * some address moved somewhere, and dropping every cache keyed by the old
  * address is the only safe answer. The `address` verb chose `from` and `to`,
  * checked `to` was empty before writing, and confirmed afterwards that `to`
- * answers and `from` is silent. That is enough to move the bookkeeping instead.
+ * answers and `from` is silent. `restore apply` reports each confirmed gear
+ * move the same way, in plan order, having also read the unit's identification
+ * number back at `to`. That is enough to move the bookkeeping instead.
  *
  * What can follow the gear is its group membership: a group light picks its
  * query target from this table at runtime, so moving the member keeps the

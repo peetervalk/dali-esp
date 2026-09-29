@@ -28,6 +28,193 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-09-29 (`restore apply` reports its moves, `backup save` warns about unaddressed gear; uncommitted on `dev`)
+
+Two fixes to `dali_shell.c` for what the fifth 2k session found. The first is
+described under Investigations (*`restore apply` publishes the scan it planned
+from*). Nothing touched a bus.
+
+- `restore apply` calls `short_address_moved(from, to)` after each gear move it
+  confirms, in plan order. It no longer publishes the planning scan through
+  `inventory_changed` when it finishes. An unconfirmed move reports nothing,
+  and device moves report nothing, as before. The hook's contract in
+  `dali_shell.h` now names both callers.
+- `backup save` sends a broadcast QUERY MISSING SHORT ADDRESS inside its bus
+  claim, after the identity reads. A YES prints that gear on the bus has no
+  short address and is not recorded, with the remedy. RX activity reads as
+  more than one such unit. An unreadable answer says a unit may be missing.
+  The save still completes. The control-device space has no counterpart,
+  because Part 103 QUERY MISSING SHORT ADDRESS is not implemented.
+- `dali_shell.c` type-checks clean with the IDF 6.0.1 flags of
+  `dali_group_map.c` from `build/compile_commands.json`. The committed version
+  is also clean, so no diagnostic is new. The same check flagged an error
+  injected at the edited line, which shows it compiles the device code rather
+  than skipping it.
+- No host vector covers either change, because no suite links the shell. No
+  host suite includes `dali_shell.h` either, so the 32 suites were not re-run.
+  On the ESPHome side only a comment in `dali_component.cpp` changed.
+
+Not covered: any bus, and an ESPHome compile.
+
+### Verified on hardware 2026-09-29, fifth session (2k bus: move-aside, `address` clear, backup export/import, `dev`)
+
+Covers the last address-restore path the entries below left without a bus
+result: moving aside a unit the backup has never seen. It is also the first bus
+run of `address <aN> clear`, `backup export` and `backup import`. Driven from
+the `dali-shell` script against the 2k node. The output carries the same
+markers as the entries below; the exact flashed ref is not recorded.
+
+Bus at start: as the entry below left it, with every unit at its recorded
+address.
+
+**2k's d1 is the Casambi CBU-DCS kept there for testing**, confirmed by the
+operator in this session. Its GTIN in the backup is 6430082060120 (GS1
+Finland), and its identification number is `CA5A000E000000FF`. Entries below
+that call d1 "the DALI-2 PB coupler" or "the coupler" mean this unit. Nothing
+they measured changes, only the name.
+
+The fixture was built in four steps: export the backup, clear a4's lamp, save
+a new backup without that lamp, then free a3 so that `commission unaddressed`
+puts the lamp there. That leaves a unit no backup knows holding an address a
+recorded unit is owed.
+
+- **`backup export`** printed the 7-entry backup as an import script of 141
+  bytes.
+- **`address a4 clear` worked, and the missing-address check gave the two
+  readings one unit can produce.** It printed the stored backup's anchor note,
+  sent DTR0 = 255, and reported `a4 cleared -- gear on the bus now reports no
+  short address`. The broadcast QUERY MISSING SHORT ADDRESS read silence before
+  the write and a decoded YES after. That is the check's first bus reading. The
+  third reading, RX activity from several missing units, did not arise.
+- **`backup save` recorded `6 entries from 4 address(es)`, and said nothing
+  about the lamp it could not see.** See the P1 item in `current_status.md`.
+- **`commission unaddressed` put the cleared lamp on a3.** First `address a3
+  set a4` (DTR0 = 9) freed a3. The walk then read `occupied=4`, found random
+  `0x5B529F` and assigned short 3, with QUERY SHORT ADDRESS echoing `0x07`. Its
+  post-scan confirmed 1 of 1. The walk takes the lowest free address, and a3
+  was it.
+- **`restore plan` moved the unknown unit aside before placing the recorded
+  one.** It read `6 matched, 5 already correct, 2 move(s)`: `a3 -> a5 (not in
+  the backup, moved aside)`, then `a4 -> a3`, with the conflict `gear a3: not in
+  backup`. `restore apply` confirmed both moves. The moved-aside lamp was
+  confirmed by its own identification number, read at a5.
+- **The operator reading holds up.** The P1 item that asked for this run
+  warned that a displacement and a placement look alike in the apply log. They
+  do (`1/2 a3 -> a5: OK`, `2/2 a4 -> a3: OK`), but `apply` reprints the plan,
+  note included, directly above them. The one line that could mislead is the
+  conflict: it names a3, the address the unit was leaving, which a recorded
+  lamp holds once the apply finishes.
+- **`backup import` brought the 7-entry backup back intact.** It printed `7
+  entries from 141 byte(s)` and `stored (141 bytes)`. The decode checks the
+  exact length, so every chunk arrived exactly once. The paste displayed
+  garbled on screen. The terminal echoed the part of the paste that arrived
+  while the script was waiting for the device's answer to `begin`. The script
+  then read the buffered lines one at a time, and nothing was sent twice.
+- **The imported backup drove the last restore.** It read `7 matched, 6
+  already correct, 1 move(s)`, `a5 -> a4`, and the move was confirmed.
+  `discover` then showed every unit where the session found it, with a4 in
+  group 0. The lamp kept its group registers through the clear and the
+  re-commission, as `dali_commands.md` says a de-addressed unit does.
+
+Found while reading the apply path for this entry: `restore apply` hands the
+integration its pre-move scan. See *`restore apply` publishes the scan it
+planned from*, under Investigations. 2k cannot show it, because every lamp
+there is in g0.
+
+Not covered:
+
+- The stop after a failed move, and a contested target in either planner.
+  Both are host-tested only.
+- `address <aN> clear` against a shared address, and `address <dN> clear` on
+  any unit.
+- `restore groups`.
+
+### Verified on hardware 2026-09-29, fourth session (2k bus: swaps in both spaces, `dev`)
+
+Covers two gaps in the entry below: no gear move had run under `restore
+apply`'s confirmation, and the planner's staging hop had never sent a frame.
+Driven from the `dali-shell` script against the 2k node. The output carries the
+same markers as the entry below; the exact flashed ref is not recorded.
+
+Bus at start: as the entry below left it, with every unit at its recorded
+address.
+
+- **A device swap is staged through a spare address.** `address d0 set d2`,
+  `address d1 set d0` and `address d2 set d1` swapped the Steinel and the
+  Casambi, with device DTR0 2, 0 and 1, each one confirmed. `restore plan` read
+  `7 matched, 5 already correct, 3 move(s)`. The Casambi went d0 -> d2
+  `(staging, placed by a later step)`, then the Steinel d1 -> d0, then the
+  Casambi d2 -> d1. `restore apply` confirmed all three.
+- **A gear swap is staged the same way, and gear moves now run under the
+  confirmation.** `address a0 set a5`, `address a4 set a0` and `address a5 set
+  a4` swapped the lamps recorded at a0 and a4. DTR0 was 11, 1 and 9, which is
+  `2N+1` as on 2026-09-03. The plan staged a0 -> a5, then placed a4 -> a0 and
+  a5 -> a4, and `restore apply` confirmed all three. For gear, the
+  confirmation reads the identification number over Part 102 memory, so both
+  of its read paths have now run.
+- Each plan staged through the lowest free address in its space, d2 and a5,
+  which is the rule in `restore_find_spare()`. No recorded unit was missing,
+  so the P1 defect in that function (it can pick a missing unit's recorded
+  address) had no chance to show.
+- **`address` refuses an occupied destination.** `address a0 set a3` answered
+  `a3 already answers; refusing to move a0 onto it`. The 2026-09-03 session
+  had only seen this check pass.
+- **The session ended with the bus matching the backup.** `backup status`
+  listed the 7 entries as `loaded from storage`. `restore plan` read `7
+  matched, 7 already correct, 0 move(s)` and `bus matches the backup; nothing
+  to do`.
+
+Not covered:
+
+- No move failed, so the stop after a failed move is still host-tested only.
+- No unit that the backup has never seen was on the bus, so the move-aside
+  path has not sent a frame.
+- Neither `address aN clear` nor `address dN clear` ran.
+
+### Verified on hardware 2026-09-29, third session (2k bus: device-space moves, `dev`)
+
+The device-space moves that the entry below left with host vectors only. Driven
+from the `dali-shell` script against the 2k node. The build carries `48009a8`
+and the stack-review fixes: `address` printed `device DTR0=2` for d2, and
+`restore apply` ended with `each confirmed on the bus`. The exact flashed ref is
+not recorded.
+
+Bus at start, per `discover`: a0–a4 lamps in group 0; d0 the Steinel (4 input
+instances), d1 the Casambi CBU-DCS (1).
+
+- **`address dN set dM` loads DTR0 raw and lands.** `address d1 set d2` ran
+  first, then `address d0 set d1`. Each loaded DTR0 with the destination and
+  ended `dM confirmed, dN silent`. On `v2.0.0` the first would have sent the
+  Casambi to d5.
+- **`restore plan` found both devices by identification number at their new
+  addresses, and put the way back in order.** After the first move it read
+  `7 matched, 6 already correct, 1 move(s)`, d2 -> d1. After the second it read
+  `5 already correct, 2 move(s)`, with d1 -> d0 ahead of d2 -> d1. The Casambi
+  cannot return to d1 until the Steinel has left it.
+- **`restore apply` made both moves and confirmed each one before sending the
+  next.** It printed `1/2 d1 -> d0: OK`, `2/2 d2 -> d1: OK`, and `2 move(s)
+  applied, each confirmed on the bus`. Each `OK` means
+  `dali_restore_confirm_move()` passed: the destination answered QUERY NUMBER
+  OF INSTANCES, the source was silent, and the Bank 0 identification number
+  read at the destination matched the backup's. This is the first bus run of
+  the confirmation and of any device-space `restore apply`. It also met the
+  case the confirmation was added for (*`restore apply` does not confirm a move
+  before the next one depends on it*, under Investigations).
+- The lamps read `status=0x04, level=85` again. The `0x00, 0` that the entry
+  below left unexplained was the lamps being off (status bit 2 is lamp arc
+  power on), not an effect of the reflash.
+
+Not covered:
+
+- No move failed, so stopping after a failed move has host vectors only.
+- No gear move has run under the confirmation. The one gear move on record
+  predates it.
+- No cycle arose, so the planner's staging hop has not sent a frame.
+- `address dN clear` did not run.
+
+No `restore plan` followed the apply. It was not needed: the two confirmations
+had already read both identification numbers at their recorded addresses.
+
 ### Verified on hardware 2026-09-29, later (2k bus: control-device commissioning, `dev`)
 
 The first bus run of the Part 103 commissioning walk, and the recovery the
@@ -1414,6 +1601,36 @@ cleared by the 2026-08-14 entry above):
 ---
 
 # Investigations
+
+## `restore apply` publishes the scan it planned from — found 2026-09-29
+
+Found by reading `cmd_restore()` for the fifth 2k session. No bus has shown it.
+
+An apply ends by publishing `s_inventory` through the `inventory_changed` hook,
+under a comment saying that short addresses moved and every cached view is
+stale. But `s_inventory` holds what `shell_restore_refresh()` stored before
+the plan was built: the planning scan, taken before the first move. The
+component's `apply_inventory_snapshot()` rebuilds its group map from that scan
+and marks the map for persisting. So after any apply that moves gear, each
+moved unit's groups are filed under the address it left. A group light can
+then take a poll representative outside its group, and the stale map survives
+a reboot until the next scan. That path does not touch level profiles, so the
+MIN/MAX cached at both ends of each move stays until a refresh re-reads it.
+
+The `address` verb avoids this with a narrower hook. After confirming both
+ends it calls `short_address_moved(from, to)`. The component then moves the
+group entry, forgets the level profile at both addresses, logs that YAML
+entities still name the old address, and requests a refresh. A restore move is
+confirmed more strictly than an `address` move, because it also checks the
+identification number at the destination, so it meets that hook's contract.
+
+Fix: call `short_address_moved()` after each confirmed gear move, in plan
+order, and drop the publish at the end of the apply. Calling it move by move
+mirrors the bus, because the plan only moves a unit onto an address the bus
+has already shown vacated. One side effect is that the hook's YAML warning also
+fires for staging hops, which pass through addresses no entity names. Device
+moves need nothing, because the integration caches no device address (see
+`dali_shell.h`, beside the hooks).
 
 ## A device-side source sides with Beckhoff on both Part 103 encodings — found 2026-09-29
 
@@ -3045,7 +3262,32 @@ below landed after that tag.
 Add new entries here as breaks accumulate, and empty the section again at the
 next tag.
 
-### From the 2026-09-29 Part 103 encoding fix (`48009a8`; `commission devices` hardware-verified, device moves host-tested)
+### From the 2026-09-29 shell fixes (compile-checked)
+
+Operator-visible:
+
+- `backup save` sends one broadcast QUERY MISSING SHORT ADDRESS per save. It
+  warns when anything answers: `backup: gear on the bus reports no short
+  address and is NOT recorded here`, then `backup: run 'commission
+  unaddressed', then 'backup save' again, to include it`.
+- After `restore apply`, the ESPHome device log has one `aX -> aY` warning per
+  confirmed gear move, staging hops included, about YAML entities that still
+  name the old address. Each move of a grouped unit also logs `group
+  membership followed the move`.
+
+C API:
+
+- `DaliShellHooks.short_address_moved` is also called by `restore apply`, once
+  per confirmed gear move, in plan order.
+- `restore apply` no longer calls `DaliShellHooks.inventory_changed`.
+
+ESPHome:
+
+- After `restore apply`, the group map follows each gear move rather than being
+  rebuilt from the scan taken before the moves. Both ends of each move drop
+  their cached level profile, and a refresh is requested.
+
+### From the 2026-09-29 Part 103 encoding fix (`48009a8`; all three writers hardware-verified on 2k)
 
 Operator-visible:
 
@@ -3065,7 +3307,7 @@ C API:
   sequence for one re-address in either space, with `to` 0..63 or
   `DALI_COMMISSIONING_NO_SHORT_ADDRESS`.
 
-### From the 2026-09-25 stack-review fixes (host-tested)
+### From the 2026-09-25 stack-review fixes (host-tested; `restore apply`'s confirmation has since run on 2k)
 
 C API:
 

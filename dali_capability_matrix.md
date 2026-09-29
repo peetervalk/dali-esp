@@ -1,7 +1,7 @@
 # DALI Capability Matrix
 
 **Last reviewed:** 2026-08-25; the raw-frame and backup/restore rows updated
-2026-09-25
+2026-09-25, the re-address and restore rows 2026-09-29
 
 One question per row: for a given DALI capability, what exists in the reusable C
 stack, whether the CLI exposes it, whether an independent host vector covers it,
@@ -57,8 +57,8 @@ verb by verb.
 | Addressed queries (34 names) | `dali_control_build_query` | `query`, `status` | yes | yes | yes (console) |
 | Configuration commands (19 names) | `dali_control_build_config` | `config` | yes | partial | yes (console) |
 | DTR0-consuming configuration | `dali_control_build_config` + sequence | `config-dtr0` | yes | no | yes (console, minus `set-short-address-dtr0`) |
-| Checked re-address / regroup | `dali_group_map_move` + shell workflow | `address` | partial (map only) | no | shell only |
-| Checked control-device re-address | n/a — `SET SHORT ADDRESS DTR0` (Part 103) | `address <dN> set\|clear` | partial (parsing only) | no | shell only |
+| Checked re-address / regroup | `dali_group_map_move` + shell workflow | `address` | partial (map only) | partial (2k, 2026-09-03 and 2026-09-29: `set` with its occupied-destination refusal, `add`/`remove`, and `clear` of a single unit; `clear` of a contested address not run) | shell only |
+| Checked control-device re-address | `dali_restore_build_move_sequence` — Part 103 `SET SHORT ADDRESS DTR0` | `address <dN> set\|clear` | partial (parsing and frames; not the handler) | partial (`set` on 2k, 2026-09-29) | shell only |
 | DTR0/1/2 load | `dali_control_build_dtr` | `dtr` | yes | yes | yes (console) |
 | Special/broadcast commands (18 names) | `dali_build_special` | `special` | yes | partial | partial (console) |
 | Arbitrary frame | n/a | `raw` | yes (parse, commissioning gate) | yes | partial (`raw`, minus commissioning frames) |
@@ -87,9 +87,9 @@ cached level profile and triggers a refresh.
 | Commission control devices | `dali_device_commissioning_commission_unaddressed` | `commission devices` | yes | yes (2k, 2026-09-29) | shell, opt-in |
 | Post-scan verification | `dali_commissioning_audit` | automatic in both `commission` walks | yes | no | shell |
 | Address backup | `dali_snapshot_from_inventory` | `backup save`, `backup status` | yes | partial (2k, 2026-09-03) | shell; persisted to flash |
-| Backup blob round trip | `dali_snapshot_encode` / `_decode` | `backup export`, `backup import` | yes | n/a — no bus traffic | shell |
-| Restore planning | `dali_restore_plan` | `restore plan` | yes | partial (one-move plan, 2k) | shell; moving aside a unit the backup never saw is host-only |
-| Restore execution | `SET SHORT ADDRESS DTR0` per move, each confirmed by `dali_restore_confirm_move` | `restore apply` | partial (confirmation only) | partial (one gear move on 2k, before confirmation existed) | shell, opt-in |
+| Backup blob round trip | `dali_snapshot_encode` / `_decode` | `backup export`, `backup import` | yes | n/a — no bus traffic; round-tripped on the 2k node, 2026-09-29 | shell |
+| Restore planning | `dali_restore_plan` | `restore plan` | yes | partial (2k, 2026-09-29: dependency order, a swap in each space, and moving aside a unit the backup never saw; a contested target is host-only) | shell |
+| Restore execution | `SET SHORT ADDRESS DTR0` per move, each confirmed by `dali_restore_confirm_move` | `restore apply` | partial (move frames and confirmation; not the apply loop) | partial (2k, 2026-09-29: gear and device moves, staging hops and a move-aside included, each confirmed; the stop after a failed move is host-only) | shell, opt-in |
 | Group restore planning | `dali_restore_plan_groups` | `restore groups` | yes | no | shell; control gear only |
 | Group restore execution | n/a — `ADD TO GROUP` / `REMOVE FROM GROUP` per bit | `restore groups apply` | no | no | shell, opt-in; read back per gear |
 | Identify blink | n/a | `identify` | no | yes | yes (button, shell) |

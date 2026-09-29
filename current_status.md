@@ -32,8 +32,8 @@ breaking release for C API consumers and for out-of-tree build systems;
 **`v2.0.0` gets both Part 103 addressing encodings wrong**, and so do its
 device arms. `address dN set dM` sends a device to 2M+1, a device-space
 `restore apply` does the same, and `commission devices` finds no unaddressed
-device. `dev` fixes all three from `48009a8`; do not use them on the tag. Gear
-addressing is unaffected.
+device. `dev` fixes all three from `48009a8`, and each has since run correctly
+on 2k; do not use them on the tag. Gear addressing is unaffected.
 
 `dali-starter.yaml` and the README example pin the current tag, so a new
 installation gets released code by default. Work lands on `dev` between
@@ -84,7 +84,10 @@ before adding broad new device support.
   during development, not from a flashed `v2.0.0` build.
 
 **On `dev` since the tag:** the stack-review fixes pass 32/32 host suites, the
-native build, and a `dali_test.yaml` compile. None has been on a bus.
+native build, and a `dali_test.yaml` compile. Only one has a bus result of its
+own: `restore apply`'s per-move confirmation, on gear and device moves on 2k.
+The `restore apply` and `backup save` fixes that followed the 2k sessions are
+compile-checked only.
 
 ### Recorded hardware state
 
@@ -99,11 +102,26 @@ counters, captures, and what each did *not* cover — are in `project_log.md`.
   first real collision behind `RX_ACTIVITY`, which every commissioning safety
   claim depends on.
 - **Control-device commissioning works on 2k, and every Part 103 address
-  parameter is raw.** Device SET SHORT ADDRESS with DTR0 = 5 put the PB coupler
+  parameter is raw.** Device SET SHORT ADDRESS with DTR0 = 5 put the Casambi
   on d5, and INITIALISE `0x00` selected neither of two unaddressed devices. On
   the fixed build, `commission devices` with INITIALISE `0x7F` found both,
   programmed them to d0 and d1, confirmed both in its post-scan, and `restore
   plan` matched all 7 units to the backup by identification number.
+- **Re-addressing, backup and restore work in both address spaces, and
+  `restore apply` confirms every move.** `address` moved control devices with
+  DTR0 raw and gear with DTR0 encoded, and refused a gear move onto an occupied
+  address. `restore plan` found every moved unit by identification number and
+  put a dependent pair in the right order. It broke a two-unit swap in each
+  space by staging one unit through a spare address, and moved aside a unit the
+  backup had never seen. `restore apply` confirmed each move before sending
+  the next: the destination answered, the source was silent, and the Bank 0
+  identification number there matched the backup's. A 7-entry backup went out
+  through `backup export`, came back intact through `backup import`, and then
+  drove a restore.
+- **`address <aN> clear` works on a single unit.** Its broadcast QUERY MISSING
+  SHORT ADDRESS read silence before the clear and a decoded YES after. The
+  cleared lamp kept its group membership through the clear and through the
+  `commission unaddressed` that re-addressed it.
 - **No control gear on 2k answers past the reply window.** `rx_reply_late` reads
   0 across every measured walk. This retires the earlier late-reply reading; the
   backoff fix that reading produced still works, but its mechanism is now
@@ -144,13 +162,7 @@ Established on or before the `v1.1.1` flash of 2026-08-14:
   memory operations, and vendor helpers. No write path reads its value back.
 - **Equal-random-address handling** — the largest untested slice. The two units
   commissioned so far drew distinct randoms, so the path never ran.
-- **Device-space moves on the fixed build.** `address dN set dM` and a
-  device-space `restore apply` now load DTR0 raw, and neither has run since:
-  the 2k recovery landed both units on their recorded addresses, so `restore
-  plan` had nothing to move. One `address d1 set d2` and back, followed by
-  `restore plan`, covers both.
-- `backup import`, `backup export`, and `restore groups` against real gear.
-  `backup save`/`status` and `restore plan`/`apply` are now covered.
+- `restore groups` against real gear.
 - The commissioning post-scan audit's own contested path. The scan path met a
   real collision, but the commission run that followed was clean, so the audit's
   classification is still an inference.
@@ -216,10 +228,12 @@ Dated evidence for each of these is in `project_log.md`.
   `dali_restore_confirm_move()` checks each move on the bus — the unit answers
   at its destination, the source is silent, and the identification number there
   is the unit's — and `restore apply` sends nothing further after a move that
-  fails it. Host-tested only. The blob round-trips both ways: `backup export` prints the
-  `backup import` script that reproduces it, so a backup kept off the device can
-  be loaded back — which is what the native CLI, having no persistent store,
-  needs. `dali_snapshot_decode()` validates a blob in full before writing, so a
+  fails it. It has confirmed gear and device moves on 2k, staging hops
+  included; the stop after a failed move is host-tested only. The blob
+  round-trips both ways: `backup export` prints the `backup import` script that
+  reproduces it, so a backup kept off the device can be loaded back — which is
+  what the native CLI, having no persistent store, needs. It has round-tripped
+  on 2k. `dali_snapshot_decode()` validates a blob in full before writing, so a
   rejected import costs the held backup nothing.
 - `dali_restore_plan_groups` is the second, separate planner: it diffs each
   gear's recorded group mask against the one on the bus and emits the ADD/REMOVE
@@ -240,10 +254,10 @@ Dated evidence for each of these is in `project_log.md`.
   mode does not gate replies, which a real bus shows directly — `discover` under
   `quiescent on` enumerates devices and instances normally. The walk searching
   the event sources themselves, at ~25 COMPARE probes per device, is the one
-  with the most to gain from the bracket rather than the least. What is still
-  inferred is COMPARE answered from inside an open Part 103 addressing window by
-  a device with no short address; nothing separates it from the addressed-query
-  case, but the bus has not been asked that exact question.
+  with the most to gain from the bracket rather than the least. A bus has since
+  asked the question this left open: on 2k, two devices with no short address
+  answered COMPARE from inside an open Part 103 addressing window, after the
+  bracket's START QUIESCENT MODE.
 - DT1 and other specialized/legacy device types remain intentionally
   unimplemented.
 
@@ -333,7 +347,9 @@ Dated evidence for each of these is in `project_log.md`.
 - Only complete group discovery replaces and persists membership. A failed
   optional query or a missed known member retains the prior map and withholds
   generated YAML. `group forget <addr> [group]` retires a departed member
-  without touching the bus.
+  without touching the bus. A re-address confirmed by `address` or by `restore
+  apply` moves the member without a scan. The `restore apply` half is
+  compile-checked only.
 - Sensor readings are one scheduler sequence, so a two-byte instance cannot have
   its latching query and latch read separated by other traffic. Matching
   Device/Instance events request an immediate authoritative poll; event
@@ -437,21 +453,19 @@ a sensor value.
 ### P0 — Protocol correctness and conformance
 
 - **Hardware validation of the stack-review fixes.** Host-tested and
-  mutation-checked, never on a bus. The cheapest checks: a capture should read
-  every reply's `since_tx_us` about 1664 higher than the same gear read before
-  (1k's a13 read 12742–13120, in `project_log.md`), and one `restore apply` on
-  2k should print `OK` per move, which is the confirmation read-back running.
+  mutation-checked. One has a bus result: `restore apply` printed `OK` for
+  every gear and device move on 2k, which is the confirmation read-back
+  running. The cheapest next check: a capture should read every reply's
+  `since_tx_us` about 1664 higher than the same gear read before (1k's a13 read
+  12742–13120, in `project_log.md`).
 - **Hardware validation of the rest of the commissioning work.** Unmet by a
-  bus: equal-random-address handling, control-device commissioning, `backup
-  import`/`export`, and `restore groups`. The single-unaddressed-device envelope
-  no longer stands on nothing; the equal-random path is where it is still an
-  assumption. The control-device half is no longer blocked on a fixture:
-  `address <dN> clear` de-addresses a control device, so the 2k Steinel can be
-  cleared and re-commissioned in one session — but not before the Part 103
-  encodings above are settled. Worth settling in the same
-  session: whether a device answers COMPARE from inside an addressing window
-  while quiescent, which is the one part of the new bracket's reasoning the bus
-  has not been asked.
+  bus: equal-random-address handling and `restore groups`. The
+  single-unaddressed-device envelope no longer stands on nothing; the
+  equal-random path is where it is still an assumption. The device walk
+  found both 2k devices after its START QUIESCENT MODE, so a device does answer
+  COMPARE inside an addressing window once the bracket has been sent. Whether
+  the devices were actually quiescent at that point cannot be read back: QUERY
+  QUIESCENT MODE (`0x40`) is not implemented.
 - **Prove bus timing beyond the local own-forward-frame guard.** TX-end and
   observation timestamps are exported and host-tested; HIL must validate both
   attribution edges (5.5 ms undecodable, 3.664 ms decoded, both from the frame
@@ -509,12 +523,13 @@ The typed verb surface is in place; what is missing is evidence. Keep
 - Validate input-device configuration writes with read/write/read-back per
   parameter. `iconfig` success means transmitted; until this is done the whole
   surface stays experimental.
-- Run a restore against a bus carrying gear no backup has seen. The planner now
-  moves such a unit aside to a free address instead of dropping the move, which
-  is host-covered but has never sent a frame. The 2026-09-03 bus is the exact
-  fixture: an unrecorded driver holding an address a recorded unit is owed.
-  Worth checking the operator reading as much as the moves — a displacement and
-  a placement look alike in the apply log apart from the plan's note.
+- **Run the `restore apply` and `backup save` fixes on a bus.** Both are
+  compile-checked only, because no host vector reaches the shell. With one lamp
+  cleared, `backup save` should say that gear reports no short address and is
+  not recorded. After `restore apply`, the device log should have a `group
+  membership followed the move` line for each gear move of a grouped unit;
+  the old code logged nothing there. 1k, with lamps in several groups, is the
+  bus where the second fix matters.
 - Add host vectors for `identify`, `smoke`, `capture`, and the inventory JSON
   export, whose output formats are unasserted.
 - Nothing in the shared-`dali_cli` migration, or the verb-parity work built on
@@ -570,7 +585,7 @@ The typed verb surface is in place; what is missing is evidence. Keep
   it holds its last value indefinitely. `DaliInputSensor` publishes only after a
   complete read (`on_input_value_done()` in `dali_component.cpp`); a failed poll
   publishes nothing and nothing marks the entity stale. On 2k, "Zone 2 Lux" sat
-  at 54 lx for as long as the Steinel shared d0 with the coupler and then had no
+  at 54 lx for as long as the Steinel shared d0 with the Casambi and then had no
   address, which reads in Home Assistant as a working sensor. Unconfirmed that
   54 was the last good reading rather than a collided read that decoded; HA's
   history would tell. Occupancy is the costly case: `zone2_occ` is a template
@@ -613,7 +628,7 @@ The typed verb surface is in place; what is missing is evidence. Keep
 
 - **`address dN clear` cannot reach its contested arm when two control devices
   share an address.** The arm opens on an undecodable reply, but on 2k the
-  Steinel and the PB coupler colliding at d0 read as silence: `address d0
+  Steinel and the Casambi colliding at d0 read as silence: `address d0
   clear` answered "does not answer", and `discover` counted both attempts as
   ignored observations. One bare `raw 01FE35 len=24 wait` did read
   `ERR malformed`. Two candidates, unsettled: the merged reply falls outside the
@@ -671,19 +686,17 @@ The typed verb surface is in place; what is missing is evidence. Keep
   the only thing that would tell an operator to run `quiescent off all`. QUERY
   QUIESCENT MODE (`0x40`, not implemented) would let the release be read back
   per device rather than inferred.
-- **`address <aN> clear` has never run on a bus.** Added with the `backup save`
-  contested warning; host-covered only at the CLI layer (arity, subcommand, and
-  that the "no short address" value is outside the encoded range), because the
-  shell handler itself has no host vectors. Three things want a real bus. The
-  broadcast QUERY MISSING SHORT ADDRESS check is new to this codebase and its
-  three-way reading — silence as NONE, decoded `0xFF` or RX activity as SOME —
-  is asserted from the standard, not observed; the second arm in particular
-  assumes several units answering YES collide the way several units answering a
-  status query do. The contested path has the same problem the post-scan audit's
-  does: no collision has been driven through it. And the partial-clear branch
-  (`a7` answering decodably after the write, meaning one unit took it and one
-  did not) is a guess about what a half-applied broadcast-to-one-address write
-  looks like. Worth doing on 2k with two drivers deliberately set to one
+- **`address <aN> clear` has run only on a single unit.** On 2k it cleared one
+  lamp, and the broadcast QUERY MISSING SHORT ADDRESS read silence before the
+  write and a decoded YES after: two of its three readings, observed. The shell
+  handler itself still has no host vectors. What still wants a bus is
+  everything a shared address brings. The third reading, RX activity as SOME,
+  assumes several units answering YES collide the way several units answering
+  a status query do. The contested path has the same problem the post-scan
+  audit's does: no collision has been driven through it. And the partial-clear
+  branch (`a7` answering decodably after the write, meaning one unit took it
+  and one did not) is a guess about what a half-applied broadcast-to-one-address
+  write looks like. Worth doing on 2k with two drivers deliberately set to one
   address: clear, confirm both report missing, `commission unaddressed`,
   `identify`, then `restore`.
 - **No restore has planned against a real contested address.** The planner

@@ -115,7 +115,9 @@ typedef struct {
     bool (*bus_claim)(void *ctx, const char *what);
     void (*bus_release)(void *ctx);
     /* Called after a workflow that invalidates cached device state, so the
-     * integration can re-read what it holds. NULL when nothing caches. */
+     * integration can re-read what it holds. `restore apply` does not call it:
+     * the only inventory it holds predates its moves, so it reports each move
+     * through short_address_moved() instead. NULL when nothing caches. */
     void (*inventory_changed)(void *ctx, const DaliDiscoveryInventory *inventory);
     /*
      * Called after one addressed configuration command was accepted for
@@ -136,20 +138,25 @@ typedef struct {
     void (*config_applied)(void *ctx, DaliTarget target, DaliCommandId id,
                            uint8_t param);
     /*
-     * Called after `address <from> set <to>` re-addressed one gear and both
-     * ends were confirmed on the bus: `to` answers, `from` is silent.
+     * Called after one gear was re-addressed and both ends were confirmed on
+     * the bus: `to` answers, `from` is silent. `address <from> set <to>` calls
+     * it once. `restore apply` calls it once per confirmed gear move, in plan
+     * order, where the confirmation also reads the unit's identification
+     * number back at `to`. A plan only moves a unit onto an address the bus has
+     * already shown vacated, so applying the calls in order tracks the bus
+     * exactly, staging hops included.
      *
      * This is what config_applied() cannot say. SET SHORT ADDRESS carries its
      * destination in DTR0, so an integration told only "a config command went
      * to a5" knows the gear moved but not where, and its only safe response is
-     * to drop everything keyed by a5 and ask for a rescan. The `address` verb
-     * chose both ends and then verified them, so it can name the move and let
+     * to drop everything keyed by a5 and ask for a rescan. Both callers chose
+     * both ends and then verified them, so they can name the move and let
      * caches follow it instead.
      *
      * Only reached after verification succeeded: an unconfirmed move calls
      * nothing, because a cache moved to an address that turns out to be wrong
-     * is worse than a cache dropped. Called on the session's task. NULL when
-     * nothing caches.
+     * is worse than a cache dropped. Called on the session's task, with the
+     * bus claimed. NULL when nothing caches.
      */
     void (*short_address_moved)(void *ctx, uint8_t from, uint8_t to);
     /*
