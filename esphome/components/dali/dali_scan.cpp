@@ -484,6 +484,24 @@ static void scan_task(void *arg) {
             }
         }
     }
+    if (inventory.identity_collision_count > 0u) {
+        /*
+         * The same fault, and the one the device list above does show -- as a
+         * single unit. Units of one product in one state answer every query
+         * the scan makes alike; only their identification numbers collide. The
+         * light entity at that address drives all of them.
+         */
+        ESP_LOGW(TAG, "%u address(es) answer as one unit but hold more than "
+                      "one; their identification numbers collide",
+                 (unsigned)inventory.identity_collision_count);
+        for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+            const DaliDiscoveryDeviceInfo *d =
+                dali_discovery_inventory_get(&inventory, addr);
+            if (d != nullptr && d->has_identity_collision) {
+                ESP_LOGW(TAG, "  a%u: contested, identity collides", (unsigned)addr);
+            }
+        }
+    }
     if (inventory.undecodable_device_count > 0u) {
         /*
          * The Part 103 device address space, which is independent of the gear

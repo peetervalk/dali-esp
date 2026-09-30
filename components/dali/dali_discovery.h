@@ -64,6 +64,23 @@ typedef struct {
      * even though nothing could be read from it.
      */
     bool                     has_undecodable_device_activity;
+    /*
+     * The gear at this address answered as one unit -- its QUERY STATUS
+     * decoded -- but its Bank 0 identity read met reply-window activity that
+     * did not decode, twice running. That read is the one question two units
+     * cannot answer alike, because their identification numbers differ. Units
+     * of one product in one state answer every other query in the walk with
+     * the same bytes, in step, and the bus carries that as one clean reply; on
+     * 2k two lamps on a3 read as one unit to every walk while this read failed.
+     *
+     * Unlike has_undecodable_activity this leaves the entry `present`, because
+     * the address does answer, and what it answers -- status, groups, level --
+     * holds for every unit on it. It is contested all the same: every consumer
+     * that reserves a contested gear address reserves this one, through
+     * dali_discovery_gear_address_contested(). Gear only; the control-device
+     * identity read is not classified.
+     */
+    bool                     has_identity_collision;
     bool                     has_status;
     uint8_t                  status;
     bool                     has_groups;
@@ -122,6 +139,10 @@ typedef struct {
      * space. Counted apart from undecodable_count so neither number implies
      * anything about the other space. */
     uint8_t                 undecodable_device_count;
+    /* Present gear addresses whose Bank 0 identity read collided. Counted
+     * apart from undecodable_count because these addresses are also listed:
+     * the two numbers never share an address. */
+    uint8_t                 identity_collision_count;
     DaliDiscoveryDeviceInfo devices[DALI_SHORT_ADDRESS_COUNT];
 } DaliDiscoveryInventory;
 
@@ -131,6 +152,14 @@ typedef void (*DaliDiscoveryFoundCb)(uint8_t addr,
 
 /* Return true if device has the given device type in its type list. */
 bool dali_discovery_has_device_type(const DaliDiscoveryDeviceInfo *device, uint8_t type);
+
+/*
+ * True when more than one unit is known to answer at this gear address: its
+ * QUERY STATUS reply did not decode, or it answered as one unit and its Bank 0
+ * identity read collided. The one test for "contested" in the gear space, so
+ * that a consumer reserving the first kind cannot forget the second.
+ */
+bool dali_discovery_gear_address_contested(const DaliDiscoveryDeviceInfo *device);
 
 DaliError dali_discovery_inventory_reset(DaliDiscoveryInventory *inventory);
 const DaliDiscoveryDeviceInfo *dali_discovery_inventory_get(
@@ -146,6 +175,17 @@ DaliError dali_discovery_inventory_store_groups(DaliDiscoveryInventory *inventor
 DaliError dali_discovery_inventory_update_input_device(
     DaliDiscoveryInventory *inventory,
     const DaliDiscoveryInputDevice *input_device);
+
+/*
+ * Record a control-gear Bank 0 identity read after the walk, for a caller that
+ * retries the identities the walk could not read. A read that decodes is what
+ * one unit answering looks like, so it also withdraws an identity collision the
+ * walk recorded here, and the inventory's count with it.
+ */
+DaliError dali_discovery_inventory_store_identity(
+    DaliDiscoveryInventory *inventory,
+    uint8_t addr,
+    const DaliMemoryBank0Identity *identity);
 
 /*
  * True when at least one control gear was positively discovered and every

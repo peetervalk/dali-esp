@@ -97,7 +97,12 @@ passes `esphome config` on 2026.9.1; nothing has compiled `dali_test.yaml` on
 it. The DTR0 read-back before every short-address write, the source probe after
 a silent target, the reworded clear lines and the version display came after
 that session: 32/32 host suites, mutation-checked, and type-checked against
-the IDF and ESPHome flags, with no bus and no ESPHome compile behind them.
+the IDF and ESPHome flags. Their only bus run is the eighth session on 2k, on a
+build that prints the new version display, where one `address clear` read DTR0
+back on the first load. Which toolchain built it is not recorded. The
+shared-address detection that session prompted has 32/32 host suites with 12
+new vectors, 13 mutants killed, a native IDF 6.0.1 build and a `dali_test.yaml`
+compile on ESPHome 2026.9.0, and no bus.
 
 ### Recorded hardware state
 
@@ -131,12 +136,22 @@ counters, captures, and what each did *not* cover — are in `project_log.md`.
   stopped at a move that did not land and sent nothing after it, and a re-plan
   finished the restore. Each confirmed gear move took the integration's group
   membership with it.
-- **`address <aN> clear` works on a single unit.** Its broadcast QUERY MISSING
-  SHORT ADDRESS read silence before the clear and a decoded YES after. The
+- **`address <aN> clear` works on one unit, and on two sharing an address.**
+  Its broadcast QUERY MISSING SHORT ADDRESS read silence before the clear and a
+  decoded YES after, from one unit and from two. On 2k one clear freed two lamps
+  sharing a3, and one `commission unaddressed` walk gave them a3 and a4. The
   cleared lamp kept its group membership through the clear and through the
   `commission unaddressed` that re-addressed it. It also acts on that
   membership while unaddressed: on 1k one followed `level g0 90` with no short
   address.
+- **Two units that answer alike share an address invisibly.** On 2k two lamps
+  of one product, both off and in group 0, were put on a3. `discover`, `scan`
+  and the commission pre-scan each read a3 as one present unit and the other
+  lamp as gone, with no `contested` note and nothing naming a3. Only `restore
+  plan` pointed there, as `identity unknown`, because the Bank 0 read is the
+  one query whose answers differ. The status-based contested classification
+  catches units whose replies garble, not every shared address. The
+  identity-collision check added since has not met a bus.
 - **`identify` puts the lamp back.** On 1k it blinked a0 from level 160, ended
   `identify: done, level 160 restored`, and the next `discover` read 160.
 - **The reply window runs from the frame end.** On 1k, a13's reply to a group
@@ -563,19 +578,19 @@ The typed verb surface is in place; what is missing is evidence. Keep
 - Validate input-device configuration writes with read/write/read-back per
   parameter. `iconfig` success means transmitted; until this is done the whole
   surface stays experimental.
-- **Run the DTR0 read-back on a bus.** Host-tested and mutation-checked; no
-  bus has seen it. Every `address` arm and every `restore apply` move now loads
-  DTR0, reads it back with QUERY CONTENT DTR0, and only then sends SET SHORT
-  ADDRESS. The seventh session's swap should now restore in one `restore
-  apply`, and every `DTR0 needed a second load` line is worth counting: each is
-  a load the unit missed, which is the P0 spacing question measured directly.
-  The device arms now depend on control devices answering Part 103 QUERY
-  CONTENT DTR0 (`0x36`), which no device here has been seen to do. Run
-  `dtrcheck 0 0 5` and `dtrcheck 1 0 5` on 2k before relying on `address dN`
-  or a device-space restore; a device that stays silent makes both refuse with
-  `DTR0 could not be checked`. The same session can check the reworded clear
-  lines in the device log and `discover` printing `v2.0` where it printed
-  `v4`.
+- **Run the DTR0 read-back on a bus.** Host-tested and mutation-checked. Its
+  only bus reading is one `address clear` on 2k, which read back on the first
+  load with two units answering together. Every `address` arm and every `restore
+  apply` move now loads DTR0, reads it back with QUERY CONTENT DTR0, and only
+  then sends SET SHORT ADDRESS. The seventh session's swap should now restore
+  in one `restore apply`, and every `DTR0 needed a second load` line is worth
+  counting: each is a load the unit missed, which is the P0 spacing question
+  measured directly. The device arms now depend on control devices answering
+  Part 103 QUERY CONTENT DTR0 (`0x36`), which no device here has been seen to
+  do. Run `dtrcheck 0 0 5` and `dtrcheck 1 0 5` on 2k before relying on
+  `address dN` or a device-space restore; a device that stays silent makes both
+  refuse with `DTR0 could not be checked`. The same session can check the
+  reworded clear lines in the device log.
 - **Finish the `identify` fix on a bus.** From a level in between it
   restores: level 160 came back on 1k. From max and from off it has not run;
   the shell should end with `identify: done, level N restored` and `identify:
@@ -626,10 +641,11 @@ The typed verb surface is in place; what is missing is evidence. Keep
 
 - **No addressing fault reaches Home Assistant.** `bus_fault` is a PHY liveness
   signal (`"OK"` / `"Bus stuck: N"`) and reports correctly, but nothing surfaces
-  a contested short address — the one failure the bus cannot undo remotely; it
-  read `OK` throughout a real collision, an address wipe, and a commissioning
-  walk. The scan already computes `undecodable_count` and the per-address flags.
-  Wanted: an addressing-health sensor, or a widened `bus_fault` reporting
+  a contested short address; it read `OK` throughout a real collision, an
+  address wipe, and a commissioning walk. The scan already computes
+  `undecodable_count`, `identity_collision_count` and the per-address flags,
+  and the integration's own scan logs both as warnings. Wanted: an
+  addressing-health sensor, or a widened `bus_fault` reporting
   `"Contested: a4"`. The same shape one layer along, group membership changes do
   not reach the integration either, so a group light entity cannot know its
   membership changed underneath it.
@@ -678,6 +694,22 @@ The typed verb surface is in place; what is missing is evidence. Keep
 
 ### P1 — Diagnostic shell correctness
 
+- **Run the shared-address detection on a bus.** Host-tested and
+  mutation-checked; no bus has seen it. A gear address whose Bank 0 identity
+  read collides twice running is now contested while staying listed:
+  - `scan` and `discover` mark it and name it.
+  - The planner reserves it and reports `contested`.
+  - `backup save` leaves it out and names it.
+  - The commissioning post-scan counts it contested, not confirmed.
+
+  No test can supply the collided read itself, and the detection depends on it
+  arriving as undecodable activity (`RX_ACTIVITY`). A collision that reads as
+  silence or as a malformed reply leaves the address listed as one unit, as
+  before. Repeat the 2k bench with two lamps on a3; `discover` and `restore
+  plan` should each name a3. `backup save` should too, but it overwrites the
+  good backup, so run `backup export` first or leave that check for last. Gear
+  with an empty Bank 0 stays invisible either way. Reasoning in
+  `project_log.md`, *Two units that answer alike share an address invisibly*.
 - **`address dN clear` cannot reach its contested arm when two control devices
   share an address.** The arm opens on an undecodable reply, but on 2k the
   Steinel and the Casambi colliding at d0 read as silence: `address d0
@@ -738,30 +770,28 @@ The typed verb surface is in place; what is missing is evidence. Keep
   the only thing that would tell an operator to run `quiescent off all`. QUERY
   QUIESCENT MODE (`0x40`, not implemented) would let the release be read back
   per device rather than inferred.
-- **`address <aN> clear` has run only on a single unit.** On 2k it cleared one
-  lamp, and the broadcast QUERY MISSING SHORT ADDRESS read silence before the
-  write and a decoded YES after: two of its three readings, observed. The shell
-  handler itself still has no host vectors. What still wants a bus is
-  everything a shared address brings. The third reading, RX activity as SOME,
-  assumes several units answering YES collide the way several units answering
-  a status query do. The contested path has the same problem the post-scan
-  audit's does: no collision has been driven through it. And the partial-clear
+- **`address <aN> clear`'s contested arm has not met a collision.** On 2k it
+  cleared two lamps sharing a3 in one command, but through the single-unit
+  path: they answered its probe, its DTR0 read-back and its QUERY MISSING SHORT
+  ADDRESS alike, so nothing collided. Two units in step answer YES as one
+  decoded `0xFF`, so the third reading, RX activity as SOME, needs units whose
+  replies garble: `more than one unit` can say there is more than one, and its
+  absence says nothing. The contested arm needs two units that disagree.
+  Setting one lamp to a level before moving it onto an unlit one should do it,
+  since their status bytes then differ in the arc-on bit. The partial-clear
   branch (`a7` answering decodably after the write, meaning one unit took it
-  and one did not) is a guess about what a half-applied broadcast-to-one-address
-  write looks like. Worth doing on 2k with two drivers deliberately set to one
-  address: clear, confirm both report missing, `commission unaddressed`,
-  `identify`, then `restore`.
+  and one did not) is still a guess about what a half-applied write looks
+  like. The shell handler still has no host vectors.
 - **No restore has planned against a real contested address.** The planner
-  reserves one now — it used to read "not present" as "free" and could stage or
+  reserves one — it used to read "not present" as "free" and could stage or
   displace a third unit onto it, which is recorded in `project_log.md` — and the
-  reservation, the new `target contested` conflict and the space independence
-  are all host-covered and mutation-checked. What no test can supply is the
-  input: `has_undecodable_activity` set by genuine overlapping replies rather
-  than by a struct field a test wrote. The same 2k bench that proves
-  `address <aN> clear` proves this, one command earlier: with two drivers on one
-  address, a `backup save` taken beforehand and a `restore plan` afterwards
-  should report `target contested` for whatever the backup says belongs there,
-  and must never list a move onto it.
+  reservation, the `target contested` conflict and the space independence are
+  host-covered and mutation-checked. On 2k it met a shared address it could not
+  see as contested, and listed no move onto it, through its unidentified-unit
+  path. Units that answer alike are now reserved too (host-tested), which
+  leaves `target contested` needing one thing that bench lacked: an
+  identifiable unit the backup places on the shared address, so a move aims at
+  it. Move that address's own lamp aside first, then put two others on it.
 
 ### P1 — Release and verification quality
 

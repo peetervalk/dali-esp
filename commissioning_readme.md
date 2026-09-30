@@ -156,6 +156,30 @@ is how you work out which fixture is which afterwards. A hardware pass — pull
 one fixture, re-address the other — is still the alternative if you need one of
 them to keep `a7` specifically.
 
+Units that answer alike are harder to see. Two lamps of one product in one state
+reply to the status probe with the same bytes, in step, and the bus carries that
+as one clean reply. On 2k that hid a lamp moved onto a3 from `discover`, `scan`
+and this pre-scan alike: one unit listed, the other simply gone. What gives it
+away is the identification number, which no two units share. The scan reads it
+at every address that answers, and when that read collides twice running it
+lists the address, marks it, and names it:
+
+```text
+03: present, LED, status=0x00, v2.0, level=0, groups=[0], contested
+Scan complete: 4 device(s) found.
+  note: 1 listed address(es) hold more than one unit.
+  They answer alike; their identification numbers collide.
+    a3: contested
+  'address aN clear', then 'commission unaddressed', separates them.
+```
+
+The address still reads as occupied, so nothing is assigned onto it, and
+everything that holds a contested address back — `restore`, `backup save`, the
+post-scan audit — holds this one back too. The same `address a3 clear` and
+`commission unaddressed` separate them. This detection is host-tested only. It
+depends on the collided read arriving as undecodable activity rather than as
+silence, and no bus has shown that yet.
+
 COMPARE now distinguishes silence from observed but undecodable traffic:
 
 - Silence through the reply window is the only valid NO.
@@ -916,7 +940,7 @@ re-addressed by hand afterwards — rather than during the restore.
 And the worse case, which is the quieter one:
 
 ```text
-backup: 1 address(es) answered undecodably and are NOT recorded here
+backup: 1 address(es) are contested and NOT recorded here
   gear a7: contested
 backup: units sharing one short address answer as one, so no identity can be
   read through them and nothing here can put them back
@@ -931,10 +955,13 @@ a hardware pass.
 
 An unanchored entry is at least an entry — the address is in the record and in
 `backup status`, and one fixture needs doing by hand. A contested address
-produces no entry at all: the scan marks it occupied but not *present*, and the
-snapshot records only what is present. Nothing about those units is in the
-backup, including their number, so without this line the first anyone would hear
-of it is a restore that puts back fewer fixtures than went in.
+produces no entry at all. One that answered undecodably is marked occupied but
+not *present*, and the snapshot records only what is present. One whose
+identification number collided is listed, but is left out of the record for
+the same reason: it holds more than one unit and no identity to anchor either.
+Nothing about those units is in the backup, including their number, so without
+this line the first anyone would hear of it is a restore that puts back fewer
+fixtures than went in.
 
 #### Putting it back
 
@@ -993,12 +1020,15 @@ A contested address counts as taken here too, and for the same reason the
 pre-scan holds it out of the free pool: something answers there, so putting a
 third unit on it would make the collision worse. It is never used as a target,
 never borrowed to stage a swap through, and never used to park a unit the backup
-has never seen. A move that wanted it says so, and says what to do:
+has never seen. The plan names it whether or not a move wanted it, because the
+units on it are the ones nothing else in the plan can see: a recorded fixture
+reported `not on bus` is often one of them. A move that wanted it says so too:
 
 ```text
-restore: 1 conflict(s):
+restore: 2 conflict(s):
+  gear a4: contested
   gear a1: target contested (4)
-restore: free a contested target with 'address <aN> clear', then
+restore: free a contested address with 'address <aN> clear', then
 'commission unaddressed', then run this again
 ```
 

@@ -87,14 +87,14 @@ typedef enum {
      * one in an address space with nowhere free to displace it to. */
     DALI_RESTORE_CONFLICT_TARGET_OCCUPIED,
     /*
-     * The recorded address answered undecodably: two or more units already
-     * share it and answer as one. Kept apart from TARGET_OCCUPIED because the
-     * remedy is different and the blocker is not a unit at all. An occupied
-     * target holds something identifiable that an operator can look up and
-     * deal with; a contested one holds nothing that can be read, addressed or
-     * moved, and is cleared with `address <aN> clear` followed by
-     * `commission unaddressed` — after which a re-run of the restore finds
-     * both units and places them.
+     * The recorded address is contested (see DALI_RESTORE_CONFLICT_CONTESTED):
+     * two or more units already share it. Kept apart from TARGET_OCCUPIED
+     * because the remedy is different and the blocker is not one unit. An
+     * occupied target holds something identifiable that an operator can look
+     * up and deal with; a contested one holds nothing that can be told apart,
+     * addressed alone or moved, and is cleared with `address <aN> clear`
+     * followed by `commission unaddressed` — after which a re-run of the
+     * restore finds both units and places them.
      *
      * The device space has no such verb, so a contested d<N> is reported for
      * the same reason and fixed by hand.
@@ -111,6 +111,16 @@ typedef enum {
      * diff against. Writing the recorded mask blind would add the groups it
      * should be in without removing the ones it should not. */
     DALI_RESTORE_CONFLICT_GROUPS_UNREADABLE,
+    /*
+     * More than one unit answers at this address: its reply did not decode,
+     * or it answered as one unit and its Bank 0 identity read collided. The
+     * address is reserved -- nothing is matched, moved, staged or displaced
+     * there -- and reported whether or not a move wanted it, because the
+     * units on it are the ones no plan can see. A recorded unit reported
+     * missing is often one of them. The remedy is the one TARGET_CONTESTED
+     * names.
+     */
+    DALI_RESTORE_CONFLICT_CONTESTED,
 } DaliRestoreConflictKind;
 
 typedef struct {

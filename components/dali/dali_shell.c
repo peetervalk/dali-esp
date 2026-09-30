@@ -3708,6 +3708,11 @@ static void shell_discovery_found_cb(uint8_t addr,
             if (device->has_input_device) {
                 shell_printf(", input-device(%u instances)", (unsigned)device->instance_count);
             }
+            /* Listed, because the address does answer; marked, because more
+             * than one unit gave that answer. The scan's note names it again. */
+            if (device->has_identity_collision) {
+                shell_printf(", contested");
+            }
             shell_printf("\r\n");
         } else {
             shell_printf("%02u: input-device, %u instance(s)\r\n",
@@ -3716,9 +3721,10 @@ static void shell_discovery_found_cb(uint8_t addr,
         }
     } else {
         if (device->has_status) {
-            shell_printf("Device %2u: present (status=0x%02X)\r\n",
+            shell_printf("Device %2u: present (status=0x%02X)%s\r\n",
                    (unsigned)addr,
-                   (unsigned)device->status);
+                   (unsigned)device->status,
+                   device->has_identity_collision ? ", contested" : "");
         } else {
             shell_printf("Device %2u: input-device (%u instance(s))\r\n",
                    (unsigned)addr,
@@ -3903,6 +3909,29 @@ static uint8_t shell_discover_bus(bool detailed)
             }
         }
     }
+    if (inventory->identity_collision_count > 0u) {
+        /*
+         * The same condition the note above reports, and the quieter case of
+         * it: units of one product in one state answer every query the walk
+         * makes alike, so they are listed above as one unit. Only their
+         * identification numbers collide. Without this the second unit is
+         * simply missing, with nothing to say where it went, so the remedy is
+         * given here rather than left for 'backup save' to name.
+         */
+        shell_printf("  note: %u listed address(es) hold more than one unit.\r\n",
+                     (unsigned)inventory->identity_collision_count);
+        shell_printf("  They answer alike; their identification numbers "
+                     "collide.\r\n");
+        for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+            const DaliDiscoveryDeviceInfo *entry =
+                dali_discovery_inventory_get(inventory, addr);
+            if (entry != NULL && entry->has_identity_collision) {
+                shell_printf("    a%u: contested\r\n", (unsigned)addr);
+            }
+        }
+        shell_printf("  'address aN clear', then 'commission unaddressed', "
+                     "separates them.\r\n");
+    }
     if (inventory->undecodable_device_count > 0u) {
         /*
          * The control-device address space, which is independent of the gear
@@ -4013,14 +4042,21 @@ static void cmd_inventory(void)
             if (entry->has_input_device) {
                 shell_printf(", input-device(%u instances)", (unsigned)entry->instance_count);
             }
+            if (entry->has_identity_collision) {
+                shell_printf(", contested (identity collides)");
+            }
             shell_printf("\r\n");
             found++;
         }
     }
 
     shell_printf("Inventory: %u device(s)", (unsigned)found);
-    if (inventory->undecodable_count > 0u) {
-        shell_printf(", %u contested", (unsigned)inventory->undecodable_count);
+    /* Both kinds of contested gear address. The second kind is also counted
+     * as a device above, because it is listed; the two counts overlap there. */
+    const unsigned gear_contested = (unsigned)inventory->undecodable_count +
+                                    (unsigned)inventory->identity_collision_count;
+    if (gear_contested > 0u) {
+        shell_printf(", %u contested", gear_contested);
     }
     if (inventory->undecodable_device_count > 0u) {
         shell_printf(", %u contested (device space)",
@@ -5805,6 +5841,10 @@ static void shell_backup_load_from_storage(void)
  * backup or a plan is only as good as its anchors and a single missed read is
  * the difference between a unit that can be put back and one that cannot. Each
  * space is read from its own Bank 0 and neither substitutes for the other.
+ *
+ * A gear address whose identity collided during the walk is retried too, and a
+ * read that decodes here withdraws the collision: two units cannot give one
+ * identification number, so the walk's two collisions were something else.
  */
 static void shell_fill_missing_identities(DaliDiscoveryInventory       *inventory,
                                           const DaliDiscoveryTransport *transport)
@@ -5818,8 +5858,7 @@ static void shell_fill_missing_identities(DaliDiscoveryInventory       *inventor
         DaliMemoryBank0Identity identity;
         if (entry->has_control_gear && !entry->has_identity &&
             dali_memory_read_bank0_identity(transport, addr, &identity) == DALI_OK) {
-            entry->has_identity = true;
-            entry->identity     = identity;
+            (void)dali_discovery_inventory_store_identity(inventory, addr, &identity);
         }
         if (entry->has_input_device && !entry->has_device_identity &&
             dali_memory_read_device_bank0_identity(transport, addr,
@@ -6169,26 +6208,28 @@ static void cmd_backup(const DaliCliTokens *t)
      * Contested addresses, which are the worse case and the quieter one.
      *
      * An unanchored entry is at least an entry: the operator can see the
-     * address in `backup status` and knows one fixture needs doing by hand. An
-     * address answering undecodably produces no entry at all: the scan marks it
-     * occupied but deliberately not `present`, and the snapshot records only
-     * what is present. Without this the units on it are missing from the
-     * backup, from its entry count, and from the output, and the first anyone
-     * hears of it is a restore that puts back fewer fixtures than went in.
+     * address in `backup status` and knows one fixture needs doing by hand. A
+     * contested address produces no entry at all. One answering undecodably is
+     * marked occupied but deliberately not `present`, and the snapshot records
+     * only what is present; one listed as present whose identity collided is
+     * left out by the snapshot itself. Without this the units on it are
+     * missing from the backup, from its entry count, and from the output, and
+     * the first anyone hears of it is a restore that puts back fewer fixtures
+     * than went in.
      */
-    if (inventory->undecodable_count > 0u ||
-        inventory->undecodable_device_count > 0u) {
-        shell_printf("backup: %u address(es) answered undecodably and are NOT "
-                     "recorded here\r\n",
-               (unsigned)(inventory->undecodable_count +
-                          inventory->undecodable_device_count));
+    const unsigned gear_contested = (unsigned)inventory->undecodable_count +
+                                    (unsigned)inventory->identity_collision_count;
+    if (gear_contested > 0u || inventory->undecodable_device_count > 0u) {
+        shell_printf("backup: %u address(es) are contested and NOT recorded "
+                     "here\r\n",
+               gear_contested + (unsigned)inventory->undecodable_device_count);
         for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
             const DaliDiscoveryDeviceInfo *device =
                 dali_discovery_inventory_get(inventory, addr);
             if (device == NULL) {
                 continue;
             }
-            if (device->has_undecodable_activity) {
+            if (dali_discovery_gear_address_contested(device)) {
                 shell_printf("  gear a%u: contested\r\n", (unsigned)addr);
             }
             if (device->has_undecodable_device_activity) {
@@ -6198,7 +6239,7 @@ static void cmd_backup(const DaliCliTokens *t)
         shell_printf("backup: units sharing one short address answer as one, so "
                      "no identity can be read through them and nothing here can "
                      "put them back\r\n");
-        if (inventory->undecodable_count > 0u) {
+        if (gear_contested > 0u) {
             shell_printf("backup: 'address <aN> clear' frees the gear ones for "
                          "'commission unaddressed'\r\n");
         }
@@ -6284,17 +6325,20 @@ static void shell_restore_print_conflicts(const char                *verb,
     }
 
     /*
-     * A contested target earns a line of follow-on that the other kinds do
-     * not. Every other conflict names an address an operator can go and look
-     * at; this one names an address that holds no unit anything can address,
-     * and the fix is a sequence rather than a lookup. Read from the stored
-     * conflicts rather than the total for the same reason the list above is:
-     * one past the cap was never recorded, so nothing here knows its kind.
+     * A contested address earns a line of follow-on that the other kinds do
+     * not, whether it is reported for itself or as the target a move wanted.
+     * Every other conflict names an address an operator can go and look at;
+     * this one names an address that holds no unit anything can address
+     * alone, and the fix is a sequence rather than a lookup. Read from the
+     * stored conflicts rather than the total for the same reason the list
+     * above is: one past the cap was never recorded, so nothing here knows its
+     * kind.
      */
     bool gear_contested   = false;
     bool device_contested = false;
     for (uint8_t i = 0u; i < count; i++) {
-        if (items[i].kind != DALI_RESTORE_CONFLICT_TARGET_CONTESTED) {
+        if (items[i].kind != DALI_RESTORE_CONFLICT_TARGET_CONTESTED &&
+            items[i].kind != DALI_RESTORE_CONFLICT_CONTESTED) {
             continue;
         }
         if (items[i].space == DALI_SNAPSHOT_SPACE_GEAR) {
@@ -6304,14 +6348,15 @@ static void shell_restore_print_conflicts(const char                *verb,
         }
     }
     if (gear_contested) {
-        shell_printf("%s: free a contested target with 'address <aN> clear', then "
-                     "'commission unaddressed', then run this again\r\n", verb);
+        shell_printf("%s: free a contested address with 'address <aN> clear', "
+                     "then 'commission unaddressed', then run this again\r\n",
+                     verb);
     }
     /* Split by space for the reason 'backup save' splits it: only the gear
      * space has a verb that takes an address away. */
     if (device_contested) {
         shell_printf("%s: nothing here de-addresses a control device, so a "
-                     "contested d<N> target needs a hardware pass\r\n", verb);
+                     "contested d<N> needs a hardware pass\r\n", verb);
     }
 }
 

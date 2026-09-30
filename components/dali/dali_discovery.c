@@ -78,6 +78,12 @@ bool dali_discovery_has_device_type(const DaliDiscoveryDeviceInfo *device, uint8
     return false;
 }
 
+bool dali_discovery_gear_address_contested(const DaliDiscoveryDeviceInfo *device)
+{
+    return device != NULL &&
+           (device->has_undecodable_activity || device->has_identity_collision);
+}
+
 static bool scan_error_is_absent(DaliError err)
 {
     return err == DALI_ERR_TIMEOUT || err == DALI_ERR_MALFORMED;
@@ -187,6 +193,27 @@ DaliError dali_discovery_inventory_store_groups(DaliDiscoveryInventory *inventor
     DaliDiscoveryDeviceInfo *device = &inventory->devices[addr];
     device->has_groups = true;
     device->groups = groups;
+    return DALI_OK;
+}
+
+DaliError dali_discovery_inventory_store_identity(
+    DaliDiscoveryInventory *inventory,
+    uint8_t addr,
+    const DaliMemoryBank0Identity *identity)
+{
+    if (inventory == NULL || addr >= DALI_SHORT_ADDRESS_COUNT || identity == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliDiscoveryDeviceInfo *device = &inventory->devices[addr];
+    device->has_identity = true;
+    device->identity = *identity;
+    if (device->has_identity_collision) {
+        device->has_identity_collision = false;
+        if (inventory->identity_collision_count > 0u) {
+            inventory->identity_collision_count--;
+        }
+    }
     return DALI_OK;
 }
 
@@ -941,9 +968,28 @@ static void discovery_enrich_device(const DaliDiscoveryTransport *transport,
 
     if (device->has_control_gear) {
         DaliMemoryBank0Identity identity;
-        if (dali_memory_read_bank0_identity(transport, addr, &identity) == DALI_OK) {
+        DaliError identity_err =
+            dali_memory_read_bank0_identity(transport, addr, &identity);
+        if (identity_err == DALI_ERR_RX_ACTIVITY) {
+            /*
+             * Asked twice before anything is concluded. One reply caught by a
+             * DALI-1 coupler's press looks like this once; a second unit on the
+             * address produces the same collision every time.
+             */
+            identity_err = dali_memory_read_bank0_identity(transport, addr, &identity);
+        }
+        if (identity_err == DALI_OK) {
             device->has_identity = true;
             device->identity = identity;
+        } else if (identity_err == DALI_ERR_RX_ACTIVITY) {
+            /*
+             * Something here answered QUERY STATUS or QUERY GROUPS decodably,
+             * so every unit on the address gave the same bytes to that. The
+             * identification number is the one thing they cannot share.
+             * Silence and malformed replies are not classified: a bank that
+             * does not answer is not a second unit.
+             */
+            device->has_identity_collision = true;
         }
     }
 
@@ -1046,6 +1092,9 @@ static DaliError discovery_scan_walk(DaliDiscoveryInventory *inventory,
             if (inventory->devices[addr].has_undecodable_device_activity) {
                 inventory->undecodable_device_count++;
             }
+            if (inventory->devices[addr].has_identity_collision) {
+                inventory->identity_collision_count++;
+            }
             if (found_cb != NULL) {
                 found_cb(addr, &inventory->devices[addr], found_ctx);
             }
@@ -1107,6 +1156,11 @@ static DaliError discovery_scan_walk(DaliDiscoveryInventory *inventory,
             device->has_instance_count = true;
             device->instance_count   = count;
             discovery_enrich_device(transport, addr, device);
+            /* Enrichment can find gear here after all -- a decoded QUERY GROUPS
+             * where the status reply was missed -- and then reads its Bank 0. */
+            if (device->has_identity_collision) {
+                inventory->identity_collision_count++;
+            }
             if (found_cb != NULL) {
                 found_cb(addr, device, found_ctx);
             }

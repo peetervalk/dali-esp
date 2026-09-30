@@ -28,6 +28,116 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-09-30 (shared-address detection; uncommitted on `dev`)
+
+Implements the fix proposed in *Two units that answer alike share an address
+invisibly*, under Investigations, for the eighth session's finding below.
+Nothing touched a bus.
+
+- `discovery_enrich_device()` keeps the Bank 0 identity read's error. On
+  `DALI_ERR_RX_ACTIVITY` it reads once more, and a second collision sets
+  `has_identity_collision` on an entry that stays `present`. Silence and
+  malformed replies are not classified. The walk counts the address in
+  `identity_collision_count`, from the status path and from the device-probe
+  path, where a decoded QUERY GROUPS can find gear too.
+- `dali_discovery_gear_address_contested()` is the one test for a contested
+  gear address, undecodable or collided. The planner's collector, the
+  snapshot, the commissioning audit's occupancy and `backup save` read it.
+- The planner reports every reserved address as a new `contested` conflict,
+  whether or not a move wanted it, in both address spaces and in the group
+  plan. The proposal had only the reservation. Without the report the bench
+  would have lost `restore plan`'s one pointer to a3, since a reserved address
+  is no longer reported as `identity unknown`.
+- The snapshot leaves a collided gear entry out rather than recording it as one
+  unanchored unit. The device entry at the same number is kept.
+- The audit counts a collided address as contested, not confirmed. That is also
+  what an equal-random-address collision between two units of one product
+  looks like after the walk.
+- `shell_fill_missing_identities()` retries collided addresses too, through the
+  new `dali_discovery_inventory_store_identity()`: a read that decodes there
+  withdraws the collision.
+- Shell: `discover` and `scan` append `, contested` to the unit's line and print
+  a note naming the address with the remedy. `inventory` marks and counts it,
+  `backup save`'s contested block covers both kinds, and the restore remedy line
+  follows a `contested` conflict as well as `target contested`. The ESPHome scan
+  logs the addresses as warnings.
+- 12 new vectors: 5 in `test_discovery` (to 68), 4 in `test_restore_plan` (to
+  41), and 1 each in `test_restore_groups` (20), `test_snapshot` (26) and
+  `test_commissioning_audit` (18). Two restore vectors that read `conflicts[0]`
+  now find their conflict by kind. 32/32 suites pass.
+- 13 mutants, each killed: no retry; retry on any failure; never classify;
+  classify any failure; each of the two walk paths not counted; the helper
+  ignoring collisions; `store_identity` keeping the flag; no `contested` report
+  in either plan; and the collector, the snapshot and the audit each reading
+  undecodable activity only.
+- The native IDF 6.0.1 build and a `dali_test.yaml` compile on ESPHome 2026.9.0
+  both pass, and both images carry the new strings. The five changed C files
+  re-run through their IDF compile commands, and `dali_scan.cpp` through its
+  ESPHome one, with `-fsyntax-only`: no diagnostics.
+
+Not covered: any bus. In particular, whether a collided identity read arrives
+as `RX_ACTIVITY` at all; a collision that reads as silence or as a malformed
+reply is still missed.
+
+### Verified on hardware 2026-09-30, eighth session (2k bus: two lamps on one short address, `dev`)
+
+The bench that two P1 items in `current_status.md` asked for: two drivers put
+on one short address on purpose, after a `backup save`. Run twice. The operator
+pasted the opening of the first run and all of the second; the first run's
+clear and walk are reported, not pasted. `discover` printed the version as
+`v2.0`, which only `e46216e` onwards does, so the build carries the DTR0
+read-back. The exact ref and the surface are not recorded.
+
+Bus at start: 5 LED gear at a0–a4, all off and in group 0, and control devices
+at d0 and d1. `backup save` recorded `7 entries from 5 address(es)`, stored 141
+bytes, and named no unanchored entry.
+
+- **`config-dtr0 a4 set-short-address-dtr0 7` put a4's lamp on a3**, on top of
+  the lamp already there. 7 is `(3 << 1) | 1`, the gear encoding of a3. The two
+  lamps are the same product in the same state: status `0x00`, level 0, group
+  0, version 2.0.
+- **Every walk read a3 as one unit and the other lamp as gone.** `discover` and
+  `scan` listed a0–a3 and `4 device(s) found`, with a3 `present, LED,
+  status=0x00, v2.0, level=0, groups=[0]` and no contested note. The commission
+  pre-scan read `occupied=4`, and the walk found no unaddressed gear. Nothing
+  named a3, and the operator's reading was that a lamp had vanished with no way
+  to tell where. Why, read from source and not captured: two units answering
+  in step with the same byte superimpose into one valid frame, and the scan
+  calls an address contested only when QUERY STATUS fails to decode. See *Two
+  units that answer alike share an address invisibly*, under Investigations.
+- **`restore plan` was the only output that pointed at a3.** On the second run
+  it read `5 matched, 5 already correct, 0 move(s)`, meaning a0–a2 and d0–d1,
+  and three conflicts: `gear a3: identity unknown`, `gear a3: not on bus` and
+  `gear a4: not on bus`. The Bank 0 read at a3 failed, as two different
+  identification numbers answering at once should. No move went onto a3, so the
+  planner stayed safe, but through its unidentified-unit path: the contested
+  reservation was never set. `target contested` could not have appeared,
+  because the unit the backup places on a3 is one of the two sharing it, so no
+  move aims there.
+- **`address 3 clear` freed both lamps through the single-unit path.** It
+  printed the anchored-entry note for a3, `a3 -> unaddressed (DTR0=255)` and
+  `a3 cleared -- gear on the bus now reports no short address`. The contested
+  arm did not open. No `DTR0 needed a second load` line, so the read-back
+  passed on the first load with both units answering it: DTR0 is loaded by
+  broadcast, so they held the same value. That is the read-back's first bus
+  reading. The broadcast QUERY MISSING SHORT ADDRESS read one decoded YES from
+  two unaddressed units, so `more than one unit` did not appear: every unit
+  answers YES with the same byte. The fifth session left that third reading
+  unseen; it now looks like one that cannot be relied on.
+- **`commission unaddressed` separated them.** It read `occupied=3`, gave short
+  3 to random `0x6E0DE5` and short 4 to `0xD81575`, with QUERY SHORT ADDRESS
+  echoing `0x07` and `0x09`, and its post-scan found 5 and confirmed 2 of 2. By
+  the operator's report, the first run's clear and walk did the same.
+
+Not covered:
+
+- Which lamp the walk put on a3 and which on a4. No `restore plan` after the
+  second walk is in the output.
+- Which error the Bank 0 read at a3 returned: `identity unknown` covers every
+  failure.
+- `address <aN> clear`'s contested arm, `target contested` and the post-scan
+  audit's contested path. Units that answer alike reach none of them.
+
 ### Verified locally on 2026-09-30 (DTR0 read-back, clear lines, version display; uncommitted on `dev`)
 
 Implements the fix proposed in *A lost DTR0 load re-addresses a unit to
@@ -1784,6 +1894,65 @@ cleared by the 2026-08-14 entry above):
 
 # Investigations
 
+## Two units that answer alike share an address invisibly — found 2026-09-30
+
+Found in the eighth session. What the bus did was observed; why is read from
+source.
+
+### Why nothing flagged it
+
+The scan classifies an address by its QUERY STATUS reply alone
+(`discovery_scan_walk()`): decoded is present, silence is absent, and
+undecodable activity is contested. Two units on one address reply to the same
+frame at nearly the same moment, and the bus carries the AND of the two. Where
+their bits differ, a bit comes out low in both halves, and `decode_half_bits()`
+rejects any bit that is not a clean low-high or high-low pair. So differing
+replies make the address contested. Where the bytes agree and the timing is
+close, the superposition is one valid frame. Two lamps of one product, off and
+in one group, agree on status, level, groups, version and device type, which is
+everything the walk asks before Bank 0.
+
+Every walk goes through `discovery_enrich_device()`: `scan`, `discover`, both
+commissioning scans, `backup save` and the `restore` refresh. It reads the
+Bank 0 identity at every present gear address, and that read is the one question
+two units cannot answer alike, because their identification numbers differ. At
+a3 it failed, which is what `restore plan`'s `identity unknown` reports. But
+enrichment keeps the identity only on `DALI_OK` and drops the error, so a
+collision there becomes "no identity" and nothing more.
+`dali_memory_read_from_sequence()` does return the sequence's error, so the
+distinction is there one call up.
+
+Safety held because an address shared this way still reads as occupied. The
+commissioning pre-scan will not assign onto it, `address set` refuses it as a
+destination, and the planner treats an unidentified unit as immovable. What was
+lost is the location. To the operator a unit vanished, and nothing says it is
+sharing an address rather than unpowered.
+
+The YES/NO queries behave the same way for a different reason. Every unit
+answers YES with `0xFF`, so several in step decode as one YES. The `more than
+one unit` wording that `address clear` and `backup save` print on RX activity
+from QUERY MISSING SHORT ADDRESS therefore appears only when the units' timing
+garbles their replies.
+
+### Fix, proposed and not implemented
+
+Keep the identity read's error in `discovery_enrich_device()`. On a read that
+fails with undecodable activity, read once more, so that one frame hit by a
+DALI-1 coupler is not taken for a second unit. If it fails the same way again,
+record the address as shared: it answers, and more than one unit is behind it.
+
+- `scan` and `discover` name the address, with the `address <aN> clear` /
+  `commission unaddressed` advice the contested note already gives.
+- The planner reserves it, as it reserves a contested address. `backup save`
+  warns instead of recording it as one unanchored unit.
+- A new flag rather than `has_undecodable_activity`, because the address does
+  answer, and the inventory's contested addresses are deliberately not
+  `present`. The cost is that every reader of the contested flag must read both.
+
+It adds no frames to a bus without a shared address. Gear with an empty Bank 0
+stays invisible. For that gear, QUERY RANDOM ADDRESS is the fallback probe, and
+it works only while the units' random addresses differ.
+
 ## A lost DTR0 load re-addresses a unit to whatever DTR0 last held — found 2026-09-30
 
 Found by reading the move that failed in the seventh session. The miss was
@@ -3520,6 +3689,44 @@ below landed after that tag.
 
 Add new entries here as breaks accumulate, and empty the section again at the
 next tag.
+
+### From the 2026-09-30 shared-address detection (host-tested, compile-checked)
+
+Operator-visible:
+
+- `discover` and `scan` append `, contested` to a unit whose identity read
+  collided, and after `Scan complete` print `note: N listed address(es) hold
+  more than one unit.`, the addresses, and the remedy.
+- `inventory` marks such a unit `contested (identity collides)` and counts it
+  in its `contested` total, where it is also counted as a device.
+- `backup save`'s contested block reads `N address(es) are contested and NOT
+  recorded here`, where it read `answered undecodably`, and lists both kinds. A
+  collided address is no longer recorded as an unanchored entry.
+- `restore plan` and `restore groups` report every contested address as a
+  `contested` conflict, even with no move aimed at it. The remedy line reads
+  `free a contested address with ...`, where it read `free a contested target`,
+  and the device-space line ends `a contested d<N> needs a hardware pass`.
+- The commissioning post-scan counts a collided address as contested, not
+  confirmed.
+
+C API:
+
+- New: `DaliDiscoveryDeviceInfo.has_identity_collision`,
+  `DaliDiscoveryInventory.identity_collision_count`,
+  `dali_discovery_gear_address_contested()` and
+  `dali_discovery_inventory_store_identity()`.
+- `DaliRestoreConflictKind` gains `DALI_RESTORE_CONFLICT_CONTESTED`, appended,
+  so existing values keep their numbers. A plan on a bus with a contested
+  address is no longer clean even when nothing wants that address.
+- `dali_snapshot_from_inventory()` and
+  `dali_commissioning_occupancy_from_inventory()` treat a collided gear address
+  as contested.
+
+ESPHome:
+
+- The integration's scan logs `N address(es) answer as one unit but hold more
+  than one; their identification numbers collide`, then one `aN: contested,
+  identity collides` line per address.
 
 ### From the 2026-09-30 DTR0 read-back, clear-line and version fixes (host-tested, compile-checked)
 

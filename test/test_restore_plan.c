@@ -79,6 +79,19 @@ static void contested_device_on_bus(uint8_t addr)
     s_inventory.undecodable_device_count++;
 }
 
+/* Two or more units that answer alike: listed as one present unit, with no
+ * identity because the Bank 0 read collided. How the scan records the 2k bench,
+ * where two lamps of one product shared a3. */
+static void identity_collided_on_bus(uint8_t addr)
+{
+    DaliDiscoveryDeviceInfo *device = &s_inventory.devices[addr];
+    device->present                = true;
+    device->has_control_gear       = true;
+    device->has_identity           = false;
+    device->has_identity_collision = true;
+    s_inventory.identity_collision_count++;
+}
+
 static void device_on_bus(uint8_t addr)
 {
     DaliDiscoveryDeviceInfo *device = &s_inventory.devices[addr];
@@ -105,6 +118,19 @@ static uint16_t count_conflicts(const DaliRestorePlan  *plan,
         }
     }
     return count;
+}
+
+/* The first stored conflict of `kind`. A contested address is reported for
+ * itself as well as by the move that wanted it, so position says nothing. */
+static const DaliRestoreConflict *find_conflict(DaliRestoreConflictKind kind)
+{
+    for (uint8_t i = 0u; i < s_plan.conflict_count; i++) {
+        if (s_plan.conflicts[i].kind == kind) {
+            return &s_plan.conflicts[i];
+        }
+    }
+    TEST_FAIL_MESSAGE("expected conflict kind not reported");
+    return NULL;
 }
 
 /*
@@ -719,7 +745,13 @@ void test_a_move_onto_a_contested_address_is_reported_not_made(void)
     TEST_ASSERT_EQUAL_UINT16(0u,
                              count_conflicts(&s_plan,
                                              DALI_RESTORE_CONFLICT_TARGET_OCCUPIED));
-    TEST_ASSERT_EQUAL_UINT8(4u, s_plan.conflicts[0].other_address);
+    TEST_ASSERT_EQUAL_UINT8(
+        4u, find_conflict(DALI_RESTORE_CONFLICT_TARGET_CONTESTED)->other_address);
+    /* And a4 is named for itself, which is what points at the remedy. */
+    TEST_ASSERT_EQUAL_UINT16(1u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_CONTESTED));
+    TEST_ASSERT_EQUAL_UINT8(4u, find_conflict(DALI_RESTORE_CONFLICT_CONTESTED)->address);
     replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
 }
 
@@ -852,7 +884,10 @@ void test_a_contested_device_address_blocks_a_device_move(void)
     TEST_ASSERT_EQUAL_UINT16(1u,
                              count_conflicts(&s_plan,
                                              DALI_RESTORE_CONFLICT_TARGET_CONTESTED));
-    TEST_ASSERT_EQUAL_INT(DALI_SNAPSHOT_SPACE_DEVICE, s_plan.conflicts[0].space);
+    TEST_ASSERT_EQUAL_INT(DALI_SNAPSHOT_SPACE_DEVICE,
+                          find_conflict(DALI_RESTORE_CONFLICT_TARGET_CONTESTED)->space);
+    TEST_ASSERT_EQUAL_INT(DALI_SNAPSHOT_SPACE_DEVICE,
+                          find_conflict(DALI_RESTORE_CONFLICT_CONTESTED)->space);
     replay_and_assert_safe(DALI_SNAPSHOT_SPACE_DEVICE);
 }
 
@@ -882,6 +917,105 @@ void test_a_hybrid_address_contested_in_one_space_still_plans_the_other(void)
                                              DALI_RESTORE_CONFLICT_TARGET_CONTESTED));
     replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
     replay_and_assert_safe(DALI_SNAPSHOT_SPACE_DEVICE);
+}
+
+void test_a_contested_address_is_reported_even_when_no_move_wants_it(void)
+{
+    /* Nothing aims at a7, but the units on it are on the bus and nothing else
+     * in the plan would say so. */
+    record(DALI_SNAPSHOT_SPACE_GEAR, 0u, 1u);
+    on_bus(0u, 1u);
+    contested_on_bus(7u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_plan.move_count);
+    TEST_ASSERT_EQUAL_UINT16(1u, s_plan.conflict_total);
+    TEST_ASSERT_EQUAL_UINT8(7u, find_conflict(DALI_RESTORE_CONFLICT_CONTESTED)->address);
+    TEST_ASSERT_EQUAL_INT(DALI_SNAPSHOT_SPACE_GEAR,
+                          find_conflict(DALI_RESTORE_CONFLICT_CONTESTED)->space);
+    TEST_ASSERT_FALSE(dali_restore_plan_is_clean(&s_plan));
+}
+
+void test_an_address_whose_identity_collides_is_where_the_missing_units_are(void)
+{
+    /*
+     * The 2k bench as the planner now sees it. The backup has lamps at a3 and
+     * a4; both answer at a3, alike, so the scan lists a3 once and reads no
+     * identity there. The plan must name a3 as contested -- the only pointer
+     * to where the two missing lamps went -- rather than as one unit whose
+     * identity is merely unknown, and must move nothing.
+     */
+    record(DALI_SNAPSHOT_SPACE_GEAR, 0u, 1u);
+    record(DALI_SNAPSHOT_SPACE_GEAR, 3u, 4u);
+    record(DALI_SNAPSHOT_SPACE_GEAR, 4u, 5u);
+    on_bus(0u, 1u);
+    identity_collided_on_bus(3u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_plan.move_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_plan.matched_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_plan.already_correct_count);
+    TEST_ASSERT_EQUAL_UINT16(1u,
+                             count_conflicts(&s_plan, DALI_RESTORE_CONFLICT_CONTESTED));
+    TEST_ASSERT_EQUAL_UINT8(3u, find_conflict(DALI_RESTORE_CONFLICT_CONTESTED)->address);
+    TEST_ASSERT_EQUAL_UINT16(0u,
+                             count_conflicts(&s_plan, DALI_RESTORE_CONFLICT_UNIDENTIFIED));
+    TEST_ASSERT_EQUAL_UINT16(2u,
+                             count_conflicts(&s_plan, DALI_RESTORE_CONFLICT_MISSING));
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
+}
+
+void test_a_move_onto_an_address_whose_identity_collides_is_target_contested(void)
+{
+    /*
+     * The bench `target contested` needs: the backup's own lamp for a3 moved
+     * aside to a10 and readable there, then two others put on a3. The move
+     * back is dropped as contested, not occupied, because what holds a3 is
+     * not one unit anyone can look up.
+     */
+    record(DALI_SNAPSHOT_SPACE_GEAR, 3u, 1u);
+    on_bus(10u, 1u);
+    identity_collided_on_bus(3u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_EQUAL_UINT8(0u, s_plan.move_count);
+    TEST_ASSERT_EQUAL_UINT16(1u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_TARGET_CONTESTED));
+    TEST_ASSERT_EQUAL_UINT16(0u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_TARGET_OCCUPIED));
+    TEST_ASSERT_EQUAL_UINT8(
+        3u, find_conflict(DALI_RESTORE_CONFLICT_TARGET_CONTESTED)->other_address);
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
+}
+
+void test_an_address_whose_identity_collides_is_never_borrowed_to_stage(void)
+{
+    /* The swap from the staging test, with the one address no recorded unit
+     * holds taken by units that answer alike. Reserved rather than present
+     * now, it must still never be borrowed: a staged unit would be a third on
+     * it. A guard on the reservation, not on how the scan found it. */
+    record(DALI_SNAPSHOT_SPACE_GEAR, 1u, 100u);
+    record(DALI_SNAPSHOT_SPACE_GEAR, 0u, 101u);
+    on_bus(0u, 100u);
+    on_bus(1u, 101u);
+    for (uint8_t addr = 2u; addr < 63u; addr++) {
+        record(DALI_SNAPSHOT_SPACE_GEAR, addr, addr);
+        on_bus(addr, addr);
+    }
+    identity_collided_on_bus(63u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_TRUE(s_plan.incomplete);
+    TEST_ASSERT_EQUAL_UINT16(1u,
+                             count_conflicts(&s_plan,
+                                             DALI_RESTORE_CONFLICT_NO_STAGING_ADDRESS));
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
 }
 
 /* --------------------------------------------------------------------------
@@ -1027,6 +1161,7 @@ void test_names_are_defined_for_every_conflict_kind_and_space(void)
         DALI_RESTORE_CONFLICT_TARGET_OCCUPIED,
         DALI_RESTORE_CONFLICT_TARGET_CONTESTED,
         DALI_RESTORE_CONFLICT_NO_STAGING_ADDRESS,
+        DALI_RESTORE_CONFLICT_CONTESTED,
     };
     for (size_t i = 0u; i < (sizeof(kinds) / sizeof(kinds[0])); i++) {
         const char *name = dali_restore_conflict_name(kinds[i]);
@@ -1070,6 +1205,10 @@ int main(void)
     RUN_TEST(test_a_contested_address_reserves_only_its_own_space);
     RUN_TEST(test_a_contested_device_address_blocks_a_device_move);
     RUN_TEST(test_a_hybrid_address_contested_in_one_space_still_plans_the_other);
+    RUN_TEST(test_a_contested_address_is_reported_even_when_no_move_wants_it);
+    RUN_TEST(test_an_address_whose_identity_collides_is_where_the_missing_units_are);
+    RUN_TEST(test_a_move_onto_an_address_whose_identity_collides_is_target_contested);
+    RUN_TEST(test_an_address_whose_identity_collides_is_never_borrowed_to_stage);
     RUN_TEST(test_the_two_address_spaces_are_planned_independently);
     RUN_TEST(test_a_control_device_is_restored_from_its_own_identity);
     RUN_TEST(test_gear_and_device_identities_never_substitute_for_each_other);

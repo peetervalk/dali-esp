@@ -489,11 +489,20 @@ address: run 'commission unaddressed' to give them distinct addresses, then
   'identify' to see which fixture is which
 ```
 
-`more than one unit` is the collision reappearing as evidence: several units
-answering the missing-address query at once is undecodable in the same way, and
-here that is the expected reading rather than an ambiguity, because for a YES/NO
+`more than one unit` is the collision reappearing as evidence, and it appears
+only when the units' replies garble. Every unit answers YES with the same byte,
+so units that reply in step decode as one YES: on 2k, two lamps cleared together
+read exactly as one does. The line can say there is more than one; its absence
+says nothing. When it does appear it is not an ambiguity, because for a YES/NO
 query NO is silence — nothing that still holds an address drives the reply
 window at all.
+
+Nor does the clear always know it is clearing a shared address. The contested
+arm opens on an undecodable reply, and units of one product in one state answer
+every probe alike. Two such lamps on a3 took the single-unit path above and were
+both cleared by it. `scan` and `discover` are what find such an address: they
+read each unit's identification number, which two units cannot share, and name
+the address as contested when that read collides. See `commissioning_readme.md`.
 
 If `a7` comes back answering *decodably* after the clear, one unit took the
 write and another did not. That is progress, not failure; repeat the clear.
@@ -1269,19 +1278,26 @@ and blocking cascades to anything queued behind the blocked unit.
 
 **A contested address is occupied, not free.** An address that answers
 undecodably holds two or more units that reply as one, and the scan deliberately
-does not mark it present because nothing there can be read. The planner reserves
-it anyway, in the space it was contested in: it is never used as a placement
-target, never borrowed to stage a cycle through, and never used to park a unit
-the backup has never seen. Writing a third unit onto it is the one fault a
-restore cannot undo by moving anything back — every other mistake it could make
-is reverted by planning again. A move that wanted such an address is dropped and
-reported as `target contested` rather than `target occupied`, because the remedy
-is a sequence rather than a lookup:
+does not mark it present because nothing there can be read. A gear address
+whose units answer alike is marked present, but its identification read
+collides, and it is contested all the same. The planner reserves both, in the
+space they were contested in: never used as a placement target, never borrowed
+to stage a cycle through, and never used to park a unit the backup has never
+seen. Writing a third unit onto one is the one fault a restore cannot undo by
+moving anything back — every other mistake it could make is reverted by
+planning again.
+
+The plan names every contested address as `contested`, whether or not a move
+wanted it: the units on it are the ones no plan can see, and a recorded unit
+reported `not on bus` is often one of them. A move that wanted such an address
+is dropped and reported as `target contested` rather than `target occupied`,
+because the remedy is a sequence rather than a lookup:
 
 ```
-restore: 1 conflict(s):
+restore: 2 conflict(s):
+  gear a4: contested
   gear a1: target contested (4)
-restore: free a contested target with 'address <aN> clear', then
+restore: free a contested address with 'address <aN> clear', then
 'commission unaddressed', then run this again
 ```
 

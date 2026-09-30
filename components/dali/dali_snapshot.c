@@ -141,8 +141,16 @@ DaliError dali_snapshot_from_inventory(DaliSnapshot                 *out,
          * entries. They are recorded independently because the two addresses
          * move independently; pairing them is dali_restore's job, not the
          * snapshot's.
+         *
+         * A gear address listed as present can still be contested: it answered
+         * as one unit and its identity read collided. It is left out for the
+         * reason an undecodable one never gets this far. It holds more than one
+         * unit and no identity, and an entry would record it as one unit that
+         * cannot be restored. The device entry at the same number is
+         * independent and still recorded.
          */
-        if (device->has_control_gear) {
+        if (device->has_control_gear &&
+            !dali_discovery_gear_address_contested(device)) {
             DaliSnapshotEntry entry;
             memset(&entry, 0, sizeof(entry));
             entry.space         = DALI_SNAPSHOT_SPACE_GEAR;

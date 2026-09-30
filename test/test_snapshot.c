@@ -260,6 +260,33 @@ void test_from_inventory_keeps_gear_whose_identity_could_not_be_read(void)
     TEST_ASSERT_EQUAL_UINT8(4u, s_snapshot.entries[0].short_address);
 }
 
+void test_from_inventory_leaves_out_gear_whose_identity_collided(void)
+{
+    /*
+     * Two units answering alike at a3: listed as present, no identity. Unlike
+     * the unreadable unit above, an entry here would record two units as one
+     * that can never be restored, so it is left out as an undecodable address
+     * is, and `backup save` names it instead. The device at the same number is
+     * a different unit and keeps its entry.
+     */
+    DaliDiscoveryInventory inv;
+    memset(&inv, 0, sizeof(inv));
+    inv.valid = true;
+    seed_gear(&inv, 1u, 0x40u);
+    inv.devices[3].present                = true;
+    inv.devices[3].has_control_gear       = true;
+    inv.devices[3].has_identity_collision = true;
+    inv.devices[3].has_input_device       = true;
+    inv.identity_collision_count          = 1u;
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_from_inventory(&s_snapshot, &inv));
+    TEST_ASSERT_EQUAL_UINT8(2u, s_snapshot.entry_count);
+    TEST_ASSERT_EQUAL_INT(DALI_SNAPSHOT_SPACE_GEAR, s_snapshot.entries[0].space);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_snapshot.entries[0].short_address);
+    TEST_ASSERT_EQUAL_INT(DALI_SNAPSHOT_SPACE_DEVICE, s_snapshot.entries[1].space);
+    TEST_ASSERT_EQUAL_UINT8(3u, s_snapshot.entries[1].short_address);
+}
+
 void test_from_inventory_rejects_an_invalid_inventory(void)
 {
     DaliDiscoveryInventory inv;
@@ -500,6 +527,7 @@ int main(void)
     RUN_TEST(test_a_device_entry_takes_its_identity_from_the_device_bank);
     RUN_TEST(test_a_device_without_its_own_bank0_is_recorded_unanchored);
     RUN_TEST(test_from_inventory_keeps_gear_whose_identity_could_not_be_read);
+    RUN_TEST(test_from_inventory_leaves_out_gear_whose_identity_collided);
     RUN_TEST(test_from_inventory_rejects_an_invalid_inventory);
     RUN_TEST(test_encode_decode_round_trip_preserves_every_field);
     RUN_TEST(test_encode_of_an_empty_snapshot_is_a_bare_header);

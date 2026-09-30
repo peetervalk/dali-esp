@@ -121,6 +121,7 @@ ISR -> fixed ring buffer -> task-context frame decoder -> scheduler/protocol
 - Documentation-only updates may be made directly.
 - Suggest software-stack changes first and implement them only after explicit
   go-ahead.
+- Do not commit, do not push, unless specifically asked to. 
 - Touch hardware/serial only after explicit go-ahead.
 - Touch only the serial port named in *Local setup* below. If it is
   unavailable, stop and notify rather than scanning for another — the wrong

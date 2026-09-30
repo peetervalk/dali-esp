@@ -30,11 +30,12 @@ typedef struct {
 typedef struct {
     bool     present[DALI_SHORT_ADDRESS_COUNT];
     /*
-     * Answered undecodably in this space: the address is taken, but nothing
-     * there can be read, matched, or moved. Never both this and `present` --
-     * the scan records one or the other -- and the two mean different things
-     * to the planner. A present unit is something to plan for; a reserved
-     * address is something to plan around.
+     * Contested in this space: the address is taken by more than one unit, so
+     * nothing there can be matched or moved. Never both this and `present`,
+     * even where the scan listed the address as present -- a gear address
+     * whose identity read collided is collected here and nowhere else -- and
+     * the two mean different things to the planner. A present unit is
+     * something to plan for; a reserved address is something to plan around.
      */
     bool     reserved[DALI_SHORT_ADDRESS_COUNT];
     bool     has_ident[DALI_SHORT_ADDRESS_COUNT];
@@ -129,12 +130,14 @@ static bool restore_add_move(DaliRestorePlan       *plan,
  * present but unidentified and reported rather than silently skipped: an
  * operator needs to know the plan cannot place it.
  *
- * An address that answered undecodably is collected too, as `reserved` rather
- * than present. Two units sharing one short address answer as one, so there is
- * no identity to read and no way to address either alone -- but the address is
- * occupied, and a plan that treated it as free would move a third unit onto it.
- * That is the one fault a restore must never create, and unlike the others it
- * cannot be undone by moving anything back.
+ * A contested address is collected too, as `reserved` rather than present:
+ * one that answered undecodably, and in the gear space one that answered as a
+ * single unit while its Bank 0 identity read collided. Two units sharing one
+ * short address answer as one, so there is no identity to read and no way to
+ * address either alone -- but the address is occupied, and a plan that treated
+ * it as free would move a third unit onto it. That is the one fault a restore
+ * must never create, and unlike the others it cannot be undone by moving
+ * anything back.
  *
  * The two spaces read their own flag for the reason they read their own
  * identity. A contested control-device address at number N says nothing about
@@ -155,7 +158,7 @@ static void restore_collect_bus(RestoreBusUnits              *units,
         }
 
         const bool contested = (space == DALI_SNAPSHOT_SPACE_GEAR)
-                                   ? device->has_undecodable_activity
+                                   ? dali_discovery_gear_address_contested(device)
                                    : device->has_undecodable_device_activity;
         if (contested) {
             units->reserved[addr] = true;
@@ -514,10 +517,22 @@ static void restore_plan_space(DaliRestorePlan    *plan,
          * incomplete. Nothing here is ever the *subject* of a move: the match
          * loop below only walks present addresses, so no pending move can
          * start on one.
+         *
+         * Reported whether or not a move wants it. The units on a contested
+         * address are the ones no plan can see, so a recorded unit that reads
+         * as missing is often one of them, and a plan that named only the
+         * missing would leave the operator no way to guess where it went.
          */
         if (units->reserved[addr]) {
             occupied  |= ((uint64_t)1u << addr);
             immovable |= ((uint64_t)1u << addr);
+            restore_add_conflict(&sink,
+                                 DALI_RESTORE_CONFLICT_CONTESTED,
+                                 space,
+                                 addr,
+                                 RESTORE_NO_ADDRESS,
+                                 false,
+                                 NULL);
         }
     }
 
@@ -743,6 +758,18 @@ DaliError dali_restore_plan_groups(DaliRestoreGroupPlan         *out,
     restore_collect_bus(&units, DALI_SNAPSHOT_SPACE_GEAR, inventory);
 
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        if (units.reserved[addr]) {
+            /* A group edit here would reach every unit on the address. Named
+             * for the reason the address plan names it. */
+            restore_add_conflict(&sink,
+                                 DALI_RESTORE_CONFLICT_CONTESTED,
+                                 DALI_SNAPSHOT_SPACE_GEAR,
+                                 addr,
+                                 RESTORE_NO_ADDRESS,
+                                 false,
+                                 NULL);
+            continue;
+        }
         if (!units.present[addr]) {
             continue;
         }
@@ -1210,6 +1237,7 @@ const char *dali_restore_conflict_name(DaliRestoreConflictKind kind)
         case DALI_RESTORE_CONFLICT_NO_STAGING_ADDRESS: return "no free address to stage";
         case DALI_RESTORE_CONFLICT_NO_RECORDED_GROUPS: return "no group data in backup";
         case DALI_RESTORE_CONFLICT_GROUPS_UNREADABLE:  return "groups unreadable";
+        case DALI_RESTORE_CONFLICT_CONTESTED:          return "contested";
         default:                                       return "unknown";
     }
 }
