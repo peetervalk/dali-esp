@@ -88,11 +88,13 @@ cached level profile and triggers a refresh.
 | Commission control devices | `dali_device_commissioning_commission_unaddressed` | `commission devices` | yes | yes (2k, 2026-09-29) | shell, opt-in |
 | Post-scan verification | `dali_commissioning_audit` | automatic in both `commission` walks | yes | no | shell |
 | Address backup | `dali_snapshot_from_inventory` | `backup save`, `backup status` | yes | partial (2k, 2026-09-03) | shell; persisted to flash |
-| Backup blob round trip | `dali_snapshot_encode` / `_decode` | `backup export`, `backup import` | yes | n/a — no bus traffic; round-tripped on the 2k node, 2026-09-29 | shell |
+| Backup blob round trip | `dali_snapshot_encode` / `_decode` | `backup export`, `backup import` | yes | n/a — no bus traffic; round-tripped on the 2k node, 2026-09-29, in format v1; v2 refuses v1 blobs | shell |
 | Restore planning | `dali_restore_plan` | `restore plan` | yes | partial (2k, 2026-09-29: dependency order, a swap in each space, and moving aside a unit the backup never saw; 2026-09-30: no move onto a shared address it read as one unidentified unit; a contested target is host-only) | shell |
 | Restore execution | `dali_restore_write_short_address` per move (DTR0 read back before the pair), each confirmed by `dali_restore_confirm_move` | `restore apply` | partial (move frames, the checked write and confirmation; not the apply loop) | partial (2k and 1k, 2026-09-29: gear and device moves, staging hops and a move-aside included, each confirmed; 1k stopped after a move that did not land. The DTR0 read-back has not met a bus) | shell, opt-in |
 | Group restore planning | `dali_restore_plan_groups` | `restore groups` | yes | no | shell; control gear only |
 | Group restore execution | n/a — `ADD TO GROUP` / `REMOVE FROM GROUP` per bit | `restore groups apply` | no | no | shell, opt-in; read back per gear |
+| Instance settings in the backup (format v2) | `dali_restore_read_instance_settings`, `dali_snapshot_add_instance` | `backup save`, `backup status` | yes | no | shell; persisted to flash |
+| Instance settings restore | `dali_restore_locate_device`, `dali_restore_instance_write_mask`, `dali_restore_write_instance_settings` | `restore instances [apply]` | yes | no | shell, opt-in; read back per instance |
 | Identify blink | n/a | `identify` | no | yes | yes (button, shell) |
 | Smoke check | n/a | `smoke` | no | yes | shell |
 
@@ -206,15 +208,19 @@ a gap.
 | Capability | Shared API | Native CLI verb | Host vector | Real bus | ESPHome |
 |---|---|---|---|---|---|
 | Instance discovery | `dali_discovery_query_input_device` | `instances` | yes | yes | yes |
+| Instance event scheme, priority, instance groups in discovery | `dali_discovery_query_input_device` | `instances` | yes | no | yes |
+| Instance-group / instance-type / all-instances selectors | `dali_build_instance_command` | `iquery`/`iconfig` `<addr> gN\|tN\|all` | yes | no | yes (`iquery`, `iconfig`) |
 | Generic instance queries | `dali_input_build_query_*` | `iquery` | yes | partial | yes (`iquery`) |
 | DTR0-selected instance query | `dali_input_build_config_sequence` | `iquery ... instance-config` | yes | no | yes (`iquery <a> <i> <n> <dtr0>`) |
-| Generic configuration (10) | `dali_input_build_set_*` | `iconfig` | yes | no | yes (`iconfig`) |
+| Generic configuration (10) | `dali_input_build_set_*` | `iconfig` | yes | partial (SET EVENT SCHEME) | yes (`iconfig`) |
 | Part 301 push-button timers | `dali_input_pb_*` | `iquery pb-*`, `iconfig pb-set-*` | yes | no | yes (`pb-*`) |
 | Part 303 occupancy | `dali_input_occ_*` | `iquery occ-*`, `iconfig occ-*` | yes | partial | yes |
 | Part 304 light sensor | `dali_input_light_*` | `iquery light-*`, `iconfig light-*` | yes | partial | yes (`light-*`) |
 | Multi-byte input polling | `dali_input_poll_build_value_sequence` | `sensor poll` | yes | yes | yes |
 | Event decode | `dali_event_*` | `events`, `capture`, `find switches` | yes | yes | yes |
 | Event dispatch rules | `dali_dispatch_*` | n/a | yes | yes | yes |
+| Dispatch on instance group vs device group, and on instance type | `DaliDispatchKey.group_kind`, `match_instance_type` | n/a | yes | no | yes (YAML `instance_group`, `device_group`, `instance_type`) |
+| Event-source matching for sensor polls (every scheme) | `dali_event_source_*` | n/a | yes | no | yes |
 | Quiescent mode | `dali_input_build_quiescent_mode[_broadcast]` | `quiescent on\|off <addr\|all>` | yes | no | yes (console) |
 | Commissioning quiescence bracket | `DaliCommissioningOptions.quiesce_control_devices` | automatic in `commission` | yes | no | n/a |
 | Device-walk quiescence bracket | `DaliDeviceCommissioningOptions.quiesce_control_devices` | automatic in `commission devices` | yes | no | n/a |
@@ -223,7 +229,9 @@ a gap.
 | Device broadcast (0xFF) | `dali_build_device_broadcast_command` | via `quiescent ... all` | yes | no | yes (console) |
 
 Configuration writes are experimental everywhere. The native CLI says so on every
-`iconfig` success line: the result means transmitted, not applied.
+`iconfig` success line: the result means transmitted, not applied. One has been
+read back on a bus: SET EVENT SCHEME, on two Steinel instances on 2k on
+2026-10-01.
 
 ## Vendor helpers
 

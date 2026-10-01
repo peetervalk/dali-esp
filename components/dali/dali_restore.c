@@ -1,5 +1,7 @@
 #include "dali_restore.h"
 #include "dali_commissioning.h"
+#include "dali_event.h"
+#include "dali_input_config.h"
 
 #include <string.h>
 
@@ -1248,5 +1250,370 @@ const char *dali_restore_space_name(DaliSnapshotSpace space)
         case DALI_SNAPSHOT_SPACE_GEAR:   return "gear";
         case DALI_SNAPSHOT_SPACE_DEVICE: return "device";
         default:                         return "unknown";
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * Instance settings
+ * --------------------------------------------------------------------------*/
+
+/* QUERY INSTANCE STATUS bit 1, instanceActive. */
+#define RESTORE_INSTANCE_STATUS_ACTIVE 0x02u
+
+#define RESTORE_EVENT_PRIORITY_MIN     2u
+#define RESTORE_EVENT_PRIORITY_MAX     5u
+#define RESTORE_EVENT_FILTER_MAX       0xFFFFFFu
+
+typedef DaliError (*RestoreInstanceQueryFn)(uint8_t addr, uint8_t instance,
+                                            DaliFrame *out);
+
+static DaliError restore_query_instance(const DaliTransport   *transport,
+                                        RestoreInstanceQueryFn build,
+                                        uint8_t                addr,
+                                        uint8_t                instance,
+                                        uint8_t               *value_out)
+{
+    DaliFrame frame;
+    DaliError err = build(addr, instance, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+    return dali_discovery_query_u8(transport, &frame, value_out);
+}
+
+/* A reply window that gave no usable answer, as opposed to a transport that
+ * failed: the first leaves one field unknown, the second ends the read. */
+static bool restore_query_soft_failure(DaliError err)
+{
+    return err == DALI_ERR_TIMEOUT || err == DALI_ERR_MALFORMED ||
+           err == DALI_ERR_RX_ACTIVITY || err == DALI_ERR_INTERVENED;
+}
+
+static bool restore_group_slot_valid(uint8_t g)
+{
+    return g < DALI_INSTANCE_COUNT || g == DALI_INPUT_INSTANCE_GROUP_NONE;
+}
+
+DaliError dali_restore_read_instance_settings(const DaliTransport  *transport,
+                                              uint8_t               addr,
+                                              uint8_t               instance,
+                                              DaliInstanceSettings *out)
+{
+    if (out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    memset(out, 0, sizeof(*out));
+    memset(out->instance_groups, DALI_INPUT_INSTANCE_GROUP_NONE,
+           sizeof(out->instance_groups));
+    if (!dali_transport_valid(transport) ||
+        addr >= DALI_SHORT_ADDRESS_COUNT || instance >= DALI_INSTANCE_COUNT) {
+        return DALI_ERR_INVALID;
+    }
+
+    uint8_t   v = 0u;
+    DaliError err = restore_query_instance(transport,
+                                           dali_input_build_query_instance_type,
+                                           addr, instance, &v);
+    if (err != DALI_OK) {
+        return err;
+    }
+    if (v >= DALI_INSTANCE_COUNT) {
+        return DALI_ERR_MALFORMED;
+    }
+    out->has_type = true;
+    out->type     = v;
+
+    err = restore_query_instance(transport, dali_input_build_query_instance_enabled,
+                                 addr, instance, &v);
+    if (err == DALI_OK) {
+        if (dali_is_yes(v)) {
+            out->has_enabled = true;
+            out->enabled     = true;
+        }
+    } else if (err == DALI_ERR_TIMEOUT) {
+        uint8_t status = 0u;
+        err = restore_query_instance(transport,
+                                     dali_input_build_query_instance_status,
+                                     addr, instance, &status);
+        if (err == DALI_OK && (status & RESTORE_INSTANCE_STATUS_ACTIVE) == 0u) {
+            out->has_enabled = true;
+            out->enabled     = false;
+        }
+    }
+    if (err != DALI_OK && !restore_query_soft_failure(err)) {
+        return err;
+    }
+
+    err = restore_query_instance(transport, dali_input_build_query_event_scheme,
+                                 addr, instance, &v);
+    if (err == DALI_OK && v <= (uint8_t)DALI_EVENT_SOURCE_INSTANCE_GROUP) {
+        out->has_event_scheme = true;
+        out->event_scheme     = v;
+    } else if (err != DALI_OK && !restore_query_soft_failure(err)) {
+        return err;
+    }
+
+    err = restore_query_instance(transport, dali_input_build_query_event_priority,
+                                 addr, instance, &v);
+    if (err == DALI_OK) {
+        out->has_event_priority = true;
+        out->event_priority     = v;
+    } else if (!restore_query_soft_failure(err)) {
+        return err;
+    }
+
+    static const RestoreInstanceQueryFn filter_queries[3] = {
+        dali_input_build_query_event_filter_zero,
+        dali_input_build_query_event_filter_one,
+        dali_input_build_query_event_filter_two,
+    };
+    uint32_t filter    = 0u;
+    bool     filter_ok = true;
+    for (uint8_t i = 0u; i < 3u; i++) {
+        err = restore_query_instance(transport, filter_queries[i], addr, instance, &v);
+        if (err != DALI_OK) {
+            if (!restore_query_soft_failure(err)) {
+                return err;
+            }
+            filter_ok = false;
+            break;
+        }
+        filter |= (uint32_t)v << (8u * i);
+    }
+    if (filter_ok) {
+        out->has_event_filter = true;
+        out->event_filter     = filter;
+    }
+
+    static const RestoreInstanceQueryFn group_queries[DALI_INPUT_INSTANCE_GROUP_SLOTS] = {
+        dali_input_build_query_primary_instance_group,
+        dali_input_build_query_instance_group1,
+        dali_input_build_query_instance_group2,
+    };
+    uint8_t groups[DALI_INPUT_INSTANCE_GROUP_SLOTS];
+    bool    groups_ok = true;
+    for (uint8_t slot = 0u; slot < DALI_INPUT_INSTANCE_GROUP_SLOTS; slot++) {
+        err = restore_query_instance(transport, group_queries[slot], addr, instance,
+                                     &groups[slot]);
+        if (err != DALI_OK) {
+            if (!restore_query_soft_failure(err)) {
+                return err;
+            }
+            groups_ok = false;
+            break;
+        }
+        if (!restore_group_slot_valid(groups[slot])) {
+            groups_ok = false;
+            break;
+        }
+    }
+    if (groups_ok) {
+        out->has_instance_groups = true;
+        memcpy(out->instance_groups, groups, sizeof(groups));
+    }
+
+    return DALI_OK;
+}
+
+static bool restore_groups_valid(const uint8_t *groups)
+{
+    for (uint8_t slot = 0u; slot < DALI_INPUT_INSTANCE_GROUP_SLOTS; slot++) {
+        if (!restore_group_slot_valid(groups[slot])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+uint8_t dali_restore_instance_write_mask(const DaliInstanceSettings *recorded,
+                                         const DaliInstanceSettings *current)
+{
+    if (recorded == NULL) {
+        return 0u;
+    }
+    DaliInstanceSettings unknown;
+    if (current == NULL) {
+        memset(&unknown, 0, sizeof(unknown));
+        current = &unknown;
+    }
+
+    uint8_t mask = 0u;
+    if (recorded->has_enabled &&
+        (!current->has_enabled || current->enabled != recorded->enabled)) {
+        mask |= DALI_RESTORE_INSTANCE_ENABLED;
+    }
+    if (recorded->has_event_scheme &&
+        recorded->event_scheme <= (uint8_t)DALI_EVENT_SOURCE_INSTANCE_GROUP &&
+        (!current->has_event_scheme ||
+         current->event_scheme != recorded->event_scheme)) {
+        mask |= DALI_RESTORE_INSTANCE_SCHEME;
+    }
+    if (recorded->has_event_priority &&
+        recorded->event_priority >= RESTORE_EVENT_PRIORITY_MIN &&
+        recorded->event_priority <= RESTORE_EVENT_PRIORITY_MAX &&
+        (!current->has_event_priority ||
+         current->event_priority != recorded->event_priority)) {
+        mask |= DALI_RESTORE_INSTANCE_PRIORITY;
+    }
+    if (recorded->has_event_filter &&
+        recorded->event_filter <= RESTORE_EVENT_FILTER_MAX &&
+        (!current->has_event_filter ||
+         current->event_filter != recorded->event_filter)) {
+        mask |= DALI_RESTORE_INSTANCE_FILTER;
+    }
+    if (recorded->has_instance_groups &&
+        restore_groups_valid(recorded->instance_groups) &&
+        (!current->has_instance_groups ||
+         memcmp(current->instance_groups, recorded->instance_groups,
+                sizeof(recorded->instance_groups)) != 0)) {
+        mask |= DALI_RESTORE_INSTANCE_GROUPS;
+    }
+    return mask;
+}
+
+bool dali_restore_locate_device(const DaliSnapshot           *snapshot,
+                                uint8_t                       entry_index,
+                                const DaliDiscoveryInventory *inventory,
+                                uint8_t                      *address_out,
+                                DaliRestoreConflictKind      *conflict_out)
+{
+    DaliRestoreConflictKind conflict = DALI_RESTORE_CONFLICT_MISSING;
+    bool    found_one = false;
+    uint8_t found_at  = 0u;
+
+    if (snapshot == NULL || inventory == NULL || !inventory->valid ||
+        address_out == NULL || entry_index >= snapshot->entry_count ||
+        snapshot->entries[entry_index].space != DALI_SNAPSHOT_SPACE_DEVICE) {
+        goto done;
+    }
+
+    const DaliSnapshotEntry *entry = &snapshot->entries[entry_index];
+    if (!entry->has_identification ||
+        dali_snapshot_identification_is_null(entry->identification)) {
+        conflict = DALI_RESTORE_CONFLICT_UNIDENTIFIED;
+        goto done;
+    }
+
+    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        const DaliDiscoveryDeviceInfo *device =
+            dali_discovery_inventory_get(inventory, addr);
+        if (device == NULL || !device->present || !device->has_input_device ||
+            device->has_undecodable_device_activity ||
+            !device->has_device_identity ||
+            !dali_snapshot_identification_equal(device->device_identity.serial,
+                                                entry->identification)) {
+            continue;
+        }
+        if (found_one) {
+            conflict  = DALI_RESTORE_CONFLICT_DUPLICATE_BUS;
+            found_one = false;
+            goto done;
+        }
+        found_one = true;
+        found_at  = addr;
+    }
+
+done:
+    if (found_one) {
+        *address_out = found_at;
+        return true;
+    }
+    if (conflict_out != NULL) {
+        *conflict_out = conflict;
+    }
+    return false;
+}
+
+static DaliError restore_send_instance_config(const DaliTransport *transport,
+                                              DaliFrame            command,
+                                              const uint8_t       *dtr,
+                                              uint8_t              dtr_count)
+{
+    if (command.bit_length == 0u) {
+        return DALI_ERR_INVALID;
+    }
+    DaliSequence seq;
+    DaliError err = dali_input_build_config_sequence(command, true, false, dtr,
+                                                     dtr_count, &seq);
+    if (err != DALI_OK) {
+        return err;
+    }
+    return dali_transport_run_sequence_atomic(transport, &seq, NULL);
+}
+
+DaliError dali_restore_write_instance_settings(const DaliTransport        *transport,
+                                               uint8_t                     addr,
+                                               uint8_t                     instance,
+                                               const DaliInstanceSettings *recorded,
+                                               uint8_t                     mask)
+{
+    if (recorded == NULL || addr >= DALI_SHORT_ADDRESS_COUNT ||
+        instance >= DALI_INSTANCE_COUNT ||
+        (mask & (uint8_t)~DALI_RESTORE_INSTANCE_ALL) != 0u ||
+        !dali_transport_supports_atomic_sequence(transport)) {
+        return DALI_ERR_INVALID;
+    }
+    /* The mask may only name fields this recording can supply. */
+    if ((mask & dali_restore_instance_write_mask(recorded, NULL)) != mask) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliError err = DALI_OK;
+
+    if (mask & DALI_RESTORE_INSTANCE_SCHEME) {
+        err = restore_send_instance_config(
+            transport, dali_input_build_set_event_scheme(addr, instance),
+            &recorded->event_scheme, 1u);
+    }
+    if (err == DALI_OK && (mask & DALI_RESTORE_INSTANCE_PRIORITY)) {
+        err = restore_send_instance_config(
+            transport, dali_input_build_set_event_priority(addr, instance),
+            &recorded->event_priority, 1u);
+    }
+    if (err == DALI_OK && (mask & DALI_RESTORE_INSTANCE_FILTER)) {
+        /* DTR0, DTR1, DTR2 carry filter bits 0-7, 8-15 and 16-23. */
+        const uint8_t filter[3] = {
+            (uint8_t)(recorded->event_filter & 0xFFu),
+            (uint8_t)((recorded->event_filter >> 8) & 0xFFu),
+            (uint8_t)((recorded->event_filter >> 16) & 0xFFu),
+        };
+        err = restore_send_instance_config(
+            transport, dali_input_build_set_event_filter(addr, instance),
+            filter, 3u);
+    }
+    if (err == DALI_OK && (mask & DALI_RESTORE_INSTANCE_GROUPS)) {
+        static DaliFrame (*const setters[DALI_INPUT_INSTANCE_GROUP_SLOTS])(uint8_t,
+                                                                           uint8_t) = {
+            dali_input_build_set_primary_group,
+            dali_input_build_set_instance_group1,
+            dali_input_build_set_instance_group2,
+        };
+        for (uint8_t slot = 0u;
+             slot < DALI_INPUT_INSTANCE_GROUP_SLOTS && err == DALI_OK; slot++) {
+            err = restore_send_instance_config(transport,
+                                               setters[slot](addr, instance),
+                                               &recorded->instance_groups[slot], 1u);
+        }
+    }
+    /* Last, so the instance starts reporting only once it reports as recorded. */
+    if (err == DALI_OK && (mask & DALI_RESTORE_INSTANCE_ENABLED)) {
+        err = restore_send_instance_config(
+            transport,
+            recorded->enabled ? dali_input_build_enable_instance(addr, instance)
+                              : dali_input_build_disable_instance(addr, instance),
+            NULL, 0u);
+    }
+    return err;
+}
+
+const char *dali_restore_instance_field_name(uint8_t field)
+{
+    switch (field) {
+        case DALI_RESTORE_INSTANCE_ENABLED:  return "enabled";
+        case DALI_RESTORE_INSTANCE_SCHEME:   return "scheme";
+        case DALI_RESTORE_INSTANCE_PRIORITY: return "priority";
+        case DALI_RESTORE_INSTANCE_FILTER:   return "filter";
+        case DALI_RESTORE_INSTANCE_GROUPS:   return "groups";
+        default:                             return "unknown";
     }
 }

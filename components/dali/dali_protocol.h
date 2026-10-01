@@ -443,10 +443,6 @@ DaliFrame dali_cmd_instance(uint8_t addr, uint8_t instance, uint8_t cmd);
 DaliFrame dali_cmd_device(uint8_t addr, uint8_t cmd);
 DaliFrame dali_cmd_device_broadcast(uint8_t cmd);
 
-/* Instance command to a device group (0–15).
- * instance: 0–31 for a specific instance; 0xFF for all instances. */
-DaliFrame dali_cmd_instance_group(uint8_t group, uint8_t instance, uint8_t cmd);
-
 /* Instance command broadcast to all devices. */
 DaliFrame dali_cmd_instance_broadcast(uint8_t instance, uint8_t cmd);
 

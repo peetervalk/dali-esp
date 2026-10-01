@@ -602,6 +602,72 @@ void test_query_input_device_clamps_and_keeps_optional_timeouts(void)
     TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT, input.instance_type_errors[2]);
 }
 
+/* Event scheme, priority and the three instance-group slots, as `instances`
+ * prints them. The slots are kept only as a full set. */
+void test_query_input_device_reads_event_addressing(void)
+{
+    DaliDiscoveryInputDevice input;
+    DaliDiscoveryTransport t = transport();
+
+    add_reply(0x0BFE35u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 2u,
+              DALI_BACKWARD_FRAME_BITS);
+    /* Instance 0: occupancy on scheme 2, priority 4, primary group 3. */
+    add_reply(0x0B0080u, DALI_EXTENDED_FRAME_BITS, DALI_OK,
+              DALI_INPUT_INSTANCE_TYPE_OCCUPANCY, DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B008Bu, DALI_EXTENDED_FRAME_BITS, DALI_OK, 2u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B0084u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 4u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B0088u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 3u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B0089u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 0xFFu,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B008Au, DALI_EXTENDED_FRAME_BITS, DALI_OK, 0xFFu,
+              DALI_BACKWARD_FRAME_BITS);
+    /* Instance 1: answers its primary group and then goes silent. */
+    add_reply(0x0B0180u, DALI_EXTENDED_FRAME_BITS, DALI_OK,
+              DALI_INPUT_INSTANCE_TYPE_LIGHT, DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B0188u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 7u,
+              DALI_BACKWARD_FRAME_BITS);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_discovery_query_input_device(&t, 5u, &input));
+
+    const DaliInputInstanceInfo *occ = &input.device.instances[0];
+    TEST_ASSERT_TRUE(occ->has_event_scheme);
+    TEST_ASSERT_EQUAL_UINT8(2u, occ->event_scheme);
+    TEST_ASSERT_TRUE(occ->has_event_priority);
+    TEST_ASSERT_EQUAL_UINT8(4u, occ->event_priority);
+    TEST_ASSERT_TRUE(occ->has_instance_groups);
+    TEST_ASSERT_EQUAL_UINT8(3u, occ->instance_groups[0]);
+    TEST_ASSERT_EQUAL_HEX8(DALI_INPUT_INSTANCE_GROUP_NONE, occ->instance_groups[1]);
+    TEST_ASSERT_EQUAL_HEX8(DALI_INPUT_INSTANCE_GROUP_NONE, occ->instance_groups[2]);
+
+    const DaliInputInstanceInfo *lux = &input.device.instances[1];
+    TEST_ASSERT_FALSE(lux->has_event_scheme);
+    TEST_ASSERT_FALSE(lux->has_event_priority);
+    TEST_ASSERT_FALSE(lux->has_instance_groups);
+}
+
+void test_query_input_device_rejects_an_out_of_range_group_slot(void)
+{
+    DaliDiscoveryInputDevice input;
+    DaliDiscoveryTransport t = transport();
+
+    add_reply(0x0BFE35u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 1u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B0080u, DALI_EXTENDED_FRAME_BITS, DALI_OK,
+              DALI_INPUT_INSTANCE_TYPE_OCCUPANCY, DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B0088u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 3u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B0089u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 40u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B008Au, DALI_EXTENDED_FRAME_BITS, DALI_OK, 0xFFu,
+              DALI_BACKWARD_FRAME_BITS);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_discovery_query_input_device(&t, 5u, &input));
+    TEST_ASSERT_FALSE(input.device.instances[0].has_instance_groups);
+}
+
 void test_query_input_device_records_type_errors(void)
 {
     DaliDiscoveryInputDevice input;
@@ -2406,6 +2472,8 @@ int main(void)
     RUN_TEST(test_scan_still_aborts_on_a_real_bus_error);
     RUN_TEST(test_query_status_rejects_bad_reply_width);
     RUN_TEST(test_query_input_device_clamps_and_keeps_optional_timeouts);
+    RUN_TEST(test_query_input_device_reads_event_addressing);
+    RUN_TEST(test_query_input_device_rejects_an_out_of_range_group_slot);
     RUN_TEST(test_query_input_device_records_type_errors);
     RUN_TEST(test_inventory_update_input_device_marks_present);
     RUN_TEST(test_query_device_type_returns_value);

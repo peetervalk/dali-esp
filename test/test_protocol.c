@@ -676,6 +676,40 @@ void test_build_instance_command_rejects_invalid_args(void)
                                                   DALI_CMD_QUERY_INPUT_VALUE, NULL));
 }
 
+/*
+ * The instance byte also selects by instance group (100GGGGG) or instance type
+ * (110TTTTT); TI's Part 103 decoder takes both. The feature forms and the
+ * device byte 0xFE are not instance addresses and stay refused.
+ */
+void test_build_instance_command_accepts_group_and_type_selectors(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_instance_command(0u, 0x83u,
+                                                  DALI_CMD_QUERY_EVENT_SCHEME, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x01838Bu, frame.data);
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_instance_command(0u, 0xC3u,
+                                                  DALI_CMD_QUERY_EVENT_SCHEME, &frame));
+    TEST_ASSERT_EQUAL_HEX32(0x01C38Bu, frame.data);
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_instance_command(0u, 0x9Fu,
+                                                  DALI_CMD_QUERY_EVENT_SCHEME, &frame));
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_build_instance_command(0u, 0xDFu,
+                                                  DALI_CMD_QUERY_EVENT_SCHEME, &frame));
+
+    static const uint8_t refused[] = { 0x20u, 0x3Fu, 0x40u, 0x7Fu, 0xA0u, 0xBFu,
+                                       0xE0u, 0xFCu, 0xFDu, 0xFEu };
+    for (uint8_t i = 0u; i < sizeof(refused); i++) {
+        TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                          dali_build_instance_command(0u, refused[i],
+                                                      DALI_CMD_QUERY_EVENT_SCHEME,
+                                                      &frame));
+    }
+}
+
 /* ---------------------------------------------------------------------------
  * DALI-2 24-bit instance command builder tests
  * --------------------------------------------------------------------------*/
@@ -697,25 +731,6 @@ void test_instance_short_addr_5_instance_0(void)
      * Expected: (0x0B << 16) | (0x00 << 8) | 0x65 = 0x0B0065 */
     DaliFrame f = dali_cmd_instance(5u, 0u, 0x65u);
     TEST_ASSERT_EQUAL_HEX32(0x0B0065u, f.data);
-    TEST_ASSERT_EQUAL_UINT8(24u, f.bit_length);
-}
-
-void test_instance_group_0_all_instances(void)
-{
-    /* group 0: addr_byte = 0x80 | (0 << 1) | 1 = 0x81
-     * Expected: (0x81 << 16) | (0xFF << 8) | 0x80 = 0x81FF80 */
-    DaliFrame f = dali_cmd_instance_group(0u, 0xFFu, 0x80u);
-    TEST_ASSERT_EQUAL_HEX32(0x81FF80u, f.data);
-    TEST_ASSERT_EQUAL_UINT8(24u, f.bit_length);
-}
-
-void test_instance_group_15_specific_instance(void)
-{
-    /* group 15: addr_byte = 0x80 | (15 << 1) | 1 = 0x80 | 0x1E | 0x01 = 0x9F
-     * instance=2, cmd=0xA0
-     * Expected: (0x9F << 16) | (0x02 << 8) | 0xA0 = 0x9F02A0 */
-    DaliFrame f = dali_cmd_instance_group(15u, 2u, 0xA0u);
-    TEST_ASSERT_EQUAL_HEX32(0x9F02A0u, f.data);
     TEST_ASSERT_EQUAL_UINT8(24u, f.bit_length);
 }
 
@@ -1312,11 +1327,10 @@ int main(void)
     RUN_TEST(test_special_convenience_builders);
     RUN_TEST(test_build_instance_command_query_input_value);
     RUN_TEST(test_build_instance_command_rejects_invalid_args);
+    RUN_TEST(test_build_instance_command_accepts_group_and_type_selectors);
     /* 24-bit instance frame builders */
     RUN_TEST(test_instance_short_addr_0_all_instances);
     RUN_TEST(test_instance_short_addr_5_instance_0);
-    RUN_TEST(test_instance_group_0_all_instances);
-    RUN_TEST(test_instance_group_15_specific_instance);
     RUN_TEST(test_instance_broadcast_all_instances);
     RUN_TEST(test_instance_broadcast_specific_instance);
     /* YES/NO response */

@@ -267,6 +267,31 @@ Commands marked "twice" require two identical addressed frames inside the
 send-twice window. A DTR load is a separate 24-bit special command and is not
 itself duplicated.
 
+### Instance byte
+
+The second byte of an addressed 24-bit control-device frame selects which
+instances act on it:
+
+| Instance byte | Selects | Built here |
+|---|---|---|
+| `000IIIII` | instance number I, 0-31 | yes |
+| `100GGGGG` | every instance in instance group G | yes, `g<G>` in `iquery`/`iconfig` |
+| `110TTTTT` | every instance of type T | yes, `t<T>` in `iquery`/`iconfig` |
+| `0xFF` | every instance | yes, `all` |
+| `0xFE` | the device itself (device-level commands) | yes, by the device builders |
+| `001xxxxx`, `101xxxxx`, `111xxxxx`, `0xFC`, `0xFD` | feature forms | no |
+
+Two sources, neither the standard text: TI's Part 103 decoder
+(`DALI_ControlDevice_InstCheck` in the MSPM0 SDK) decodes the number, group,
+type and broadcast forms exactly so, and the table agrees with the standard as
+recalled. TI's number branch is buggy (its mask is always 0); the group and type
+branches are what this table relies on. Not yet exercised on a bus.
+
+A query through a group, type or broadcast selector draws one reply per
+selected instance, and those collide. `dali_build_instance_command()` accepts
+every form above except the feature forms; the device byte has its own
+builder.
+
 ### Generic instance configuration
 
 | Opcode | Command | DTR | Sends |
@@ -562,6 +587,29 @@ event-information bits (`bits 9:0`), and decodes the five standard source scheme
 Device/Instance frames carry no instance type; it has to come from discovery or
 configuration rather than be inferred from the event value. Power notifications
 use the reserved Part 103 prefix and are represented as a separate frame kind.
+
+### Which instance sent it
+
+An integration polls a sensor by (short address, instance number), and only a
+Device/Instance event carries that pair. `dali_event_source` answers "could this
+event have come from the instance at (A, I)?" for every scheme:
+
+| Scheme | Carries | Matches (A, I) when |
+|---|---|---|
+| 2 device/instance | address, instance | both equal: exact |
+| 1 device | address, type | address equals, type fits |
+| 0 instance | type, instance | instance equals, type fits |
+| 3 device group | device group, type | the device is in the group, type fits |
+| 4 instance group | instance group, type | the group is one of the instance's three, type fits |
+
+"Fits" uses a profile read from the instance itself — QUERY INSTANCE TYPE,
+QUERY EVENT SCHEME and the three instance-group queries — and anything the
+profile does not hold counts as fitting. An event only prompts a poll, and the
+poll supplies the value, so matching too widely costs queries while matching too
+narrowly leaves a sensor on its poll interval. The profile's own scheme is never
+used to exclude: an event in an unexpected scheme is the sign that the scheme
+changed, and the caller reads the profile again. Device groups are not read yet,
+so a device-group event fits every instance whose type fits.
 
 Part 301 push-button event information uses sparse standard values:
 

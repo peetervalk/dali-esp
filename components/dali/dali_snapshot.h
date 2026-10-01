@@ -37,15 +37,29 @@
  */
 #define DALI_SNAPSHOT_MAX_ENTRIES     (2u * DALI_SHORT_ADDRESS_COUNT)
 
-#define DALI_SNAPSHOT_FORMAT_VERSION  1u
+/*
+ * Instance settings are bounded on their own. The entry bound is the true worst
+ * case; for instances that would be 64 devices of 32 instances, a 25 kB blob
+ * for a bus nobody has. 64 covers sixteen four-instance multisensors, and a
+ * save that finds more records what fits and says what it left out.
+ */
+#define DALI_SNAPSHOT_MAX_INSTANCES   64u
+
+/*
+ * 2 added the instance records. A version-1 blob is refused rather than read:
+ * the format changed on purpose, and a backup taken before it is taken again.
+ */
+#define DALI_SNAPSHOT_FORMAT_VERSION  2u
 
 /* Wire layout, little-endian where it matters. See dali_snapshot_encode(). */
 #define DALI_SNAPSHOT_MAGIC_LEN       4u
 #define DALI_SNAPSHOT_HEADER_SIZE     8u
 #define DALI_SNAPSHOT_ENTRY_WIRE_SIZE 19u
+#define DALI_SNAPSHOT_INSTANCE_WIRE_SIZE 12u
 #define DALI_SNAPSHOT_BLOB_MAX \
     (DALI_SNAPSHOT_HEADER_SIZE + \
-     (DALI_SNAPSHOT_MAX_ENTRIES * DALI_SNAPSHOT_ENTRY_WIRE_SIZE))
+     (DALI_SNAPSHOT_MAX_ENTRIES * DALI_SNAPSHOT_ENTRY_WIRE_SIZE) + \
+     (DALI_SNAPSHOT_MAX_INSTANCES * DALI_SNAPSHOT_INSTANCE_WIRE_SIZE))
 
 /*
  * Which address space an entry belongs to. The two are independent: control
@@ -80,10 +94,24 @@ typedef struct {
     uint16_t          groups;          /* bit N set => member of group N */
 } DaliSnapshotEntry;
 
+/*
+ * One instance of a recorded control device. Tied to the device's entry rather
+ * than to a short address, because the address is exactly what a restore may
+ * find changed: the entry's identification number says where the device is
+ * now, and the settings go there.
+ */
 typedef struct {
-    uint8_t           version;
-    uint8_t           entry_count;
-    DaliSnapshotEntry entries[DALI_SNAPSHOT_MAX_ENTRIES];
+    uint8_t              entry_index;  /* a DALI_SNAPSHOT_SPACE_DEVICE entry */
+    uint8_t              instance;     /* 0..31 */
+    DaliInstanceSettings settings;
+} DaliSnapshotInstance;
+
+typedef struct {
+    uint8_t              version;
+    uint8_t              entry_count;
+    uint8_t              instance_count;
+    DaliSnapshotEntry    entries[DALI_SNAPSHOT_MAX_ENTRIES];
+    DaliSnapshotInstance instances[DALI_SNAPSHOT_MAX_INSTANCES];
 } DaliSnapshot;
 
 /* ---------------------------------------------------------------------------
@@ -97,6 +125,17 @@ void dali_snapshot_reset(DaliSnapshot *snapshot);
  * DALI_ERR_INVALID on a bad argument or an out-of-range short address.
  */
 DaliError dali_snapshot_add(DaliSnapshot *snapshot, const DaliSnapshotEntry *entry);
+
+/*
+ * Record the settings of one instance of the control device at `entry_index`.
+ * DALI_ERR_INVALID when the index names no device-space entry, the instance is
+ * out of range, or that instance is already recorded; DALI_ERR_FULL at
+ * DALI_SNAPSHOT_MAX_INSTANCES.
+ */
+DaliError dali_snapshot_add_instance(DaliSnapshot               *snapshot,
+                                     uint8_t                     entry_index,
+                                     uint8_t                     instance,
+                                     const DaliInstanceSettings *settings);
 
 /*
  * Build a snapshot from a completed discovery inventory. Records every present
@@ -139,17 +178,29 @@ uint64_t dali_snapshot_used_mask(const DaliSnapshot *snapshot,
  * Wire format, chosen so a truncated or foreign blob fails to decode rather
  * than producing a plausible-looking snapshot:
  *
- *   0  magic[4]      "DBK1"
- *   4  version       1
- *   5  entry_count   0..DALI_SNAPSHOT_MAX_ENTRIES
- *   6  reserved[2]   zero
- *   8  entries[]     19 bytes each:
+ *   0  magic[4]         "DBK1" (the magic names the family; byte 4 the layout)
+ *   4  version          2
+ *   5  entry_count      0..DALI_SNAPSHOT_MAX_ENTRIES
+ *   6  instance_count   0..DALI_SNAPSHOT_MAX_INSTANCES
+ *   7  reserved         zero
+ *   8  entries[]        19 bytes each:
  *        +0  flags   bit0 has_identification, bit1 has_gtin, bit2 has_groups
  *        +1  space
  *        +2  short_address
  *        +3  groups, little-endian uint16
  *        +5  identification[8]
  *        +13 gtin[6]
+ *      instances[]      12 bytes each, after the last entry:
+ *        +0  entry_index      a device-space entry above
+ *        +1  instance         0..31
+ *        +2  flags   bit0 has_type, bit1 has_enabled, bit2 enabled,
+ *                    bit3 has_event_scheme, bit4 has_event_priority,
+ *                    bit5 has_event_filter, bit6 has_instance_groups
+ *        +3  type
+ *        +4  event_scheme
+ *        +5  event_priority
+ *        +6  event_filter, little-endian 24 bits
+ *        +9  instance_groups[3]
  * --------------------------------------------------------------------------*/
 
 /*
@@ -164,9 +215,11 @@ DaliError dali_snapshot_encode(const DaliSnapshot *snapshot,
 
 /*
  * Decode from buf. Returns DALI_ERR_INVALID on a bad argument, a wrong magic, an
- * unsupported version, an entry count over capacity, a length that does not
- * match the declared entry count, or an entry naming an unknown address space
- * or an out-of-range short address.
+ * unsupported version (version 1 included), an entry or instance count over
+ * capacity, a length that does not match the declared counts, an entry naming
+ * an unknown address space or an out-of-range short address, or an instance
+ * record that names no device entry, repeats one, or holds a value out of
+ * range.
  *
  * On any of those, `out` is left exactly as it was: the blob is validated in
  * full before the first byte is written. A caller may therefore decode straight

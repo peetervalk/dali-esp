@@ -38,6 +38,28 @@ static DaliSnapshotEntry make_entry(DaliSnapshotSpace space,
     return entry;
 }
 
+/* The 2k Steinel's occupancy instance as restored on 2026-10-01. */
+static DaliInstanceSettings make_settings(void)
+{
+    DaliInstanceSettings s;
+    memset(&s, 0, sizeof(s));
+    s.has_type            = true;
+    s.type                = 3u;
+    s.has_enabled         = true;
+    s.enabled             = true;
+    s.has_event_scheme    = true;
+    s.event_scheme        = 2u;
+    s.has_event_priority  = true;
+    s.event_priority      = 4u;
+    s.has_event_filter    = true;
+    s.event_filter        = 0x000007u;
+    s.has_instance_groups = true;
+    s.instance_groups[0]  = 3u;
+    s.instance_groups[1]  = DALI_INPUT_INSTANCE_GROUP_NONE;
+    s.instance_groups[2]  = DALI_INPUT_INSTANCE_GROUP_NONE;
+    return s;
+}
+
 /* --------------------------------------------------------------------------
  * Model
  * -------------------------------------------------------------------------*/
@@ -361,6 +383,14 @@ void test_a_full_snapshot_fits_the_declared_blob_maximum(void)
                        (uint8_t)i);
         TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_add(&s_snapshot, &entry));
     }
+    /* And a full instance table, one instance on each device entry. */
+    DaliInstanceSettings settings = make_settings();
+    for (uint8_t i = 0u; i < DALI_SNAPSHOT_MAX_INSTANCES; i++) {
+        TEST_ASSERT_EQUAL_INT(DALI_OK,
+                              dali_snapshot_add_instance(&s_snapshot,
+                                                         (uint8_t)(DALI_SHORT_ADDRESS_COUNT + i),
+                                                         0u, &settings));
+    }
 
     uint32_t written = 0u;
     TEST_ASSERT_EQUAL_INT(DALI_OK,
@@ -368,6 +398,7 @@ void test_a_full_snapshot_fits_the_declared_blob_maximum(void)
     TEST_ASSERT_EQUAL_UINT32(DALI_SNAPSHOT_BLOB_MAX, written);
     TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_decode(&s_decoded, s_buf, written));
     TEST_ASSERT_EQUAL_UINT8(DALI_SNAPSHOT_MAX_ENTRIES, s_decoded.entry_count);
+    TEST_ASSERT_EQUAL_UINT8(DALI_SNAPSHOT_MAX_INSTANCES, s_decoded.instance_count);
 }
 
 void test_encode_reports_full_when_the_buffer_is_short(void)
@@ -491,6 +522,175 @@ void test_a_rejected_blob_leaves_the_destination_snapshot_intact(void)
     TEST_ASSERT_EQUAL_UINT8(2u, s_decoded.entries[1].short_address);
 }
 
+/* --------------------------------------------------------------------------
+ * Instance settings (format version 2)
+ * -------------------------------------------------------------------------*/
+
+/* A gear entry at index 0 and a device entry at index 1. */
+static void add_gear_and_device(void)
+{
+    DaliSnapshotEntry gear   = make_entry(DALI_SNAPSHOT_SPACE_GEAR, 4u, 0x10u);
+    DaliSnapshotEntry device = make_entry(DALI_SNAPSHOT_SPACE_DEVICE, 0u, 0x20u);
+    TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_add(&s_snapshot, &gear));
+    TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_add(&s_snapshot, &device));
+}
+
+void test_add_instance_belongs_to_a_device_entry_only(void)
+{
+    add_gear_and_device();
+    DaliInstanceSettings s = make_settings();
+
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID, dali_snapshot_add_instance(&s_snapshot, 0u, 1u, &s));
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID, dali_snapshot_add_instance(&s_snapshot, 2u, 1u, &s));
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID, dali_snapshot_add_instance(&s_snapshot, 1u, 32u, &s));
+    TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_add_instance(&s_snapshot, 1u, 1u, &s));
+    /* Once per instance: two records would disagree about which to restore. */
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID, dali_snapshot_add_instance(&s_snapshot, 1u, 1u, &s));
+    TEST_ASSERT_EQUAL_UINT8(1u, s_snapshot.instance_count);
+}
+
+void test_add_instance_refuses_values_no_restore_could_send(void)
+{
+    add_gear_and_device();
+    DaliInstanceSettings s = make_settings();
+    s.event_scheme = 5u;
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID, dali_snapshot_add_instance(&s_snapshot, 1u, 0u, &s));
+    s = make_settings();
+    s.instance_groups[1] = 32u;
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID, dali_snapshot_add_instance(&s_snapshot, 1u, 0u, &s));
+    s = make_settings();
+    s.event_filter = 0x1000000u;
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID, dali_snapshot_add_instance(&s_snapshot, 1u, 0u, &s));
+    s = make_settings();
+    s.type = 32u;
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID, dali_snapshot_add_instance(&s_snapshot, 1u, 0u, &s));
+    /* An unknown field is not range-checked: it is not restored either. */
+    s = make_settings();
+    s.has_event_scheme = false;
+    s.event_scheme = 0xEEu;
+    TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_add_instance(&s_snapshot, 1u, 0u, &s));
+}
+
+void test_add_instance_reports_full_at_capacity(void)
+{
+    add_gear_and_device();
+    DaliInstanceSettings s = make_settings();
+    /* One device has only 32 instances, so spread the table over two. */
+    DaliSnapshotEntry second = make_entry(DALI_SNAPSHOT_SPACE_DEVICE, 1u, 0x30u);
+    TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_add(&s_snapshot, &second));
+    for (uint8_t i = 0u; i < DALI_SNAPSHOT_MAX_INSTANCES; i++) {
+        TEST_ASSERT_EQUAL_INT(DALI_OK,
+                              dali_snapshot_add_instance(&s_snapshot,
+                                                         (uint8_t)(1u + i / 32u),
+                                                         (uint8_t)(i % 32u), &s));
+    }
+    DaliSnapshotEntry third = make_entry(DALI_SNAPSHOT_SPACE_DEVICE, 2u, 0x38u);
+    TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_add(&s_snapshot, &third));
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_FULL, dali_snapshot_add_instance(&s_snapshot, 3u, 0u, &s));
+}
+
+void test_instance_settings_survive_a_round_trip(void)
+{
+    add_gear_and_device();
+    DaliInstanceSettings occ = make_settings();
+    DaliInstanceSettings lux = make_settings();
+    lux.type = 4u;
+    lux.has_enabled = false;
+    lux.event_filter = 0xABCDEFu;
+    lux.has_instance_groups = false;
+    lux.event_scheme = 0u;
+    TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_add_instance(&s_snapshot, 1u, 1u, &occ));
+    TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_add_instance(&s_snapshot, 1u, 0u, &lux));
+
+    uint32_t written = 0u;
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_snapshot_encode(&s_snapshot, s_buf, sizeof(s_buf), &written));
+    TEST_ASSERT_EQUAL_UINT32(DALI_SNAPSHOT_HEADER_SIZE +
+                                 2u * DALI_SNAPSHOT_ENTRY_WIRE_SIZE +
+                                 2u * DALI_SNAPSHOT_INSTANCE_WIRE_SIZE,
+                             written);
+    TEST_ASSERT_EQUAL_UINT8(2u, s_buf[4]);
+    TEST_ASSERT_EQUAL_UINT8(2u, s_buf[6]);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_decode(&s_decoded, s_buf, written));
+    TEST_ASSERT_EQUAL_UINT8(2u, s_decoded.instance_count);
+
+    const DaliSnapshotInstance *a = &s_decoded.instances[0];
+    TEST_ASSERT_EQUAL_UINT8(1u, a->entry_index);
+    TEST_ASSERT_EQUAL_UINT8(1u, a->instance);
+    TEST_ASSERT_TRUE(a->settings.has_type);
+    TEST_ASSERT_EQUAL_UINT8(3u, a->settings.type);
+    TEST_ASSERT_TRUE(a->settings.has_enabled);
+    TEST_ASSERT_TRUE(a->settings.enabled);
+    TEST_ASSERT_TRUE(a->settings.has_event_scheme);
+    TEST_ASSERT_EQUAL_UINT8(2u, a->settings.event_scheme);
+    TEST_ASSERT_TRUE(a->settings.has_event_priority);
+    TEST_ASSERT_EQUAL_UINT8(4u, a->settings.event_priority);
+    TEST_ASSERT_TRUE(a->settings.has_event_filter);
+    TEST_ASSERT_EQUAL_HEX32(0x000007u, a->settings.event_filter);
+    TEST_ASSERT_TRUE(a->settings.has_instance_groups);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(occ.instance_groups, a->settings.instance_groups, 3u);
+
+    const DaliSnapshotInstance *b = &s_decoded.instances[1];
+    TEST_ASSERT_EQUAL_UINT8(0u, b->instance);
+    TEST_ASSERT_EQUAL_UINT8(4u, b->settings.type);
+    TEST_ASSERT_FALSE(b->settings.has_enabled);
+    TEST_ASSERT_EQUAL_HEX32(0xABCDEFu, b->settings.event_filter);
+    TEST_ASSERT_FALSE(b->settings.has_instance_groups);
+    TEST_ASSERT_EQUAL_UINT8(0u, b->settings.event_scheme);
+}
+
+/* The format changed on purpose: a version-1 blob is refused, not read as a
+ * version 2 with no instances. */
+void test_decode_refuses_a_version_1_blob(void)
+{
+    add_gear_and_device();
+    uint32_t written = 0u;
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_snapshot_encode(&s_snapshot, s_buf, sizeof(s_buf), &written));
+    s_buf[4] = 1u;
+    TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID, dali_snapshot_decode(&s_decoded, s_buf, written));
+}
+
+void test_decode_rejects_a_bad_instance_record(void)
+{
+    add_gear_and_device();
+    DaliInstanceSettings s = make_settings();
+    TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_add_instance(&s_snapshot, 1u, 1u, &s));
+    TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_add_instance(&s_snapshot, 1u, 2u, &s));
+    uint32_t written = 0u;
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_snapshot_encode(&s_snapshot, s_buf, sizeof(s_buf), &written));
+    TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_decode(&s_decoded, s_buf, written));
+
+    const uint32_t rec = DALI_SNAPSHOT_HEADER_SIZE + 2u * DALI_SNAPSHOT_ENTRY_WIRE_SIZE;
+    uint8_t saved;
+
+#define EXPECT_REJECTED_WITH(offset, value)                                      \
+    do {                                                                         \
+        saved = s_buf[offset];                                                   \
+        s_buf[offset] = (value);                                                 \
+        TEST_ASSERT_EQUAL_INT(DALI_ERR_INVALID,                                  \
+                              dali_snapshot_decode(&s_decoded, s_buf, written)); \
+        s_buf[offset] = saved;                                                   \
+    } while (0)
+
+    EXPECT_REJECTED_WITH(rec + 0u, 0u);      /* names the gear entry */
+    EXPECT_REJECTED_WITH(rec + 0u, 2u);      /* names no entry */
+    EXPECT_REJECTED_WITH(rec + 1u, 32u);     /* instance out of range */
+    EXPECT_REJECTED_WITH(rec + 1u, 2u);      /* repeats the second record */
+    EXPECT_REJECTED_WITH(rec + 2u, 0xFFu);   /* an unknown flag bit */
+    EXPECT_REJECTED_WITH(rec + 4u, 5u);      /* a scheme no device has */
+    EXPECT_REJECTED_WITH(rec + 9u, 40u);     /* a group no device has */
+    EXPECT_REJECTED_WITH(7u, 1u);            /* the reserved header byte */
+    EXPECT_REJECTED_WITH(6u, 3u);            /* an instance count the length denies */
+#undef EXPECT_REJECTED_WITH
+
+    /* Every rejection above left the last good decode in place. */
+    TEST_ASSERT_EQUAL_UINT8(2u, s_decoded.instance_count);
+    TEST_ASSERT_EQUAL_INT(DALI_OK, dali_snapshot_decode(&s_decoded, s_buf, written));
+}
+
 void test_invalid_arguments_are_rejected(void)
 {
     uint32_t written = 0u;
@@ -539,6 +739,12 @@ int main(void)
     RUN_TEST(test_decode_rejects_an_entry_count_over_capacity);
     RUN_TEST(test_decode_rejects_a_corrupt_space_or_address);
     RUN_TEST(test_a_rejected_blob_leaves_the_destination_snapshot_intact);
+    RUN_TEST(test_add_instance_belongs_to_a_device_entry_only);
+    RUN_TEST(test_add_instance_refuses_values_no_restore_could_send);
+    RUN_TEST(test_add_instance_reports_full_at_capacity);
+    RUN_TEST(test_instance_settings_survive_a_round_trip);
+    RUN_TEST(test_decode_refuses_a_version_1_blob);
+    RUN_TEST(test_decode_rejects_a_bad_instance_record);
     RUN_TEST(test_invalid_arguments_are_rejected);
     return UNITY_END();
 }

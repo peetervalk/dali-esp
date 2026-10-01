@@ -3337,6 +3337,105 @@ static void cmd_address(const DaliCliTokens *t)
     shell_bus_release();
 }
 
+/* "3,-,-": primary, group 1 and group 2 in slot order, `-` for an unused slot;
+ * "none" when all three are unused. */
+static void shell_print_group_slots(const uint8_t *groups)
+{
+    bool any = false;
+    for (uint8_t slot = 0u; slot < DALI_INPUT_INSTANCE_GROUP_SLOTS; slot++) {
+        any = any || groups[slot] != DALI_INPUT_INSTANCE_GROUP_NONE;
+    }
+    if (!any) {
+        shell_printf("none");
+        return;
+    }
+    for (uint8_t slot = 0u; slot < DALI_INPUT_INSTANCE_GROUP_SLOTS; slot++) {
+        if (slot > 0u) {
+            shell_printf(",");
+        }
+        if (groups[slot] == DALI_INPUT_INSTANCE_GROUP_NONE) {
+            shell_printf("-");
+        } else {
+            shell_printf("%u", (unsigned)groups[slot]);
+        }
+    }
+}
+
+static void shell_print_instance_groups(const uint8_t *groups)
+{
+    shell_printf(", groups=");
+    shell_print_group_slots(groups);
+}
+
+static void shell_print_scheme_value(uint8_t scheme)
+{
+    if (scheme <= (uint8_t)DALI_EVENT_SOURCE_INSTANCE_GROUP) {
+        shell_printf("%s", dali_event_source_scheme_name((DaliEventSourceScheme)scheme));
+    } else {
+        shell_printf("%u", (unsigned)scheme);
+    }
+}
+
+/* One field of a recorded or read instance, `?` when it is not known. */
+static void shell_print_instance_field(uint8_t field, const DaliInstanceSettings *s)
+{
+    switch (field) {
+        case DALI_RESTORE_INSTANCE_ENABLED:
+            if (s->has_enabled) {
+                shell_printf("%s", s->enabled ? "yes" : "no");
+                return;
+            }
+            break;
+        case DALI_RESTORE_INSTANCE_SCHEME:
+            if (s->has_event_scheme) {
+                shell_print_scheme_value(s->event_scheme);
+                return;
+            }
+            break;
+        case DALI_RESTORE_INSTANCE_PRIORITY:
+            if (s->has_event_priority) {
+                shell_printf("%u", (unsigned)s->event_priority);
+                return;
+            }
+            break;
+        case DALI_RESTORE_INSTANCE_FILTER:
+            if (s->has_event_filter) {
+                shell_printf("0x%06lX", (unsigned long)s->event_filter);
+                return;
+            }
+            break;
+        case DALI_RESTORE_INSTANCE_GROUPS:
+            if (s->has_instance_groups) {
+                shell_print_group_slots(s->instance_groups);
+                return;
+            }
+            break;
+        default:
+            break;
+    }
+    shell_printf("?");
+}
+
+/* "type 3, enabled yes, scheme device-instance, ...": every field, in the
+ * order a restore writes them, so a backup and a plan read alike. */
+static void shell_print_instance_settings(const DaliInstanceSettings *s)
+{
+    static const uint8_t fields[] = {
+        DALI_RESTORE_INSTANCE_ENABLED,  DALI_RESTORE_INSTANCE_SCHEME,
+        DALI_RESTORE_INSTANCE_PRIORITY, DALI_RESTORE_INSTANCE_FILTER,
+        DALI_RESTORE_INSTANCE_GROUPS,
+    };
+    if (s->has_type) {
+        shell_printf("type %u", (unsigned)s->type);
+    } else {
+        shell_printf("type ?");
+    }
+    for (uint8_t i = 0u; i < sizeof(fields); i++) {
+        shell_printf(", %s ", dali_restore_instance_field_name(fields[i]));
+        shell_print_instance_field(fields[i], s);
+    }
+}
+
 static void shell_print_input_instance(const DaliInputInstanceInfo *info)
 {
     if (info == NULL) {
@@ -3361,6 +3460,16 @@ static void shell_print_input_instance(const DaliInputInstanceInfo *info)
     }
     if (info->has_error) {
         shell_printf(", error=%s", dali_is_yes(info->error) ? "yes" : "no");
+    }
+    if (info->has_event_scheme) {
+        shell_printf(", scheme=");
+        shell_print_scheme_value(info->event_scheme);
+    }
+    if (info->has_event_priority) {
+        shell_printf(", priority=%u", (unsigned)info->event_priority);
+    }
+    if (info->has_instance_groups) {
+        shell_print_instance_groups(info->instance_groups);
     }
     shell_printf("\r\n");
 }
@@ -4981,6 +5090,30 @@ static void cmd_export_inventory(void)
                             shell_printf(", \"error\": %s",
                                    dali_is_yes(info->error) ? "true" : "false");
                         }
+                        if (info->has_event_scheme) {
+                            shell_printf(", \"event_scheme\": %u",
+                                   (unsigned)info->event_scheme);
+                        }
+                        if (info->has_event_priority) {
+                            shell_printf(", \"event_priority\": %u",
+                                   (unsigned)info->event_priority);
+                        }
+                        if (info->has_instance_groups) {
+                            /* MASK slots as null, so the array keeps its slot
+                             * positions: primary, group 1, group 2. */
+                            shell_printf(", \"instance_groups\": [");
+                            for (uint8_t slot = 0u;
+                                 slot < DALI_INPUT_INSTANCE_GROUP_SLOTS; slot++) {
+                                uint8_t g = info->instance_groups[slot];
+                                if (g == DALI_INPUT_INSTANCE_GROUP_NONE) {
+                                    shell_printf("%snull", slot > 0u ? ", " : "");
+                                } else {
+                                    shell_printf("%s%u", slot > 0u ? ", " : "",
+                                           (unsigned)g);
+                                }
+                            }
+                            shell_printf("]");
+                        }
                     } else {
                         shell_printf(", \"query_error\": %d", (int)type_err);
                     }
@@ -5755,18 +5888,18 @@ static uint8_t      s_backup_blob[DALI_SNAPSHOT_BLOB_MAX];
 /*
  * `backup import` staging.
  *
- * A full snapshot encodes to DALI_SNAPSHOT_BLOB_MAX bytes, which is 4880 hex
+ * A full snapshot encodes to DALI_SNAPSHOT_BLOB_MAX bytes, which is 6416 hex
  * characters against a DALI_SHELL_LINE_MAX of 80 and a token limit of 31. A
  * blob therefore cannot arrive on one line however it is spelled, so import is
  * a short mode: `begin`, some number of chunk lines, `end`.
  *
  * The staging buffer is s_backup_blob itself rather than a second one, because
- * a spare 2440 bytes to hold a copy of something only one command at a time can
+ * a spare 3208 bytes to hold a copy of something only one command at a time can
  * be using is not worth it. What that costs is an interlock: every other path
  * that writes s_backup_blob -- save, export, and the storage load restore()
  * goes through -- refuses while an import is open. That refusal is a feature
  * and not just a guard, because the alternative is a `backup save` typed in the
- * middle of an 82-line paste silently destroying it.
+ * middle of a 107-line paste silently destroying it.
  *
  * s_backup itself is untouched until `end` decodes successfully, so an
  * abandoned import leaves the held backup exactly as it was.
@@ -5869,6 +6002,80 @@ static void shell_fill_missing_identities(DaliDiscoveryInventory       *inventor
     }
 }
 
+typedef struct {
+    uint8_t devices;    /* device entries whose instances were read */
+    uint8_t recorded;   /* instances now in the backup */
+    uint8_t dropped;    /* read, but past DALI_SNAPSHOT_MAX_INSTANCES */
+    uint8_t unread;     /* did not answer QUERY INSTANCE TYPE */
+} ShellInstanceRecordCounts;
+
+/*
+ * Read and record the settings of every instance of every control device the
+ * snapshot just recorded, eleven-odd queries each. Called with the bus claimed.
+ * A device the scan saw without an instance count is skipped; one that answers
+ * fewer instances than it claims has the rest counted as unread.
+ */
+static void shell_backup_record_instances(const DaliDiscoveryInventory *inventory,
+                                          const DaliDiscoveryTransport *transport,
+                                          ShellInstanceRecordCounts    *counts)
+{
+    for (uint8_t e = 0u; e < s_backup.entry_count; e++) {
+        const DaliSnapshotEntry *entry = &s_backup.entries[e];
+        if (entry->space != DALI_SNAPSHOT_SPACE_DEVICE) {
+            continue;
+        }
+        const DaliDiscoveryDeviceInfo *device =
+            dali_discovery_inventory_get(inventory, entry->short_address);
+        if (device == NULL || !device->has_instance_count) {
+            continue;
+        }
+        const uint8_t count = device->instance_count < DALI_INSTANCE_COUNT
+                                  ? device->instance_count
+                                  : (uint8_t)DALI_INSTANCE_COUNT;
+        counts->devices++;
+
+        for (uint8_t instance = 0u; instance < count; instance++) {
+            DaliInstanceSettings settings;
+            DaliError err = dali_restore_read_instance_settings(
+                transport, entry->short_address, instance, &settings);
+            if (err != DALI_OK) {
+                counts->unread++;
+                continue;
+            }
+            err = dali_snapshot_add_instance(&s_backup, e, instance, &settings);
+            if (err == DALI_OK) {
+                counts->recorded++;
+            } else if (err == DALI_ERR_FULL) {
+                counts->dropped++;
+            } else {
+                counts->unread++;
+            }
+        }
+    }
+}
+
+static void shell_backup_report_instances(const char                      *verb,
+                                          const ShellInstanceRecordCounts *counts)
+{
+    if (counts->devices == 0u) {
+        return;
+    }
+    shell_printf("%s: recorded the settings of %u instance(s) on %u control "
+                 "device(s)\r\n",
+                 verb, (unsigned)counts->recorded, (unsigned)counts->devices);
+    if (counts->dropped > 0u) {
+        shell_printf("%s: %u more instance(s) NOT recorded: a backup holds at most "
+                     "%u\r\n",
+                     verb, (unsigned)counts->dropped,
+                     (unsigned)DALI_SNAPSHOT_MAX_INSTANCES);
+    }
+    if (counts->unread > 0u) {
+        shell_printf("%s: %u instance(s) did not answer and are NOT recorded; "
+                     "'instances <addr>' shows which\r\n",
+                     verb, (unsigned)counts->unread);
+    }
+}
+
 static void shell_backup_print_entry(const DaliSnapshotEntry *entry)
 {
     shell_printf("  %s %s%u:",
@@ -5887,6 +6094,20 @@ static void shell_backup_print_entry(const DaliSnapshotEntry *entry)
         shell_printf(" groups=0x%04X", (unsigned)entry->groups);
     }
     shell_printf("\r\n");
+}
+
+/* The recorded instances of the device entry at `entry_index`, under it. */
+static void shell_backup_print_instances_of(uint8_t entry_index)
+{
+    for (uint8_t i = 0u; i < s_backup.instance_count; i++) {
+        const DaliSnapshotInstance *inst = &s_backup.instances[i];
+        if (inst->entry_index != entry_index) {
+            continue;
+        }
+        shell_printf("    instance %u: ", (unsigned)inst->instance);
+        shell_print_instance_settings(&inst->settings);
+        shell_printf("\r\n");
+    }
 }
 
 /*
@@ -5968,6 +6189,14 @@ static void cmd_backup_import(const DaliCliTokens *t, const DaliCliCommandSpec *
             shell_printf("backup import: %u byte(s) did not decode (%s); the "
                          "held backup is unchanged\r\n",
                    (unsigned)len, shell_err(err));
+            /* Named, because it is the one refusal an operator will meet
+             * with a blob that was valid when it was exported. */
+            if (len > 4u && memcmp(s_backup_blob, "DBK1", 4u) == 0 &&
+                s_backup_blob[4] == 1u) {
+                shell_printf("backup import: it is a version-1 backup, from "
+                             "before instance settings were recorded; take a "
+                             "new one with 'backup save'\r\n");
+            }
             return;
         }
 
@@ -5981,9 +6210,11 @@ static void cmd_backup_import(const DaliCliTokens *t, const DaliCliCommandSpec *
             }
         }
 
-        shell_printf("backup import: %u entr%s from %u byte(s)\r\n",
+        shell_printf("backup import: %u entr%s and %u instance setting(s) from "
+                     "%u byte(s)\r\n",
                (unsigned)s_backup.entry_count,
                s_backup.entry_count == 1u ? "y" : "ies",
+               (unsigned)s_backup.instance_count,
                (unsigned)len);
         if (unanchored > 0u) {
             shell_printf("backup import: %u entr%s %s no identification "
@@ -6061,12 +6292,14 @@ static void cmd_backup(const DaliCliTokens *t)
             }
             return;
         }
-        shell_printf("backup: %u entr%s, %s\r\n",
+        shell_printf("backup: %u entr%s and %u instance setting(s), %s\r\n",
                (unsigned)s_backup.entry_count,
                s_backup.entry_count == 1u ? "y" : "ies",
+               (unsigned)s_backup.instance_count,
                s_backup_from_storage ? "loaded from storage" : "saved this session");
         for (uint8_t i = 0u; i < s_backup.entry_count; i++) {
             shell_backup_print_entry(&s_backup.entries[i]);
+            shell_backup_print_instances_of(i);
         }
         return;
     }
@@ -6090,7 +6323,7 @@ static void cmd_backup(const DaliCliTokens *t)
          * Printed as the `backup import` script that reproduces it, not as one
          * long hex line. `export inventory` already prints these facts in a
          * readable form; what this produces is meant to be fed back, and a full
-         * blob is 4880 hex characters against an 80-character line -- so a
+         * blob is 6416 hex characters against an 80-character line -- so a
          * single line would have to be re-chunked by hand before it could be,
          * which is the transcription step the pair exists to avoid. Redirect it
          * to a file, paste the file back.
@@ -6168,10 +6401,18 @@ static void cmd_backup(const DaliCliTokens *t)
     DaliError              missing_err = DALI_OK;
     const ShellUnaddressed missing     = shell_unaddressed_probe(&missing_err);
 
+    /* The snapshot is built inside the claim, because recording each control
+     * device's instance settings is more bus traffic and needs it too. */
+    err = dali_snapshot_from_inventory(&s_backup, inventory);
+    ShellInstanceRecordCounts instance_counts;
+    memset(&instance_counts, 0, sizeof(instance_counts));
+    if (err == DALI_OK) {
+        shell_backup_record_instances(inventory, &transport, &instance_counts);
+    }
+
     shell_inventory_replace(inventory);
     shell_bus_release();
 
-    err = dali_snapshot_from_inventory(&s_backup, inventory);
     if (err != DALI_OK) {
         s_backup_valid = false;
         dali_cli_print_error(&s_out, "backup save", err);
@@ -6190,6 +6431,7 @@ static void cmd_backup(const DaliCliTokens *t)
            (unsigned)s_backup.entry_count,
            s_backup.entry_count == 1u ? "y" : "ies",
            (unsigned)found);
+    shell_backup_report_instances("backup", &instance_counts);
 
     if (unanchored > 0u) {
         shell_printf("backup: %u entr%s %s no identification number and cannot "
@@ -6717,6 +6959,224 @@ static void cmd_restore_groups(const DaliCliTokens      *t,
                  "'discover'\r\n");
 }
 
+/* " scheme instance -> device-instance, enabled no -> yes" for a mask. */
+static void shell_restore_print_instance_changes(uint8_t                     mask,
+                                                 const DaliInstanceSettings *from,
+                                                 const DaliInstanceSettings *to)
+{
+    bool first = true;
+    for (uint8_t bit = 0x01u; bit <= DALI_RESTORE_INSTANCE_GROUPS; bit <<= 1u) {
+        if ((mask & bit) == 0u) {
+            continue;
+        }
+        shell_printf("%s %s ", first ? "" : ",", dali_restore_instance_field_name(bit));
+        shell_print_instance_field(bit, from);
+        shell_printf(" -> ");
+        shell_print_instance_field(bit, to);
+        first = false;
+    }
+}
+
+typedef struct {
+    uint8_t located;     /* recorded instances whose device was found */
+    uint8_t correct;     /* already holding what was recorded */
+    uint8_t changes;     /* needing at least one write */
+    uint8_t skipped;     /* not answering, or now a different type */
+    uint8_t unlocated;   /* their device could not be found */
+    uint8_t applied;     /* written and read back as recorded */
+    uint8_t mismatch;    /* written, but read back otherwise or not at all */
+} ShellInstanceRestoreCounts;
+
+/*
+ * One recorded instance: read it where its device answers now, report what
+ * differs, and with `apply` write that and read it back. False when the bus
+ * failed and the run should stop.
+ */
+static bool shell_restore_one_instance(const char                 *verb,
+                                       const DaliDiscoveryTransport *transport,
+                                       uint8_t                     addr,
+                                       const DaliSnapshotInstance *rec,
+                                       bool                        apply,
+                                       ShellInstanceRestoreCounts *counts)
+{
+    const DaliSnapshotEntry *entry = &s_backup.entries[rec->entry_index];
+    DaliInstanceSettings     current;
+    DaliError err = dali_restore_read_instance_settings(transport, addr,
+                                                        rec->instance, &current);
+    if (err == DALI_ERR_TIMEOUT) {
+        counts->skipped++;
+        shell_printf("  d%u.%u: does not answer; skipped\r\n",
+                     (unsigned)addr, (unsigned)rec->instance);
+        return true;
+    }
+    if (err != DALI_OK) {
+        shell_printf("  d%u.%u: %s\r\n", (unsigned)addr, (unsigned)rec->instance,
+                     shell_err(err));
+        shell_printf("%s: stopped; re-run 'restore instances' to see what "
+                     "remains\r\n", verb);
+        return false;
+    }
+    if (rec->settings.has_type && current.has_type &&
+        rec->settings.type != current.type) {
+        /* A different kind of instance now: its settings would mean something
+         * else, so nothing is written to it. */
+        counts->skipped++;
+        shell_printf("  d%u.%u: now type %u, recorded as type %u; skipped\r\n",
+                     (unsigned)addr, (unsigned)rec->instance,
+                     (unsigned)current.type, (unsigned)rec->settings.type);
+        return true;
+    }
+
+    const uint8_t mask = dali_restore_instance_write_mask(&rec->settings, &current);
+    if (mask == 0u) {
+        counts->correct++;
+        return true;
+    }
+    counts->changes++;
+
+    shell_printf("  d%u.%u", (unsigned)addr, (unsigned)rec->instance);
+    if (addr != entry->short_address) {
+        /* Written where the device answers now, which differs from where the
+         * backup found it until the addresses are restored. */
+        shell_printf(" (backup d%u)", (unsigned)entry->short_address);
+    }
+    shell_printf(":");
+    shell_restore_print_instance_changes(mask, &current, &rec->settings);
+    if (!apply) {
+        shell_printf("\r\n");
+        return true;
+    }
+
+    err = dali_restore_write_instance_settings(transport, addr, rec->instance,
+                                               &rec->settings, mask);
+    if (err != DALI_OK) {
+        shell_printf("  %s\r\n", shell_err(err));
+        shell_printf("%s: stopped; re-run 'restore instances' to see what "
+                     "remains\r\n", verb);
+        return false;
+    }
+
+    /* Each write is unacknowledged, so only a read says it landed. */
+    DaliInstanceSettings after;
+    err = dali_restore_read_instance_settings(transport, addr, rec->instance, &after);
+    const uint8_t remaining = (err == DALI_OK)
+        ? dali_restore_instance_write_mask(&rec->settings, &after) : mask;
+    if (err == DALI_OK && remaining == 0u) {
+        counts->applied++;
+        shell_printf("  OK\r\n");
+    } else {
+        counts->mismatch++;
+        shell_printf("  NOT CONFIRMED:");
+        for (uint8_t bit = 0x01u; bit <= DALI_RESTORE_INSTANCE_GROUPS; bit <<= 1u) {
+            if ((remaining & bit) != 0u) {
+                shell_printf(" %s", dali_restore_instance_field_name(bit));
+            }
+        }
+        shell_printf("\r\n");
+    }
+    return true;
+}
+
+/*
+ * `restore instances [apply]`: put each recorded control-device instance's
+ * generic settings back. Planned against a fresh scan, so each device is found
+ * by identification number wherever it answers now; read, compared and, with
+ * `apply`, written and read back one instance at a time.
+ */
+static void cmd_restore_instances(const DaliCliTokens      *t,
+                                  const DaliCliCommandSpec *usage)
+{
+    const bool apply = (t->count > 2u) && (strcmp(t->tok[2], "apply") == 0);
+
+    if (t->count > 3u || (t->count == 3u && !apply)) {
+        dali_cli_print_usage(&s_out, usage);
+        return;
+    }
+    /* The same authority as the group restore: it rewrites configuration on
+     * every recorded device, and an event scheme or group set wrongly is an
+     * occupancy or a switch that stops reaching its lights. */
+    if (apply &&
+        !shell_policy_allows(DALI_SHELL_ALLOW_COMMISSION, "restore instances apply")) {
+        return;
+    }
+
+    const char *verb = apply ? "restore instances apply" : "restore instances";
+    if (!shell_restore_refresh(verb)) {
+        return;
+    }
+    if (s_backup.instance_count == 0u) {
+        shell_printf("%s: the backup records no instance settings\r\n", verb);
+        return;
+    }
+    if (!shell_bus_claim(verb)) {
+        shell_printf("%s: bus busy\r\n", verb);
+        return;
+    }
+
+    const DaliDiscoveryTransport transport = shell_discovery_transport();
+    ShellInstanceRestoreCounts   counts;
+    memset(&counts, 0, sizeof(counts));
+    bool running = true;
+
+    for (uint8_t e = 0u; e < s_backup.entry_count && running; e++) {
+        bool    has_instances = false;
+        uint8_t recorded      = 0u;
+        for (uint8_t i = 0u; i < s_backup.instance_count; i++) {
+            if (s_backup.instances[i].entry_index == e) {
+                has_instances = true;
+                recorded++;
+            }
+        }
+        if (!has_instances) {
+            continue;
+        }
+
+        uint8_t                 addr     = 0u;
+        DaliRestoreConflictKind conflict = DALI_RESTORE_CONFLICT_MISSING;
+        if (!dali_restore_locate_device(&s_backup, e, &s_inventory_scratch, &addr,
+                                        &conflict)) {
+            counts.unlocated = (uint8_t)(counts.unlocated + recorded);
+            shell_printf("  backup d%u: %s; its %u instance(s) are not restored\r\n",
+                         (unsigned)s_backup.entries[e].short_address,
+                         dali_restore_conflict_name(conflict), (unsigned)recorded);
+            continue;
+        }
+
+        for (uint8_t i = 0u; i < s_backup.instance_count && running; i++) {
+            const DaliSnapshotInstance *rec = &s_backup.instances[i];
+            if (rec->entry_index != e) {
+                continue;
+            }
+            counts.located++;
+            running = shell_restore_one_instance(verb, &transport, addr, rec, apply,
+                                                 &counts);
+        }
+    }
+
+    shell_bus_release();
+
+    shell_printf("%s: %u located, %u already correct, %u to change, %u skipped, "
+                 "%u not located\r\n",
+                 verb, (unsigned)counts.located, (unsigned)counts.correct,
+                 (unsigned)counts.changes, (unsigned)counts.skipped,
+                 (unsigned)counts.unlocated);
+    if (!apply) {
+        if (counts.changes > 0u) {
+            shell_printf("restore instances: run 'restore instances apply' to "
+                         "execute\r\n");
+        } else if (counts.skipped == 0u && counts.unlocated == 0u) {
+            shell_printf("restore instances: every recorded instance matches the "
+                         "backup; nothing to do\r\n");
+        }
+        return;
+    }
+    shell_printf("%s: %u confirmed", verb, (unsigned)counts.applied);
+    if (counts.mismatch > 0u) {
+        shell_printf(", %u not confirmed by the read-back", (unsigned)counts.mismatch);
+    }
+    shell_printf("\r\n");
+}
+
 static void cmd_restore(const DaliCliTokens *t)
 {
     const DaliCliCommandSpec *usage = dali_cli_command_for_id(DALI_CLI_CMD_RESTORE);
@@ -6729,6 +7189,11 @@ static void cmd_restore(const DaliCliTokens *t)
      */
     if (strcmp(t->tok[1], "groups") == 0) {
         cmd_restore_groups(t, usage);
+        return;
+    }
+    /* Instance settings likewise: a repair of its own, never part of apply. */
+    if (strcmp(t->tok[1], "instances") == 0) {
+        cmd_restore_instances(t, usage);
         return;
     }
 
@@ -7114,7 +7579,7 @@ static void cmd_iquery(const DaliCliTokens *t)
     uint8_t instance;
 
     if (!dali_cli_parse_short_addr(t->tok[1], &addr) ||
-        !dali_cli_parse_instance(t->tok[2], &instance)) {
+        !dali_cli_parse_instance_selector(t->tok[2], &instance)) {
         dali_cli_print_usage(&s_out, dali_cli_command_for_id(DALI_CLI_CMD_IQUERY));
         return;
     }
@@ -7143,6 +7608,10 @@ static void cmd_iquery(const DaliCliTokens *t)
     if (command.bit_length == 0u) {
         dali_cli_print_error(&s_out, spec->name, DALI_ERR_INVALID);
         return;
+    }
+    if (dali_cli_instance_selector_is_multi(instance)) {
+        shell_printf("note: %s can reach more than one instance; if several "
+                     "answer, the replies collide\r\n", t->tok[2]);
     }
 
     DaliFrame reply = {0u, 0u};
@@ -7186,7 +7655,7 @@ static void cmd_iconfig(const DaliCliTokens *t)
     uint8_t instance;
 
     if (!dali_cli_parse_short_addr(t->tok[1], &addr) ||
-        !dali_cli_parse_instance(t->tok[2], &instance)) {
+        !dali_cli_parse_instance_selector(t->tok[2], &instance)) {
         dali_cli_print_usage(&s_out, dali_cli_command_for_id(DALI_CLI_CMD_ICONFIG));
         return;
     }
@@ -7247,6 +7716,10 @@ static void cmd_iconfig(const DaliCliTokens *t)
         /* Transmitted, not acknowledged: read the value back with iquery before
          * treating an input-device configuration write as applied. */
         shell_printf("%s: transmitted; verify with iquery\r\n", spec->name);
+        if (s_session.hooks.instance_config_applied != NULL) {
+            s_session.hooks.instance_config_applied(s_session.hooks.ctx, addr,
+                                                    instance);
+        }
     }
 }
 

@@ -456,3 +456,86 @@ DaliError dali_restore_plan_groups(DaliRestoreGroupPlan         *out,
 
 /* True when there is nothing to do and nothing wrong: no changes, no conflicts. */
 bool dali_restore_group_plan_is_clean(const DaliRestoreGroupPlan *plan);
+
+/* ---------------------------------------------------------------------------
+ * Instance settings
+ *
+ * A control device keeps each instance's generic configuration -- enabled,
+ * event scheme, event priority, event filter, instance groups -- in its own
+ * memory, and a device RESET returns it to defaults. Re-addressing should not
+ * touch it; the 2k Steinel was nonetheless found with both emitting instances
+ * on scheme 0 after a day of re-addressing (project_log.md, 2026-10-01). This
+ * is the repair, kept apart from the address restore for the reason group
+ * membership is: an operator putting addresses back has not asked for every
+ * instance to be reconfigured.
+ *
+ * A recorded device is found by identification number, so the settings go to
+ * wherever it answers now. Every setting is a SET rather than an edit, so
+ * writing the recorded value is right whatever the device holds; a field the
+ * device does not report is still written, and its read-back says whether it
+ * took. Nothing here blocks: a front end reads, writes and reads back through
+ * these, one instance at a time, holding the bus.
+ * --------------------------------------------------------------------------*/
+
+/* Bits of a write mask. */
+#define DALI_RESTORE_INSTANCE_ENABLED   0x01u
+#define DALI_RESTORE_INSTANCE_SCHEME    0x02u
+#define DALI_RESTORE_INSTANCE_PRIORITY  0x04u
+#define DALI_RESTORE_INSTANCE_FILTER    0x08u
+#define DALI_RESTORE_INSTANCE_GROUPS    0x10u
+#define DALI_RESTORE_INSTANCE_ALL       0x1Fu
+
+/*
+ * Read one instance's settings at `addr`. DALI_ERR_TIMEOUT when QUERY INSTANCE
+ * TYPE goes unanswered, and then nothing else is asked; any other field that
+ * does not answer is left unknown. The filter and the group slots are kept only
+ * whole.
+ *
+ * QUERY INSTANCE ENABLED answers YES or nothing, so silence is "disabled" or a
+ * lost reply. It is read as disabled only when QUERY INSTANCE STATUS agrees,
+ * its instanceActive bit (bit 1) clear; on 2k both enabled instances answer
+ * 0x02 and both silent ones 0x00. Otherwise enabled stays unknown, because a
+ * backup that recorded a lost reply as "disabled" would switch the instance
+ * off on restore.
+ */
+DaliError dali_restore_read_instance_settings(const DaliTransport  *transport,
+                                              uint8_t               addr,
+                                              uint8_t               instance,
+                                              DaliInstanceSettings *out);
+
+/*
+ * The fields to write so the instance holds what was recorded: each field the
+ * backup has that the device reports differently or does not report. A
+ * recorded priority outside 2-5 is never in the mask, since SET EVENT PRIORITY
+ * takes nothing else.
+ */
+uint8_t dali_restore_instance_write_mask(const DaliInstanceSettings *recorded,
+                                         const DaliInstanceSettings *current);
+
+/*
+ * Where the device recorded at snapshot entry `entry_index` answers now,
+ * matched by its identification number. True with the address; false with
+ * *conflict_out set to UNIDENTIFIED (the entry has no number), MISSING
+ * (nothing answers with it) or DUPLICATE_BUS (more than one does). A contested
+ * device address never matches.
+ */
+bool dali_restore_locate_device(const DaliSnapshot           *snapshot,
+                                uint8_t                       entry_index,
+                                const DaliDiscoveryInventory *inventory,
+                                uint8_t                      *address_out,
+                                DaliRestoreConflictKind      *conflict_out);
+
+/*
+ * Send the writes `mask` selects to the instance at `addr`: each its DTR loads
+ * and its send-twice command as one sequence, ENABLE or DISABLE last, so the
+ * instance does not report under half its recorded addressing. Stops at the
+ * first error. Does not read back: read the settings again and compare.
+ */
+DaliError dali_restore_write_instance_settings(const DaliTransport        *transport,
+                                               uint8_t                     addr,
+                                               uint8_t                     instance,
+                                               const DaliInstanceSettings *recorded,
+                                               uint8_t                     mask);
+
+/* Name of one mask bit, for messages: "enabled", "scheme", ... */
+const char *dali_restore_instance_field_name(uint8_t field);

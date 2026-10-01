@@ -1084,9 +1084,36 @@ read back once and any that did not take the edits is flagged `MISMATCH`; group
 commands are unacknowledged, so that read-back is the only thing that tells a
 driver which took them from one which did not.
 
-Control gear only. Control devices have their own group scheme in Part 103 that
-the scan does not read. **Scenes are not captured at all** — nothing reads scene
-levels back, so a `RESET` still costs you those.
+Control gear only. A control device's instance groups come back with `restore
+instances`, below; its device groups are not read at all. **Scenes are not
+captured at all** — nothing reads scene levels back, so a `RESET` still costs
+you those.
+
+#### Putting control-device settings back
+
+A control device keeps each instance's own configuration: whether it is
+enabled, which event scheme it reports with, its event priority and filter, and
+its three instance groups. `backup save` records those too, and a separate verb
+puts them back:
+
+```text
+restore instances         # what differs from the backup
+restore instances apply   # write it, then read each instance back
+```
+
+The event scheme is the one to watch. An integration polls a sensor by short
+address and instance number, and only scheme 2 (device/instance) events carry
+both, so a sensor whose instance has slipped to another scheme still works but
+leans on inference to follow its events, and the integration warns about it.
+That happened on 2k: after a day of re-addressing, the Steinel's two emitting
+instances were on scheme 0. Run `restore instances` after re-addressing control
+devices, and after any `RESET` of one.
+
+Like the group restore, this finds each device by identification number
+wherever it answers now, and never runs as part of `restore apply`. An instance
+that no longer answers, or is now a different type, is skipped and named. It
+records only the generic Part 103 settings: Part 303 hold and report timers and
+the like are not captured.
 
 #### Keeping the backup somewhere else
 
@@ -1095,8 +1122,13 @@ writes it to flash, so it survives a reboot, and `backup status` tells you which
 you are looking at:
 
 ```text
-backup: 4 entries, loaded from storage
+backup: 4 entries and 5 instance setting(s), loaded from storage
 ```
+
+**Backups taken before 2026-10-01 are gone.** That is when the format went to
+version 2 to hold instance settings. A backup stored by an older build no
+longer loads, because the stored record changed size, and an exported
+version-1 file is refused on import. After flashing, run `backup save` again.
 
 That flash is the NVS partition ESPHome's default layout already provides — no
 extra partition, and nothing to configure. The shell task stages the blob and
@@ -1112,7 +1144,7 @@ until reboot. `backup export` prints it as the script that reads it back:
 ```text
 backup: 46 byte(s); the lines below re-import it
 backup import begin
-backup import 44424B31010200000000000000000A 1B2C3D4E5F60718293A4B5C6D7E8F9
+backup import 44424B31020200000000000000000A 1B2C3D4E5F60718293A4B5C6D7E8F9
 backup import 0A1B2C3D4E5F60718293A4B5C6D7E8 F9
 backup import end
 ```
@@ -1124,15 +1156,15 @@ With the shell client:
 python3 /config/dali-shell backup export > /config/dali_addresses.txt
 ```
 
-The chunking is not decoration — a full 64-fixture snapshot is 4880 hex
+The chunking is not decoration — a full snapshot is 6416 hex
 characters and the shell reads 80-character lines — so the export is printed in
 the shape the import accepts rather than as one line you would have to break up
 yourself.
 
 While an import is open, `backup save`, `backup export`, `backup status` and
 both `restore` verbs refuse and say why. That is deliberate: they share the
-buffer the paste is landing in, and a `backup save` typed halfway through an
-82-line paste would otherwise destroy it without a word. `backup import abort`
+buffer the paste is landing in, and a `backup save` typed halfway through a
+107-line paste would otherwise destroy it without a word. `backup import abort`
 discards a paste that went wrong, and any line that does not parse discards it
 for you — a blob missing a line in the middle can still decode into a
 plausible-looking snapshot, and that snapshot moves fixtures to the wrong
@@ -1145,9 +1177,10 @@ blob is checked end to end before a byte of it is kept.
 `backup save`, `export` and `import` and `restore plan` / `restore apply` all
 worked, with every move confirmed. That included dependent moves, a swap staged
 through a spare address, and moving aside a unit the backup had never seen.
-These have host vectors and nothing more: `apply` stopping at a move it cannot
-confirm, a restore planned against a contested address, the rejection paths,
-and `restore groups apply`.
+That was the version-1 format. These have host vectors and nothing more: `apply`
+stopping at a move it cannot confirm, a restore planned against a contested
+address, the rejection paths, `restore groups apply`, both `restore instances`
+verbs, and the instance settings `backup save` now records.
 
 A restore is only as good as what `backup save` managed to read. A save cannot
 record gear that has no short address. It warns when the bus reports any, so

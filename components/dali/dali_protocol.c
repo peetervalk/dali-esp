@@ -273,9 +273,15 @@ static DaliError target_addr_byte(DaliAddressType type,
     }
 }
 
+/* An instance number, an instance-group or instance-type selector, or every
+ * instance. Not 0xFE: device-level commands have their own builder. */
 static bool instance_valid(uint8_t instance)
 {
-    return instance < DALI_INSTANCE_COUNT || instance == DALI_ALL_INSTANCES;
+    const uint8_t form = (uint8_t)(instance & DALI_INSTANCE_SELECTOR_MASK);
+    return instance < DALI_INSTANCE_COUNT ||
+           form == DALI_INSTANCE_GROUP_SELECTOR ||
+           form == DALI_INSTANCE_TYPE_SELECTOR ||
+           instance == DALI_ALL_INSTANCES;
 }
 
 static DaliError command_opcode(const DaliCommandInfo *cmd,
@@ -767,11 +773,6 @@ DaliFrame dali_cmd_device(uint8_t addr, uint8_t cmd)
 DaliFrame dali_cmd_device_broadcast(uint8_t cmd)
 {
     return make_frame24(DALI_BROADCAST_COMMAND_ADDRESS, DALI_DEVICE_INSTANCE, cmd);
-}
-
-DaliFrame dali_cmd_instance_group(uint8_t group, uint8_t instance, uint8_t cmd)
-{
-    return make_frame24(group_addr_byte(group, 1u), instance, cmd);
 }
 
 DaliFrame dali_cmd_instance_broadcast(uint8_t instance, uint8_t cmd)

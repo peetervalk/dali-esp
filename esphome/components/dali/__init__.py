@@ -62,9 +62,19 @@ _ADDRESS_KIND = {
     "none":      0,   # DALI_EVENT_ADDRESS_INVALID (Instance source scheme)
     "invalid":   0,   # explicit alias for the C enum name
     "short":     1,   # DALI_EVENT_ADDRESS_SHORT
-    "group":     2,   # DALI_EVENT_ADDRESS_GROUP
+    "group":     2,   # DALI_EVENT_ADDRESS_GROUP; Part 103: either group space
+    "device_group":   2,   # DALI_EVENT_ADDRESS_GROUP + DALI_DISPATCH_GROUP_DEVICE
+    "instance_group": 2,   # DALI_EVENT_ADDRESS_GROUP + DALI_DISPATCH_GROUP_INSTANCE
     "broadcast": 3,   # DALI_EVENT_ADDRESS_BROADCAST
 }
+
+# DaliDispatchGroupKind. Part-103 device groups and instance groups are separate
+# number spaces; `group` matches either, as it always has.
+_GROUP_KIND = {
+    "device_group":   1,   # DALI_DISPATCH_GROUP_DEVICE
+    "instance_group": 2,   # DALI_DISPATCH_GROUP_INSTANCE
+}
+_GROUP_ADDRESS_KINDS = ("group", "device_group", "instance_group")
 
 _OUTPUT_TYPE = {
     "short":     0,   # DALI_ADDR_SHORT
@@ -87,6 +97,7 @@ _DISPATCH_ACTION = {
 
 _EVENT_ANY = 0xFFFF  # DALI_DISPATCH_EVENT_ANY
 _INSTANCE_ANY = 0xFF  # DALI_DISPATCH_INSTANCE_ANY
+_INSTANCE_TYPE_ANY = 0xFF  # match_instance_type = false
 
 
 def _any_or_event_information(value):
@@ -110,6 +121,13 @@ def _any_or_instance(value):
     value = cv.int_(value)
     if value == _INSTANCE_ANY:
         return value
+    return cv.int_range(min=0, max=31)(value)
+
+
+def _any_or_instance_type(value):
+    """Accept 'any' or a Part-103 instance type (1 push button, 3 occupancy...)."""
+    if isinstance(value, str) and value.lower() == "any":
+        return _INSTANCE_TYPE_ANY
     return cv.int_range(min=0, max=31)(value)
 
 
@@ -140,10 +158,16 @@ def _validate_dispatch_entry(config):
     address = config["address"]
     event_information = config[CONF_EVENT_INFORMATION]
     instance = config["instance"]
+    instance_type = config["instance_type"]
 
     if frame_kind == "legacy_16bit":
         if address_kind in ("none", "invalid"):
             raise cv.Invalid("legacy_16bit requires short, group, or broadcast")
+        if address_kind in _GROUP_KIND:
+            raise cv.Invalid(
+                f"{address_kind} is a Part-103 source; a legacy_16bit frame "
+                "addresses a control-gear group, so use group"
+            )
         if address_kind == "group" and address > 15:
             raise cv.Invalid("legacy_16bit group address must be 0..15")
         if address_kind == "broadcast" and address != 0:
@@ -152,15 +176,25 @@ def _validate_dispatch_entry(config):
             raise cv.Invalid("legacy_16bit event_information must be 0..255 or any")
         if instance != _INSTANCE_ANY:
             raise cv.Invalid("legacy_16bit does not carry an instance; use any")
+        if instance_type != _INSTANCE_TYPE_ANY:
+            raise cv.Invalid("legacy_16bit does not carry an instance type; use any")
     else:
         if address_kind == "broadcast":
             raise cv.Invalid("input_24bit events do not use a broadcast source")
-        if address_kind == "group" and address > 31:
+        if address_kind in _GROUP_ADDRESS_KINDS and address > 31:
             raise cv.Invalid("Part-103 source group must be 0..31")
         if address_kind in ("none", "invalid") and address != 0:
             raise cv.Invalid("an Instance source has no address; use address: 0")
-        if address_kind == "group" and instance != _INSTANCE_ANY:
+        if address_kind in _GROUP_ADDRESS_KINDS and instance != _INSTANCE_ANY:
             raise cv.Invalid("Part-103 group sources do not carry an instance number")
+        if (address_kind == "short" and instance != _INSTANCE_ANY and
+                instance_type != _INSTANCE_TYPE_ANY):
+            # Device/Instance carries the address and instance but no type,
+            # and Device carries the address and type but no instance.
+            raise cv.Invalid(
+                "no Part-103 event carries a short address, an instance and an "
+                "instance type together; drop instance or instance_type"
+            )
         if config["action"] in ("observe", "mirror"):
             raise cv.Invalid("observe and mirror are only valid for legacy_16bit")
 
@@ -179,6 +213,9 @@ _DISPATCH_ENTRY_SCHEMA = cv.All(
         cv.Optional(CONF_EVENT_INFORMATION): _any_or_event_information,
         cv.Optional(CONF_EVENT_CODE): _any_or_event_code,
         cv.Optional("instance", default="any"): _any_or_instance,
+        # Matches only events that carry a type: schemes 0, 1, 3 and 4, never a
+        # Device/Instance (scheme 2) event.
+        cv.Optional("instance_type", default="any"): _any_or_instance_type,
         cv.Required("output_type"):   cv.one_of(*_OUTPUT_TYPE,  lower=True),
         cv.Optional("output_address", default=0): cv.int_range(min=0, max=63),
         cv.Required("action"):        cv.one_of(*_DISPATCH_ACTION, lower=True),
@@ -419,6 +456,8 @@ async def to_code(config):
             entry["output_address"],
             _DISPATCH_ACTION[entry["action"]],
             entry["scene"],
+            _GROUP_KIND.get(entry["address_kind"], 0),
+            entry["instance_type"],
         ))
 
     if CONF_SHELL in config:

@@ -27,6 +27,7 @@ set(DALI_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_input_device.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_input_poll.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_event.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_event_source.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_discovery.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_commissioning.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_device_commissioning.c
@@ -99,6 +100,7 @@ add_dali_test(test_input_device test_input_device.c)
 add_dali_test(test_transport  test_transport.c)
 add_dali_test(test_input_poll test_input_poll.c)
 add_dali_test(test_event test_event.c)
+add_dali_test(test_event_source test_event_source.c)
 add_dali_test(test_discovery test_discovery.c)
 add_dali_test(test_commissioning test_commissioning.c)
 add_dali_test(test_device_commissioning test_device_commissioning.c)
@@ -107,6 +109,7 @@ add_dali_test(test_snapshot   test_snapshot.c)
 add_dali_test(test_restore_plan test_restore_plan.c)
 add_dali_test(test_restore_groups test_restore_groups.c)
 add_dali_test(test_restore_confirm test_restore_confirm.c)
+add_dali_test(test_restore_instances test_restore_instances.c)
 add_dali_test(test_vendor     test_vendor.c)
 add_dali_test(test_mapping    test_mapping.c)
 add_dali_test(test_memory     test_memory.c)

@@ -239,6 +239,10 @@ class DaliComponent : public Component {
   void on_config_applied(DaliTarget target, DaliCommandId id, uint8_t param);
   void on_short_address_moved(uint8_t from, uint8_t to);
   void on_short_address_cleared(uint8_t addr);
+  // An instance configuration write went to the control device at `addr`
+  // (`instance` is the instance byte as sent). Re-reads the source profile of
+  // every sensor there. Callable from a worker task.
+  void on_instance_config_applied(uint8_t addr, uint8_t instance);
   // Called by the scan task before on_scan_complete(). Copies only control-gear
   // profile metadata; scan_done_'s release/acquire handoff publishes the copy.
   void set_scan_level_profile_snapshot(const DaliDiscoveryInventory *inventory);
@@ -248,10 +252,12 @@ class DaliComponent : public Component {
   // Called by DaliInputSensor during codegen init (Core 0 setup phase).
   void register_input_sensor(DaliBusSensor *sensor);
   // Called once per headless_dispatch entry during codegen init (Core 0 setup phase).
+  // group_kind is a DaliDispatchGroupKind; instance_type 0xFF matches any type.
   void add_dispatch_entry(uint8_t frame_kind, uint8_t address_kind, uint8_t address,
                           uint16_t event_information, uint8_t instance,
                           uint8_t output_type, uint8_t output_address,
-                          uint8_t action, uint8_t scene);
+                          uint8_t action, uint8_t scene,
+                          uint8_t group_kind = 0u, uint8_t instance_type = 0xFFu);
 
   // ── Configuration export (dali_config_export.cpp) ───────────────────────
   //

@@ -197,8 +197,8 @@ static const DaliCliCommandSpec s_commands[] = {
     { DALI_CLI_CMD_DT6, "dt6", "<addr> <name> [dtr0]", "device type 6 (LED) command", 2u, 3u, NULL },
     { DALI_CLI_CMD_DT8, "dt8", "<addr> <name> [v0] [v1] [v2]", "device type 8 (colour) command", 2u, 5u, NULL },
 
-    { DALI_CLI_CMD_IQUERY, "iquery", "<addr> <instance> <name> [dtr0]", "Part 103 instance query", 3u, 4u, NULL },
-    { DALI_CLI_CMD_ICONFIG, "iconfig", "<addr> <instance> <name> [v0] [v1] [v2]", "Part 103 instance configuration", 3u, 6u, NULL },
+    { DALI_CLI_CMD_IQUERY, "iquery", "<addr> <inst|gN|tN|all> <name> [dtr0]", "Part 103 instance query", 3u, 4u, NULL },
+    { DALI_CLI_CMD_ICONFIG, "iconfig", "<addr> <inst|gN|tN|all> <name> [v0] [v1] [v2]", "Part 103 instance configuration", 3u, 6u, NULL },
     { DALI_CLI_CMD_VENDOR, "vendor", "lunatone <addr> <instance> <name> | steinel <instance> <raw>", "vendor helpers", 3u, 4u,
       "lunatone steinel" },
 
@@ -217,10 +217,10 @@ static const DaliCliCommandSpec s_commands[] = {
     { DALI_CLI_CMD_IDENTIFY, "identify", "<addr>", "blink one short-addressed lamp, then restore its level", 1u, 1u, NULL },
     { DALI_CLI_CMD_QUIESCENT, "quiescent", "on|off <addr|all>", "Part 103 quiescent mode: silence control-device events", 2u, 2u,
       "on off" },
-    { DALI_CLI_CMD_BACKUP, "backup", "save|status|export|import <begin|HEX|end|abort>", "record which physical unit holds which short address", 1u, 3u,
+    { DALI_CLI_CMD_BACKUP, "backup", "save|status|export|import <begin|HEX|end|abort>", "record which physical unit holds which short address, and each control device's instance settings", 1u, 3u,
       "save export status import" },
-    { DALI_CLI_CMD_RESTORE, "restore", "plan|apply|groups [apply]", "put short addresses, or group membership, back the way the backup recorded them", 1u, 2u,
-      "plan apply groups" },
+    { DALI_CLI_CMD_RESTORE, "restore", "plan|apply|groups [apply]|instances [apply]", "put short addresses, group membership, or instance settings back the way the backup recorded them", 1u, 2u,
+      "plan apply groups instances" },
 };
 
 #define CLI_COMMAND_COUNT ((uint8_t)(sizeof(s_commands) / sizeof(s_commands[0])))
@@ -556,6 +556,38 @@ bool dali_cli_parse_device_addr(const char *text, uint8_t *out)
 bool dali_cli_parse_instance(const char *text, uint8_t *out)
 {
     return dali_cli_parse_u8(text, DALI_MAX_INSTANCE, out);
+}
+
+bool dali_cli_parse_instance_selector(const char *text, uint8_t *out)
+{
+    if (text == NULL || out == NULL) {
+        return false;
+    }
+    if (strcmp(text, "all") == 0) {
+        *out = DALI_ALL_INSTANCES;
+        return true;
+    }
+
+    uint8_t form;
+    if (text[0] == 'g') {
+        form = DALI_INSTANCE_GROUP_SELECTOR;
+    } else if (text[0] == 't') {
+        form = DALI_INSTANCE_TYPE_SELECTOR;
+    } else {
+        return dali_cli_parse_instance(text, out);
+    }
+
+    uint8_t value;
+    if (!dali_cli_parse_u8(text + 1, DALI_MAX_INSTANCE, &value)) {
+        return false;
+    }
+    *out = (uint8_t)(form | value);
+    return true;
+}
+
+bool dali_cli_instance_selector_is_multi(uint8_t instance_byte)
+{
+    return instance_byte >= DALI_INSTANCE_COUNT;
 }
 
 bool dali_cli_parse_level(const char *text, DaliCliLevel *out)

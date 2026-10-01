@@ -1,13 +1,18 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-09-30, after the seventh bus session, on 1k, and the
-fixes it led to. The session ran the `identify`, `backup save` and `restore
-apply` fixes, and a `restore apply` move that did not land showed that a lost
-DTR0 load re-addresses a unit to whatever DTR0 last held. Every short-address
-write now reads DTR0 back first, and the clear lines in the device log and
-`discover`'s version field no longer mislead; those are host-tested and
-compile-checked only. The record is in `project_log.md`; what is still open is
-in the prioritized list below.
+**Last updated:** 2026-10-01, after the ninth bus session, on 2k. The Steinel's
+occupancy had slowed because both of its emitting instances were on event
+scheme 0, whose frames carry no device address. No event matched a sensor, so
+occupancy waited for its poll interval. `iconfig` put scheme 2 back and `iquery`
+read it back, the first configuration write confirmed on a bus, and events
+trigger polls again. What set scheme 0 is not known. Since then, sensors match
+events of every scheme, not only scheme 2, and instance groups can be read,
+addressed and dispatched on. The backup format is now version 2: it records each
+control device's instance settings, and `restore instances` puts them back.
+**Version 2 is a deliberate break: a backup stored or exported by an older
+build does not load.** All of this is host-tested and compile-checked, with no
+bus run. The record is in `project_log.md`; what is still open is in the
+prioritized list below.
 
 Annex to `AGENTS.md`. That file holds the architecture, the layer rules, the ISR
 and timing constraints, and the native/host build commands; this one holds what
@@ -58,7 +63,7 @@ is not DALI Alliance certified.
 
 | Aim | Current state |
 |---|---|
-| CLI completeness | **Surface complete, verification incomplete.** Every shared capability has a typed verb, including memory, DT6, DT8, input-device query/configuration, vendor helpers, control-device memory, gear *and* control-device commissioning, gear *and* control-device re-addressing, backup/restore, CONTINUOUS UP/DOWN, arc power MASK, and send-twice `raw2`. What is missing is real-bus results for DT6, DT8, memory writes, and input-device configuration. |
+| CLI completeness | **Surface complete, verification incomplete.** Every shared capability has a typed verb, including memory, DT6, DT8, input-device query/configuration, vendor helpers, control-device memory, gear *and* control-device commissioning, gear *and* control-device re-addressing, backup/restore, CONTINUOUS UP/DOWN, arc power MASK, and send-twice `raw2`. What is missing is real-bus results for DT6, DT8, memory writes, and every input-device configuration write but SET EVENT SCHEME. |
 | ESP32 / ESPHome controller | **Working installation-grade baseline.** The two known sites have operational brightness control, observation, sensor polling, diagnostics, and discovery. Not yet a general, fully state-correct DALI controller. |
 | Protocol separation | **Directionally strong.** The reusable C stack is independent of ESPHome, and every frame the ESPHome layer sends is built by a shared builder in `components/dali`. What stays ESPHome-bound is the wiring — console dispatch, the refresh pump, the entity registries — none of which host tests can reach. |
 | Standards confidence | **Selected workflows verified, not complete conformance.** Some tests repeat implementation constants rather than independent standard-derived vectors. |
@@ -102,7 +107,12 @@ build that prints the new version display, where one `address clear` read DTR0
 back on the first load. Which toolchain built it is not recorded. The
 shared-address detection that session prompted has 32/32 host suites with 12
 new vectors, 13 mutants killed, a native IDF 6.0.1 build and a `dali_test.yaml`
-compile on ESPHome 2026.9.0, and no bus.
+compile on ESPHome 2026.9.0, and no bus. The 2026-10-01 event-source matching
+and instance-group work passes 33/33 host suites, `esphome config`, a
+`dali_test.yaml` compile on ESPHome 2026.9.0 and the native IDF 6.0.1 build, and
+has no bus result. The version-2 backup with instance settings that followed it
+passes 34/34 host suites, the same compile and the native build, also with no
+bus result. Every backup and restore bus result below predates version 2.
 
 ### Recorded hardware state
 
@@ -122,6 +132,16 @@ counters, captures, and what each did *not* cover — are in `project_log.md`.
   the fixed build, `commission devices` with INITIALISE `0x7F` found both,
   programmed them to d0 and d1, confirmed both in its post-scan, and `restore
   plan` matched all 7 units to the backup by identification number.
+- **A configuration write lands and reads back, and the event scheme decides
+  how fast a sensor is.** On 2k the Steinel's lux (0) and occupancy (1)
+  instances both read event scheme 0, so their events carried instance type
+  and number but no device address. The integration requests a poll only for
+  a Device/Instance event, so occupancy changed only on its poll interval,
+  which the operator noticed as a slow sensor. `iconfig 0 <i> set-event-scheme
+  2` read back 2 on both. The next occupancy event arrived as `0x00840C`, the
+  frame of the 2026-09-04 capture, and `event poll requested` followed 3 ms
+  later. Those 2026-09-04 frames carried the device address, so something
+  since then set both instances to 0, and nothing records what (P1 below).
 - **Re-addressing, backup and restore work in both address spaces, and
   `restore apply` confirms every move.** `address` moved control devices with
   DTR0 raw and gear with DTR0 encoded, and refused a gear move onto an occupied
@@ -195,8 +215,9 @@ Established on or before the `v1.1.1` flash of 2026-08-14:
 - **Most of `dev` since `v1.1.1`.** The 2k pass cleared gear commissioning,
   the backup/restore core, and the contested classification; the rest of the
   protocol work has host vectors and no bus behind it.
-- Hardware round-trip for input-device configuration writes, DT6/DT8 helpers,
-  memory operations, and vendor helpers. No write path reads its value back.
+- Hardware round-trip for input-device configuration writes other than SET
+  EVENT SCHEME, DT6/DT8 helpers, memory operations, and vendor helpers. No
+  write verb reads its own value back; the operator has to.
 - **Equal-random-address handling** — the largest untested slice. The two units
   commissioned so far drew distinct randoms, so the path never ran.
 - `restore groups` against real gear.
@@ -247,9 +268,21 @@ Dated evidence for each of these is in `project_log.md`.
 - Part 103 events decode into canonical source fields, reject command and
   reserved frames, and preserve all ten event-information bits. Independent
   vectors cover all five normal source schemes.
+- `dali_event_source` answers "could this event have come from the instance at
+  (address, instance)?" for every scheme: exactly for Device/Instance, and for
+  the others on the fields they carry, narrowed by a profile read from the
+  instance (type, scheme, instance groups). Unknown facts never exclude, and
+  the profile's scheme is never used to exclude. Host-tested, with the 2k
+  Steinel's frames in both schemes as vectors.
+- Instance commands take the whole Part 103 instance byte: a number, an
+  instance-group selector (`0x80|G`), an instance-type selector (`0xC0|T`), or
+  every instance. The group and type forms come from TI's device decoder and
+  agree with the standard as recalled; no bus has run them. Discovery reads each
+  instance's event scheme, event priority and three instance groups.
 - Part 103 generic instance configuration plus Part 301/type 1, Part 303/type 3,
   and Part 304/type 4 builders have an independently audited opcode surface.
-  Software-level evidence only.
+  SET EVENT SCHEME has landed on a real device and read back; the rest is
+  software-level evidence only.
 - The Part 102 memory helper reads the common Bank 0 identity block, and the
   Part 103 form beside it reads a control device's own Bank 0 over 24-bit
   framing. Discovery performs each read in its own space, independently: gear
@@ -287,6 +320,15 @@ Dated evidence for each of these is in `project_log.md`.
   something a restore cannot give back. Both "the backup never read this gear's
   groups" and "this gear's groups will not read back now" are reported and
   skipped rather than written blind.
+- Since version 2 the snapshot also records each control device's instance
+  settings — type, enabled, event scheme, priority, filter, instance groups —
+  up to 64 instances, tied to the device's entry rather than to its address.
+  `restore instances` is the third, separate repair: it locates each device by
+  identification number, reads each instance, writes the recorded value of each
+  field that differs (ENABLE or DISABLE last) and reads it back. A disabled
+  instance is recorded only when QUERY INSTANCE STATUS agrees with the silent
+  QUERY INSTANCE ENABLED, so a lost YES is never saved as "disabled".
+  Host-tested only; type-specific settings are not recorded.
 - `dali_device_commissioning` is the Part 103 counterpart of
   `dali_commissioning` — same walk shape over a different command space, sharing
   the reply classification rather than the encodings. Both directions of the
@@ -398,9 +440,17 @@ Dated evidence for each of these is in `project_log.md`.
   changed: the gear keeps its groups and follows group and broadcast commands
   with no address, as a cleared lamp on 1k did.
 - Sensor readings are one scheduler sequence, so a two-byte instance cannot have
-  its latching query and latch read separated by other traffic. Matching
-  Device/Instance events request an immediate authoritative poll; event
-  information is never published as a sensor value.
+  its latching query and latch read separated by other traffic. An event that
+  could be a sensor's own requests an immediate authoritative poll; event
+  information is never published as a sensor value. A Device/Instance event
+  matches exactly; any other scheme matches by inference through
+  `dali_event_source`, against a source profile each sensor reads after boot,
+  after a scan, after a shell workflow, and after an `iconfig` to its device,
+  and logged as `event poll requested (inferred)`. A profile is read again, at
+  most every five minutes, when an event arrives in a scheme it did not expect.
+  A sensor whose instance is not on scheme 2 is logged once, at WARN when it
+  polls on events or a dispatch rule keys on its address. Host-tested matcher;
+  the ESPHome wiring is compile-checked only.
 - `bus_fault` separates current availability from cumulative history. The
   `tx_frames_ok` PHY counter is the recovery signal: it publishes
   `Bus stuck (N total)` and returns to `OK (N past faults)` once a frame clocks
@@ -465,8 +515,9 @@ this bus — is in `project_log.md`.
 ### 2k site: the scan's event note counts sensor traffic, not interference
 
 Every `discover` here notes control-device events arriving mid-walk, N running
-14-39. There is no timing fault and no interference. The Steinel at a0 emits on
-four instances continuously, only one of which is occupancy, so the count tracks
+14-39. There is no timing fault and no interference. The Steinel at d0 emits
+continuously from two of its four instances, a lux heartbeat every 3.000 s and
+an occupancy heartbeat every 30 s, so the count tracks
 elapsed time rather than whether anyone is in the corridor; Home Assistant's
 recorder stores only value changes and so shows almost none of this traffic.
 
@@ -495,6 +546,16 @@ retransmitting after losing its slot. Investigation in `project_log.md`.
 Polling is authoritative for occupancy. A matching Device/Instance event
 requests an immediate poll, but the event information itself is never treated as
 a sensor value.
+
+What the ninth session read, 2026-10-01:
+
+- Instances 0 and 1 are the only emitters: both `status=0x02`, event priority
+  4, and event scheme 2 since that session put it back from 0. Instances 2
+  and 3 report `status=0x00` and send no events.
+- Occupancy (instance 1): event filter `0x07`, report timer 30 s, deadtime
+  500 ms. `occ-capabilities` reads `0x00` and range and sensitivity read MASK,
+  because the Steinel keeps those in Bank 2 (`steinel_bank2_reference.md`).
+  The hold timer was not read.
 
 ## Prioritized Work
 
@@ -577,7 +638,9 @@ The typed verb surface is in place; what is missing is evidence. Keep
   so `devmem write` reports transmitted, not applied.
 - Validate input-device configuration writes with read/write/read-back per
   parameter. `iconfig` success means transmitted; until this is done the whole
-  surface stays experimental.
+  surface stays experimental. SET EVENT SCHEME is done, on two Steinel
+  instances on 2k. The other nine generic setters and every Part 301/303/304
+  setter remain.
 - **Run the DTR0 read-back on a bus.** Host-tested and mutation-checked. Its
   only bus reading is one `address clear` on 2k, which read back on the first
   load with two units answering together. Every `address` arm and every `restore
@@ -649,6 +712,32 @@ The typed verb surface is in place; what is missing is evidence. Keep
   `"Contested: a4"`. The same shape one layer along, group membership changes do
   not reach the integration either, so a group light entity cannot know its
   membership changed underneath it.
+- **Event-source matching has no bus result, and the scheme loss is not
+  explained.** Sensors now match events of every scheme and the integration
+  warns about a sensor off scheme 2 (ESPHome component, above), so the 2k
+  failure would now cost bus time instead of latency, and would be logged.
+  - *Run it on 2k.* Put the Steinel's occupancy instance back on scheme 0
+    (`iconfig 0 1 set-event-scheme 0`). Within one heartbeat the log should
+    show `event scheme changed from device-instance to instance`, then
+    `event poll requested (inferred)` on each `type=3 inst=1` event; walking in
+    should update occupancy as fast as on scheme 2. Restore scheme 2 afterwards
+    and look for the change logged back.
+  - *Cause unknown.* A RESET is unlikely: the report timer reads 30 s, not the
+    default of 5 that `steinel_bank2_reference.md` gives. The one recorded
+    change in the window is 2026-09-29, when the Steinel's address was cleared
+    by hand, it was re-commissioned, and it was moved through d1 and d2. A
+    Part 103 rule that drops schemes 1 and 2 to 0 when the short address is
+    deleted is recalled, not sourced, and TI's firmware has none.
+  - *To settle it on 2k:* `dtrcheck 0 0 5` first. Then `address d0 set d2`
+    and back, and read the scheme. Then `address d0 clear` and `commission
+    devices`, and read it again. If the clear changes it, every device clear
+    and re-commission changes that unit's event addressing.
+  - *Run the instance backup on 2k.* Flash, `backup save` (the version-1
+    backup is gone), `backup status` should list the Steinel's four instances
+    and the Casambi's one. Then `iconfig 0 1 set-event-scheme 0`, `restore
+    instances` should list exactly that field, and `restore instances apply`
+    should end `OK`. Instances 2 and 3 should record as disabled, which tests
+    the enabled/status agreement on a real device.
 - **Decide: what an input sensor shows when its device stops answering.** Today
   it holds its last value indefinitely. `DaliInputSensor` publishes only after a
   complete read (`on_input_value_done()` in `dali_component.cpp`); a failed poll
@@ -680,10 +769,6 @@ The typed verb surface is in place; what is missing is evidence. Keep
   would need instance configuration too. The same sources give device QUERY
   MISSING SHORT ADDRESS (`0x33`), which would back `address <dN> clear` as the
   broadcast query backs the gear arm.
-- Extend the compact Part 103 dispatch key if a site needs to distinguish
-  Device-Group from Instance-Group sources or match instance type. The canonical
-  event/capture path retains these fields; the five-field rule key does not. No
-  site needs this today, and it changes a C struct layout.
 - A paged or exportable Find Couplers result, rather than one
   truncated-with-a-count summary. The log already holds every frame.
 - Define recovery after bus-only power cycles, beyond the current/cumulative
@@ -739,12 +824,14 @@ The typed verb surface is in place; what is missing is evidence. Keep
   goes out about 1.7 ms after it, under DALI-2's 2.4 ms stop condition. The
   emitter, a0, is the unit most exposed, and TI's device firmware shows how one
   loses such a frame: it discards anything that starts before its own stop
-  detection. Whether that explains the backoff depends on a0's event priority.
-  At 2 or 3 the event ends before the backoff does and the retry goes out clear
-  of it; at 4 or 5 the event outlasts the backoff and the retry lands 1.7 ms
-  after it either way. `iquery 0 <instance> event-priority` settles which,
-  read-only. Count TX starts within 2.4 ms of the last RX edge before changing
-  anything.
+  detection. Whether that explained the backoff depended on the emitter's event
+  priority, and the ninth session read it: 4 on instances 0 and 1, the only two
+  that emit. At 4 the event usually outlasts the backoff and the retry lands
+  1.7 ms after it, as it would with no backoff, so this mechanism does not
+  account for 8/8. The spacing problem itself stands (P0). What is left is the
+  cheap test above, and the decisive one from the 2026-09-03 entry in
+  `project_log.md`: the pre-backoff build under `quiescent on all`. Count TX
+  starts within 2.4 ms of the last RX edge before changing anything.
 - **One intervening frame aborts a whole scan.** `discovery_scan_walk()`
   returns on any per-address error other than TIMEOUT, MALFORMED or
   RX_ACTIVITY, so a coupler button press during a reply window ends a 45 s
@@ -874,6 +961,13 @@ The typed verb surface is in place; what is missing is evidence. Keep
   each board that does run the shell. On 2026-09-25 `dali_test.yaml` reads
   135.0 KiB (138,248 B); the restore plan's per-move identification number,
   added that day so `restore apply` can confirm each move, is 1.5 KiB of it.
+  On 2026-10-01 it reads 138,656 B. The shell caches 16 devices of 32 instance
+  records, so one byte per record is 512 B: the per-instance event scheme,
+  priority and groups added 8 bytes each and cost 4.3 KiB until the record's
+  three enum fields were stored as bytes, which more than paid for them. The
+  version-2 backup then took it to 141,728 B: the 768-byte instance table is in
+  the blob twice (the shell's staging copy and the integration's flash record)
+  and the 1,536-byte model of it once.
 - **`sram1_as_iram` is inert at this IRAM level.** IRAM is
   76.7 KiB of the default 128 KiB and this build's `.iram0.text` ends at
   `0x4009369F` — `0x40093464` on 2026-09-25, with the cache-safe GPTIMER and
@@ -895,6 +989,7 @@ The typed verb surface is in place; what is missing is evidence. Keep
 | `components/dali/dali_snapshot.*` | Records which physical unit (Bank 0 id) holds which short address |
 | `components/dali/dali_restore.*` | Turns a snapshot plus a live bus into an ordered move list |
 | `components/dali/dali_group_map.*` | Group→member bookkeeping; picks a group light's poll representative |
+| `components/dali/dali_event_source.*` | Could this event be that instance's? The matcher behind event-triggered sensor polls, and the profile read that narrows it |
 | `components/dali/dali_light_write.h` | Header-only desired/in-flight/confirmed write arbitration |
 | `components/dali/dali_refresh_cursor.h` | Header-only refresh-pump cursor |
 | `components/dali/dali_dim_curve.*` | IEC 62386-102 arc power level ↔ light output conversion |

@@ -91,6 +91,16 @@ address and reject group and broadcast forms. `quiescent` is the exception: it
 is device-level rather than instance-level, so it takes no instance, and its
 target is a short address or the literal `all`.
 
+`iquery` and `iconfig` also accept an instance *selector* in place of the
+number: `g<N>` reaches every instance in instance group N, `t<N>` every instance
+of type N, and `all` every instance on the device. `iconfig 0 all
+set-event-scheme 2` puts every instance of device 0 on scheme 2 in one line, and
+`iquery 0 t3 event-scheme` reads the occupancy instance without knowing its
+number. A query through a selector that reaches more than one instance draws one
+reply per instance and they collide; the shell says so before sending. Verbs
+that need one particular instance — `sensor poll`, `vendor`, `devmem` — take a
+number only.
+
 ### Console results
 
 | Result | Meaning |
@@ -819,9 +829,13 @@ Kelvin as well as mirek.
 ## Input Devices — Part 103
 
 ```text
-iquery <addr> <instance> <name> [dtr0]
-iconfig <addr> <instance> <name> [v0] [v1] [v2]
+iquery <addr> <inst|gN|tN|all> <name> [dtr0]
+iconfig <addr> <inst|gN|tN|all> <name> [v0] [v1] [v2]
 ```
+
+The instance byte is IEC 62386-103's: `0`-`31` is an instance number, `gN` is
+`0x80|N` (instance group N), `tN` is `0xC0|N` (instance type N), and `all` is
+`0xFF`. See `dali_protocol.md`, *Instance byte*.
 
 Run `iquery <addr> <instance> type` first, and use Part 301, 303, or 304 names
 only on an instance of type 1, 3, or 4 respectively.
@@ -1053,7 +1067,9 @@ export config                           # discovered devices as a YAML dali: blo
 identify <addr>                         # blink one fixture, then restore its level
 find switches [seconds]                 # listen for events and map switches
 events                                  # drain queued Part 103 events
-instances <addr>                        # what a control device offers
+instances <addr>                        # what a control device offers, with
+                                        # each instance's event scheme, event
+                                        # priority and instance groups
 sensor poll <addr> [instance]           # read an input instance's value
 quiescent on|off <addr|all>             # silence control-device events
 smoke <addr>                            # read/write/read-back check
@@ -1171,11 +1187,17 @@ restore plan                            # what it would take to match the backup
 restore apply                           # do it
 restore groups                          # the same for gear group membership
 restore groups apply                    # do it
+restore instances                       # the same for control-device instance settings
+restore instances apply                 # do it
 ```
 
 `backup save` scans both address spaces and records, per short address, the
 8-byte **identification number** at Bank 0 offset `0x0B` for the unit holding it
-— plus its GTIN and, for gear, its group mask. That number is the anchor: it is
+— plus its GTIN and, for gear, its group mask. For each control device it also
+records every instance's generic settings: type, enabled, event scheme, event
+priority, event filter and the three instance groups, about eleven queries per
+instance. A backup holds at most 64 instances, and `backup save` names any it
+left out, or any that did not answer. That number is the anchor: it is
 the one property of a unit that no addressing operation changes, which is what
 makes a snapshot taken before a commissioning run enough to undo one. It is not
 the 24-bit random address RANDOMISE generates, which is temporary. An address whose
@@ -1354,9 +1376,51 @@ It refuses to guess in two cases, both reported and neither written:
 | `groups unreadable` | the gear was identified but its `QUERY GROUPS` did not answer. Writing the recorded mask blind would add the right groups without removing the wrong ones |
 
 The remaining conflict kinds are the address planner's and mean the same things.
-**Control gear only** — IEC 62386-103 control devices have their own group
-scheme, which the scan does not read and this does not touch. Scenes are not
+**Control gear only.** A control device's instance groups are restored by
+`restore instances`; its device groups are not read at all. Scenes are not
 captured at all.
+
+### `restore instances` — control-device settings
+
+A control device keeps each instance's generic configuration in its own memory:
+whether it is enabled, its event scheme, event priority and event filter, and
+its three instance groups. A device RESET returns all of it to defaults.
+Re-addressing should not touch it, but on 2k the Steinel was found with both
+emitting instances on scheme 0 after a day of re-addressing, which left its
+occupancy sensor polling on its interval instead of following its events.
+
+```text
+restore instances: scanning
+  d0.0: scheme instance -> device-instance
+  d0.1: scheme instance -> device-instance
+restore instances: 5 located, 3 already correct, 2 to change, 0 skipped, 0 not located
+restore instances: run 'restore instances apply' to execute
+```
+
+Like `restore groups`, it is a separate repair that `restore apply` never
+reaches, and each device is found by its identification number wherever it
+answers now, printed as `d5.1 (backup d0)` when the two differ. Every setting is
+a SET, not an edit, so writing the recorded value is right whatever the device
+holds; a field the device does not report is written anyway, and the read-back
+decides. `apply` writes only the fields that differ — each as its DTR loads and
+send-twice command in one sequence, ENABLE or DISABLE last — then reads the
+instance back and prints `OK` or `NOT CONFIRMED:` with the fields that did not
+take.
+
+It skips, and says so:
+
+| Reported | Meaning |
+|---|---|
+| `does not answer; skipped` | QUERY INSTANCE TYPE went unanswered at the device's current address |
+| `now type U, recorded as type T; skipped` | a different kind of instance holds that number now, so the recorded settings would mean something else |
+| `backup d<N>: <conflict>` | the device itself could not be located: no identification number recorded, not on the bus, or on it twice |
+
+Two readings need care. QUERY INSTANCE ENABLED answers YES or nothing, so
+`backup save` records an instance as disabled only when its QUERY INSTANCE
+STATUS agrees (instanceActive clear); a lost YES otherwise stays unknown, never
+"disabled". A recorded priority outside 2-5 is not written, because SET EVENT
+PRIORITY takes nothing else. Type-specific settings — Part 301 timers, Part 303
+hold and report timers, Part 304 hysteresis — are not recorded.
 
 ### Keeping a backup off the device
 
@@ -1372,38 +1436,47 @@ reproduces it:
 ```text
 backup: 46 byte(s); the lines below re-import it
 backup import begin
-backup import 44424B31010200000000000000000A 1B2C3D4E5F60718293A4B5C6D7E8F9
+backup import 44424B31020200000000000000000A 1B2C3D4E5F60718293A4B5C6D7E8F9
 backup import 0A1B2C3D4E5F60718293A4B5C6D7E8 F9
 backup import end
 ```
 
-`44424B31` is the format magic, `01` the version and `02` the entry count; the
-rest is entry data, printed 15 bytes to a token and two tokens to a line.
+`44424B31` is the format magic, `02` the version, the next `02` the entry count
+and `00` the instance count; the rest is entry data and then instance records,
+printed 15 bytes to a token and two tokens to a line.
+
+**The format is version 2 since 2026-10-01**, when the instance records were
+added. A version-1 blob is refused on import, and `backup import` says that is
+what it is. A backup an older ESPHome build stored in flash does not load
+either, because the stored record changed size: after flashing a build with
+version 2, run `backup save` again.
 
 Redirect it to a file, paste the file back. The chunking is not decorative: a
-full snapshot is 4880 hex characters against an 80-character line limit, so the
+full snapshot is 6416 hex characters against an 80-character line limit, so the
 blob cannot arrive in one piece however it is spelled, and printing it as one
 long line would leave the operator to re-chunk it by hand.
 
 `import` is a short mode. `begin` opens it, each `backup import <hex> <hex>`
 line appends, `end` decodes and installs, `abort` discards. While it is open,
 `backup save`, `backup status`, `backup export` and both `restore` verbs refuse
-— they share the staging buffer, and a `backup save` typed in the middle of an
-82-line paste would otherwise destroy it silently. A chunk that does not parse
+— they share the staging buffer, and a `backup save` typed in the middle of a
+107-line paste would otherwise destroy it silently. A chunk that does not parse
 discards the whole import rather than being skipped, because a blob missing a
 line in the middle can still decode into a plausible-looking snapshot that moves
 fixtures to the wrong addresses.
 
 Nothing an import can contain damages the backup already held: the blob is
-validated in full — magic, version, entry count, exact length, and every entry's
-address space and short address — before the first byte is written.
+validated in full — magic, version, entry and instance counts, exact length,
+every entry's address space and short address, and every instance record's
+device entry, instance number and values — before the first byte is written.
 
-**Everything here except `restore groups` has met a bus.** `backup save`,
-`status`, `export` and `import`, `restore plan` and `restore apply` have run on
-real gear and control devices. That covers dependent moves, a swap staged
-through a spare address, moving aside a unit the backup had never seen, and the
-per-move confirmation in both spaces. Both `restore groups` verbs have host
-vectors only. `current_status.md` has what is verified and `project_log.md` the
+**Everything here except the group and instance restores has met a bus.**
+`backup save`, `status`, `export` and `import`, `restore plan` and `restore
+apply` have run on real gear and control devices, in the version-1 format. That
+covers dependent moves, a swap staged through a spare address, moving aside a
+unit the backup had never seen, and the per-move confirmation in both spaces.
+Both `restore groups` verbs, both `restore instances` verbs, and the instance
+records `backup save` now takes, have host vectors only. `current_status.md` has what is verified and `project_log.md` the
 sessions behind it. See `commissioning_readme.md` for the workflow this belongs
 to.
 

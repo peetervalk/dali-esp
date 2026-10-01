@@ -9,6 +9,7 @@ idf_component_register(
         "dali_input_device.c"
         "dali_input_poll.c"
         "dali_event.c"
+        "dali_event_source.c"
         "dali_discovery.c"
         "dali_commissioning.c"
         "dali_device_commissioning.c"

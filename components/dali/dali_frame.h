@@ -129,6 +129,17 @@
 #define DALI_BROADCAST_COMMAND_ADDRESS  0xFFu /* 16/24-bit address byte */
 #define DALI_DEVICE_INSTANCE            0xFEu /* 24-bit instance byte */
 #define DALI_ALL_INSTANCES              0xFFu /* 24-bit instance byte */
+/*
+ * The IEC 62386-103 instance byte has two more addressing forms beside an
+ * instance number (000IIIII): 100GGGGG reaches every instance in instance group
+ * G, and 110TTTTT every instance of type T. Read from TI's Part 103 device
+ * decoder (DALI_ControlDevice_InstCheck in the MSPM0 SDK), which agrees with
+ * the standard as recalled; neither source is the standard text. The feature
+ * forms (001xxxxx, 101xxxxx, 111xxxxx and 0xFC/0xFD) are not built.
+ */
+#define DALI_INSTANCE_SELECTOR_MASK     0xE0u
+#define DALI_INSTANCE_GROUP_SELECTOR    0x80u /* | instance group 0..31 */
+#define DALI_INSTANCE_TYPE_SELECTOR     0xC0u /* | instance type 0..31  */
 #define DALI_YES_RESPONSE               0xFFu /* 8-bit backward frame */
 #define DALI_DAPC_MAX_LEVEL             254u
 /* Arc power level 255 is MASK: "leave the level unchanged", not a level.

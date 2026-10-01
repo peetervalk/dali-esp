@@ -105,7 +105,8 @@ void test_null_args_return_invalid(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 0, true, 0x05u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 0,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 0 }, DALI_DISPATCH_ACTION_MIRROR, 0 },
     };
 
@@ -119,7 +120,8 @@ void test_no_matching_entry_returns_ok_silently(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 3, true, 0x05u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 0,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 0 }, DALI_DISPATCH_ACTION_MIRROR, 0 },
     };
 
@@ -132,7 +134,8 @@ void test_observe_recall_max_infers_on_without_tx(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 6, true, 0x05u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 6,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 6 }, DALI_DISPATCH_ACTION_OBSERVE, 0 },
     };
     DaliDispatchToggleState state = {};
@@ -157,7 +160,8 @@ void test_observe_off_infers_off_without_tx(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 6, true, 0x00u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 6,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 6 }, DALI_DISPATCH_ACTION_OBSERVE, 0 },
     };
     DaliDispatchToggleState state = { .group_on = (uint16_t)(1u << 6u) };
@@ -178,7 +182,8 @@ void test_observe_dim_has_unknown_state_without_tx(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 0, true, 0x01u); /* UP */
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 0,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 0 }, DALI_DISPATCH_ACTION_OBSERVE, 0 },
     };
     DaliDispatchResult result = { .has_state = true };
@@ -198,7 +203,8 @@ void test_observe_dapc_level_infers_level_without_tx(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 2, false, 123u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 2,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 2 }, DALI_DISPATCH_ACTION_OBSERVE, 0 },
     };
     DaliDispatchToggleState state = {};
@@ -221,7 +227,8 @@ void test_observe_dapc_zero_infers_off_without_tx(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 2, false, 0u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 2,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 2 }, DALI_DISPATCH_ACTION_OBSERVE, 0 },
     };
     DaliDispatchToggleState state = { .group_on = (uint16_t)(1u << 2u) };
@@ -242,7 +249,8 @@ void test_mirror_dapc_level_translates_to_output_target(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_SHORT, 16, false, 123u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_SHORT, 16,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 6 }, DALI_DISPATCH_ACTION_MIRROR, 0 },
     };
     DaliDispatchResult result = {};
@@ -262,7 +270,8 @@ void test_mirror_recall_max_issues_correct_frame(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 6, true, 0x05u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 6,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 6 }, DALI_DISPATCH_ACTION_MIRROR, 0 },
     };
 
@@ -280,7 +289,8 @@ void test_mirror_off_issues_correct_frame(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 6, true, 0x00u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 6,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 6 }, DALI_DISPATCH_ACTION_MIRROR, 0 },
     };
 
@@ -297,7 +307,8 @@ void test_mirror_dapc_frame_issues_dapc(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 6, false, 0x80u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 6,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 6 }, DALI_DISPATCH_ACTION_MIRROR, 0 },
     };
 
@@ -315,7 +326,8 @@ void test_mirror_phantom_remap_to_different_group(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_SHORT, 16, true, 0x05u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_SHORT, 16,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 6 }, DALI_DISPATCH_ACTION_MIRROR, 0 },
     };
 
@@ -331,7 +343,8 @@ void test_event_information_specific_only_fires_on_match(void)
 {
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 0,
-            0x05u, DALI_DISPATCH_INSTANCE_ANY },
+            0x05u, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 0 }, DALI_DISPATCH_ACTION_RECALL_MAX, 0 },
     };
 
@@ -353,7 +366,8 @@ void test_action_off_sends_off_frame(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 0, true, 0x05u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 0,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 2 }, DALI_DISPATCH_ACTION_OFF, 0 },
     };
 
@@ -370,7 +384,8 @@ void test_action_scene_sends_correct_frame(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 0, true, 0x05u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 0,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 0 }, DALI_DISPATCH_ACTION_SCENE, 5u },
     };
 
@@ -386,7 +401,8 @@ void test_toggle_starts_off_and_flips(void)
 {
     DaliInputEvent ev = make_dali2(DALI_EVENT_ADDRESS_SHORT, 3, 0, 0x02u);
     DaliDispatchEntry table[] = {
-        { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 3, 0x02u, 0u },
+        { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 3, 0x02u, 0u,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 0 }, DALI_DISPATCH_ACTION_TOGGLE, 0 },
     };
     DaliDispatchToggleState state = {};
@@ -416,7 +432,8 @@ void test_broadcast_toggle_flips_between_recall_max_and_off(void)
 {
     DaliInputEvent ev = make_dali2(DALI_EVENT_ADDRESS_SHORT, 3, 0, 0x02u);
     DaliDispatchEntry table[] = {
-        { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 3, 0x02u, 0u },
+        { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 3, 0x02u, 0u,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_BROADCAST, 0 }, DALI_DISPATCH_ACTION_TOGGLE, 0 },
     };
     DaliDispatchToggleState state = {};
@@ -451,17 +468,20 @@ void test_dali2_device_instance_matches_canonical_address_and_instance(void)
                                    DALI_DT301_EVENT_SHORT_PRESS);
     DaliDispatchEntry wrong_address[] = {
         { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 4u,
-            DALI_DT301_EVENT_SHORT_PRESS, 3u },
+            DALI_DT301_EVENT_SHORT_PRESS, 3u,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 0u }, DALI_DISPATCH_ACTION_RECALL_MAX, 0u },
     };
     DaliDispatchEntry wrong_instance[] = {
         { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 5u,
-            DALI_DT301_EVENT_SHORT_PRESS, 2u },
+            DALI_DT301_EVENT_SHORT_PRESS, 2u,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 0u }, DALI_DISPATCH_ACTION_RECALL_MAX, 0u },
     };
     DaliDispatchEntry matching[] = {
         { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 5u,
-            DALI_DT301_EVENT_SHORT_PRESS, 3u },
+            DALI_DT301_EVENT_SHORT_PRESS, 3u,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 0u }, DALI_DISPATCH_ACTION_RECALL_MAX, 0u },
     };
     DaliDispatchResult result = {};
@@ -492,12 +512,14 @@ void test_dali2_dispatch_matches_all_ten_event_information_bits(void)
     DaliInputEvent ev = make_dali2(DALI_EVENT_ADDRESS_SHORT, 5u, 3u, 0x2ABu);
     DaliDispatchEntry low_eight_bits_only[] = {
         { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 5u,
-            0x00ABu, 3u },
+            0x00ABu, 3u,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 0u }, DALI_DISPATCH_ACTION_RECALL_MAX, 0u },
     };
     DaliDispatchEntry full_information[] = {
         { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 5u,
-            0x02ABu, 3u },
+            0x02ABu, 3u,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 0u }, DALI_DISPATCH_ACTION_RECALL_MAX, 0u },
     };
     DaliDispatchResult result = {};
@@ -511,6 +533,88 @@ void test_dali2_dispatch_matches_all_ten_event_information_bits(void)
     TEST_ASSERT_TRUE(result.matched);
 }
 
+static DaliInputEvent parse_event_24(uint32_t raw)
+{
+    DaliFrame frame = { .data = raw, .bit_length = DALI_EXTENDED_FRAME_BITS };
+    DaliInputEvent ev;
+    TEST_ASSERT_EQUAL(DALI_OK, dali_event_parse_frame(&frame, &ev));
+    return ev;
+}
+
+static bool dispatch_matches(const DaliDispatchKey *key, const DaliInputEvent *ev)
+{
+    DaliDispatchEntry entry = {
+        .key    = *key,
+        .output = { DALI_ADDR_GROUP, 0u },
+        .action = DALI_DISPATCH_ACTION_RECALL_MAX,
+    };
+    DaliDispatchResult result = {};
+    TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(&entry, 1u, ev, NULL, &result));
+    return result.matched;
+}
+
+/*
+ * Instance group 3 and device group 3 are unrelated sources that the original
+ * five-field key could not tell apart. group_kind can; EITHER keeps the old
+ * behaviour for keys that never set it.
+ */
+void test_dali2_group_kind_separates_device_and_instance_groups(void)
+{
+    DaliInputEvent instance_group = parse_event_24(0xC60C0Bu); /* ig3, type 3 */
+    DaliInputEvent device_group   = parse_event_24(0x860C0Bu); /* dg3, type 3 */
+    TEST_ASSERT_EQUAL(DALI_EVENT_SOURCE_INSTANCE_GROUP, instance_group.source.scheme);
+    TEST_ASSERT_EQUAL(DALI_EVENT_SOURCE_DEVICE_GROUP, device_group.source.scheme);
+
+    DaliDispatchKey key = {
+        .frame_kind        = DALI_EVENT_FRAME_INPUT_24BIT,
+        .address_kind      = DALI_EVENT_ADDRESS_GROUP,
+        .address           = 3u,
+        .event_information = DALI_DISPATCH_EVENT_ANY,
+        .instance          = DALI_DISPATCH_INSTANCE_ANY,
+    };
+    TEST_ASSERT_TRUE(dispatch_matches(&key, &instance_group));
+    TEST_ASSERT_TRUE(dispatch_matches(&key, &device_group));
+
+    key.group_kind = DALI_DISPATCH_GROUP_INSTANCE;
+    TEST_ASSERT_TRUE(dispatch_matches(&key, &instance_group));
+    TEST_ASSERT_FALSE(dispatch_matches(&key, &device_group));
+
+    key.group_kind = DALI_DISPATCH_GROUP_DEVICE;
+    TEST_ASSERT_FALSE(dispatch_matches(&key, &instance_group));
+    TEST_ASSERT_TRUE(dispatch_matches(&key, &device_group));
+
+    key.address = 4u;
+    TEST_ASSERT_FALSE(dispatch_matches(&key, &device_group));
+}
+
+void test_dali2_instance_type_key_needs_a_typed_event(void)
+{
+    DaliInputEvent device_scheme = parse_event_24(0x0A0C0Bu); /* d5, type 3 */
+    DaliInputEvent device_instance = make_dali2(DALI_EVENT_ADDRESS_SHORT, 5u, 1u,
+                                                0x00Bu);
+    TEST_ASSERT_EQUAL(DALI_EVENT_SOURCE_DEVICE, device_scheme.source.scheme);
+
+    DaliDispatchKey key = {
+        .frame_kind          = DALI_EVENT_FRAME_INPUT_24BIT,
+        .address_kind        = DALI_EVENT_ADDRESS_SHORT,
+        .address             = 5u,
+        .event_information   = DALI_DISPATCH_EVENT_ANY,
+        .instance            = DALI_DISPATCH_INSTANCE_ANY,
+        .match_instance_type = true,
+        .instance_type       = 3u,
+    };
+    TEST_ASSERT_TRUE(dispatch_matches(&key, &device_scheme));
+    /* Device/Instance frames carry no type, so a typed key cannot match. */
+    TEST_ASSERT_FALSE(dispatch_matches(&key, &device_instance));
+
+    key.instance_type = 4u;
+    TEST_ASSERT_FALSE(dispatch_matches(&key, &device_scheme));
+
+    key.match_instance_type = false;
+    TEST_ASSERT_TRUE(dispatch_matches(&key, &device_scheme));
+    TEST_ASSERT_TRUE(dispatch_matches(&key, &device_instance));
+}
+
 void test_dali2_exact_00ff_does_not_collide_with_event_any(void)
 {
     DaliInputEvent different = make_dali2(DALI_EVENT_ADDRESS_SHORT, 5u, 3u,
@@ -519,12 +623,14 @@ void test_dali2_exact_00ff_does_not_collide_with_event_any(void)
                                       0x00FFu);
     DaliDispatchEntry exact_ff[] = {
         { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 5u,
-            0x00FFu, 3u },
+            0x00FFu, 3u,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 0u }, DALI_DISPATCH_ACTION_RECALL_MAX, 0u },
     };
     DaliDispatchEntry any_information[] = {
         { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 5u,
-            DALI_DISPATCH_EVENT_ANY, 3u },
+            DALI_DISPATCH_EVENT_ANY, 3u,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 0u }, DALI_DISPATCH_ACTION_RECALL_MAX, 0u },
     };
     DaliDispatchResult result = {};
@@ -547,7 +653,8 @@ void test_legacy_only_actions_reject_part103_events(void)
     DaliInputEvent ev = make_dali2(DALI_EVENT_ADDRESS_SHORT, 1, 0, 0x02u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 1,
-            DALI_DISPATCH_EVENT_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_EVENT_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 0 }, DALI_DISPATCH_ACTION_OBSERVE, 0 },
     };
 
@@ -567,7 +674,8 @@ void test_mirror_updates_toggle_state(void)
     DaliInputEvent ev_off = make_legacy(DALI_EVENT_ADDRESS_GROUP, 6, true, 0x00u);
     DaliDispatchEntry mirror_table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 6,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 6 }, DALI_DISPATCH_ACTION_MIRROR, 0 },
     };
     DaliDispatchToggleState state = {};
@@ -584,11 +692,13 @@ void test_first_matching_entry_wins(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 0, true, 0x05u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 0,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 0 }, DALI_DISPATCH_ACTION_RECALL_MAX, 0 },
         /* Second matching entry — must be skipped */
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 0,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 7 }, DALI_DISPATCH_ACTION_OFF, 0 },
     };
 
@@ -606,7 +716,8 @@ void test_result_mirror_recall_max_does_not_claim_a_level(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 6, true, 0x05u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 6,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 6 }, DALI_DISPATCH_ACTION_MIRROR, 0 },
     };
     DaliDispatchResult result = { .has_state = false };
@@ -628,7 +739,8 @@ void test_result_step_down_and_off_claims_neither_state_nor_level(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 6, true, 0x07u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 6,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 6 }, DALI_DISPATCH_ACTION_OBSERVE, 0 },
     };
     DaliDispatchToggleState state = {};
@@ -652,7 +764,8 @@ void test_result_mirror_off_infers_off(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 6, true, 0x00u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 6,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 6 }, DALI_DISPATCH_ACTION_MIRROR, 0 },
     };
     DaliDispatchResult result = { .has_state = false };
@@ -668,7 +781,8 @@ void test_result_mirror_dim_has_no_state(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 0, true, 0x01u); /* UP */
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 0,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 0 }, DALI_DISPATCH_ACTION_MIRROR, 0 },
     };
     DaliDispatchResult result = { .has_state = true }; /* pre-set true to check it's cleared */
@@ -682,7 +796,8 @@ void test_result_action_off_infers_off(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 0, true, 0x05u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 0,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 3 }, DALI_DISPATCH_ACTION_OFF, 0 },
     };
     DaliDispatchResult result = {};
@@ -699,7 +814,8 @@ void test_result_action_recall_max_does_not_claim_a_level(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 0, true, 0x00u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 0,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 5 }, DALI_DISPATCH_ACTION_RECALL_MAX, 0 },
     };
     DaliDispatchResult result = {};
@@ -714,7 +830,8 @@ void test_result_toggle_infers_state(void)
 {
     DaliInputEvent ev = make_dali2(DALI_EVENT_ADDRESS_SHORT, 1, 0, 0x02u);
     DaliDispatchEntry table[] = {
-        { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 1, 0x02u, 0u },
+        { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 1, 0x02u, 0u,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 0 }, DALI_DISPATCH_ACTION_TOGGLE, 0 },
     };
     DaliDispatchToggleState state = {};
@@ -738,7 +855,8 @@ void test_result_null_result_out_does_not_crash(void)
     DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 0, true, 0x05u);
     DaliDispatchEntry table[] = {
         { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 0,
-            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY },
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
           { DALI_ADDR_GROUP, 0 }, DALI_DISPATCH_ACTION_RECALL_MAX, 0 },
     };
     TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(table, 1u, &ev, NULL, NULL));
@@ -768,6 +886,8 @@ int main(void)
     RUN_TEST(test_broadcast_toggle_flips_between_recall_max_and_off);
     RUN_TEST(test_dali2_device_instance_matches_canonical_address_and_instance);
     RUN_TEST(test_dali2_dispatch_matches_all_ten_event_information_bits);
+    RUN_TEST(test_dali2_group_kind_separates_device_and_instance_groups);
+    RUN_TEST(test_dali2_instance_type_key_needs_a_typed_event);
     RUN_TEST(test_dali2_exact_00ff_does_not_collide_with_event_any);
     RUN_TEST(test_legacy_only_actions_reject_part103_events);
     RUN_TEST(test_mirror_updates_toggle_state);

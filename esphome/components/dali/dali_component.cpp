@@ -17,6 +17,7 @@ extern "C" {
 #include "../../../components/dali/dali_cli.h"
 #include "../../../components/dali/dali_control.h"
 #include "../../../components/dali/dali_event.h"
+#include "../../../components/dali/dali_event_source.h"
 #include "../../../components/dali/dali_dispatch.h"
 #include "../../../components/dali/dali_protocol.h"
 #include "../../../components/dali/dali_input_device.h"
@@ -209,6 +210,13 @@ struct GroupMembershipPersist {
  * Staged rather than written where it is produced, for the same reason group
  * membership is: `backup save` runs on the shell task and the preferences API
  * is Core 0 only, so loop() performs the write.
+ *
+ * The record is sized by DALI_SNAPSHOT_BLOB_MAX, and ESPHome refuses a stored
+ * preference whose size differs from the one asked for. So a format that grows
+ * the blob -- version 2 added instance settings -- also makes a backup stored
+ * by an older build unloadable: it reads as no backup at all. The magic is kept
+ * on purpose. It is the NVS key, so the first save overwrites the old entry
+ * instead of leaving it stranded in the partition.
  */
 static constexpr uint32_t ADDRESS_BACKUP_MAGIC = 0x44414231u;  /* "DAB1" */
 struct AddressBackupPersist {
@@ -373,14 +381,33 @@ static void forget_level_profile_cache(DaliTarget target)
 
 static constexpr uint8_t MAX_INPUT_SENSORS = 16u;
 
+/* A suspect or incomplete source profile is read again no sooner than this
+ * after the previous read. Another device whose events also fit a sensor keeps
+ * that sensor suspect for good, so this is what such a device costs in steady
+ * state: one five-query read every five minutes. */
+static constexpr uint32_t SOURCE_PROFILE_REREAD_MS = 300000u;
+
 struct SensorEntry {
     DaliBusSensor    *sensor;
     std::atomic<bool> seq_in_flight;
     std::atomic<bool> poll_requested;
+    /* What the bus says about this instance as an event source: type, event
+     * scheme, instance groups (dali_event_source.h). Written by
+     * on_source_profile_done() and read by on_dali_unsolicited(), both on the
+     * DALI task, so neither it nor source_read needs a lock. */
+    DaliEventSourceProfile source;
+    bool                   source_read;
+    std::atomic<bool> source_wanted;   /* read at the next opportunity */
+    std::atomic<bool> source_suspect;  /* read once SOURCE_PROFILE_REREAD_MS allows */
+    uint32_t          source_read_ms;  /* loop only: when the last read was queued */
 };
 
 static SensorEntry s_sensor_registry[MAX_INPUT_SENSORS];
 static uint8_t     s_sensor_count = 0u;
+
+/* One profile read at a time, so a boot with many sensors spreads its reads
+ * between other traffic instead of queueing them all at once. */
+static std::atomic<bool> s_source_read_in_flight{false};
 
 /* ── Registry accessors for the configuration exporter ───────────────────────
  *
@@ -454,6 +481,168 @@ static bool enqueue_sensor_poll(SensorEntry *e, uint32_t now_ms)
     ESP_LOGW(TAG, "sensor poll enqueue failed (%d); will retry next interval",
              (int)err);
     return false;
+}
+
+/* ── Input sensor source profiles ───────────────────────────────────────── */
+
+/* Does a headless dispatch rule key on this control device's short address?
+ * Such a rule matches only schemes that carry the address, 1 and 2, so it stops
+ * firing outright on any other, where a sensor only slows down. */
+static bool dispatch_keys_on_device(uint8_t address)
+{
+    for (uint8_t i = 0u; i < s_dispatch_count; i++) {
+        const DaliDispatchKey &k = s_dispatch_table[i].key;
+        if (k.frame_kind == DALI_EVENT_FRAME_INPUT_24BIT &&
+            k.address_kind == DALI_EVENT_ADDRESS_SHORT &&
+            k.address == address) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const char *scheme_name(uint8_t scheme)
+{
+    return dali_event_source_scheme_name(static_cast<DaliEventSourceScheme>(scheme));
+}
+
+/*
+ * Say what a completed read found, once: when the scheme is first read and
+ * whenever it changes. Scheme 2 is the exact path and needs no comment beyond
+ * a change. Any other scheme still works, by inference, but costs polls of
+ * every sensor its events could belong to, and stops dispatch rules keyed on
+ * the device; that is a warning when this sensor polls on events or such a rule
+ * exists, and information otherwise.
+ */
+static void report_source_profile(const SensorEntry *e, bool had_scheme,
+                                  uint8_t old_scheme)
+{
+    const DaliEventSourceProfile &p = e->source;
+    const unsigned addr = e->sensor->get_address();
+    const unsigned inst = e->sensor->get_instance();
+
+    if (!p.has_scheme) return;
+    if (had_scheme && old_scheme == p.scheme) {
+        ESP_LOGD(TAG, "sensor addr=%u inst=%u: event scheme still %s",
+                 addr, inst, scheme_name(p.scheme));
+        return;
+    }
+    if (had_scheme) {
+        ESP_LOGW(TAG, "sensor addr=%u inst=%u: event scheme changed from %s to %s",
+                 addr, inst, scheme_name(old_scheme), scheme_name(p.scheme));
+    }
+    if (p.scheme == DALI_EVENT_SOURCE_DEVICE_INSTANCE) {
+        if (!had_scheme) {
+            ESP_LOGD(TAG, "sensor addr=%u inst=%u: event scheme %s",
+                     addr, inst, scheme_name(p.scheme));
+        }
+        return;
+    }
+
+    bool consequential = e->sensor->get_poll_on_event() ||
+                         dispatch_keys_on_device((uint8_t)addr);
+    if (consequential) {
+        ESP_LOGW(TAG, "sensor addr=%u inst=%u: event scheme is %s, not "
+                      "device-instance; its events are matched by inference and "
+                      "can poll other sensors too%s. To restore: iconfig %u %u "
+                      "set-event-scheme 2",
+                 addr, inst, scheme_name(p.scheme),
+                 dispatch_keys_on_device((uint8_t)addr)
+                     ? ", and dispatch rules keyed on this address do not fire"
+                     : "",
+                 addr, inst);
+    } else {
+        ESP_LOGI(TAG, "sensor addr=%u inst=%u: event scheme is %s, not "
+                      "device-instance; polled on its interval, so this costs "
+                      "nothing", addr, inst, scheme_name(p.scheme));
+    }
+}
+
+/* Async completion callback — runs on the DALI task, as the matcher does. */
+static void on_source_profile_done(const DaliSequenceResult *result, void *ctx)
+{
+    SensorEntry *e = static_cast<SensorEntry *>(ctx);
+    const bool    had_scheme = e->source_read && e->source.has_scheme;
+    const uint8_t old_scheme = e->source.scheme;
+
+    /* A scheduler reset cancelled the read, which says nothing about the
+     * instance: keep what was known and ask again. */
+    if (result != nullptr && result->result == DALI_SCHED_RESET_ERROR) {
+        e->source_wanted.store(true, std::memory_order_release);
+        s_source_read_in_flight.store(false, std::memory_order_release);
+        return;
+    }
+
+    DaliEventSourceProfile read;
+    DaliError err = dali_event_source_profile_from_sequence(result, &read);
+    /* What the read produced replaces the old profile, even when that is
+     * nothing: a field that did not read back is unknown, and unknown only
+     * widens the match. */
+    e->source      = read;
+    e->source_read = true;
+    if (err == DALI_OK) {
+        e->source_suspect.store(false, std::memory_order_release);
+    } else {
+        e->source_suspect.store(true, std::memory_order_release);
+        ESP_LOGD(TAG, "sensor addr=%u inst=%u: source profile incomplete (%s); "
+                      "matching widely until it reads",
+                 (unsigned)e->sensor->get_address(),
+                 (unsigned)e->sensor->get_instance(), dali_error_name(err));
+    }
+    report_source_profile(e, had_scheme, old_scheme);
+    s_source_read_in_flight.store(false, std::memory_order_release);
+}
+
+static bool enqueue_source_profile_read(SensorEntry *e, uint32_t now_ms)
+{
+    /* Background work: leave a busy queue to the traffic it is busy with, and
+     * try again on a later pass rather than adding to it. */
+    DaliSchedQueueStats stats;
+    if (dali_sched_queue_stats(&stats) != DALI_OK ||
+        stats.depth > stats.capacity / 2u) {
+        return false;
+    }
+
+    DaliSequence seq;
+    DaliError err = dali_event_source_build_profile_sequence(
+        e->sensor->get_address(), e->sensor->get_instance(), &seq);
+    if (err == DALI_OK) {
+        seq.on_complete = on_source_profile_done;
+        seq.cb_ctx      = e;
+        /* Raised first: the completion clears it, and may run before the
+         * enqueue call returns. */
+        s_source_read_in_flight.store(true, std::memory_order_release);
+        err = dali_sched_enqueue_sequence(&seq);
+        if (err != DALI_OK)
+            s_source_read_in_flight.store(false, std::memory_order_release);
+    }
+    if (err != DALI_OK) {
+        /* Retried on the next loop pass, so DEBUG: a full queue would
+         * otherwise log on every pass until it drains. */
+        ESP_LOGD(TAG, "sensor source profile enqueue failed (%d); will retry", (int)err);
+        return false;
+    }
+    e->source_read_ms = now_ms;
+    return true;
+}
+
+/* A scan or a shell workflow may have moved or reconfigured any device. */
+static void want_all_source_profiles()
+{
+    for (uint8_t i = 0u; i < s_sensor_count; i++)
+        s_sensor_registry[i].source_wanted.store(true, std::memory_order_release);
+}
+
+/* An instance configuration write reached this control device. Every sensor on
+ * it is read again, whichever instance the write selected: a group or type
+ * selector can reach several, and a five-query read is cheap. */
+static void want_source_profiles_at(uint8_t address)
+{
+    for (uint8_t i = 0u; i < s_sensor_count; i++) {
+        SensorEntry &e = s_sensor_registry[i];
+        if (e.sensor->get_address() == address)
+            e.source_wanted.store(true, std::memory_order_release);
+    }
 }
 
 /*
@@ -1071,11 +1260,13 @@ static void on_dali_unsolicited(const DaliFrame *frame, void * /*ctx*/)
     rec.timestamp_us = 0u;
     dali_event_queue_push(&s_event_queue, &rec);
 
-    /* Device/instance events identify one configured query target exactly.
-     * Treat the event as a change notification only: QUERY INPUT VALUE remains
-     * authoritative for both one- and two-byte sensor entities. Other Part-103
-     * source schemes need type/group metadata that the current YAML does not
-     * carry, so do not guess a target for them.
+    /* An event is a change notification only: QUERY INPUT VALUE remains
+     * authoritative for both one- and two-byte sensor entities. Each sensor is
+     * asked whether the event could be its own (dali_event_source.h). A
+     * Device/Instance event answers that exactly. Any other scheme is matched
+     * on the fields it carries, narrowed by the sensor's source profile, and a
+     * sensor nothing rules out is polled: a poll too many costs one query, and
+     * a poll too few leaves the sensor waiting for its interval.
      *
      * Whether an event is worth a poll is per-instance, because "event" does
      * not imply "change": some instances report on a timer and repeat the same
@@ -1083,24 +1274,30 @@ static void on_dali_unsolicited(const DaliFrame *frame, void * /*ctx*/)
      * configured interval with the device's report rate and puts traffic on the
      * bus that delays other instances' events. poll_on_event: false keeps such
      * an instance on its interval. */
-    if (event.frame_kind == DALI_EVENT_FRAME_INPUT_24BIT &&
-        event.source.scheme == DALI_EVENT_SOURCE_DEVICE_INSTANCE &&
-        event.source.has_device_address && event.source.has_instance) {
+    if (event.frame_kind == DALI_EVENT_FRAME_INPUT_24BIT) {
         for (uint8_t i = 0u; i < s_sensor_count; i++) {
             SensorEntry &e = s_sensor_registry[i];
-            if (e.sensor->get_address()  != event.source.device_address ||
-                e.sensor->get_instance() != event.source.instance) {
-                continue;
-            }
+            DaliEventSourceMatch match = dali_event_source_match(
+                &event, e.sensor->get_address(), e.sensor->get_instance(), &e.source);
+            if (match == DALI_EVENT_SOURCE_MATCH_NONE) continue;
+
+            /* An event in a scheme the profile did not expect: either the
+             * instance changed scheme or another device's event fits it, and
+             * reading the profile again tells which. Checked whatever
+             * poll_on_event says, so a change is reported for every sensor. */
+            if (dali_event_source_scheme_differs(&event, &e.source))
+                e.source_suspect.store(true, std::memory_order_release);
+
             /* Gated at the source rather than at admission: a request stored
              * for a sensor that never consumes it would stay set and then fire
              * on whatever admitted the next poll. */
             if (!e.sensor->get_poll_on_event()) continue;
 
             e.poll_requested.store(true, std::memory_order_release);
-            ESP_LOGD(TAG, "event poll requested: addr=%u inst=%u info=%u raw=%06X",
-                     (unsigned)event.source.device_address,
-                     (unsigned)event.source.instance,
+            ESP_LOGD(TAG, "event poll requested%s: addr=%u inst=%u info=%u raw=%06X",
+                     match == DALI_EVENT_SOURCE_MATCH_POSSIBLE ? " (inferred)" : "",
+                     (unsigned)e.sensor->get_address(),
+                     (unsigned)e.sensor->get_instance(),
                      (unsigned)event.event_information,
                      (unsigned)event.raw.data);
         }
@@ -1299,9 +1496,35 @@ void DaliComponent::loop()
         boot_sensor_query_done_ = true;
     }
 
+    /* ── Input sensor: read each instance's event-source profile ── */
+    /* Behind the boot polls, one read at a time. A read wanted by boot, a scan
+     * or a shell workflow goes as soon as the bus allows; a suspect or
+     * incomplete profile waits out SOURCE_PROFILE_REREAD_MS from its last
+     * read, so a misfit event source cannot keep the bus busy with reads. */
+    if (boot_sensor_query_done_ &&
+        !scan_running_.load(std::memory_order_acquire) &&
+        !s_source_read_in_flight.load(std::memory_order_acquire)) {
+        uint32_t now = millis();
+        for (uint8_t i = 0u; i < s_sensor_count; i++) {
+            SensorEntry &e = s_sensor_registry[i];
+            if (!e.source_wanted.load(std::memory_order_acquire) &&
+                e.source_suspect.load(std::memory_order_acquire) &&
+                (uint32_t)(now - e.source_read_ms) >= SOURCE_PROFILE_REREAD_MS) {
+                e.source_suspect.store(false, std::memory_order_release);
+                e.source_wanted.store(true, std::memory_order_release);
+            }
+            if (!e.source_wanted.load(std::memory_order_acquire)) continue;
+            if (enqueue_source_profile_read(&e, now))
+                e.source_wanted.store(false, std::memory_order_release);
+            break;
+        }
+    }
+
     /* ── A shell workflow put the bus down; re-read what it may have moved ── */
-    if (external_refresh_request_.exchange(false, std::memory_order_acq_rel))
+    if (external_refresh_request_.exchange(false, std::memory_order_acq_rel)) {
         dali_refresh_cursor_request(&refresh_cursor_);
+        want_all_source_profiles();
+    }
 
     /* ── Persist group membership when a scan/console edit dirtied it ── */
     if (s_group_members_dirty_.exchange(false, std::memory_order_acq_rel))
@@ -1551,6 +1774,7 @@ void DaliComponent::loop()
     if (scan_success) {
         apply_scan_level_profile_snapshot_();
         start_refresh();
+        want_all_source_profiles();
     }
 }
 
@@ -1632,8 +1856,8 @@ static const DaliCliCommandSpec s_console_commands[] = {
 
     { DALI_CLI_CMD_DT6, "dt6", "<addr> <name> [dtr0]", "device type 6 (LED) command", 2u, 3u, NULL },
 
-    { DALI_CLI_CMD_IQUERY,  "iquery",  "<addr> <instance> <name> [dtr0]", "Part 103 instance query", 3u, 4u, NULL },
-    { DALI_CLI_CMD_ICONFIG, "iconfig", "<addr> <instance> <name> [v0] [v1] [v2]", "Part 103 instance configuration", 3u, 6u, NULL },
+    { DALI_CLI_CMD_IQUERY,  "iquery",  "<addr> <inst|gN|tN|all> <name> [dtr0]", "Part 103 instance query", 3u, 4u, NULL },
+    { DALI_CLI_CMD_ICONFIG, "iconfig", "<addr> <inst|gN|tN|all> <name> [v0] [v1] [v2]", "Part 103 instance configuration", 3u, 6u, NULL },
     { DALI_CLI_CMD_VENDOR,  "vendor",  "lunatone <addr> <instance> <name> | steinel <instance> <raw>", "vendor helpers", 3u, 4u, "lunatone steinel" },
 
     { DALI_CLI_CMD_MEMREAD,  "memread",  "<addr> <bank> <offset> [count]", "control-gear memory read (Part 102)", 3u, 4u, NULL },
@@ -1999,8 +2223,8 @@ void DaliComponent::console_iquery_(const DaliCliTokens &t, void *ctx)
 {
     uint8_t addr, instance;
     if (!dali_cli_parse_short_addr(t.tok[1], &addr) ||
-        !dali_cli_parse_instance(t.tok[2], &instance)) {
-        set_cmd_result("iquery: addr 0-63, inst 0-31");
+        !dali_cli_parse_instance_selector(t.tok[2], &instance)) {
+        set_cmd_result("iquery: addr 0-63, inst 0-31|gN|tN|all");
         return;
     }
 
@@ -2233,8 +2457,8 @@ void DaliComponent::console_iconfig_(const DaliCliTokens &t)
 {
     uint8_t addr, instance;
     if (!dali_cli_parse_short_addr(t.tok[1], &addr) ||
-        !dali_cli_parse_instance(t.tok[2], &instance)) {
-        set_cmd_result("iconfig: addr 0-63, inst 0-31");
+        !dali_cli_parse_instance_selector(t.tok[2], &instance)) {
+        set_cmd_result("iconfig: addr 0-63, inst 0-31|gN|tN|all");
         return;
     }
 
@@ -2276,6 +2500,8 @@ void DaliComponent::console_iconfig_(const DaliCliTokens &t)
     DaliError err = dali_input_build_config_sequence(command, spec->send_twice, false,
                                                      dtr, spec->dtr_count, &seq);
     if (err == DALI_OK) err = dali_sched_enqueue_sequence(&seq);
+    /* Queued behind the write, so the read sees what it left. */
+    if (err == DALI_OK) want_source_profiles_at(addr);
     set_cmd_enqueue_result(err);
 }
 
@@ -2822,6 +3048,15 @@ bool DaliComponent::apply_inventory_snapshot(const DaliDiscoveryInventory *inven
     return set_group_membership_snapshot(map.members, map.verified, observed_gear);
 }
 
+/* `iconfig` from a shell session wrote to the instances at `addr`. A group or
+ * type selector can reach any of them, so every sensor there is read again. */
+void DaliComponent::on_instance_config_applied(uint8_t addr, uint8_t instance)
+{
+    (void) instance;
+    if (addr >= DALI_SHORT_ADDRESS_COUNT) return;
+    want_source_profiles_at(addr);
+}
+
 void DaliComponent::on_config_applied(DaliTarget target, DaliCommandId id,
                                       uint8_t param)
 {
@@ -3064,6 +3299,12 @@ void DaliComponent::register_input_sensor(DaliBusSensor *sensor)
         e.sensor      = sensor;
         e.seq_in_flight.store(false, std::memory_order_relaxed);
         e.poll_requested.store(false, std::memory_order_relaxed);
+        /* Unknown until read: every event its fields allow reaches it. */
+        dali_event_source_profile_clear(&e.source);
+        e.source_read    = false;
+        e.source_read_ms = 0u;
+        e.source_wanted.store(true, std::memory_order_relaxed);
+        e.source_suspect.store(false, std::memory_order_relaxed);
     } else {
         ESP_LOGW(TAG, "sensor registry full — increase MAX_INPUT_SENSORS");
     }
@@ -3073,7 +3314,8 @@ void DaliComponent::add_dispatch_entry(uint8_t frame_kind, uint8_t address_kind,
                                        uint8_t address, uint16_t event_information,
                                        uint8_t instance, uint8_t output_type,
                                        uint8_t output_address, uint8_t action,
-                                       uint8_t scene)
+                                       uint8_t scene, uint8_t group_kind,
+                                       uint8_t instance_type)
 {
     if (s_dispatch_count >= MAX_DISPATCH_ENTRIES) {
         ESP_LOGW(TAG, "dispatch table full — increase MAX_DISPATCH_ENTRIES");
@@ -3085,6 +3327,9 @@ void DaliComponent::add_dispatch_entry(uint8_t frame_kind, uint8_t address_kind,
     e.key.address      = address;
     e.key.event_information = event_information;
     e.key.instance     = instance;
+    e.key.group_kind   = static_cast<DaliDispatchGroupKind>(group_kind);
+    e.key.match_instance_type = instance_type != 0xFFu;
+    e.key.instance_type = e.key.match_instance_type ? instance_type : 0u;
     e.output.type      = static_cast<DaliAddressType>(output_type);
     e.output.address   = output_address;
     e.action           = static_cast<DaliDispatchAction>(action);

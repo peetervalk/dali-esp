@@ -221,6 +221,18 @@ void DaliShellServer::short_address_cleared_cb(void *ctx, uint8_t addr)
     self->parent_->on_short_address_cleared(addr);
 }
 
+/* `iconfig` wrote to a control device's instances. The integration re-reads
+ * what its sensors there say about themselves rather than trusting the write. */
+void DaliShellServer::instance_config_applied_cb(void *ctx, uint8_t addr,
+                                                 uint8_t instance)
+{
+    auto *self = static_cast<DaliShellServer *>(ctx);
+    if (self == nullptr || self->parent_ == nullptr) {
+        return;
+    }
+    self->parent_->on_instance_config_applied(addr, instance);
+}
+
 /* ── Accept loop ─────────────────────────────────────────────────────────── */
 
 void DaliShellServer::task_entry(void *arg)
@@ -307,6 +319,7 @@ void DaliShellServer::serve(int client_fd)
     session.hooks.config_applied = config_applied_cb;
     session.hooks.short_address_moved = short_address_moved_cb;
     session.hooks.short_address_cleared = short_address_cleared_cb;
+    session.hooks.instance_config_applied = instance_config_applied_cb;
     session.hooks.export_config = export_config_cb;
     session.hooks.snapshot_save = snapshot_save_cb;
     session.hooks.snapshot_load = snapshot_load_cb;

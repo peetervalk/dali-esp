@@ -540,6 +540,42 @@ static void test_parse_short_addr_and_instance(void)
     TEST_ASSERT_TRUE(dali_cli_parse_instance("31", &v));
     TEST_ASSERT_EQUAL_UINT8(31u, v);
     TEST_ASSERT_FALSE(dali_cli_parse_instance("32", &v));
+    /* The single-instance parser stays strict: a sensor poll needs one. */
+    TEST_ASSERT_FALSE(dali_cli_parse_instance("g3", &v));
+}
+
+/*
+ * iquery and iconfig take the whole Part 103 instance byte: a number, an
+ * instance group (100GGGGG), an instance type (110TTTTT), or every instance.
+ */
+static void test_parse_instance_selector(void)
+{
+    uint8_t v = 0u;
+    TEST_ASSERT_TRUE(dali_cli_parse_instance_selector("1", &v));
+    TEST_ASSERT_EQUAL_HEX8(0x01u, v);
+    TEST_ASSERT_FALSE(dali_cli_instance_selector_is_multi(v));
+
+    TEST_ASSERT_TRUE(dali_cli_parse_instance_selector("g3", &v));
+    TEST_ASSERT_EQUAL_HEX8(0x83u, v);
+    TEST_ASSERT_TRUE(dali_cli_instance_selector_is_multi(v));
+    TEST_ASSERT_TRUE(dali_cli_parse_instance_selector("g31", &v));
+    TEST_ASSERT_EQUAL_HEX8(0x9Fu, v);
+
+    TEST_ASSERT_TRUE(dali_cli_parse_instance_selector("t3", &v));
+    TEST_ASSERT_EQUAL_HEX8(0xC3u, v);
+    TEST_ASSERT_TRUE(dali_cli_instance_selector_is_multi(v));
+
+    TEST_ASSERT_TRUE(dali_cli_parse_instance_selector("all", &v));
+    TEST_ASSERT_EQUAL_HEX8(0xFFu, v);
+    TEST_ASSERT_TRUE(dali_cli_instance_selector_is_multi(v));
+
+    TEST_ASSERT_FALSE(dali_cli_parse_instance_selector("32", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_instance_selector("g32", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_instance_selector("t32", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_instance_selector("g", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_instance_selector("x3", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_instance_selector("d3", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_instance_selector(NULL, &v));
 }
 
 /*
@@ -1744,6 +1780,7 @@ int main(void)
     RUN_TEST(test_parse_target_forms);
     RUN_TEST(test_parse_target_rejects_out_of_range);
     RUN_TEST(test_parse_short_addr_and_instance);
+    RUN_TEST(test_parse_instance_selector);
     RUN_TEST(test_parse_device_addr_requires_the_d_prefix);
     RUN_TEST(test_the_gear_parsers_reject_the_device_spelling);
     RUN_TEST(test_address_device_lines_reach_the_handler);

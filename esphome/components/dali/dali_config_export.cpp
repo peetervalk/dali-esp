@@ -302,6 +302,14 @@ void emit_dispatch_entry(const DaliCliOut *out, const DaliDispatchEntry *entry)
 {
     const char *frame  = frame_kind_name((uint8_t) entry->key.frame_kind);
     const char *source = address_kind_name((uint8_t) entry->key.address_kind);
+    /* A group key narrowed to one Part-103 group space has its own spelling. */
+    if (entry->key.address_kind == DALI_EVENT_ADDRESS_GROUP) {
+        if (entry->key.group_kind == DALI_DISPATCH_GROUP_DEVICE) {
+            source = "device_group";
+        } else if (entry->key.group_kind == DALI_DISPATCH_GROUP_INSTANCE) {
+            source = "instance_group";
+        }
+    }
     const char *output = target_type_name((uint8_t) entry->output.type);
     const char *action = dispatch_action_name((uint8_t) entry->action);
 
@@ -329,6 +337,11 @@ void emit_dispatch_entry(const DaliCliOut *out, const DaliDispatchEntry *entry)
     } else {
         dali_cli_printf(out, "      instance: %u\r\n",
                         (unsigned) entry->key.instance);
+    }
+
+    if (entry->key.match_instance_type) {
+        dali_cli_printf(out, "      instance_type: %u\r\n",
+                        (unsigned) entry->key.instance_type);
     }
 
     dali_cli_printf(out, "      output_type: %s\r\n", output);
@@ -628,7 +641,7 @@ void emit_discovered_inputs(const DaliCliOut *out,
                                 "%saddress %u instance %u: %s instance, with "
                                 "no standard value to\r\n",
                                 prose, (unsigned) addr, (unsigned) inst,
-                                dali_input_role_name(info->role));
+                                dali_input_role_name(static_cast<DaliInputRole>(info->role)));
                 dali_cli_printf(out,
                                 "%spoll — check what the device documents for "
                                 "it.\r\n", prose);
@@ -638,7 +651,7 @@ void emit_discovered_inputs(const DaliCliOut *out,
             dali_cli_printf(out, "%s- platform: dali\r\n", lead);
             dali_cli_printf(out, "%s  name: \"DALI %u %s %u\"\r\n", lead,
                             (unsigned) addr,
-                            dali_input_role_name(info->role),
+                            dali_input_role_name(static_cast<DaliInputRole>(info->role)),
                             (unsigned) inst);
             dali_cli_printf(out, "%s  address: %u\r\n", lead, (unsigned) addr);
             dali_cli_printf(out, "%s  instance: %u\r\n", lead, (unsigned) inst);

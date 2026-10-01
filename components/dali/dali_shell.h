@@ -181,14 +181,26 @@ typedef struct {
      */
     void (*short_address_cleared)(void *ctx, uint8_t addr);
     /*
-     * Neither hook has a control-device counterpart, and that is a statement
-     * about the integration rather than an omission here: nothing on the other
-     * side caches a device short address. Lights are keyed by gear address,
-     * sensors by the device address in their own YAML, and `restore apply`
-     * already moves devices without notifying anything. `address d<N> set` and
-     * `address d<N> clear` therefore call nothing. Add a pair here if a cache
-     * ever keys on the device space.
+     * Neither hook has a control-device counterpart. Lights are keyed by gear
+     * address and sensors by the device address in their own YAML, so no
+     * device-space cache follows a move. What the integration does hold per
+     * device -- each sensor's event-source profile -- is read again after any
+     * workflow releases the bus, which every `address d<N>` arm and `restore
+     * apply` does, so a move needs no hook of its own.
      */
+    /*
+     * Called after `iconfig` transmitted a configuration write to the control
+     * device at `addr`. `instance` is the instance byte as sent: an instance
+     * number, a group or type selector, or every instance.
+     *
+     * `iconfig` is a single sequence, not a workflow, so it claims no bus and
+     * reaches none of the hooks above. An integration that caches what an
+     * instance says about itself -- its event scheme, its instance groups --
+     * re-reads it here rather than waiting to notice the change. Transmitted
+     * is not applied, which is why the response is a read rather than an
+     * update. Called on the session's task. NULL when nothing caches.
+     */
+    void (*instance_config_applied)(void *ctx, uint8_t addr, uint8_t instance);
     /*
      * Print the integration's own configuration as the YAML block that would
      * produce it — what `export config` emits.

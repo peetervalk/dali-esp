@@ -98,6 +98,15 @@ iquery 0 1 occ-report-timer    # expect 5 (5 seconds)
 iquery 0 1 event-filter0       # expect 7
 ```
 
+The integration polls occupancy at once only for a device/instance event, so
+both emitting instances must be on event scheme 2. On scheme 0 occupancy still
+works, but only on its poll interval. Both were found at 0 on 2026-10-01:
+
+```text
+iquery 0 1 event-scheme        # expect 2; same for instance 0
+iconfig 0 1 set-event-scheme 2 # if not, then read it back
+```
+
 Restore the report timer to 5 seconds:
 
 ```text

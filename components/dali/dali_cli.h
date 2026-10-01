@@ -309,6 +309,19 @@ bool dali_cli_parse_short_addr(const char *text, uint8_t *out);
 bool dali_cli_parse_device_addr(const char *text, uint8_t *out);
 bool dali_cli_parse_instance(const char *text, uint8_t *out);
 
+/*
+ * The instance argument of the verbs that address instances generically,
+ * `iquery` and `iconfig`. Accepts an instance number 0-31, `g<N>` for every
+ * instance in instance group N, `t<N>` for every instance of type N, and `all`,
+ * and writes the Part 103 instance byte. Verbs that need one particular
+ * instance -- a sensor poll, a vendor query -- keep dali_cli_parse_instance().
+ */
+bool dali_cli_parse_instance_selector(const char *text, uint8_t *out);
+
+/* True when an instance byte from the parser above can reach more than one
+ * instance, so a query sent with it can draw colliding replies. */
+bool dali_cli_instance_selector_is_multi(uint8_t instance_byte);
+
 typedef struct {
     uint8_t level;
     bool    is_mask;

@@ -28,6 +28,168 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-10-01 (backup format v2: instance settings; uncommitted on `dev`)
+
+The option chosen in *Instance settings in the backup*, under Investigations:
+the snapshot format goes to version 2 and records each control device's instance
+settings, and `restore instances` puts them back. Nothing touched a bus.
+
+- **Model and codec.** `DaliInstanceSettings` holds type, enabled, event
+  scheme, priority, filter and the three instance groups, each optional. A
+  snapshot holds up to 64 of them, each tied to its device's entry index. The
+  wire format puts the instance count in the old reserved byte 6 and appends
+  12-byte instance records after the entries. The decoder takes version 2
+  only, and validates every instance record before writing anything: it must
+  name a device entry, appear once, use known flag bits and hold sendable
+  values.
+- **Read, decide, locate, write** in `dali_restore`. The read takes about
+  eleven queries per instance. It records "disabled" only when QUERY INSTANCE
+  ENABLED is silent *and* QUERY INSTANCE STATUS shows instanceActive clear, so
+  a lost YES is never saved as disabled. The write mask names each recorded
+  field the device reports differently or not at all, never a priority outside
+  2-5. A device is located by identification number, with contested addresses
+  excluded. The write sends one DTR-load-plus-send-twice sequence per field,
+  ENABLE or DISABLE last.
+- **Shell.** `backup save` reads every instance of every recorded control device
+  inside its bus claim and names any it left out or that did not answer.
+  `backup status` lists them under their device. `backup import` names a
+  version-1 blob when it refuses one. `restore instances [apply]` prints the
+  differing fields as `now -> recorded`, writes and reads back per instance,
+  and is gated like `restore groups apply`.
+- **ESPHome.** No code change beyond a comment: the persisted record is sized by
+  `DALI_SNAPSHOT_BLOB_MAX` and grows with it.
+
+Results:
+
+- 34/34 host suites. `test_snapshot` has 6 new vectors (to 32) and its
+  full-snapshot vector now fills the instance table too. The new suite
+  `test_restore_instances` has 15, against a mock control device with real
+  registers that applies the writes, so the read-back vectors say what a device
+  would report.
+- `dali_test.yaml` compiles on ESPHome 2026.9.0. Static RAM is 141,728 B,
+  +3,072 B: the 768-byte instance table twice in blob form and the 1,536-byte
+  model once.
+- The native IDF 6.0.1 build passes and carries the new verb strings.
+
+Not covered: any bus, and no mutation pass. Every backup and restore bus result
+recorded before this entry was taken in the version-1 format.
+
+### Verified locally on 2026-10-01 (event-source matching and instance groups; uncommitted on `dev`)
+
+The work the ninth session's finding led to: sensors match events of every
+scheme, and instance groups can be read, addressed and dispatched on. Reasoning
+in *The Steinel's events lost their device address*, under Investigations.
+Nothing touched a bus.
+
+- **`dali_event_source`**, a new pure-C module: the matcher, the scheme-change
+  test, and the five-query profile read (type, scheme, three instance groups)
+  with its parser. `test_event_source` holds 19 vectors, among them the 2k
+  Steinel's two heartbeats in both schemes it has been seen in.
+- **The integration** asks each sensor's matcher instead of comparing a
+  Device/Instance address. A source profile per sensor is read after boot,
+  after a scan, after a shell workflow and after an `iconfig` to its device:
+  one read at a time, only while the scheduler queue is at most half full. A
+  read cancelled by a scheduler reset keeps the old profile. An event in a
+  scheme the profile did not expect marks the sensor for a re-read, at most
+  every five minutes. A non-2 scheme is reported once, and a change whenever it
+  happens.
+- **Instance selectors.** `dali_build_instance_command()` accepts `0x80|G` and
+  `0xC0|T`; `iquery` and `iconfig` on both surfaces take `gN`, `tN` and `all`.
+  A new shell hook, `instance_config_applied`, lets a TCP-shell `iconfig`
+  trigger the profile re-read; the console path does it directly.
+- **Discovery** reads each instance's event scheme, priority and three instance
+  groups, shown by `instances` and `export inventory`. The record's three enum
+  fields are now stored as bytes to pay for that (see the RAM figure below).
+- **Dispatch keys** gain `group_kind` and an instance-type match; YAML gains
+  `address_kind: instance_group` / `device_group` and `instance_type:`, and
+  `export config` writes them back.
+- **`dali_cmd_instance_group()` removed.**
+
+Results:
+
+- 33/33 host suites. New vectors beyond `test_event_source`: 1 in `test_cli`,
+  1 in `test_protocol`, 2 in `test_discovery`, 2 in `test_dispatch`. Every
+  `test_dispatch` key initializer gained the three new fields, since a
+  positional initializer that stops early fails `-Wmissing-field-initializers`.
+- `esphome config dali_test.yaml` is valid with two new dispatch rules
+  exercising `instance_group`, `instance_type` and `device_group`. Three
+  deliberately invalid copies are refused with the intended messages:
+  `instance_group` on a legacy frame, `instance_type` on a legacy frame, and a
+  short-address rule naming both an instance and an instance type.
+- `dali_test.yaml` compiles on ESPHome 2026.9.0, and the firmware carries the
+  new strings. Static RAM is 138,656 B. The new instance fields alone had made
+  it 143,776 B, because the shell caches 16 devices of 32 instance records;
+  narrowing the three enum fields to bytes brought it under the 139,416 B of the
+  build before them.
+- The native IDF 6.0.1 build passes and carries the new shell strings.
+
+Not covered: any bus, and no mutation pass. The group and type selectors rest
+on TI's decoder and recall of the standard, so their first bus run is also
+their first independent check.
+
+### Verified on hardware 2026-10-01, ninth session (2k bus: the Steinel's event scheme, `dev`)
+
+The operator reported the Steinel's occupancy as noticeably slower over the
+preceding days. Driven from the `dali-shell` script against the 2k node, with
+the ESPHome logger at DEBUG. The node was reflashed before the session; the ref
+is not recorded, and nothing found depends on it.
+
+`instances 0`:
+
+```text
+ 0: type=4 light, usable=standard, source=standard, enabled=yes, resolution=11, status=0x02
+ 1: type=3 occupancy, usable=standard, source=standard, enabled=yes, resolution=2, status=0x02
+ 2: type=0 generic, usable=unverified, source=standard, resolution=16, status=0x00
+ 3: type=0 generic, usable=unverified, source=standard, resolution=8, status=0x00
+```
+
+Instance 1, through `iquery 0 1`:
+
+| Query | Reply | Reading |
+|---|---|---|
+| `type` | 3 | occupancy |
+| `enabled` | yes (`0xFF`) | |
+| `status` | `0x02` | active, no error |
+| `error` | timeout | |
+| `event-scheme` | 0, read twice | instance scheme: no device address |
+| `event-priority` | 4, read twice | |
+| `event-filter0` | `0x07` | |
+| `occ-report-timer` | 30 | 30 s |
+| `occ-deadtime` | 10 | 500 ms |
+| `occ-capabilities` | `0x00` | no Part 303 range or sensitivity control |
+| `occ-detection-range`, `occ-sensitivity` | 255 each | MASK |
+| `input-value` | 0 | vacant, no movement |
+| `input-value-latch` | timeout | nothing past a 2-bit value |
+
+Instance 0 read `event-scheme` 0 and `event-priority` 4. `occ-hold-timer` was
+not read.
+
+- **Before the fix, no event matched a sensor.** The DEBUG log carried `rx
+  type=4 inst=0 evt=1` every 3.0 s and `rx type=3 inst=1 evt=12` every 30.0 s,
+  and no `event poll requested` line. These are the two heartbeats the
+  2026-09-04 capture recorded as `0x008001` and `0x00840C`, decoded under the
+  instance scheme. Lux published every 30 s, on its poll interval.
+- **`iconfig 0 <i> set-event-scheme 2` landed on both instances.** Each printed
+  `transmitted; verify with iquery`, and `iquery` then read 2 for each. This is
+  the first `iconfig` write read back on a bus.
+- **Events trigger polls again.** From 10:41:23.8 lux events read `rx a0
+  inst=0 evt=1`, with no poll request, consistent with lux carrying
+  `poll_on_event: false`. The next occupancy heartbeat arrived as `rx a0
+  inst=1 evt=12` at 10:41:55.074, and `event poll requested: addr=0 inst=1
+  info=12 raw=00840C` followed at 10:41:55.077. That raw value is the
+  2026-09-04 frame, byte for byte. The 10:42:25 heartbeat did the same.
+
+Not covered:
+
+- A vacant-to-occupied transition after the fix. Every occupancy event in the
+  log is the 30 s heartbeat, `evt=12`.
+- The poll's result. The component logs none, and the occupancy entity's own
+  state line does not appear in the log, where lux, temperature and humidity
+  do.
+- What set both instances to scheme 0. See *The Steinel's events lost their
+  device address*, under Investigations.
+- Whether the scheme survives a bus power cycle.
+
 ### Verified locally on 2026-09-30 (shared-address detection; uncommitted on `dev`)
 
 Implements the fix proposed in *Two units that answer alike share an address
@@ -1894,6 +2056,144 @@ cleared by the 2026-08-14 entry above):
 
 # Investigations
 
+## The Steinel's events lost their device address — found 2026-10-01
+
+Found in the ninth session. What the bus showed was observed; the integration's
+side is read from source; what changed the scheme is not known.
+
+Supersedes one sentence of *What a device RESET clears*, below: "The Steinel
+emits in scheme 2" held on 2026-09-04 and did not hold on 2026-10-01, until the
+session put it back.
+
+### Why scheme 0 is slow rather than broken
+
+Every input sensor is polled on its own `poll_interval`, 30 s by default,
+whatever the bus does. An event only brings that poll forward.
+`on_dali_unsolicited()` in `dali_component.cpp` sets `poll_requested` on a
+registered sensor when three things hold:
+
+- the event is a Device/Instance frame;
+- its device address and instance number equal the sensor's;
+- the sensor has `poll_on_event`.
+
+The loop polls a requested sensor at once. The event information is never the
+value.
+
+A sensor's YAML carries an address and an instance number and nothing else that
+could identify an event source. Each other scheme lacks one of the two:
+
+| Scheme | Carries |
+|---|---|
+| 0, instance | instance type and number, no address |
+| 1, device | address and instance type |
+| 3, device group | device group and instance type |
+| 4, instance group | instance group and instance type |
+
+None can be matched to a sensor without metadata the YAML does not hold, and the
+code declines to guess. Such an event is decoded, logged at DEBUG and queued for
+headless dispatch, and the sensor waits for its interval. A state change then
+reaches Home Assistant anywhere from 0 to `poll_interval` later, rather than one
+query after the event. Headless dispatch splits the same way: `key_matches()` in
+`dali_dispatch.c` matches a rule keyed on a short address only against events
+that carry one, which are schemes 1 and 2.
+
+Nothing reports the fallback.
+
+### When it changed
+
+The 2026-09-04 capture recorded `0x008001` and `0x00840C`. Both have bit 23
+clear and bit 15 set, which is the Device/Instance layout. The ninth session
+found 0 on both emitting instances, so both changed at some point between those
+two dates.
+
+A RESET is unlikely, on the evidence available:
+
+- `steinel_bank2_reference.md` gives Steinel's defaults as hold timer 1, report
+  timer 5 and event filter 7.
+- The report timer reads 30, as the 30.01 s heartbeat of 2026-09-04 says it
+  did then.
+- The filter reads 7, which matches the default, so it tells neither way.
+
+A RESET would also have returned Bank 2 to factory values, so `devmem read 0 2 4
+10`, read against any earlier tuning, would settle it. `occ-hold-timer` against
+the default of 1 is one more data point.
+
+The one recorded change to the Steinel in the window is 2026-09-29:
+
+1. its address was cleared to MASK by hand (`raw C130FF`, `raw2 01FE14`);
+2. it sat unaddressed until `commission devices` put it on d0;
+3. it was moved through d1 and d2 and back.
+
+A Part 103 rule may switch schemes 1 and 2 to scheme 0 when the short address is
+deleted, and not switch them back. That rule is recalled rather than sourced;
+TI's `DALI_103_setShortAddress()` has no such step. If it exists it fits
+everything seen: both instances at once, exactly 0, nothing else touched.
+
+To separate the moves from the clear, on 2k with the scheme at 2:
+
+1. `dtrcheck 0 0 5`, since the `address` arms now read DTR0 back.
+2. `address d0 set d2`, `address d2 set d0`, then `iquery 0 1 event-scheme`.
+3. `address d0 clear`, `commission devices`, then `iquery 0 1 event-scheme`.
+
+### Event priority settles the emitter-spacing candidate
+
+Both emitting instances read event priority 4. Instances 2 and 3 report
+`status=0x00` and emit nothing; neither the 2026-09-04 capture nor the ninth
+session's log has an event from them. *Whether that explains the backoff
+depends on a0's event priority*, under Investigations, set the rule: at 4 or 5
+the emitter-spacing mechanism does not explain 8/8. So it does not. The
+decisive test named there, the pre-backoff build under `quiescent on all`, is
+what remains.
+
+### Instance settings in the backup: the decision it waits on
+
+What the 2026-10-01 work did not do is put each instance's settings — event
+scheme, priority, filter, instance groups — into the device backup so a restore
+can put them back. The model change is small; where the bytes live is not:
+
+- The snapshot holds up to 128 entries and a device can have 32 instances, so
+  a per-entry instance table is out of the question. A bounded table of, say,
+  64 instance records at about 12 bytes adds 768 bytes to the blob and to each
+  RAM copy of it: the shell's `s_backup` and `s_backup_blob`, and the
+  integration's `s_address_backup`.
+- ESPHome loads a preference by its stored size. Growing
+  `AddressBackupPersist` makes a backup saved by an older build unreadable, so
+  an upgrade silently drops it unless the new build migrates it.
+
+Three ways to do it:
+
+1. **Blob v2.** One backup, a version bump, a decoder that still reads v1, and
+   a persisted record that grows — with migration code, or with the loss
+   accepted and stated in the release notes.
+2. **A second record beside the first.** The address backup stays v1, so
+   nothing stored is lost. Instance settings go in their own blob, under their
+   own preference key and in their own export line. It costs a second buffer
+   and a second import step.
+3. **Declare it in YAML instead.** A sensor states the scheme it needs, and the
+   integration writes it back when its profile read finds otherwise. That
+   repairs the case that actually happened without any backup at all, but it
+   makes the integration write to devices on its own initiative, which nothing
+   in it does today.
+
+### Decided: version 2, and old backups are dropped
+
+The operator chose the first option on 2026-10-01: bump the blob format and
+accept that older backups are lost. The decoder reads version 2 only, so an
+exported version-1 file is refused (`backup import` names it as one), and a
+backup an older ESPHome build stored no longer loads because the stored record
+changed size. `ADDRESS_BACKUP_MAGIC` was kept: it is the NVS key, so the first
+version-2 save overwrites the old entry rather than stranding it in the
+partition. Implementation in the verification entry of the same date.
+
+### The Part 303 event information
+
+`evt=12` is `0x00C`. It arrives every 30 s, and the report timer is 30. That
+fits bit 2 being the repeat flag of a report-timer event, which *Opcodes: a
+second independent source* could not place from TI's code. If bits 0 and 1 are
+movement and occupied and bit 3 is the movement-sensor type, the heartbeat reads
+"vacant, no movement, repeat". That bit assignment is recalled, not sourced; the
+matching period is the only bus evidence.
+
 ## Two units that answer alike share an address invisibly — found 2026-09-30
 
 Found in the eighth session. What the bus did was observed; why is read from
@@ -3689,6 +3989,88 @@ below landed after that tag.
 
 Add new entries here as breaks accumulate, and empty the section again at the
 next tag.
+
+### From the 2026-10-01 backup format v2 (host-tested, compile-checked)
+
+Operator-visible, and breaking:
+
+- **Backups taken before this change are lost.** A backup stored in flash by an
+  older ESPHome build no longer loads (the stored record changed size), and an
+  exported version-1 file is refused by `backup import`, which says what it is.
+  Run `backup save` after flashing.
+- `backup save` also records every control device's instance settings, which
+  makes it slower on a bus with input devices, by about eleven queries per
+  instance. It reports how many it recorded, left out over the 64-instance
+  limit, or could not read.
+- `backup status` and `backup import` report the instance count; `status` lists
+  each instance under its device.
+- New: `restore instances [apply]`. `apply` needs the same policy as `restore
+  groups apply`.
+- An export is longer: a full blob is 3,208 bytes, 107 import lines.
+
+C API:
+
+- `DALI_SNAPSHOT_FORMAT_VERSION` is 2 and `DALI_SNAPSHOT_BLOB_MAX` grew by
+  768 bytes. New: `DALI_SNAPSHOT_MAX_INSTANCES`,
+  `DALI_SNAPSHOT_INSTANCE_WIRE_SIZE`, `DaliSnapshotInstance`,
+  `DaliSnapshot.instance_count` and `.instances[]`,
+  `dali_snapshot_add_instance()`.
+- New in `dali_input_device.h`: `DaliInstanceSettings`.
+- New in `dali_restore.h`: `dali_restore_read_instance_settings()`,
+  `dali_restore_instance_write_mask()`, `dali_restore_locate_device()`,
+  `dali_restore_write_instance_settings()`,
+  `dali_restore_instance_field_name()` and the `DALI_RESTORE_INSTANCE_*` mask
+  bits.
+
+### From the 2026-10-01 event-source matching and instance groups (host-tested, compile-checked)
+
+Operator-visible:
+
+- A sensor with `poll_on_event` is polled on any event that could be its own,
+  not only a Device/Instance one. Inferred matches log `event poll requested
+  (inferred): ...`, so the DEBUG line gained a variant.
+- New log lines from the integration: a sensor whose instance is not on event
+  scheme 2 (WARN when the sensor polls on events or a dispatch rule keys on its
+  device, INFO otherwise), `event scheme changed from X to Y`, and a DEBUG line
+  when a source profile read comes back incomplete.
+- The integration reads each sensor's source profile — five instance queries —
+  after boot, after a scan, after any shell workflow, and after an `iconfig` to
+  that sensor's device, one read at a time.
+- `iquery` and `iconfig` take `g<N>`, `t<N>` and `all` as the instance. A query
+  through one prints `note: ... can reach more than one instance`. The console
+  usage line reads `inst 0-31|gN|tN|all`.
+- `instances` and `export inventory` show each instance's event scheme, event
+  priority and instance groups; `discover` spends five more queries per input
+  instance to read them.
+- YAML `headless_dispatch` accepts `address_kind: instance_group` and
+  `device_group`, and `instance_type:`. `group` still matches either group
+  space. A typed rule keyed on a short address and an instance is refused,
+  since no event carries all three.
+
+C API:
+
+- Removed: `dali_cmd_instance_group()`. It put the group in the address byte,
+  which made it a device-group command and not an instance-group one, and built
+  that byte with the 16-group gear layout, so device group 16 became group 0.
+  Nothing called it.
+- New module `dali_event_source` (`dali_event_source_match()`,
+  `dali_event_source_scheme_differs()`, the profile read builder and parser).
+- `dali_build_instance_command()` accepts the instance-group (`0x80|G`) and
+  instance-type (`0xC0|T`) selectors. New: `DALI_INSTANCE_SELECTOR_MASK`,
+  `DALI_INSTANCE_GROUP_SELECTOR`, `DALI_INSTANCE_TYPE_SELECTOR`,
+  `dali_cli_parse_instance_selector()`, `dali_cli_instance_selector_is_multi()`.
+- `DaliDispatchKey` gains `group_kind`, `match_instance_type` and
+  `instance_type`, appended. Zero values keep the old matching, but a positional
+  initializer that stops at `instance` now fails `-Wmissing-field-initializers`.
+- `DaliInputInstanceInfo` gains `has_event_scheme`/`event_scheme`,
+  `has_event_priority`/`event_priority` and
+  `has_instance_groups`/`instance_groups[3]`, and its `role`, `role_source` and
+  `usable` fields are now `uint8_t` holding the enum values. C callers are
+  unaffected; C++ callers passing them to a function taking the enum need a
+  cast.
+- `DaliShellHooks` gains `instance_config_applied`.
+- ESPHome: `DaliComponent::add_dispatch_entry()` takes `group_kind` and
+  `instance_type`, defaulted; `on_instance_config_applied()` is new.
 
 ### From the 2026-09-30 shared-address detection (host-tested, compile-checked)
 

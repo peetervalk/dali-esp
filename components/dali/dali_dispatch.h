@@ -42,17 +42,36 @@
  *     address      = ignored
  *
  * instance matches the canonical source instance when one is present; use
- * DALI_DISPATCH_INSTANCE_ANY when it is absent or irrelevant. The compact key
- * cannot distinguish Device-Group from Instance-Group or match instance type.
+ * DALI_DISPATCH_INSTANCE_ANY when it is absent or irrelevant.
  * event_information matches all 10 Part-103 information bits (0x000-0x3FF).
  * For DT301, short press is 0x002 and double press is 0x005.
+ *
+ * Two Part-103 refinements, both off when zero, so a key built before they
+ * existed matches exactly as it did:
+ *
+ *   group_kind narrows a GROUP key to device groups or to instance groups. The
+ *   two number spaces are independent: instance group 3 and device group 3
+ *   are unrelated, and DALI_DISPATCH_GROUP_EITHER matches both.
+ *
+ *   match_instance_type requires the event to carry instance_type. Schemes 0,
+ *   1, 3 and 4 carry a type; Device/Instance (2) does not, so a typed key never
+ *   matches a scheme-2 event.
  */
+typedef enum {
+    DALI_DISPATCH_GROUP_EITHER   = 0,
+    DALI_DISPATCH_GROUP_DEVICE   = 1,
+    DALI_DISPATCH_GROUP_INSTANCE = 2,
+} DaliDispatchGroupKind;
+
 typedef struct {
     DaliEventFrameKind   frame_kind;
     DaliEventAddressKind address_kind;
     uint8_t              address;
     uint16_t             event_information; /* exact value or DALI_DISPATCH_EVENT_ANY */
     uint8_t              instance;          /* exact value or DALI_DISPATCH_INSTANCE_ANY */
+    DaliDispatchGroupKind group_kind;       /* GROUP keys only */
+    bool                 match_instance_type;
+    uint8_t              instance_type;     /* 0-31, when match_instance_type */
 } DaliDispatchKey;
 
 /* ── Actions ──────────────────────────────────────────────────────────────── */

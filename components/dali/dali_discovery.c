@@ -1322,6 +1322,41 @@ static void query_instance_optional_fields(const DaliDiscoveryTransport *transpo
         info->has_error = true;
         info->error = raw;
     }
+    if (query_instance_u8(transport,
+                          dali_input_build_query_event_scheme,
+                          addr,
+                          info->instance,
+                          &raw) == DALI_OK) {
+        info->has_event_scheme = true;
+        info->event_scheme = raw;
+    }
+    if (query_instance_u8(transport,
+                          dali_input_build_query_event_priority,
+                          addr,
+                          info->instance,
+                          &raw) == DALI_OK) {
+        info->has_event_priority = true;
+        info->event_priority = raw;
+    }
+
+    static const DaliDiscoveryInputQueryBuilder
+        group_queries[DALI_INPUT_INSTANCE_GROUP_SLOTS] = {
+        dali_input_build_query_primary_instance_group,
+        dali_input_build_query_instance_group1,
+        dali_input_build_query_instance_group2,
+    };
+    uint8_t groups[DALI_INPUT_INSTANCE_GROUP_SLOTS];
+    for (uint8_t slot = 0u; slot < DALI_INPUT_INSTANCE_GROUP_SLOTS; slot++) {
+        if (query_instance_u8(transport, group_queries[slot], addr,
+                              info->instance, &groups[slot]) != DALI_OK) {
+            return;
+        }
+        if (groups[slot] >= 32u && groups[slot] != DALI_INPUT_INSTANCE_GROUP_NONE) {
+            return;
+        }
+    }
+    info->has_instance_groups = true;
+    memcpy(info->instance_groups, groups, sizeof(groups));
 }
 
 DaliError dali_discovery_query_input_device(const DaliDiscoveryTransport *transport,
