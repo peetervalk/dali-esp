@@ -20,10 +20,16 @@
  *
  * ── One session ────────────────────────────────────────────────────────────
  *
- * The shell permits one session at a time (see dali_shell.h), so a second
- * connection is accepted only far enough to be told why it is being closed —
- * leaving it unaccepted would look like a hung connect. An abandoned session is
- * reclaimed by the idle timeout.
+ * The shell permits one session at a time (see dali_shell.h), and this front
+ * end serves each connection to completion before it accepts the next. A
+ * second client therefore waits in the listen backlog, connected and unanswered,
+ * until the session ends; see the comment on listen() in dali_shell_tcp.cpp.
+ *
+ * A session whose peer is gone must not keep the shell, and mid-workflow it
+ * must not keep the bus. A peer that stops reading is dropped once one send()
+ * has taken nothing for SO_SNDTIMEO, which also ends the workflow at its next
+ * step. One that vanished while idle is found by TCP keepalive in under a
+ * minute. A session that is merely unused is reclaimed by the idle timeout.
  *
  * ── Access ─────────────────────────────────────────────────────────────────
  *
@@ -31,6 +37,13 @@
  * ESPHome web server: whoever can reach the port can drive the bus. Because
  * that is a lower bar than physical access to the UART, commissioning verbs are
  * refused unless the YAML opts in with `allow_commissioning: true`.
+ *
+ * A browser can reach the port too, on behalf of any page it has open: a
+ * cross-site form or no-cors fetch POSTs here without a preflight, and the
+ * lines of its body would run as commands. So a connection that opens with an
+ * HTTP request line is closed before any of its lines is dispatched
+ * (dali_cli_peer_sniff()). That shuts the browser out; it does nothing about a
+ * program on the network that speaks the shell.
  */
 
 #include "esphome/core/component.h"

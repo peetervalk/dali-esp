@@ -7,6 +7,448 @@ bus produced the result), **host-tested** (host vectors only, no bus), and
 
 Dated evidence for every claim here is in [project_log.md](project_log.md).
 
+## Unreleased: v3.0.0
+
+Everything on `dev` since `v2.0.0`. New changes are added here as they land.
+
+At tagging:
+
+- check each claim against the tree (`git grep <symbol> v2.0.0` settles most
+  of them in seconds)
+- re-check each label against `project_log.md` and `todo.md`
+- rename this heading to the version
+
+**This is a breaking release.**
+
+| Who | What breaks |
+|---|---|
+| Anyone holding a backup | A backup taken by `v2.0.0` does not load: the format is now version 2 |
+| C API consumers | Several changes fail to compile, and several change what a value means |
+| Out-of-tree build systems | One more translation unit |
+| Automation that scrapes shell or console text | Many verbs print different text. Re-check it |
+
+Home Assistant YAML needs no change. The first ESPHome build after upgrading
+is a full rebuild.
+
+**Upgrading from `v2.0.0`:**
+
+1. If the bus needs a restore from a backup you hold, run it **before**
+   upgrading. This release cannot read that backup, whether it is in flash or
+   exported to a file.
+2. After flashing, run `backup save`.
+
+**Staying on `v2.0.0`:**
+
+- Keep `allow_commissioning` off wherever a browser is used on the same
+  network. See *Security*.
+- Do not use `address d<N> set`, a device-space `restore apply`, or `commission
+  devices`. See *Fixed*.
+
+### Security
+
+- **The TCP shell no longer runs what a browser sends it.** A web page open in
+  any browser on the network could POST to the shell port. 2323 is not on the
+  browsers' blocked-port list, and a `text/plain` form or no-cors fetch needs no
+  preflight. Every line of the request body then ran as a shell command,
+  commissioning included where `allow_commissioning: true`, which
+  `dali-starter.yaml` sets.
+  - A connection that opens with an HTTP request line is now closed before
+    anything in it runs.
+  - The device logs a WARN that names the sender's address.
+
+  Every earlier release with the TCP shell has the hole. **Host-tested**: the
+  classifier `dali_cli_peer_sniff()` has 7 vectors, the attack's full shape
+  among them, and 6 mutants killed. The binding is unverified on a device.
+
+### Breaking — operator-visible
+
+- **Backups taken before this release are lost.**
+  - A backup stored in flash by an older build no longer loads, because the
+    stored record changed size. It reads as no backup at all.
+  - An exported version-1 file is refused by `backup import`, which says what
+    it is.
+  - Run `backup save` after flashing. **Host-tested.**
+- **The device-space `address` arms need the device to answer QUERY CONTENT
+  DTR0 (`0x36`).** A device that does not makes `address d<N> set|clear` and
+  any device-space `restore apply` move refuse with `DTR0 could not be
+  checked`. No device here has yet been seen to answer it.
+
+### Breaking — C API
+
+- **`DaliError` gains `DALI_ERR_WAIT_EXPIRED` (13), appended.** It means a
+  blocking caller stopped waiting, and nothing is known about the bus. The
+  shell's and the scan task's blocking transports return it where they
+  returned `DALI_ERR_TIMEOUT`. Treat it as unknown, never as absent.
+- **`dali_phy_tx()`:**
+  - It returns `DALI_ERR_TIMING`, not `DALI_ERR_TIMEOUT`, when a frame does not
+    complete in time.
+  - It reports success only once the ISR has reached `DALI_PHY_TX_DONE`.
+- **The TX-end reference moved 1.664 ms earlier.**
+  `dali_phy_get_last_tx_end_us()` and the scheduler's `get_last_tx_end_us`
+  hook now report the end of the forward frame's last data bit. The constants
+  follow:
+
+  | Constant | Before | Now |
+  |---|---|---|
+  | `DALI_REPLY_WINDOW_OPEN_DECODED_US` | 2000 | 3664 |
+  | `DALI_REPLY_WINDOW_CLOSE_US` | 27000 | 28664 |
+  | `DALI_REPLY_WINDOW_OPEN_US` | 5500 | 5500, which now opens 1.664 ms earlier |
+
+  The first two are the same instants measured from the new reference.
+  `DALI_TX_STOP_BITS_US` is new.
+- **`DALI_DEVICE_INITIALISE_UNADDRESSED_PARAM` is `0x7F`**, not `0x00`. `0x00`
+  selects the device at d0.
+- **`DaliRestoreMove` changes layout.** `kind` moves ahead of `from` and `to`;
+  `has_identification` and `identification[8]` are appended. Positional
+  initializers break. There are none in-tree.
+- **`DaliRestoreMoveCheck` gains `DALI_RESTORE_MOVE_UNIT_MISSING`, appended.**
+  `DALI_RESTORE_MOVE_TARGET_SILENT` now also means the source still answers.
+  `dali_restore_confirm_move()` sends one more query, the probe of `from`, when
+  `to` is silent. A caller switching on the result must handle the new value.
+- **`DaliRestoreConflictKind` gains `DALI_RESTORE_CONFLICT_CONTESTED`,
+  appended.** A plan on a bus with a contested address is no longer clean, even
+  when nothing wants that address.
+- **The snapshot format is version 2.**
+  - `DALI_SNAPSHOT_FORMAT_VERSION` is 2.
+  - `DALI_SNAPSHOT_BLOB_MAX` grows by 768 bytes, to 3,208.
+  - `DaliSnapshot` gains `instance_count` and `instances[]`.
+  - `dali_snapshot_from_inventory()` and
+    `dali_commissioning_occupancy_from_inventory()` treat an identity-collided
+    gear address as contested.
+- **Removed: `dali_cmd_instance_group()`.** It put the group in the address
+  byte, which made it a device-group command and not an instance-group one. It
+  also built that byte with the 16-group gear layout, so device group 16
+  became group 0. Nothing called it. `dali_build_instance_command()` with an
+  instance-group selector replaces it.
+- **`DaliDispatchKey` gains `group_kind`, `match_instance_type` and
+  `instance_type`, appended.** Zero values keep the old matching. A positional
+  initializer that stops at `instance` now fails
+  `-Wmissing-field-initializers`.
+- **`DaliInputInstanceInfo`:**
+  - It gains `has_event_scheme`/`event_scheme`,
+    `has_event_priority`/`event_priority` and
+    `has_instance_groups`/`instance_groups[3]`.
+  - Its `role`, `role_source` and `usable` fields are now `uint8_t` holding the
+    enum values. C callers are unaffected. C++ callers that pass them to a
+    function taking the enum need a cast.
+- **Struct growth.** `DaliDiscoveryDeviceInfo` gains `has_identity_collision`,
+  and `DaliDiscoveryInventory` gains `identity_collision_count`. Anything that
+  compiled a struct size in must be rebuilt as a unit.
+- **Shell hooks:**
+  - `restore apply` no longer calls `DaliShellHooks.config_applied` or
+    `inventory_changed`.
+  - It calls `short_address_moved` once per confirmed gear move, in plan
+    order.
+  - `DaliShellHooks` gains `instance_config_applied`, appended.
+- **The scheduler routes unsolicited event frames to subscribers in every
+  state.** `rx_event_unroutable` stays in `dali_stats_t`, but is no longer
+  incremented. `dali_sched_is_quiescent()` no longer reports quiescent between
+  dequeuing a transaction and transmitting it.
+- **ESPHome C++:**
+  - `DaliComponent::add_dispatch_entry()` takes `group_kind` and
+    `instance_type`, both defaulted.
+  - `on_instance_config_applied()` is new.
+
+### Breaking — build
+
+- **One new translation unit:** `components/dali/dali_event_source.c`. An
+  out-of-tree build that lists sources by hand must add it, or fail to link.
+  In-repo builds are covered: `components/dali/CMakeLists.txt` lists it,
+  `esphome/components/dali/proto_dali_event_source.c` is its shim, and CI
+  fails if the lists disagree.
+- **The ESPHome component sets `CONFIG_GPTIMER_ISR_CACHE_SAFE` and
+  `CONFIG_GPIO_CTRL_FUNC_IN_IRAM`,** so the first build after upgrading is a
+  full rebuild.
+- **A config with a `shell:` block needs two more lwIP sockets.**
+  `CONFIG_LWIP_MAX_SOCKETS` rises by 2, unless the YAML sets it. In that case
+  ESPHome warns if it is short.
+
+### Added
+
+- **Instance settings in the backup, and `restore instances [apply]`.**
+  - `backup save` records each control device's instance settings: type,
+    enabled, event scheme, priority, filter and three instance groups, up to 64
+    instances.
+  - It reports how many it recorded, left out over the limit, or could not
+    read. That costs about eleven queries per instance.
+  - `restore instances` lists each differing field as `now -> recorded`.
+    `apply` writes the fields, ENABLE or DISABLE last, and reads each instance
+    back.
+  - `apply` needs the same policy as `restore groups apply`. Type-specific
+    settings, such as Part 303 timers, are not recorded.
+
+  **Host-tested.**
+- **Sensors poll on events of every scheme.**
+  - A sensor with `poll_on_event` is polled on any event that could be its own,
+    not only a Device/Instance one. An inferred match logs `event poll
+    requested (inferred): ...`.
+  - The integration reads each sensor's source profile, five instance queries,
+    after boot, after a scan, after any shell workflow, and after an `iconfig`
+    to that sensor's device. It reads one at a time.
+  - New log lines:
+    - an instance off scheme 2: WARN when the sensor polls on events or a
+      dispatch rule keys on its device, INFO otherwise
+    - `event scheme changed from X to Y`
+    - DEBUG when a profile read comes back incomplete
+
+  **Host-tested** matcher; the ESPHome wiring is unverified.
+- **Instance-group, instance-type and all-instances selectors.**
+  - `iquery` and `iconfig` take `g<N>`, `t<N>` and `all` as the instance. A
+    query through one prints `note: ... can reach more than one instance`.
+  - The console usage line reads `inst 0-31|gN|tN|all`.
+  - `instances` and `export inventory` show each instance's event scheme,
+    event priority and instance groups. `discover` spends five more queries per
+    input instance reading them.
+
+  **Host-tested**, against TI's decoder and recall of the standard.
+- **`headless_dispatch` keys on Part 103 groups and instance types.**
+  - YAML accepts `address_kind: instance_group` and `device_group`, and
+    `instance_type:`. `group` still matches either group space.
+  - A typed rule keyed on a short address and an instance is refused, since no
+    event carries all three. `export config` writes the new keys back.
+
+  **Host-tested.**
+- **Shared addresses that answer alike are detected.**
+  - A gear address whose Bank 0 identity read collides twice running is marked
+    contested, and stays listed.
+  - `discover` and `scan` append `, contested` to it, and after `Scan complete`
+    print `note: N listed address(es) hold more than one unit.`, the addresses,
+    and the remedy.
+  - `inventory` marks it `contested (identity collides)` and counts it.
+  - The planner reserves it, `backup save` leaves it out, and the commissioning
+    post-scan counts it contested rather than confirmed.
+  - The ESPHome scan logs `N address(es) answer as one unit but hold more than
+    one; their identification numbers collide`, then one `aN: contested,
+    identity collides` line per address.
+
+  **Host-tested.**
+- **DTR0 is read back before every short-address write.**
+  - Every `address` arm and every `restore apply` move loads DTR0, reads it
+    back with QUERY CONTENT DTR0 (gear `0x98`, device `0x36`), and only then
+    sends SET SHORT ADDRESS.
+  - A wrong, silent or unreadable read-back gets one more load. If that fails
+    too, nothing further is sent:
+    - `DTR0 did not load: a7 read back 0x0B, not 0x05; nothing further sent`
+    - `DTR0 could not be checked: ...`
+  - A write that needed the second load prints `DTR0 needed a second load: a7
+    first read back 0x0B`.
+  - Clearing a contested address sends the pair unchecked when the read-back
+    collides, and says so.
+
+  **Host-tested**; one bus reading, a `clear` on 2k that loaded first time.
+- **`restore apply` confirms every move.**
+  - Each move is checked before the next is sent: the destination answers, the
+    source is silent, and the identification number there is the unit's.
+  - Lines read `OK` or `sent, not confirmed: <reason>`.
+  - The run stops at the first move it cannot confirm. A clean run ends
+    `restore apply: N move(s) applied, each confirmed on the bus`.
+
+  **Hardware-verified**: gear and device moves on 2k, and on 1k a stop after a
+  move that did not land.
+- **`backup save` warns about unaddressed gear.** It sends one broadcast QUERY
+  MISSING SHORT ADDRESS. When anything answers, it prints `backup: gear on the
+  bus reports no short address and is NOT recorded here`, then `backup: run
+  'commission unaddressed', then 'backup save' again, to include it`.
+  **Hardware-verified** on 1k.
+- **The TCP shell drops dead peers.**
+  - A client that stops reading without closing is dropped once a write makes
+    no progress for 10 s, and its workflow ends at the next step.
+  - A peer that vanished while idle is reclaimed in about 45 s by TCP
+    keepalive.
+  - The shell's listener and client are registered with ESPHome's socket
+    count.
+
+  **Unverified** on a device.
+- **New C API:**
+
+  | Header | New |
+  |---|---|
+  | `dali_cli.h` | `DaliCliPeerVerdict`, `DaliCliPeerSniffer`, `DALI_CLI_HTTP_METHOD_MAX`, `dali_cli_peer_sniffer_init()`, `dali_cli_peer_sniff()`; `dali_cli_parse_instance_selector()`, `dali_cli_instance_selector_is_multi()`; `dali_cli_format_gear_version()`, `DALI_CLI_VERSION_TEXT_MAX`; `dali_cli_raw_frame_is_commissioning()` |
+  | `dali_event_source.h` (new module) | `dali_event_source_match()`, `dali_event_source_scheme_differs()`, the profile read builder and parser |
+  | Instance selectors | `DALI_INSTANCE_SELECTOR_MASK`, `DALI_INSTANCE_GROUP_SELECTOR`, `DALI_INSTANCE_TYPE_SELECTOR` |
+  | `dali_snapshot.h` | `DALI_SNAPSHOT_MAX_INSTANCES`, `DALI_SNAPSHOT_INSTANCE_WIRE_SIZE`, `DaliSnapshotInstance`, `dali_snapshot_add_instance()` |
+  | `dali_input_device.h` | `DaliInstanceSettings` |
+  | `dali_restore.h`, instance settings | `dali_restore_read_instance_settings()`, `dali_restore_instance_write_mask()`, `dali_restore_locate_device()`, `dali_restore_write_instance_settings()`, `dali_restore_instance_field_name()`, the `DALI_RESTORE_INSTANCE_*` mask bits |
+  | `dali_restore.h`, moves | `dali_restore_build_move_sequence()`, `dali_restore_write_short_address()`, `DaliRestoreWriteOutcome`, `DaliRestoreWriteResult`, `dali_restore_write_was_sent()`, `dali_restore_write_outcome_name()`, `dali_restore_confirm_move()`, `DaliRestoreMoveCheck`, `dali_restore_move_check_name()` |
+  | Discovery | `dali_discovery_gear_address_contested()`, `dali_discovery_inventory_store_identity()` |
+  | Transport | `dali_transport_transaction_timeout_ms()` |
+
+### Changed — what verbs print
+
+None of these renames or removes a verb.
+
+**`address` and `restore apply`:**
+
+- `address aN set aM` and `dN set dM` probe the source when the destination is
+  silent: `... and aN still does -- the gear did not move`, or `neither aM nor
+  aN answers after the write -- run 'scan' to find the gear`. An undecodable
+  destination reads `whether aM answers after the write is unreadable (...)`.
+- A transport error during an `address` write says whether SET SHORT ADDRESS
+  had gone out, replacing `ERR <error> at sequence step N`:
+  - `<error> before SET SHORT ADDRESS; nothing moved`
+  - `<error> while SET SHORT ADDRESS went out; run 'scan' before sending
+    anything else`
+
+  `restore apply` makes the same distinction on the move line.
+- `restore apply`'s `nothing answers at the target` now reads `nothing answers
+  at the target, and the source still does`. A new reason, `nothing answers at
+  the target or the source`, reports a unit that answers at neither end.
+
+**`identify`:**
+
+- It reads QUERY ACTUAL LEVEL before it blinks, and puts that level back
+  afterwards: OFF for a lamp that was off, DAPC for any other level.
+- It ends `identify: done, level N restored` or `identify: done, switched off
+  again`, where it printed `identify: done` and left the lamp at min.
+- A level it cannot read prints `identify: level before unreadable (<reason>);
+  aN will be left at min` before the blink.
+- The help text reads `blink one short-addressed lamp, then restore its
+  level`.
+
+**`discover`, `inventory` and `stats`:**
+
+- `discover` and `inventory` print the gear version as major.minor (`v2.0`),
+  where they printed the byte halved (`v4`). A byte below 2.0 prints raw, as
+  `version=0x01`. `export inventory` and `smoke` still give the raw byte.
+- `discover`'s event note counts every event that arrived during the walk, so
+  it reads higher on the same bus. `stats`' `event unroutable` stays at 0.
+
+**Backup and restore:**
+
+- `backup save`'s contested block reads `N address(es) are contested and NOT
+  recorded here`, where it read `answered undecodably`, and lists both kinds.
+  A collided address is no longer recorded as an unanchored entry.
+- `backup status` and `backup import` report the instance count, and `status`
+  lists each instance under its device.
+- An export is longer. A full blob is 3,208 bytes, which is 107 import lines.
+- `restore plan` and `restore groups` report every contested address as a
+  `contested` conflict, even with no move aimed at it.
+  - The remedy line reads `free a contested address with ...`, where it read
+    `free a contested target`.
+  - The device-space line ends `a contested d<N> needs a hardware pass`.
+
+**Elsewhere:**
+
+- `raw` and `raw2` of a commissioning frame need `allow_commissioning: true`
+  on the TCP shell. Without it they print `raw (commissioning frame): refused
+  by session policy`.
+- `capture` and `trace` measure `since_tx_us` from the frame end. Add 1664 to
+  compare a capture taken before this release.
+- `wait expired` can appear where `timeout` did, when the shell stopped waiting
+  on a busy bus.
+
+### Changed — ESPHome
+
+**Address changes:**
+
+- After `restore apply`, the group map follows each confirmed gear move,
+  rather than being rebuilt from the scan taken before the moves.
+  - Both ends of each move drop their cached level profile, and a refresh is
+    requested.
+  - Each move logs `group membership followed the move` and an `aX -> aY`
+    warning about YAML entities that still name the old address.
+  - The per-move `short address changed ... stale until the next scan` line is
+    gone. **Hardware-verified** on 1k.
+- After `address aN clear`, the device log reads `aN cleared: no longer polled
+  for group state (gX gY); the gear keeps its groups and still follows group
+  and broadcast commands`, where it read `retired from every group it was
+  known in`.
+  - The warning after it reads `nothing answers at aN now. Any entity
+    configured with address: N targets nothing until 'commission unaddressed'
+    re-addresses the unit, at an address only a scan can find`.
+
+**Other behaviour:**
+
+- The Identify button restores the level the same way the shell does. It logs
+  `back to level N`, `switched off again`, or `left at min` when the level was
+  unreadable. It blinks the address it started on, even if Target Address
+  changes mid-blink. **Unverified.**
+- A shell workflow's bus claim waits up to 5 s for queued work to drain, and is
+  refused if it does not, logging `queued traffic did not drain; claim
+  refused`.
+- The **DALI Command** text entity refuses a `raw` or `raw2` commissioning
+  frame with `commissioning frame; use the native CLI`.
+- `idle_timeout` now only reclaims a terminal left open and unused, and
+  `idle_timeout: 0` no longer costs the shell to a dropped connection.
+
+### Fixed
+
+- **Both Part 103 addressing encodings.** **Hardware-verified** on 2k, all three
+  writers.
+  - `address d<N> set d<M>` loads device DTR0 with `M`, not `(M << 1) | 1`,
+    and prints it so (`device DTR0=4` for d4). On `v2.0.0` it sent the device
+    to 2M+1, or nowhere for M ≥ 32.
+  - A device move in `restore apply` loads DTR0 raw too.
+  - `commission devices` sends INITIALISE `0x7F`, not `0x00`. `0x00` selects
+    the device at d0. On 2k it found neither of two unaddressed devices, and on
+    a bus whose d0 is occupied it would have re-addressed that device.
+- **The reply window was measured from after the stop bits.** That put the
+  undecodable-activity edge 1.664 ms past the standard's minimum. It is now
+  measured from the frame end. **Hardware-verified** for a decoded reply, in a
+  1k capture. The undecodable edge is host-tested only.
+- **`restore apply` did not confirm a move before the next one depended on it.**
+  **Hardware-verified.**
+- **A unit that missed the DTR0 load took whatever DTR0 last held.** It could
+  land on top of another unit. Now prevented by the read-back under *Added*.
+  **Host-tested.**
+- **`restore apply` handed the integration the scan it planned from,** so group
+  membership went stale after the moves. **Hardware-verified** on 1k.
+- **Events that arrived while the scheduler was in `SCHED_TX` or `WAIT_SETTLE`
+  were dropped,** including the inter-frame guard on an idle bus. They now
+  reach their subscribers. **Host-tested.**
+- **`raw` and `raw2` bypassed the commissioning policy.** **Host-tested.**
+- **The TX bit clock was not cache-safe in ESPHome builds.** NVS commits could
+  stall it mid-frame. Fixed by the sdkconfig options under *Breaking — build*.
+  **Unverified** beyond the generated sdkconfig.
+- **The TCP shell could read an occupied address as free.** Refresh and poll
+  work queued ahead of a probe outlasted its fixed 200 ms wait. The expired
+  wait reported `DALI_ERR_TIMEOUT`, which means silence. So `address` could
+  write onto an occupied address, and a `commission` pre-scan could offer it as
+  free. Three things changed:
+  - A claim now drains the queue first.
+  - An expired wait reports `DALI_ERR_WAIT_EXPIRED`.
+  - Single-frame waits are sized from the retry budget.
+
+  **Unverified** on a device.
+- **`identify` left the lamp at min.** **Hardware-verified** from a mid level on
+  1k. From max, from off, and on the ESPHome button it is unverified.
+- **The gear version printed as the byte halved.** **Host-tested.**
+- **The ESPHome log called a cleared lamp "retired from every group".** The
+  gear keeps its groups; only the integration's polling changed.
+- **A sensor whose instance was not on event scheme 2 polled only on its
+  interval.** Its events matched nothing. This is what slowed the 2k Steinel.
+  **Host-tested.**
+- **Two units that answered alike shared an address invisibly.** No scan
+  flagged it. **Host-tested.**
+- **The TCP shell had no send timeout and no keepalive.** A client that stopped
+  reading could hold a workflow, and the bus, for as long as TCP took to give
+  up. With `idle_timeout: 0`, a peer that vanished while idle held the shell
+  until reboot. **Unverified** on a device.
+- **The TCP shell's sockets were not counted** in ESPHome's lwIP socket pool.
+
+### Verification
+
+- **Host and CI.** 34 host suites, all passing. `dali_test.yaml` compiles on
+  ESPHome 2026.9.0, and the native firmware builds on IDF 6.0.1.
+- **`v2.0.0` features that have run on a bus since that tag:**
+  - `commission devices`
+  - `backup export` and `backup import`, in the version-1 format
+  - `address <aN> clear`
+  - `address <dN> set`, on the fixed encoding
+  - the move-aside path in `restore plan`
+- **Not yet on any bus:**
+  - equal-random-address recovery
+  - `restore groups`
+  - the version-2 backup and `restore instances`
+  - event-source matching
+  - the instance selectors
+  - the shared-address detection
+  - DT6, DT8, memory writes, and every input-device configuration write but
+    SET EVENT SCHEME
+  - the TCP shell hardening
+
+  `todo.md` has the procedure for each.
+
 ## v2.0.0
 
 **This is a breaking release for C API consumers and for out-of-tree build

@@ -101,6 +101,59 @@ typedef enum {
 DaliCliTokenizeResult dali_cli_tokenize(const char *line, DaliCliTokens *out);
 
 /* ---------------------------------------------------------------------------
+ * Peer classification
+ *
+ * A network front end serves whoever connects, and a web page can make a
+ * browser connect. A cross-site form, or a no-cors fetch with a text/plain body,
+ * POSTs to http://<device>:2323/ with no CORS preflight, and the shell reads
+ * the request as lines: the request line and the headers resolve as unknown
+ * verbs, and then every line of the body runs as a command. Any page open in a
+ * browser on the LAN could readdress the bus that way on a firmware that allows
+ * commissioning.
+ *
+ * So a network front end classifies the start of each connection before it
+ * lets a line through. An HTTP request opens with a method token, one space and
+ * a request target: `POST / HTTP/1.1`. A browser sends the origin form, which
+ * starts with '/', or `*` for `OPTIONS *`; the absolute and authority forms go
+ * only to proxies. Methods are uppercase letters, with '-' in the WebDAV ones.
+ * Verbs are lowercase and matched case-sensitively, so no line the shell
+ * accepts can open that way.
+ *
+ * Fed one byte at a time, the classifier decides within the first
+ * DALI_CLI_HTTP_METHOD_MAX + 2 bytes, and never stays undecided across a CR or
+ * LF. A front end that sniffs each byte before feeding it to the shell
+ * therefore never lets a line reach dispatch ahead of the verdict, without
+ * holding anything back. Only the first line is examined: a browser cannot put
+ * bytes ahead of its own request line, and a connection that has already
+ * spoken the shell is a shell client.
+ * --------------------------------------------------------------------------*/
+
+/* Longest method token classified as HTTP. The longest in the IANA registry,
+ * UPDATEREDIRECTREF, has 17 characters. */
+#define DALI_CLI_HTTP_METHOD_MAX 20u
+
+typedef enum {
+    DALI_CLI_PEER_UNDECIDED = 0,
+    DALI_CLI_PEER_SHELL,  /* the first line is not an HTTP request line */
+    DALI_CLI_PEER_HTTP,   /* the connection opened with an HTTP request */
+} DaliCliPeerVerdict;
+
+typedef struct {
+    DaliCliPeerVerdict verdict;
+    uint8_t            method_len;
+    bool               saw_space;
+} DaliCliPeerSniffer;
+
+/* Start classifying a new connection. */
+void dali_cli_peer_sniffer_init(DaliCliPeerSniffer *sniffer);
+
+/*
+ * Classify one more byte of the connection. Returns the verdict, which is final
+ * once it is not DALI_CLI_PEER_UNDECIDED: later bytes return it unchanged.
+ */
+DaliCliPeerVerdict dali_cli_peer_sniff(DaliCliPeerSniffer *sniffer, uint8_t ch);
+
+/* ---------------------------------------------------------------------------
  * Verb table
  * --------------------------------------------------------------------------*/
 

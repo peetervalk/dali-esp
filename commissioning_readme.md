@@ -7,7 +7,7 @@ another room, an address that has to be freed, gear coming off the wall — skip
 to [Change a bus that is already
 commissioned](#5-change-a-bus-that-is-already-commissioned).
 
-**Last reviewed:** 2026-09-03
+**Last reviewed:** 2026-10-02
 
 `dali-starter.yaml` is mostly a shim: it brings up the bus and opens the
 diagnostic shell on a TCP port. The shell is the tool. The buttons and the
@@ -54,9 +54,11 @@ native ESP-IDF build — not a subset written for ESPHome.
 
 **One shell session at a time.** Long shell workflows also gate the controller's
 other local producers, so a refresh cannot be inserted into a commissioning
-probe. A second connection is accepted only far enough to be told why it is
-closing, and a terminal closed without quitting is reclaimed by the
-`idle_timeout` in the YAML. This is local serialization, not proof that the
+probe. A second client waits, connected but unanswered, until the first
+session ends. A connection that drops is reclaimed within a minute, and a
+client that stops reading in the middle of a workflow is dropped once a write
+has made no progress for 10 s, which ends the workflow too. A terminal left open and unused is reclaimed by
+the `idle_timeout` in the YAML. This is local serialization, not proof that the
 physical DALI bus is single-master; another controller can still transmit.
 
 ## 3. Walk the bus
@@ -117,11 +119,16 @@ releases a quiescence you started by hand with `quiescent on all`. And if the
 release cannot be transmitted, the shell says so explicitly — control devices may
 stay silent, and `quiescent off all` is the fix.
 
-**It is still dependable only with a single unaddressed device on the bus.** The
-reply-activity, cleanup, and equal-random-address handling described here are
-host-tested, not a multi-gear HIL result: the collision classification they all
-rest on has never met a real overlapping reply. Commission new gear one piece at
-a time until that has been exercised on a real bus.
+**Add new gear a few units at a time.** Walks over two unaddressed units have
+run correctly on real buses, gear twice and control devices once. The
+undecodable-activity classification has met a genuine physical collision. Two
+things described here have not run on a bus:
+
+- the equal-random-address handling
+- the cleanup after a cancelled walk
+
+`todo.md` has the procedures that would close both. Read the post-scan every
+time; it is the backstop for both.
 
 Before the walk starts, `commission` pre-scans the bus to learn which short
 addresses are already taken. An address that answers that pre-scan with
@@ -364,31 +371,35 @@ clean event frame is too long to fit inside the window, so it is never read as
 a reply; see `project_log.md`, 2026-09-29.) Of the two walks, this is the one
 with more to gain from the bracket, not less.
 
-One part of that reasoning is still inference rather than observation: a device
-answering `COMPARE` from inside an open Part 103 addressing window, with no
-short address. Nothing in the clause separates that from the addressed-query
-case, and the broadcast address byte 0xFF does reach unaddressed devices, but
-the bus has not been asked that exact question. It is worth confirming in the
-same session as the first real `commission devices` run.
+The bus has since confirmed the one part of that reasoning that was inference.
+On 2k, the first `commission devices` run found two devices with no short
+address. They answered `COMPARE` from inside an open Part 103 addressing
+window, after the bracket's START QUIESCENT MODE.
 
-The remaining commissioning work is explicit:
+The remaining commissioning work:
 
-- The cross-part TERMINATE guard now runs, alongside the START/STOP QUIESCENT
-  bracketing. The two cover different halves of the same problem: quiescence
-  stops a control device *transmitting* into the run, and the Part 103 TERMINATE
+- **The two brackets cover different halves of the same problem.** Quiescence
+  stops a control device *transmitting* into the run. The Part 103 TERMINATE
   stops one sitting in its own addressing state and answering COMPARE as gear
-  that is not there — which is a state the Part 102 INITIALISE itself can put it
-  in. Neither reaches a device that never received the broadcast, and none of it
-  is HIL-validated. The reverse guard — bracketing control-device commissioning
-  with a Part 102 TERMINATE — is in place too, and is equally unvalidated.
-- Two gear that generate the same 24-bit random address are detected during the
-  run and sent back to being unaddressed, but they are not placed for you: a
-  second run is what gives them addresses. See "When two gear share a random
-  address" above. The detection has host vectors and no bus result.
-- DALI-2 priority/backoff and complete multi-master intervention handling remain
-  open. Local atomic sequences do not stop another physical master.
-- Multi-gear, mixed Part 102/Part 103, cancellation-fault, and external-master
-  scenarios still need hardware-in-loop runs before this warning can be relaxed.
+  that is not there, a state the Part 102 INITIALISE itself can put it in. The
+  reverse guard brackets control-device commissioning with a Part 102
+  TERMINATE.
+  - Every walk sends them, and walks with them have run on 2k, which carries
+    both gear and control devices.
+  - No bus has yet shown either one preventing the interference it is for.
+    That needs a unit that would otherwise have answered.
+  - Neither reaches a device that never received the broadcast.
+- **Equal random addresses.** Two gear that generate the same 24-bit random
+  address are detected during the run and sent back to being unaddressed. They
+  are not placed for you: a second run gives them addresses. See "When two
+  gear share a random address" above. The detection has host vectors and no
+  bus result.
+- **Other masters.** DALI-2 priority and backoff, and complete multi-master
+  intervention handling, remain open. Local atomic sequences do not stop
+  another physical master.
+- **Still owed a hardware run:** cancellation faults, equal random addresses,
+  an external master, and a walk over a whole installation's worth of
+  unaddressed gear.
 
 The verb is refused unless the YAML says `allow_commissioning: true`. The shell
 port is unauthenticated — the same posture as OTA and the web server, but a lower
@@ -396,6 +407,12 @@ bar than physical access to a UART — and one typed line can readdress a whole
 bus. `dali-starter.yaml` enables it because commissioning is what that firmware
 is for. Set it to `false` on anything left flashed on a shared network:
 RANDOMISE cannot be undone.
+
+A web page cannot drive the shell through a browser. A connection that opens
+with an HTTP request is closed before any of its lines runs, and the device log
+names the address it came from. Releases up to `v2.0.0` lack this: there, a
+page open in any browser on the network could send shell lines in the body of
+a POST, so keep `allow_commissioning` off on those wherever a browser is used.
 
 The same rule refuses the nine commissioning primitives under `special`
 (`initialise`, `randomise`, `search-h/m/l`, `program-short`, `withdraw`, and both
@@ -947,11 +964,13 @@ backup: units sharing one short address answer as one, so no identity can be
 backup: 'address <aN> clear' frees the gear ones for 'commission unaddressed'
 ```
 
-A contested **control device** address gets different advice, because only the
-gear space has a verb for it: `address` is control-gear only, and the Part 103
-SET SHORT ADDRESS is reached from `restore` alone — which needs a unit that
-already answers as itself, which a contested one does not. That case still needs
-a hardware pass.
+A contested **control device** address gets different advice. `address d<N>
+clear` exists, but its contested arm opens only when the collision reads as
+undecodable activity. On 2k, two devices sharing d0 read as silence instead,
+and the verb answered `does not answer`. So the shell still names a hardware
+pass. The by-hand clear that worked there is device DTR0 `0xFF` (`raw C130FF
+len=24`), then SET SHORT ADDRESS sent twice at the shared address (`raw2
+<addr>FE14 len=24`, with `01` for d0). Follow it with `commission devices`.
 
 An unanchored entry is at least an entry — the address is in the record and in
 `backup status`, and one fixture needs doing by hand. A contested address
@@ -1037,8 +1056,8 @@ Clearing a4 and re-commissioning turns two units nothing could read into two
 units that answer separately and read back their own identification numbers — at
 which point a second `restore plan` can place them, and whatever the backup
 recorded for a4 comes back. Contested **device** addresses are reserved and
-reported the same way, but there is no verb that de-addresses a control device,
-so one of those needs a hardware pass.
+reported the same way. Clearing one is less certain, as the backup section
+above explains, so the plan names a hardware pass for them.
 
 #### Putting group membership back
 
@@ -1125,14 +1144,19 @@ you are looking at:
 backup: 4 entries and 5 instance setting(s), loaded from storage
 ```
 
-**Backups taken before 2026-10-01 are gone.** That is when the format went to
-version 2 to hold instance settings. A backup stored by an older build no
-longer loads, because the stored record changed size, and an exported
-version-1 file is refused on import. After flashing, run `backup save` again.
+**A backup taken by `v2.0.0`, or by `dev` before 2026-10-01, is gone.** That
+is when the format went to version 2, to hold instance settings.
+
+- A backup stored by an older build no longer loads, because the stored record
+  changed size.
+- An exported version-1 file is refused on import.
+- After flashing, run `backup save` again.
+- If you need a restore from an old backup, run it before upgrading.
 
 That flash is the NVS partition ESPHome's default layout already provides — no
 extra partition, and nothing to configure. The shell task stages the blob and
-the main loop performs the write, because the preferences API is Core 0 only;
+the main loop performs the write, because the preferences API belongs to the
+main loop;
 NVS itself is flushed on ESPHome's `flash_write_interval`, 60 s by default, or
 at a clean shutdown. A `backup save` seconds before a power cut is therefore
 still in RAM when the lights go out, and `backup status` after the reboot is
@@ -1173,14 +1197,25 @@ blob is checked end to end before a byte of it is kept.
 
 #### What has not been proven
 
-**The address path has run on a bus.** On the 2k installation on 2026-09-29,
-`backup save`, `export` and `import` and `restore plan` / `restore apply` all
-worked, with every move confirmed. That included dependent moves, a swap staged
-through a spare address, and moving aside a unit the backup had never seen.
-That was the version-1 format. These have host vectors and nothing more: `apply`
-stopping at a move it cannot confirm, a restore planned against a contested
-address, the rejection paths, `restore groups apply`, both `restore instances`
-verbs, and the instance settings `backup save` now records.
+**The address path has run on a bus, in the version-1 format.** On 2k on
+2026-09-29, these all worked, with every move confirmed:
+
+- `backup save`, `export` and `import`
+- `restore plan` and `restore apply`, including dependent moves, a swap staged
+  through a spare address, and moving aside a unit the backup had never seen
+
+On 1k, `apply` stopped at a move it could not confirm and sent nothing after
+it, and a re-plan finished the job.
+
+These have host vectors and nothing more:
+
+- a restore planned against a contested address
+- the rejection paths
+- `restore groups apply`
+- both `restore instances` verbs
+- the instance settings `backup save` now records
+
+`todo.md` has the procedures.
 
 A restore is only as good as what `backup save` managed to read. A save cannot
 record gear that has no short address. It warns when the bus reports any, so
@@ -1221,13 +1256,20 @@ Both lines need `allow_commissioning: true`, and neither is reachable from the
 **DALI Command** text entity at all — which is the point: this is the pair that
 an unauthenticated port should not accept from one typed line.
 
-**Do not run this on an installation you need working.** Commissioning is
-dependable today only with a *single* unaddressed device on the bus (see
-[Assigning short addresses](#assigning-short-addresses)), so the first line
-reliably destroys the addressing of every fixture while the second cannot
-reliably restore it. Until the multi-gear walk has a hardware result, a bus-wide
-redo means de-addressing and re-commissioning one fixture at a time, physically
-disconnecting the rest or working through gear that is powered down.
+**Do not run this on an installation you need working.** The first line
+reliably destroys the addressing of every fixture. The largest walk on record
+is two units, and two units drawing the same random address has never met a
+bus (see [Assigning short addresses](#assigning-short-addresses)). So a single
+walk putting back a whole installation is unproven.
+
+Until it has a hardware result, redo a bus a few fixtures at a time:
+
+1. De-address a few with `address a<N> clear`.
+2. Run `commission unaddressed`.
+3. Run `restore plan` and `restore apply`.
+4. Move on to the next few.
+
+The rest stay addressed throughout.
 
 What is safe, and usually what "redo the configuration" actually means:
 

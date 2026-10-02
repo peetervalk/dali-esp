@@ -131,6 +131,46 @@ DaliCliTokenizeResult dali_cli_tokenize(const char *line, DaliCliTokens *out)
 }
 
 /* ---------------------------------------------------------------------------
+ * Peer classification
+ * --------------------------------------------------------------------------*/
+
+void dali_cli_peer_sniffer_init(DaliCliPeerSniffer *sniffer)
+{
+    if (sniffer != NULL) {
+        *sniffer = (DaliCliPeerSniffer){ .verdict = DALI_CLI_PEER_UNDECIDED };
+    }
+}
+
+DaliCliPeerVerdict dali_cli_peer_sniff(DaliCliPeerSniffer *sniffer, uint8_t ch)
+{
+    if (sniffer == NULL) {
+        return DALI_CLI_PEER_SHELL;
+    }
+    if (sniffer->verdict != DALI_CLI_PEER_UNDECIDED) {
+        return sniffer->verdict;
+    }
+
+    bool upper = (ch >= (uint8_t)'A' && ch <= (uint8_t)'Z');
+    bool hyphen = (ch == (uint8_t)'-' && sniffer->method_len > 0u);
+
+    if (sniffer->saw_space) {
+        /* The byte after the method's space opens the request target. */
+        sniffer->verdict = (ch == (uint8_t)'/' || ch == (uint8_t)'*')
+                               ? DALI_CLI_PEER_HTTP
+                               : DALI_CLI_PEER_SHELL;
+    } else if (ch == (uint8_t)' ' && sniffer->method_len > 0u) {
+        sniffer->saw_space = true;
+    } else if ((upper || hyphen) && sniffer->method_len < DALI_CLI_HTTP_METHOD_MAX) {
+        sniffer->method_len++;
+    } else {
+        /* Anything else here, CR and LF included, ends the method token with
+         * something no request line contains, so the line is not one. */
+        sniffer->verdict = DALI_CLI_PEER_SHELL;
+    }
+    return sniffer->verdict;
+}
+
+/* ---------------------------------------------------------------------------
  * Verb table
  *
  * min_args/max_args count the arguments after the verb. A verb that dispatches

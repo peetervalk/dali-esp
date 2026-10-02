@@ -3,7 +3,7 @@
 Every verb, its arguments, and its named command tables, for both surfaces that
 accept typed commands.
 
-**Last reviewed:** 2026-09-03
+**Last reviewed:** 2026-10-02
 
 Frame layouts and opcodes are in `dali_protocol.md`. Per-capability status —
 shared API, host vector, real-bus result, exposure — is in
@@ -28,7 +28,7 @@ the tokenizer, argument parsers, named tables, and reply decoding
 (`components/dali/dali_cli.c`), so a verb, an argument form, and a command name
 mean the same thing on both. What it cannot do is stream or block: a result is
 one Home Assistant text state, and every console verb is one enqueue and one
-completion because Core 0's loop may not block. That is the whole basis of the
+completion because ESPHome's main loop may not block. That is the whole basis of the
 split — see the availability column below, and
 `dali_capability_matrix.md` for the reasoning per verb.
 
@@ -617,6 +617,17 @@ That last line is the resolution: `commission devices` finds unaddressed devices
 by searching for them, which is the positive evidence this path lacks. A device
 that shows up in the walk was cleared; one that does not, was not.
 
+**A shared device address can defeat `clear`.** Its contested arm opens on an
+undecodable reply. On 2k, the Steinel and the Casambi colliding at d0 read as
+silence instead, and the verb answered `d0 does not answer; nothing to clear`.
+The by-hand clear works however many units share the address:
+
+```text
+raw C130FF len=24        # device DTR0 = 0xFF, "no short address"
+raw2 01FE14 len=24       # SET SHORT ADDRESS at d0, twice; the byte is (N << 1) | 1
+commission devices
+```
+
 Both device arms are gated by `allow_commissioning: true`, for the reason the
 gear ones are — they are the same DALI command differing only in what DTR0
 holds. Nothing in the integration caches a device short address, so neither arm
@@ -1077,9 +1088,10 @@ commission unaddressed [first] [max]    # assign short addresses
 ```
 
 `commission` only ever addresses gear that has none, so it is the verb for new
-gear and never the verb for a change. Re-grouping, re-addressing, and retiring
-a fixture are `config` and `config-dtr0` commands — see the recipes below and
-the reconfiguration section of `commissioning_readme.md`.
+gear and never the verb for a change. Re-grouping and re-addressing are
+`address` commands, or their unchecked `config` and `config-dtr0` spellings —
+see *Address and Group Membership*, the recipes below, and the reconfiguration
+section of `commissioning_readme.md`.
 
 `quiescent` sends the Part 103 device-level `START`/`STOP QUIESCENT MODE`
 (opcodes `0x1D`/`0x1E`, instance byte `0xFE`, send-twice). `all` is address byte
@@ -1093,7 +1105,9 @@ until `quiescent off` releases it; and nothing in this project tracks the state
 or releases it on exit, so a forgotten `quiescent on all` leaves the installation
 looking broken. Whether the standard also ends the state on its own timer is not
 established here — treat `off` as the only thing that reliably releases it.
-Host-tested; no bus has run it.
+On 2k, `quiescent on all` silenced the Steinel's event traffic for a whole
+walk, and `off all` released it. Nothing reads the state back: QUERY QUIESCENT
+MODE is not implemented.
 
 Every operator-driven walk now takes this bracket on its own behalf, so an
 operator rarely needs the verb for a scan: `scan`, `discover`, both
@@ -1107,21 +1121,27 @@ stay outside it: `find switches`, whose whole purpose is listening for events,
 and the integration's own periodic scan, which runs with nobody present to
 accept a silent installation.
 
-Commissioning remains hardware-dependable only with a single unaddressed device
-on the bus. The receive path now attributes observations to a reply window
-measured from the end of the forward frame — opening at 5.5 ms for undecodable
-activity, which is the case `COMPARE` turns on, and closing at 28.664 ms — and
-distinguishes three cases during `COMPARE`:
+The receive path attributes observations to a reply window measured from the
+end of the forward frame. The window opens at 5.5 ms for undecodable activity,
+which is the case `COMPARE` turns on, and closes at 28.664 ms. During `COMPARE`
+it distinguishes three cases:
 
 - silence is NO;
 - qualified, response-like malformed activity is `DALI_ERR_RX_ACTIVITY`, which
   `COMPARE` alone treats as YES;
 - ambiguous malformed activity or RX overflow is an error and aborts the run.
 
-This fixes the software-side collision inversion recorded in `project_log.md`,
-but overlapping replies and the activity qualifier have host coverage only; they
-have not been validated as physical-bus collision detection. Do not rely on
-multi-device commissioning until that hardware validation is complete. A run now brackets itself with broadcast
+This fixes the software-side collision inversion recorded in `project_log.md`.
+
+- Walks over two unaddressed units have run correctly on 2k, for gear and for
+  control devices. Whenever both units were at or below the search address,
+  their `COMPARE` replies overlapped.
+- The activity qualifier has met one genuine physical collision, through the
+  scan.
+- Two units drawing the same random address have not met a bus, so add new
+  gear a few units at a time.
+
+A run brackets itself with broadcast
 `START`/`STOP QUIESCENT MODE`, so control devices are silent for its duration
 and cannot put an event frame into a COMPARE reply window. The release is
 unconditional, so a run also releases a quiescence started by hand with
@@ -1149,11 +1169,16 @@ There is no verb for it; the Part 102 `special terminate` is unrelated and
 addresses gear.
 
 Over TCP, `commission` and the nine commissioning specials are refused unless the
-YAML sets `allow_commissioning: true`, because the port is unauthenticated. See
+YAML sets `allow_commissioning: true`, because the port is unauthenticated. A
+connection that opens with an HTTP request is closed before any of its lines
+runs, so a web page cannot reach the shell through a browser. See
 `commissioning_readme.md` for the workflow.
 
 A long verb prints as it goes and holds the bus for as long as it runs.
-Cancellation or a TCP disconnect is noticed between ordinary bus steps. Once the
+Cancellation or a TCP disconnect is noticed between ordinary bus steps. A client
+that stops reading without closing counts as disconnected once a write has made
+no progress for 10 s, so a suspended terminal or a sleeping laptop holds the bus
+for seconds rather than the minutes TCP takes to give up. Once the
 opening atomic sequence has been handed to the transport, however, `INITIALISE`
 may already have reached the bus. Cleanup therefore bypasses the cancellation
 gate and attempts a final Part 102 `TERMINATE` before returning. The original
@@ -1325,8 +1350,11 @@ restore: free a contested address with 'address <aN> clear', then
 
 Once cleared and re-commissioned, both units answer separately, both read back
 their own identification numbers, and a second `restore plan` places them. The
-device space is reserved the same way and reported the same way, but has no verb
-that takes an address away, so a contested `d<N>` target needs a hardware pass.
+device space is reserved the same way and reported the same way. Its remedy is
+less certain, because `address d<N> clear` opens its contested arm only when
+the collision reads as undecodable activity. On 2k, two devices sharing d0 read
+as silence. So the shell names a hardware pass for a contested `d<N>`. See *The
+control-device space* for the by-hand clear.
 
 ### `restore groups` — a different repair
 
@@ -1476,9 +1504,10 @@ apply` have run on real gear and control devices, in the version-1 format. That
 covers dependent moves, a swap staged through a spare address, moving aside a
 unit the backup had never seen, and the per-move confirmation in both spaces.
 Both `restore groups` verbs, both `restore instances` verbs, and the instance
-records `backup save` now takes, have host vectors only. `current_status.md` has what is verified and `project_log.md` the
-sessions behind it. See `commissioning_readme.md` for the workflow this belongs
-to.
+records `backup save` now takes, have host vectors only. Bus status per
+capability is in `dali_capability_matrix.md`, what has yet to run in
+`todo.md`, and the sessions behind both in `project_log.md`. See
+`commissioning_readme.md` for the workflow this belongs to.
 
 ## Diagnostics
 

@@ -3,7 +3,7 @@
 Product: Steinel HF 360-2 DALI-2 IPD (art. 064280)
 Reference installation, sensor at short address 0
 
-**Last reviewed:** 2026-08-14
+**Last reviewed:** 2026-10-02
 
 The HF 360-2 DALI-2 IPD is a **control device** (IEC 62386-103), not control
 gear. Sensitivity and detection range cannot be set over Bluetooth — the app
@@ -17,6 +17,34 @@ Commands below are shell verbs (`tools/dali-shell`, or the serial CLI). The
 Home Assistant command console spells them identically — anything declaring a
 `text:` platform and a `command_result:` sensor has the same verbs, including
 `dali-starter.yaml`. Verb syntax is in `dali_commands.md`.
+
+## Instance Layout
+
+| Instance | Type | Meaning | How the integration reads it |
+|---:|---:|---|---|
+| 0 | 4 | Light/lux | Two-byte poll, `scale: 0.01` |
+| 1 | 3 | Occupancy | One-byte poll: 0 / 85 / 170 / 255 |
+| 2 | 0 | Temperature | Two-byte poll, `T_C = raw * 0.1 - 5` |
+| 3 | 0 | Humidity | One-byte poll, `H_percent = raw * 0.5` |
+
+Polling is authoritative. An event from the instance requests an immediate
+poll, but the event information is never treated as a sensor value.
+
+**The reference unit:**
+
+- Instances 0 and 1 are the only emitters. Both read `status=0x02` and event
+  priority 4.
+- Instance 0 sends a lux heartbeat every 3.000 s, with a constant payload.
+  Instance 1 sends an occupancy heartbeat every 30 s.
+- Instances 2 and 3 read `status=0x00` and send nothing.
+- On occupancy (instance 1):
+  - event filter `0x07`
+  - report timer 30 s, not Steinel's 5
+  - deadtime 500 ms
+- `occ-capabilities` reads `0x00`, and range and sensitivity read MASK. The
+  unit keeps those in Bank 2, below, rather than in the Part 303 settings.
+
+So walk-time event counts on this bus measure elapsed time, not movement.
 
 ## Bank 2 Offset Map
 
@@ -98,14 +126,25 @@ iquery 0 1 occ-report-timer    # expect 5 (5 seconds)
 iquery 0 1 event-filter0       # expect 7
 ```
 
-The integration polls occupancy at once only for a device/instance event, so
-both emitting instances must be on event scheme 2. On scheme 0 occupancy still
-works, but only on its poll interval. Both were found at 0 on 2026-10-01:
+Keep both emitting instances on event scheme 2, device/instance. It is the only
+scheme whose events carry both the short address and the instance number, so
+the integration matches them to a sensor exactly.
+
+- On any other scheme, `dev` still polls on an event, by inference, and logs a
+  warning about the sensor.
+- `v2.0.0` and earlier match scheme 2 only. On scheme 0, occupancy there
+  follows its poll interval alone.
+
+Both instances were found at 0 on 2026-10-01, and nothing records what set
+them:
 
 ```text
 iquery 0 1 event-scheme        # expect 2; same for instance 0
 iconfig 0 1 set-event-scheme 2 # if not, then read it back
 ```
+
+`backup save` records each instance's event scheme, and `restore instances`
+puts it back.
 
 Restore the report timer to 5 seconds:
 

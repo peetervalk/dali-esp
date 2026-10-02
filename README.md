@@ -9,13 +9,14 @@ A reusable C protocol stack (`components/dali`) drives the bus — PHY, schedule
 - Lights by group, short address, or broadcast, with query-based state readback; short-address entities query themselves by default and groups use a representative member (`QUERY ACTUAL LEVEL`)
 - Brightness maps through the DALI arc-power curve rather than a linear percentage. Each target's curve and MIN/MAX LEVEL window are queried from the gear and cached; a group entity uses the union of its members' windows. `dimming_curve`, `min_level`, and `max_level` override the queried values per light.
 - Multi-frame operations (DTR loads, ENABLE DEVICE TYPE, memory reads, send-twice config) run as atomic scheduler transactions, so locally scheduled traffic cannot interleave between the steps
-- Bus scan and discovery from Home Assistant; scan-verified group membership is persisted to flash and survives reboots; control-gear commissioning through the native serial CLI or the TCP diagnostic shell with `allow_commissioning: true`
+- Bus scan and discovery from Home Assistant; scan-verified group membership is persisted to flash and survives reboots; control-gear and control-device commissioning through the native serial CLI or the TCP diagnostic shell with `allow_commissioning: true`
+- Backup and restore keyed to each unit's Bank 0 identification number rather than its address: short addresses in both address spaces, gear group membership, and control-device instance settings
 - DALI-2 input devices: occupancy, lux, temperature, humidity — authoritative polling, with any event that could be the instance's own requesting an immediate poll (`poll_on_event`): exactly on event scheme 2 (device/instance), by inference on the others, and a log warning when a polled instance is not on scheme 2
 - Passive observation of existing pushbutton couplers (`headless_dispatch`): couplers keep commanding the lamps, ESP32 keeps HA state in sync
 - Diagnostic shell over TCP (`shell:`): the full native CLI — discover, identify, commissioning, live trace, rolling capture, JSON export — from a terminal, with no serial cable. The same shell, running the same code, as the serial console on a native ESP-IDF build
 - Free-text DALI command console in HA: queries, config, memory bank read/write, raw 16/24-bit frames
 - Protocol core is plain C with no ESPHome dependency; protocol and cross-task
-  helpers are covered by 31 host test suites, and CI additionally builds the
+  helpers are covered by 34 host test suites, and CI additionally builds the
   ESPHome component, the native ESP-IDF firmware, and a release tag as a
   consumer would fetch it
 
@@ -25,7 +26,7 @@ A reusable C protocol stack (`components/dali`) drives the bus — PHY, schedule
 |---|---|
 | MCU | ESP32 (classic), tested on ESP32-WROVER-E / ESP32-DevKitC-VE. Other variants are untested |
 | Cores | Two recommended; a single-core part is handled but has never been built or run here |
-| RAM | ~134 KiB of static DRAM at link time, 65 KiB of it the diagnostic shell. No PSRAM required |
+| RAM | ~138 KiB of static DRAM at link time with every option on; the diagnostic shell is the largest single item. No PSRAM required |
 | Flash | 4 MB. ESPHome's default ESP32 layout is two 1.75 MB app slots plus a 448 KiB NVS partition, and NVS is where a saved backup lives |
 | DALI interface | MikroE [DALI 2 Click](https://www.mikroe.com/dali-2-click) |
 | Wiring | TX → GPIO18, RX → GPIO19 |
@@ -34,13 +35,13 @@ Notes: GPIO16/17 are unavailable on WROVER-E — the PSRAM die uses them, and dr
 
 ### Cores
 
-The DALI worker and the scan task both block on bus round-trips — a full scan for tens of seconds — so on a dual-core part they are pinned to Core 1 and the ESPHome main loop keeps Core 0 to itself. Two cores is what the firmware is tested on.
+The DALI worker, the scan task and the shell task all block on bus round-trips, a full scan for tens of seconds, so they run as their own tasks and never on the main loop. On a dual-core part they are pinned to core 1. ESPHome 2026.9 pins its main loop to core 1 as well, so the two share that core. A blocked task yields, but the PHY's short pre-transmit idle check busy-waits on that core; `current_status.md` lists it under *Known Limitations*. Two cores is what the firmware is tested on.
 
 A single-core target is handled rather than supported: `dali_core_affinity.h` requests no affinity when the part reports one core, because `xTaskCreatePinnedToCore()` fails outright against a core that does not exist. Nothing here has been built or run on one, and a scan there would share its core with Wi-Fi and the API for the whole walk.
 
 ### Memory
 
-Both columns are the same tree (`dev`, 2026-09-04) built for the classic ESP32 with esp-idf: [dali_test.yaml](dali_test.yaml) — the CI config, which enables everything the component has — and the same config with the `shell:` block removed.
+Both columns are the same tree (`dev`, 2026-09-04) built for the classic ESP32 with esp-idf: [dali_test.yaml](dali_test.yaml) — the CI config, which enables everything the component has — and the same config with the `shell:` block removed. The table is re-measured at each release. Since that build, `dali_test.yaml` has grown to 141,792 B (138.5 KiB) of static DRAM, mostly in the shell's caches and the larger backup. The without-shell column has not been re-measured.
 
 | Segment | With `shell:` | Without | Region |
 |---|---|---|---|
@@ -61,9 +62,9 @@ Two things survive a reboot, both through ESPHome's preferences API — which on
 | What | Size | Written when |
 |---|---|---|
 | Scan-verified group membership | 144 B | a scan, or an add-group/remove-group console command, changes it |
-| Address backup (`backup save`) | up to 2448 B | `backup save`, or a completed `backup import` |
+| Address backup (`backup save`) | up to 3216 B | `backup save`, or a completed `backup import` |
 
-Both are staged in RAM by the task that produced them and written by the main loop, because the preferences API is Core 0 only. NVS is flushed on ESPHome's `flash_write_interval` — 60 s by default — or at a clean shutdown, so a `backup save` seconds before a power cut is not on flash yet. After a reboot, `backup status` reporting `loaded from storage` is the confirmation that one made it. Reboots and OTA updates keep it; erasing the chip or moving the partition layout does not.
+Both are staged in RAM by the task that produced them and written by the main loop, because the preferences API belongs to the main loop and is not safe to call from another task. NVS is flushed on ESPHome's `flash_write_interval` — 60 s by default — or at a clean shutdown, so a `backup save` seconds before a power cut is not on flash yet. After a reboot, `backup status` reporting `loaded from storage` is the confirmation that one made it. Reboots and OTA updates keep it; erasing the chip or moving the partition layout does not.
 
 The native ESP-IDF serial firmware passes no persistence hooks at all, so a backup taken there lives until reboot and `backup export` is how it leaves the device. The shell says which case you are in; see [commissioning_readme.md](commissioning_readme.md).
 
@@ -91,22 +92,26 @@ The native ESP-IDF serial firmware passes no persistence hooks at all, so a back
      result as JSON. `help` lists every verb. With no client to hand,
      `nc <address> 2323` is a complete if unfriendly substitute.
 
-     The commissioning entry point is `commission unaddressed [first] [max]`.
-     Over TCP it is refused unless the firmware sets
-     `shell: { allow_commissioning: true }`; the native serial shell permits it.
-     Timestamped reply-activity handling and the safety `TERMINATE` cleanup path
-     are host-tested, not real-bus proof of multi-device commissioning. Use one
-     unaddressed control gear at a time for now.
+     The commissioning entry points are `commission unaddressed [first] [max]`
+     for control gear and `commission devices` for control devices. Over TCP
+     they are refused unless the firmware sets
+     `shell: { allow_commissioning: true }`; the native serial shell permits
+     them. Walks over two unaddressed units have run correctly on real buses, in
+     both address spaces. Two units drawing the same random address have not,
+     and neither has a walk cancelled partway, so add new gear a few units at a
+     time and read the post-scan the walk prints.
 
      `backup save` records which physical unit — by its Bank 0 identification
      number, which no addressing operation changes — holds which short address,
      and `restore plan` / `restore apply` put them back afterwards using plain
      addressed commands and no `INITIALISE` window. Take one before anything
-     that re-addresses in bulk. `backup export` prints it as the `backup import`
+     that re-addresses in bulk. It also records gear group membership and each
+     control device's instance settings, which `restore groups` and `restore
+     instances` put back. `backup export` prints it as the `backup import`
      script that reads it back, which is how a backup is kept off a device with
-     no persistent store. `backup save`/`status` and `restore plan`/`apply` have
-     run correctly on a real bus; `backup import`/`export` and `restore groups`
-     are host-tested only.
+     no persistent store. On `dev` the backup format is version 2, and a backup
+     taken by `v2.0.0` does not load. [todo.md](todo.md) lists what has yet to
+     run on a bus.
 
      `export config` answers the other half: it prints the `dali:` block, and
      the `light:` and `sensor:` entries naming it, as YAML you can paste back.
@@ -241,38 +246,45 @@ text:
 - [dali_commands.md](dali_commands.md) — every verb and named command table, for the shell and the HA console
 - [dali_protocol.md](dali_protocol.md) — frame layouts, opcode tables by IEC part, event decoding
 - [dali_capability_matrix.md](dali_capability_matrix.md) — per-capability status: shared API, native CLI verb, host vector, real-bus result, ESPHome surface
-- [CHANGELOG.md](CHANGELOG.md) — per-release changes, with the C API and operator-visible migrations
-- [current_status.md](current_status.md) — project state, known limitations, roadmap
-- [project_log.md](project_log.md) — verification history, investigations, and the unreleased-change list behind those claims
-- [steinel_bank2_reference.md](steinel_bank2_reference.md) — Steinel HF 360 II memory bank tuning
+- [CHANGELOG.md](CHANGELOG.md) — per-release changes, with the C API and operator-visible migrations; *Unreleased* collects what `dev` has since the last tag
+- [current_status.md](current_status.md) — what the firmware does now, and its known limitations
+- [todo.md](todo.md) — what has yet to run on a real bus, with the procedure for each, then the development backlog
+- [project_log.md](project_log.md) — verification history and investigations: the dated evidence
+- [steinel_bank2_reference.md](steinel_bank2_reference.md) — Steinel HF 360 II instance layout and memory bank tuning
 
 ## Scope and limitations
 
 - Control gear: DT6 (LED) and DT8 (colour) are implemented. Other device types (DT0 fluorescent, DT1 emergency, …) are not.
 - One DALI bus per controller. Direct-control couplers are additional transmitters;
   simultaneous traffic is not collision-safe.
-- Commissioning preserves frame-like, undecodable reply-window activity for
-  COMPARE and attempts an abort-bypassing safety `TERMINATE` if the workflow is
-  cancelled. Those paths are host-tested only: real-bus multi-device
-  commissioning remains unverified, so the supported operating procedure is one
-  unaddressed gear at a time. A run brackets itself with broadcast Part 103
-  START/STOP QUIESCENT MODE so control devices cannot transmit into a COMPARE
-  reply window, but that too is host-tested only and cannot reach a device that
-  missed the broadcast. Two gear that draw the same random address are detected
-  at VERIFY, de-addressed, and left for a second run to place -- host-tested,
-  same caveat. Cross-part addressing interference is guarded in one direction —
-  a run brackets itself with Part 103 TERMINATE so a control device cannot sit in
-  its own addressing state and answer COMPARE as gear — but control-device
-  commissioning itself, and multi-master arbitration, are not implemented.
-- Implemented does not mean verified on hardware. Several paths — the DT6/DT8
-  command sets, memory writes, input-device configuration — have host vectors but
-  no recorded real-bus result; [dali_capability_matrix.md](dali_capability_matrix.md)
-  states which is which per capability.
+- Commissioning reads frame-like, undecodable reply-window activity as YES
+  during COMPARE. Each walk brackets itself with broadcast START/STOP QUIESCENT
+  MODE, so control devices do not transmit into a COMPARE reply window. It also
+  sends a cross-part TERMINATE, so a unit of the other kind cannot sit in its
+  own addressing state and answer COMPARE. A safety `TERMINATE` goes out however
+  the walk ends, cancellation included. Both control gear and control devices
+  have a walk.
+  - Walks over two unaddressed units have run correctly on real buses.
+  - Two units drawing the same random address are detected at VERIFY,
+    de-addressed, and left for a second run to place. That has never met a bus,
+    and neither has a cancelled walk's cleanup.
+  - So add new gear a few units at a time.
+  - The bracket cannot reach a device that missed the broadcast.
+  - Multi-master arbitration is not implemented.
+- Implemented does not mean verified on hardware. Several paths have host
+  vectors but no recorded real-bus result:
+  - the DT6/DT8 command sets
+  - memory writes
+  - every input-device configuration write but SET EVENT SCHEME
+
+  [dali_capability_matrix.md](dali_capability_matrix.md) states which is which
+  per capability, and [todo.md](todo.md) gives the procedure that would close
+  each gap.
 - This is an independent project. It implements and is tested against useful parts of IEC 62386, but it is **not** a DALI Alliance certified product. DALI and DALI-2 are trademarks of the Digital Illumination Interface Alliance.
 
 ## Development
 
-Host tests (no hardware needed) — 26 suites over the C protocol stack and the
+Host tests (no hardware needed) — 34 suites over the C protocol stack and the
 cross-task helpers the ESPHome layer depends on:
 
 ```sh

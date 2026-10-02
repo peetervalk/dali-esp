@@ -11,7 +11,7 @@
 Frame layouts, opcode tables, and standard behaviour, mapped to what this
 project implements. It is not a replacement for IEC 62386.
 
-**Last reviewed:** 2026-08-25
+**Last reviewed:** 2026-10-02
 
 For the verbs that send these frames, see `dali_commands.md`. For what has been
 run against real gear, see `dali_capability_matrix.md`.
@@ -132,10 +132,16 @@ counted in `undecodable_count`, and left `present = false`:
   sixty-three, and aborting would take the ESPHome boot scan and the `commission`
   pre-scan down with it.
 
-Gear sharing a short address is the expected cause. The classification itself is
-still awaiting the physical collision captures noted below. The classification has host coverage, but
-the response-like thresholds and overlapping-reply behaviour have not yet been
-validated with physical collision captures or hardware-in-the-loop tests.
+Gear sharing a short address is the expected cause. The classification has met
+one physical collision, on 2k: a driver that regained power on an occupied
+address read as `contested`, with the right remedy. Two things are still
+unchecked:
+
+- the response-like thresholds, against a capture of the collision itself
+- the 5.5 ms edge, against a collision, since it moved to the frame end
+
+Units that answer in step decode as one clean reply instead. The scan catches
+those through a colliding Bank 0 identity read; see `dali_commands.md`.
 
 ## Control Gear — IEC 62386-102
 
@@ -222,8 +228,10 @@ has no common parser — its contents are optional OEM data.
 
 `READ MEMORY LOCATION` auto-increments the device's offset cursor, so a block
 read must stay atomic: an interrupted and retried read returns the bytes after
-the ones asked for. Memory transactions are not yet protected by a
-scheduler-level session, and this layout correction is not hardware-verified.
+the ones asked for. Every block read therefore goes out as one scheduler
+sequence. The layout has been read on real gear many times. `meminfo`, every
+`backup save` and every `restore` confirmation read the identification number
+at `0x0B`, and restores have matched units by it.
 
 ## Special Commands
 
@@ -391,8 +399,9 @@ Both accept any 24-bit device command, queries included — a broadcast query
 collides by construction, which the operator surfaces warn about rather than the
 builder forbidding it.
 
-`quiescent on|off <addr|all>` is the verb on both front ends. Host-tested;
-no bus has run it.
+`quiescent on|off <addr|all>` is the verb on both front ends. On 2k, `quiescent
+on all` silenced the Steinel's events for a whole walk, and `off all` released
+it. Without QUERY QUIESCENT MODE, the silence is the only read-back.
 
 ### Part 103 special commands
 
@@ -426,9 +435,17 @@ DTR loads and memory writes have their own builders,
 `dali_build_control_device_dtr_data()` and
 `dali_cmd_control_device_write_memory_location*()`. `TERMINATE` came first, on
 2026-08-26, because control-*gear* commissioning needs it — see Cross-Part
-Interference. `DTR0`/`DTR1 DATA` have met a bus inside every device-space
-Bank 0 read — `discover` has read device identities through them on 2k — and
-the other rows have no hardware result recorded here.
+Interference.
+
+On the bus:
+
+- `DTR0`/`DTR1 DATA` have run inside every device-space Bank 0 read;
+  `discover` has read device identities through them on 2k.
+- The addressing specials ran in `commission devices` on 2k on 2026-09-29: it
+  found and programmed two unaddressed devices with TERMINATE, INITIALISE,
+  RANDOMISE, the SEARCHADDR loads, COMPARE, PROGRAM SHORT ADDRESS, VERIFY and
+  WITHDRAW.
+- The memory writes, `0x20` and `0x21`, have no hardware result recorded here.
 
 **Every Part 103 address parameter is raw.** Only Part 102 encodes an address
 as `(short_addr << 1) | 1`, and using that form here silently does the wrong
@@ -529,7 +546,9 @@ as the `quiescent` verb. What that does not cover: a device that never received
 the broadcast, and the reverse direction below. It is recorded because it is a
 plausible explanation for phantom devices in a mixed-installation binary search,
 and because it is separate from the COMPARE collision problem rather than another
-face of it. Host-tested only.
+face of it. Walks carrying the bracket have run on 2k, a mixed bus, but nothing
+there would have interfered without it. So no bus has yet shown it preventing
+anything.
 
 `0xC1` means two things depending on frame width. As a Part 102 special opcode it
 is `ENABLE DEVICE TYPE`; as the first byte of a 24-bit frame it is the Part 103
@@ -568,7 +587,8 @@ The reverse direction is implemented too. `commission devices` sends a Part 102
 `TERMINATE` before its `INITIALISE`, again immediately after it, and in the
 cleanup unwind (`DaliDeviceCommissioningOptions.terminate_control_gear`): gear
 left in an addressing window, or put in one by misframing the `0xC1` specials,
-would otherwise act on them. Host-tested only.
+would otherwise act on them. It went out in the `commission devices` walk on
+2k. Whether it prevented anything cannot be read from that bus.
 
 ## Event Frames
 
@@ -709,7 +729,8 @@ A DALI-2 control device spaces its own forward frames far more widely than this
 table does. TI's device firmware waits 13.5, 14.9, 16.3, 17.9 or 19.5 ms after
 the last frame on the wire, whoever sent it, for priorities 1–5; DALI-1 wanted
 22 Te after a backward frame. Nothing here waits after a received frame beyond
-the idle check above, which is the open P0 timing item in `current_status.md`.
+the idle check above. That is the open P0 item *Space forward frames from
+received frames* in `todo.md`.
 
 The open edge has been two values since 2026-08-25, and which one applies is
 decided by whether the observation decoded. `DALI_REPLY_WINDOW_OPEN_US`
@@ -726,8 +747,9 @@ choosing it is deliberate — a 1k-site DT6 driver varies by 1.7 ms between
 consecutive queries, so any hand-picked margin gets overtaken. The RANDOMISE
 settle is a commissioning-sequence delay in
 `dali_commissioning`, raised from 15 ms on 2026-08-24 to match the figure
-Espressif's `esp_dali` attributes to IEC 62386-102 §11.3. Unconfirmed against the
-standard text and unexercised on a bus since the change.
+Espressif's `esp_dali` attributes to IEC 62386-102 §11.3. It is unconfirmed
+against the standard text, but every commissioning walk on 2k and 1k since
+2026-09-03 has used it.
 
 ## Sources
 

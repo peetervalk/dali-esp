@@ -1738,6 +1738,142 @@ static void test_buffer_sink_reports_truncation(void)
     TEST_ASSERT_EQUAL_STRING("1234567", small);
 }
 
+/* ---------------------------------------------------------------------------
+ * Peer classification
+ * --------------------------------------------------------------------------*/
+
+/*
+ * Feed `text` one byte at a time, as a front end does. Returns the verdict after
+ * the last byte and, through `decided_at`, how many bytes it took to become
+ * final (0 when it never did).
+ */
+static DaliCliPeerVerdict sniff_text(const char *text, size_t *decided_at)
+{
+    DaliCliPeerSniffer sniffer;
+    dali_cli_peer_sniffer_init(&sniffer);
+
+    DaliCliPeerVerdict verdict = DALI_CLI_PEER_UNDECIDED;
+    size_t at = 0u;
+    for (size_t i = 0u; text[i] != '\0'; i++) {
+        verdict = dali_cli_peer_sniff(&sniffer, (uint8_t)text[i]);
+        if (verdict != DALI_CLI_PEER_UNDECIDED && at == 0u) {
+            at = i + 1u;
+        }
+    }
+    if (decided_at != NULL) {
+        *decided_at = at;
+    }
+    return verdict;
+}
+
+/*
+ * What a cross-site POST puts on the wire, body included: "scan" would run if
+ * the body's lines reached the shell. The verdict lands on the request
+ * target's '/', the sixth byte, long before the first line can end.
+ */
+static void test_peer_sniff_refuses_a_browser_post(void)
+{
+    size_t at = 0u;
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP,
+                      sniff_text("POST / HTTP/1.1\r\n"
+                                 "Host: dali-2k.local:2323\r\n"
+                                 "Content-Type: text/plain\r\n"
+                                 "\r\n"
+                                 "x=\r\nscan\r\n", &at));
+    TEST_ASSERT_EQUAL(6u, at);
+}
+
+/* Every request form a browser can be made to send to an origin server. */
+static void test_peer_sniff_refuses_every_request_form(void)
+{
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text("GET / HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text("GET /ws HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text("HEAD /favicon.ico HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text("OPTIONS * HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text("PUT /x HTTP/1.1\r\n", NULL));
+    /* WebDAV methods carry a hyphen; HTTP/2 prior knowledge opens with PRI. */
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text("BASELINE-CONTROL / HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text("UPDATEREDIRECTREF / HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text("PRI * HTTP/2.0\r\n", NULL));
+}
+
+/* A shell client is passed on its first byte; verbs are lowercase. */
+static void test_peer_sniff_passes_shell_lines(void)
+{
+    size_t at = 0u;
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("scan\r\n", &at));
+    TEST_ASSERT_EQUAL(1u, at);
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("discover\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("query a3 status\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("\r\n", NULL));
+    /* A telnet client opens with IAC option negotiation. */
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("\xFF\xFB\x01", NULL));
+}
+
+/*
+ * The property a front end relies on to feed bytes through without holding any
+ * back: the verdict is final by the time a CR or LF arrives, so the shell's
+ * line assembly never completes a line ahead of it.
+ */
+static void test_peer_sniff_decides_before_any_line_ends(void)
+{
+    static const char *const cases[] = {
+        "\r", "\n", "GET\r\n", "GET \r\n", "GET\n", "OPTIONS \n",
+        "POST  \r\n", "A\r\n", "TRACE on\r\n", "scan\r\n",
+    };
+
+    for (size_t c = 0u; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        DaliCliPeerSniffer sniffer;
+        dali_cli_peer_sniffer_init(&sniffer);
+        for (const char *p = cases[c]; *p != '\0'; p++) {
+            DaliCliPeerVerdict v = dali_cli_peer_sniff(&sniffer, (uint8_t)*p);
+            if (*p == '\r' || *p == '\n') {
+                TEST_ASSERT_NOT_EQUAL_MESSAGE(DALI_CLI_PEER_UNDECIDED, v, cases[c]);
+            }
+        }
+    }
+}
+
+/* An uppercase word alone is not a request line: a target must follow. */
+static void test_peer_sniff_needs_a_request_target(void)
+{
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("TRACE on\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("GET  / HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("Get / HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("-GET / HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text(" GET / HTTP/1.1\r\n", NULL));
+    /* A method and its space with nothing after them yet stay undecided,
+     * which is safe: no line has ended. */
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_UNDECIDED, sniff_text("GET ", NULL));
+}
+
+static void test_peer_sniff_bounds_the_method(void)
+{
+    char line[DALI_CLI_HTTP_METHOD_MAX + 8u];
+
+    memset(line, 'A', DALI_CLI_HTTP_METHOD_MAX);
+    strcpy(line + DALI_CLI_HTTP_METHOD_MAX, " / H");
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text(line, NULL));
+
+    memset(line, 'A', DALI_CLI_HTTP_METHOD_MAX + 1u);
+    strcpy(line + DALI_CLI_HTTP_METHOD_MAX + 1u, " / H");
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text(line, NULL));
+}
+
+/* Only the opening line counts, in both directions. */
+static void test_peer_sniff_verdict_is_final(void)
+{
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("help\r\nGET / HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text("GET / HTTP/1.1\r\nhelp\r\n", NULL));
+
+    DaliCliPeerSniffer sniffer;
+    dali_cli_peer_sniffer_init(&sniffer);
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_UNDECIDED, dali_cli_peer_sniff(&sniffer, (uint8_t)'G'));
+    dali_cli_peer_sniffer_init(&sniffer);
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, dali_cli_peer_sniff(&sniffer, (uint8_t)'s'));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, dali_cli_peer_sniff(NULL, (uint8_t)'G'));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1749,6 +1885,14 @@ int main(void)
     RUN_TEST(test_tokenize_rejects_too_many_tokens);
     RUN_TEST(test_tokenize_rejects_over_long_token);
     RUN_TEST(test_tokenize_accepts_longest_valid_token);
+
+    RUN_TEST(test_peer_sniff_refuses_a_browser_post);
+    RUN_TEST(test_peer_sniff_refuses_every_request_form);
+    RUN_TEST(test_peer_sniff_passes_shell_lines);
+    RUN_TEST(test_peer_sniff_decides_before_any_line_ends);
+    RUN_TEST(test_peer_sniff_needs_a_request_target);
+    RUN_TEST(test_peer_sniff_bounds_the_method);
+    RUN_TEST(test_peer_sniff_verdict_is_final);
 
     RUN_TEST(test_command_table_covers_every_id);
     RUN_TEST(test_command_table_entries_are_well_formed);

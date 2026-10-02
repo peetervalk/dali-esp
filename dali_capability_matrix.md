@@ -1,7 +1,9 @@
 # DALI Capability Matrix
 
-**Last reviewed:** 2026-08-25; the raw-frame and backup/restore rows updated
-2026-09-25, the re-address and restore rows 2026-09-29
+**Last reviewed:** 2026-10-02
+
+What has yet to run on a bus is listed in `todo.md`, with the procedure for
+each row marked `no` or `partial` here.
 
 One question per row: for a given DALI capability, what exists in the reusable C
 stack, whether the CLI exposes it, whether an independent host vector covers it,
@@ -86,8 +88,8 @@ cached level profile and triggers a refresh.
 | Configuration export | n/a — reads live entity state | `export config` | no | yes | shell only; the native build has no YAML to describe |
 | Commission unaddressed | `dali_commissioning_commission_unaddressed` | `commission unaddressed` | yes | partial | shell, opt-in |
 | Commission control devices | `dali_device_commissioning_commission_unaddressed` | `commission devices` | yes | yes (2k, 2026-09-29) | shell, opt-in |
-| Post-scan verification | `dali_commissioning_audit` | automatic in both `commission` walks | yes | no | shell |
-| Address backup | `dali_snapshot_from_inventory` | `backup save`, `backup status` | yes | partial (2k, 2026-09-03) | shell; persisted to flash |
+| Post-scan verification | `dali_commissioning_audit` | automatic in both `commission` walks | yes | partial (clean post-scans on 2k and 1k, gear and devices, 2026-09-03 to 2026-09-30; the contested and unrecorded classes have not met a bus) | shell |
+| Address backup | `dali_snapshot_from_inventory` | `backup save`, `backup status` | yes | partial (2k and 1k, 2026-09-03 to 2026-09-30, in format v1; the unaddressed-gear warning on 1k, 2026-09-29; format v2 not yet) | shell; persisted to flash |
 | Backup blob round trip | `dali_snapshot_encode` / `_decode` | `backup export`, `backup import` | yes | n/a — no bus traffic; round-tripped on the 2k node, 2026-09-29, in format v1; v2 refuses v1 blobs | shell |
 | Restore planning | `dali_restore_plan` | `restore plan` | yes | partial (2k, 2026-09-29: dependency order, a swap in each space, and moving aside a unit the backup never saw; 2026-09-30: no move onto a shared address it read as one unidentified unit; a contested target is host-only) | shell |
 | Restore execution | `dali_restore_write_short_address` per move (DTR0 read back before the pair), each confirmed by `dali_restore_confirm_move` | `restore apply` | partial (move frames, the checked write and confirmation; not the apply loop) | partial (2k and 1k, 2026-09-29: gear and device moves, staging hops and a move-aside included, each confirmed; 1k stopped after a move that did not land. The DTR0 read-back has not met a bus) | shell, opt-in |
@@ -108,19 +110,31 @@ pool without listing it as a device. The same host coverage asserts that a
 cancelled commissioning workflow uses a safety transport to attempt TERMINATE
 despite the latched front-end abort, and reports a failed cleanup separately.
 
-That is host evidence, not a real-bus multi-device result. Commissioning remains
-limited operationally to one unaddressed control gear at a time until the
-multi-device path is exercised on hardware. A run now brackets itself with
-broadcast START/STOP QUIESCENT MODE — host-tested for ordering, settle,
-release-on-every-exit, and the two failure modes, but never run on a bus, and it
-cannot reach a device that does not receive the broadcast.
+**On a bus:**
 
-Equal random addresses are handled as of 2026-08-26: VERIFY reply-window activity
-is read as co-selection, the pair is de-addressed with PROGRAM SHORT ADDRESS 0xFF
-and dropped from the search, the short address is left unconsumed, and the run
-continues -- a second run places them. Host vectors only, and it rests on the same
-undecodable-activity classification that has no physical collision capture behind
-it. Arbitration against another bus master remains open.
+- The scan's undecodable-activity classification met a genuine physical
+  collision on 2k on 2026-09-03.
+- Two-unit walks have run correctly on 2k, gear on 2026-09-03 and 2026-09-30,
+  devices on 2026-09-29.
+- Every walk since 2026-09-29 has sent the broadcast START/STOP QUIESCENT MODE
+  bracket. Its ordering, settle, release-on-every-exit and two failure modes
+  are host-tested.
+  - Its release on the error and cancel paths has not been watched on a bus.
+  - It cannot reach a device that does not receive the broadcast.
+
+The equal-random-address path has never run.
+
+Equal random addresses are handled as of 2026-08-26:
+
+- VERIFY reply-window activity is read as co-selection.
+- The pair is de-addressed with PROGRAM SHORT ADDRESS 0xFF and dropped from the
+  search.
+- The short address is left unconsumed, the run continues, and a second run
+  places them.
+
+That has host vectors only. Real gear cannot stage it, since nothing writes a
+random address; `todo.md` describes a rig with emulated gear. Arbitration
+against another bus master remains open.
 
 Cross-part interference is guarded in both directions as of 2026-08-26: a gear
 run sends IEC 62386-103 TERMINATE before INITIALISE, again immediately after, and
@@ -129,8 +143,10 @@ on seeing the Part 102 INITIALISE cannot answer COMPARE as gear; the
 control-device walk sends a Part 102 TERMINATE at the same three points, for the
 mirror-image reason. Opt-in through
 `DaliCommissioningOptions.terminate_control_devices` and
-`DaliDeviceCommissioningOptions.terminate_control_gear`, non-fatal on failure,
-host vectors only. Discovery records undecodable activity in the control-device
+`DaliDeviceCommissioningOptions.terminate_control_gear`, and non-fatal on
+failure. The shell sets both, so both have gone out in real walks on 2k. No bus
+has yet had a unit in the state they guard against, so their effect is still
+host-tested only. Discovery records undecodable activity in the control-device
 address space (`has_undecodable_device_activity`), which reserves that device
 address in the Part 103 free-address mask and nothing in the gear one — the two
 spaces are independent.
@@ -142,9 +158,9 @@ confirmed, contested, and silent, and names two classes the run does not claim �
 an address occupied now that was free before and was never recorded as an
 assignment (the signature of an abort between PROGRAM SHORT ADDRESS and the
 assignment record), and an address newly contested that the run never assigned.
-Host vectors only. Every classification rests on the same undecodable-activity
-reading as the in-run duplicate detection, so a `contested` line is an inference
-that the hardware pass has yet to confirm.
+Clean post-scans have run on both buses ("confirmed 2 of 2"). The contested and
+unrecorded classes have host vectors only, and `todo.md` stages the first of
+them with a spare driver.
 
 The shell rows are the same code the native CLI runs, reached through
 `esphome/components/dali/dali_shell_tcp.cpp`. Its commissioning entry point is
@@ -221,12 +237,12 @@ a gap.
 | Event dispatch rules | `dali_dispatch_*` | n/a | yes | yes | yes |
 | Dispatch on instance group vs device group, and on instance type | `DaliDispatchKey.group_kind`, `match_instance_type` | n/a | yes | no | yes (YAML `instance_group`, `device_group`, `instance_type`) |
 | Event-source matching for sensor polls (every scheme) | `dali_event_source_*` | n/a | yes | no | yes |
-| Quiescent mode | `dali_input_build_quiescent_mode[_broadcast]` | `quiescent on\|off <addr\|all>` | yes | no | yes (console) |
-| Commissioning quiescence bracket | `DaliCommissioningOptions.quiesce_control_devices` | automatic in `commission` | yes | no | n/a |
-| Device-walk quiescence bracket | `DaliDeviceCommissioningOptions.quiesce_control_devices` | automatic in `commission devices` | yes | no | n/a |
-| Cross-part TERMINATE bracket | `DaliCommissioningOptions.terminate_control_devices` | automatic in `commission` | yes | no | n/a |
-| Part 103 TERMINATE frame | `dali_build_device_special` / `DALI_CMD_DEVICE_TERMINATE` | via `commission` | yes | no | n/a |
-| Device broadcast (0xFF) | `dali_build_device_broadcast_command` | via `quiescent ... all` | yes | no | yes (console) |
+| Quiescent mode | `dali_input_build_quiescent_mode[_broadcast]` | `quiescent on\|off <addr\|all>` | yes | yes (2k, 2026-09-03: `on all` silenced events through a walk, `off all` released them; no read-back exists) | yes (console) |
+| Commissioning quiescence bracket | `DaliCommissioningOptions.quiesce_control_devices` | automatic in `commission` | yes | partial (sent in gear walks on 2k and 1k since 2026-09-29; release on the error and cancel paths not watched) | n/a |
+| Device-walk quiescence bracket | `DaliDeviceCommissioningOptions.quiesce_control_devices` | automatic in `commission devices` | yes | partial (2k, 2026-09-29: sent, no release failure printed) | n/a |
+| Cross-part TERMINATE bracket | `DaliCommissioningOptions.terminate_control_devices` | automatic in `commission` | yes | partial (sent in gear walks since 2026-09-29; nothing on either bus for it to stop) | n/a |
+| Part 103 TERMINATE frame | `dali_build_device_special` / `DALI_CMD_DEVICE_TERMINATE` | via `commission` | yes | yes (2k, 2026-09-29, closing `commission devices`) | n/a |
+| Device broadcast (0xFF) | `dali_build_device_broadcast_command` | via `quiescent ... all` | yes | yes (2k, via `quiescent ... all`) | yes (console) |
 
 Configuration writes are experimental everywhere. The native CLI says so on every
 `iconfig` success line: the result means transmitted, not applied. One has been
@@ -288,7 +304,9 @@ The caches that cache is part of are now fed by both surfaces. A shell session's
 `DaliShellHooks::inventory_changed`, and a `config` verb reports what it sent
 through `DaliShellHooks::config_applied`, so the group-membership table and the
 level-profile cache no longer depend on which surface an operator happened to
-use. Host- and compile-verified only; no bus has run it.
+use. `short_address_moved` has run on 1k, where each confirmed `restore apply`
+move carried the group map with it. The inventory and config hooks have no
+recorded bus result.
 
 ## Known gaps this matrix is tracking
 
@@ -304,11 +322,12 @@ use. Host- and compile-verified only; no bus has run it.
   validation, and reply decoding are shared code with host vectors, but the
   dispatch in `dali_component.cpp` between them is ESPHome/FreeRTOS-bound and
   reachable only on the device.
-- Quiescent mode has frame-level host vectors but no bus result. Commissioning
-  releases what it started; the standalone verb does not, so a device left
-  quiescent by hand stays silent until `quiescent off` — or until its own
-  timeout, 15 minutes in TI's device firmware and unknown for the Steinel —
-  which is indistinguishable from a dead sensor.
+- Quiescent mode cannot be read back: QUERY QUIESCENT MODE is not
+  implemented. Commissioning and the shell's scans release what they started.
+  The standalone verb does not, so a device left quiescent by hand stays silent
+  until `quiescent off`, or until its own timeout: 15 minutes in TI's device
+  firmware, and unknown for the Steinel. That is indistinguishable from a dead
+  sensor.
 - Part 103 **device groups** have a decode path and no read or write path. They
   are recognised as an event source (`DALI_EVENT_SOURCE_DEVICE_GROUP`) and
   nowhere else: discovery does not query them, the snapshot does not record

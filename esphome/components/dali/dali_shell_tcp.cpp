@@ -33,6 +33,26 @@ static constexpr UBaseType_t SHELL_TASK_PRIORITY = 4u;
  * output and re-check the idle deadline. */
 static constexpr uint32_t SHELL_RECV_TIMEOUT_MS = 250u;
 
+/* How long one send() may take nothing before the peer counts as gone. Without
+ * it a client that stops reading without closing -- a laptop asleep with the
+ * session open, a terminal suspended with Ctrl-Z -- parks this task inside
+ * send() until lwIP abandons the connection, which takes minutes, and whatever
+ * the running workflow holds stays held: the bus gate, quiescent mode, an open
+ * INITIALISE window. Ten seconds rides out a few retransmission backoffs on a
+ * poor Wi-Fi link; a reader that is merely slow drains the 5.7 KB send buffer
+ * far sooner than that. */
+static constexpr uint32_t SHELL_SEND_TIMEOUT_MS = 10000u;
+
+/* TCP keepalive finds a peer that vanished while nothing was being sent: an
+ * idle session would otherwise hold the shell until the idle timeout, or for
+ * good when that is 0. Probes start after this much silence and the peer is
+ * declared gone after the last unanswered one, about 45 s in all; recv() then
+ * fails and the session closes. A quiet verb is covered too: its next write
+ * fails at once instead of waiting out the send timeout. */
+static constexpr int SHELL_KEEPALIVE_IDLE_S     = 30;
+static constexpr int SHELL_KEEPALIVE_INTERVAL_S = 5;
+static constexpr int SHELL_KEEPALIVE_COUNT      = 3;
+
 void DaliShellServer::setup()
 {
     if (parent_ == nullptr) {
@@ -92,9 +112,11 @@ void DaliShellServer::write_cb(void *ctx, const char *text)
             continue;
         }
         /* A blocking socket returns EINTR without having sent anything; every
-         * other error means this connection is finished. Marking the peer lost
-         * rather than retrying is what stops a long workflow from spending its
-         * remaining seconds writing into a closed descriptor. */
+         * other error means this connection is finished. That includes EAGAIN,
+         * which here means SO_SNDTIMEO expired with nothing taken: the peer
+         * stopped reading. Marking the peer lost rather than retrying is what
+         * stops a long workflow from spending its remaining seconds writing
+         * into a connection nobody is reading. */
         if (sent < 0 && errno == EINTR) {
             continue;
         }
@@ -301,10 +323,27 @@ void DaliShellServer::serve(int client_fd)
     tv.tv_usec = (suseconds_t) ((SHELL_RECV_TIMEOUT_MS % 1000u) * 1000u);
     ::setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+    /* Set before anything is written, the busy notice included. */
+    struct timeval send_tv = {};
+    send_tv.tv_sec = (time_t) (SHELL_SEND_TIMEOUT_MS / 1000u);
+    send_tv.tv_usec = (suseconds_t) ((SHELL_SEND_TIMEOUT_MS % 1000u) * 1000u);
+    if (::setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &send_tv, sizeof(send_tv)) != 0) {
+        ESP_LOGW(TAG, "SO_SNDTIMEO failed (%d): a peer that stops reading can "
+                      "hold a workflow until lwIP gives up", errno);
+    }
+
     /* Nagle would hold back the prompt and the incremental progress lines that
      * make a long workflow readable. */
     int one = 1;
     ::setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+    int keep_idle = SHELL_KEEPALIVE_IDLE_S;
+    int keep_interval = SHELL_KEEPALIVE_INTERVAL_S;
+    int keep_count = SHELL_KEEPALIVE_COUNT;
+    ::setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+    ::setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE, &keep_idle, sizeof(keep_idle));
+    ::setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &keep_interval, sizeof(keep_interval));
+    ::setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPCNT, &keep_count, sizeof(keep_count));
 
     client_fd_ = client_fd;
     peer_lost_ = false;
@@ -350,6 +389,13 @@ void DaliShellServer::serve(int client_fd)
 
     uint32_t last_activity_ms = millis();
 
+    /* Is this a shell client at all? A browser can be made to send an HTTP
+     * request here, and the lines of its body would run as commands; see
+     * dali_cli_peer_sniff(). */
+    DaliCliPeerSniffer sniffer;
+    dali_cli_peer_sniffer_init(&sniffer);
+    bool http_peer = false;
+
     while (!peer_lost_) {
         uint8_t buf[64];
         int received = ::recv(client_fd, buf, sizeof(buf), 0);
@@ -357,6 +403,14 @@ void DaliShellServer::serve(int client_fd)
         if (received > 0) {
             last_activity_ms = millis();
             for (int i = 0; i < received && !peer_lost_; i++) {
+                /* Sniffed before it is fed. The verdict always arrives before a
+                 * line can end, so nothing an HTTP peer sends reaches dispatch:
+                 * not its request line, and not its body. What it fed before
+                 * the verdict is a partial line, which the next attach clears. */
+                if (dali_cli_peer_sniff(&sniffer, buf[i]) == DALI_CLI_PEER_HTTP) {
+                    http_peer = true;
+                    break;
+                }
                 /* Telnet clients in line mode send a bare LF or a CR LF pair;
                  * the shell treats either terminator as end of line, so the
                  * second byte of the pair arrives as an empty line and is
@@ -364,6 +418,21 @@ void DaliShellServer::serve(int client_fd)
                 if (dali_shell_feed_byte(buf[i])) {
                     dali_shell_write_prompt();
                 }
+            }
+            if (http_peer) {
+                /* With the address: the browser that sent it is on this
+                 * network, and so is whoever can tell which page it had open. */
+                char peer_text[16] = "unknown";
+                struct sockaddr_in peer = {};
+                socklen_t peer_len = sizeof(peer);
+                if (::getpeername(client_fd, (struct sockaddr *) &peer, &peer_len) == 0) {
+                    inet_ntoa_r(peer.sin_addr, peer_text, sizeof(peer_text));
+                }
+                ESP_LOGW(TAG, "Closed a connection from %s that opened with an HTTP "
+                              "request; nothing it sent was run", peer_text);
+                write_cb(this, "\r\nHTTP request refused: this port is the DALI shell, "
+                               "not a web server.\r\n");
+                break;
             }
         } else if (received == 0) {
             break;  /* orderly close */

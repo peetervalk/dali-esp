@@ -338,19 +338,39 @@ def _validate_distinct_pins(config):
 # dali_cli_special_is_commissioning() marks can readdress an entire bus from one
 # typed line, and RANDOMISE cannot be undone.
 
-_SHELL_SCHEMA = cv.Schema(
-    {
-        cv.GenerateID(): cv.declare_id(DaliShellServer),
-        cv.Optional(CONF_SHELL_PORT, default=2323): cv.port,
-        # Reclaims the single session from a terminal window that was closed
-        # without quitting; 0 disables it.
-        cv.Optional(CONF_SHELL_IDLE_TIMEOUT, default="10min"): cv.All(
-            cv.positive_time_period_seconds,
-            cv.Range(max=cv.TimePeriod(seconds=86400)),
-        ),
-        cv.Optional(CONF_ALLOW_COMMISSIONING, default=False): cv.boolean,
-    }
-).extend(cv.COMPONENT_SCHEMA)
+def _consume_shell_sockets(config):
+    """Count the shell's sockets in lwIP's pool.
+
+    ESPHome sizes CONFIG_LWIP_MAX_SOCKETS to the sum of what components
+    register, and the shell opens its own: one listener, and one client at a
+    time, because a session is served to completion before the next accept.
+    Unregistered, those two are borrowed from components that counted on them,
+    and the pool runs out exactly when everything is busy at once.
+    """
+    from esphome.components import socket
+
+    socket.consume_sockets(1, "dali.shell")(config)
+    socket.consume_sockets(1, "dali.shell", socket.SocketType.TCP_LISTEN)(config)
+    return config
+
+
+_SHELL_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(DaliShellServer),
+            cv.Optional(CONF_SHELL_PORT, default=2323): cv.port,
+            # Reclaims the single session from a terminal left open and unused;
+            # 0 disables it. A peer that vanished is found sooner, by TCP
+            # keepalive, so 0 no longer costs the shell to a dropped connection.
+            cv.Optional(CONF_SHELL_IDLE_TIMEOUT, default="10min"): cv.All(
+                cv.positive_time_period_seconds,
+                cv.Range(max=cv.TimePeriod(seconds=86400)),
+            ),
+            cv.Optional(CONF_ALLOW_COMMISSIONING, default=False): cv.boolean,
+        }
+    ).extend(cv.COMPONENT_SCHEMA),
+    _consume_shell_sockets,
+)
 
 
 CONFIG_SCHEMA = cv.All(

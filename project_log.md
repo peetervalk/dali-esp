@@ -9,14 +9,22 @@ session to answer questions that only its last few sections could answer.
 behind those claims: what was verified, when, on what tree, and the
 investigations whose conclusions have since been folded into the code.
 
-Three kinds of entry live here:
+Two kinds of entry live here:
 
 - **Verification history** — dated records of what was exercised, locally or on
   hardware, and what that pass did and did not cover.
 - **Investigations** — the reasoning behind a fix, kept because the reasoning is
   the part that is expensive to reconstruct and easy to get wrong twice.
-- **Unreleased changes** — accumulated API and operator-visible breaks, raw
-  material for the next release notes. This section empties when a tag ships.
+
+Other material lives elsewhere:
+
+- **Unreleased changes** used to collect at the end of this file. Since
+  2026-10-02 they go straight into `CHANGELOG.md`, under *Unreleased*.
+- **Open work**, meaning what still needs a bus and the development backlog,
+  is in `todo.md`.
+
+Entries written before 2026-10-02 that point at a P0, P1 or P2 item in
+`current_status.md` mean the prioritized list that is now `todo.md`.
 
 Add new entries at the top of their section. The existing verification entries
 are grouped roughly by campaign rather than strictly by date, and several refer
@@ -27,6 +35,139 @@ supersedes.
 ---
 
 # Verification history
+
+### Moved from `current_status.md` on 2026-10-02 (records that had no entry here)
+
+`current_status.md` now describes capabilities only, without dates. Its dated
+material already had entries here, except for the records below. They are kept
+as they stood there, under their own dates.
+
+**At the `v2.0.0` tag, 2026-09-18.**
+
+- 31/31 host suites built and passed, locally and in CI.
+- `dali_test.yaml` passed `esphome config` and `esphome compile` on ESPHome
+  2026.9.0. That config is `type: local`, so this validated the Python schema
+  in `esphome/components/dali/__init__.py` against the tree. It also compiled
+  the C++ layer and the vendored C from it.
+- The native ESP-IDF firmware built in CI, compiling the same
+  `components/dali` C under a second toolchain.
+- The tag built as an external component in an empty directory, with no
+  checkout around it (`release-packaging.yml`). That is the only check that a
+  consumer can fetch and build it.
+- It was not a hardware pass. The real-bus results behind `v2.0.0` came from
+  `dev` during development, not from a flashed `v2.0.0` build.
+
+**Static DRAM and the shell's share, 2026-09-04.** Two builds of the same `dev`
+tree for the classic ESP32 with esp-idf: `dali_test.yaml`, and the same config
+without its `shell:` block.
+
+| Segment | With `shell:` | Without | Region |
+|---|---|---|---|
+| Static DRAM (`.data` + `.bss` + `.noinit`) | 133.9 KiB (76%) | 69.1 KiB (39%) | 176.5 KiB (`dram0_0_seg`) |
+| IRAM (`.text` + `.vectors`) | 76.7 KiB (60%) | 76.7 KiB (60%) | 128 KiB (`iram0_0_seg`) |
+| App image | 1,053,739 B (57%) | 973,083 B (53%) | 1.75 MB partition |
+
+- The shell cost 64.8 KiB of RAM and 78.8 KiB of flash.
+- Its session caches were 62 KiB of static `.bss` between them: the
+  input-instance cache, two capture rings, two inventories and the held backup.
+- `dali_shell.c` is compiled unconditionally through the `proto_dali_shell.c`
+  shim. Nothing outside `dali_shell_tcp.cpp` references it, so `--gc-sections`
+  drops all of it when the block is absent.
+
+**Static DRAM since then.**
+
+| Date | Static DRAM | Note |
+|---|---|---|
+| 2026-09-25 | 138,248 B | 1.5 KiB of it is the restore plan's per-move identification number, added that day so `restore apply` can confirm each move |
+| 2026-10-01 | 138,656 B | |
+| 2026-10-01 | 141,728 B | the version-2 backup |
+| 2026-10-02 | 141,792 B | |
+
+The entries below have the detail.
+
+**IRAM end.**
+
+- `.iram0.text` ended at `0x40093464` on 2026-09-25, with the cache-safe
+  GPTIMER and GPIO options on.
+- `current_status.md` later recorded `0x4009369F`, for a build it did not
+  date.
+- The 2026-10-02 build in the next entry reads `0x40093464` again, as
+  `_iram_text_end` in `xtensa-esp32-elf-nm`.
+
+All of these are far below `0x400A0000`, the line above which `sram1_as_iram`
+starts to cost heap.
+
+### Verified locally on 2026-10-02 (TCP shell hardening; uncommitted on `dev`)
+
+Three fixes to the TCP front end, found while assessing a browser GUI for the
+shell. A GUI would make each of them worse, so they come first. Nothing touched
+a device or a bus.
+
+- **A browser could drive the shell.** A cross-site form, or a no-cors fetch with
+  a text/plain body, POSTs to `http://<device>:2323/` with no CORS preflight.
+  2323 is not on the browsers' blocked-port list. Nothing in
+  `dali_shell_feed_byte()` or the TCP loop told such a request from a shell
+  client, and an error line does not end a session. So the request line and the
+  headers resolved as unknown verbs, and then every line of the body ran as a
+  command. On a build with `allow_commissioning: true`, which
+  `dali-starter.yaml` sets, that reaches `commission` and RANDOMISE. Browsers
+  that ask before a public page reaches the local network narrow this; they do
+  not close it.
+  - The fix classifies the start of each connection in `dali_cli_peer_sniff()`.
+    An uppercase method token of up to 20 characters, one space, then `/` or
+    `*` is HTTP. That is every request form a browser sends to an origin
+    server, `OPTIONS *` preflights and WebSocket handshakes included. Verbs are
+    lowercase and matched case-sensitively, so nothing the shell accepts can
+    open that way.
+  - It decides before any CR or LF. So the binding sniffs each byte before
+    feeding it and holds nothing back: no line can reach dispatch ahead of the
+    verdict. The partial line an HTTP peer leaves in the shell's line buffer is
+    cleared by the next attach.
+  - Only the first line is examined, because a browser cannot put bytes ahead
+    of its own request line. The binding logs the sender's address at WARN,
+    writes one refusal line, and closes.
+- **The send timeout** (the P1 item). `SO_SNDTIMEO` is 10 s. lwIP returns a
+  partial count when a timed-out send moved some bytes, and -1 with
+  `EWOULDBLOCK` when it moved none. `write_cb()` already retried the first and
+  marked the peer lost on the second, so only the option and a comment
+  changed. 10 s rather than "a few": a send blocks only once the 5,760-byte
+  send buffer is full, which a live reader drains in milliseconds, while a lost
+  segment on poor Wi-Fi costs a retransmission backoff of a second or more.
+- **Keepalive.** Probes start after 30 s of silence, every 5 s, and give up
+  after 3, so a vanished peer is reclaimed in about 45 s. That matters most
+  with `idle_timeout: 0`, where a dead idle session used to hold the shell
+  until reboot.
+- **Socket registration.** ESPHome sizes `CONFIG_LWIP_MAX_SOCKETS` to the sum of
+  what components register through `socket.consume_sockets()`, and the shell
+  registered nothing. It now registers one TCP listener and one TCP client. One
+  client is enough: `serve()` runs each session to completion before the next
+  `accept()`.
+- **Docs.** The binding header and `commissioning_readme.md` both said a second
+  connection is accepted and told the shell is busy. The comment on `listen()`
+  in the binding already said otherwise: nothing is accepted while a session
+  runs, so a second client waits in the backlog. Both now say so.
+  `tools/dali-shell`'s `probe_shell()` docstring makes the same assumption
+  and is untouched; a node with a session open fails its probe.
+  `dali-starter.yaml` and the README example pin `v2.0.0`, so their
+  `idle_timeout` comments still describe the tag; see the unreleased changes.
+
+Results:
+
+- 34/34 host suites. `test_cli` has 7 new vectors (97 tests), including the
+  attack's full shape: a POST whose body carries `scan`. A mutation pass killed
+  all six mutants: the `*` target dropped, the method bound off by one, a
+  leading hyphen accepted, CR/LF leaving the verdict open, the verdict not
+  final, and lowercase accepted as a method.
+- `dali_test.yaml` compiles on ESPHome 2026.9.0 (IDF 5.5.5) with no warnings
+  in the component. The build log reads `Setting CONFIG_LWIP_MAX_SOCKETS to 14
+  (TCP=7 [api=3, captive_portal=3, dali.shell=1], UDP=3 [...], TCP_LISTEN=4
+  [api=1, dali.shell=1, ota=1, web_server_base=1])`, against 12 before. Static
+  RAM is 141,792 B, +64 B. lwIP's `sockets` table accounts for 40 B of it: 280 B
+  for 14 slots. Flash is 1,036,283 B. The new ELF carries both new log strings.
+- The native IDF 6.0.1 build passes, `dali_cli.c` recompiled.
+
+Not covered: any device. The `current_status.md` P1 item *Run the TCP shell
+hardening on a device* lists the three checks.
 
 ### Verified locally on 2026-10-01 (backup format v2: instance settings; uncommitted on `dev`)
 
@@ -3983,324 +4124,11 @@ options struct carries `terminate_control_gear` as the mirror of
 
 # Unreleased API and operator-visible changes
 
-Raw material for the next release notes. The section was emptied into
-[CHANGELOG.md](CHANGELOG.md) when **v2.0.0** shipped on 2026-09-18; everything
-below landed after that tag.
+Moved to `CHANGELOG.md`, under *Unreleased: v3.0.0*, on 2026-10-02.
+Everything listed here since `v2.0.0` is there, grouped by kind rather than by
+date, with a verification label per item.
 
-Add new entries here as breaks accumulate, and empty the section again at the
-next tag.
-
-### From the 2026-10-01 backup format v2 (host-tested, compile-checked)
-
-Operator-visible, and breaking:
-
-- **Backups taken before this change are lost.** A backup stored in flash by an
-  older ESPHome build no longer loads (the stored record changed size), and an
-  exported version-1 file is refused by `backup import`, which says what it is.
-  Run `backup save` after flashing.
-- `backup save` also records every control device's instance settings, which
-  makes it slower on a bus with input devices, by about eleven queries per
-  instance. It reports how many it recorded, left out over the 64-instance
-  limit, or could not read.
-- `backup status` and `backup import` report the instance count; `status` lists
-  each instance under its device.
-- New: `restore instances [apply]`. `apply` needs the same policy as `restore
-  groups apply`.
-- An export is longer: a full blob is 3,208 bytes, 107 import lines.
-
-C API:
-
-- `DALI_SNAPSHOT_FORMAT_VERSION` is 2 and `DALI_SNAPSHOT_BLOB_MAX` grew by
-  768 bytes. New: `DALI_SNAPSHOT_MAX_INSTANCES`,
-  `DALI_SNAPSHOT_INSTANCE_WIRE_SIZE`, `DaliSnapshotInstance`,
-  `DaliSnapshot.instance_count` and `.instances[]`,
-  `dali_snapshot_add_instance()`.
-- New in `dali_input_device.h`: `DaliInstanceSettings`.
-- New in `dali_restore.h`: `dali_restore_read_instance_settings()`,
-  `dali_restore_instance_write_mask()`, `dali_restore_locate_device()`,
-  `dali_restore_write_instance_settings()`,
-  `dali_restore_instance_field_name()` and the `DALI_RESTORE_INSTANCE_*` mask
-  bits.
-
-### From the 2026-10-01 event-source matching and instance groups (host-tested, compile-checked)
-
-Operator-visible:
-
-- A sensor with `poll_on_event` is polled on any event that could be its own,
-  not only a Device/Instance one. Inferred matches log `event poll requested
-  (inferred): ...`, so the DEBUG line gained a variant.
-- New log lines from the integration: a sensor whose instance is not on event
-  scheme 2 (WARN when the sensor polls on events or a dispatch rule keys on its
-  device, INFO otherwise), `event scheme changed from X to Y`, and a DEBUG line
-  when a source profile read comes back incomplete.
-- The integration reads each sensor's source profile — five instance queries —
-  after boot, after a scan, after any shell workflow, and after an `iconfig` to
-  that sensor's device, one read at a time.
-- `iquery` and `iconfig` take `g<N>`, `t<N>` and `all` as the instance. A query
-  through one prints `note: ... can reach more than one instance`. The console
-  usage line reads `inst 0-31|gN|tN|all`.
-- `instances` and `export inventory` show each instance's event scheme, event
-  priority and instance groups; `discover` spends five more queries per input
-  instance to read them.
-- YAML `headless_dispatch` accepts `address_kind: instance_group` and
-  `device_group`, and `instance_type:`. `group` still matches either group
-  space. A typed rule keyed on a short address and an instance is refused,
-  since no event carries all three.
-
-C API:
-
-- Removed: `dali_cmd_instance_group()`. It put the group in the address byte,
-  which made it a device-group command and not an instance-group one, and built
-  that byte with the 16-group gear layout, so device group 16 became group 0.
-  Nothing called it.
-- New module `dali_event_source` (`dali_event_source_match()`,
-  `dali_event_source_scheme_differs()`, the profile read builder and parser).
-- `dali_build_instance_command()` accepts the instance-group (`0x80|G`) and
-  instance-type (`0xC0|T`) selectors. New: `DALI_INSTANCE_SELECTOR_MASK`,
-  `DALI_INSTANCE_GROUP_SELECTOR`, `DALI_INSTANCE_TYPE_SELECTOR`,
-  `dali_cli_parse_instance_selector()`, `dali_cli_instance_selector_is_multi()`.
-- `DaliDispatchKey` gains `group_kind`, `match_instance_type` and
-  `instance_type`, appended. Zero values keep the old matching, but a positional
-  initializer that stops at `instance` now fails `-Wmissing-field-initializers`.
-- `DaliInputInstanceInfo` gains `has_event_scheme`/`event_scheme`,
-  `has_event_priority`/`event_priority` and
-  `has_instance_groups`/`instance_groups[3]`, and its `role`, `role_source` and
-  `usable` fields are now `uint8_t` holding the enum values. C callers are
-  unaffected; C++ callers passing them to a function taking the enum need a
-  cast.
-- `DaliShellHooks` gains `instance_config_applied`.
-- ESPHome: `DaliComponent::add_dispatch_entry()` takes `group_kind` and
-  `instance_type`, defaulted; `on_instance_config_applied()` is new.
-
-### From the 2026-09-30 shared-address detection (host-tested, compile-checked)
-
-Operator-visible:
-
-- `discover` and `scan` append `, contested` to a unit whose identity read
-  collided, and after `Scan complete` print `note: N listed address(es) hold
-  more than one unit.`, the addresses, and the remedy.
-- `inventory` marks such a unit `contested (identity collides)` and counts it
-  in its `contested` total, where it is also counted as a device.
-- `backup save`'s contested block reads `N address(es) are contested and NOT
-  recorded here`, where it read `answered undecodably`, and lists both kinds. A
-  collided address is no longer recorded as an unanchored entry.
-- `restore plan` and `restore groups` report every contested address as a
-  `contested` conflict, even with no move aimed at it. The remedy line reads
-  `free a contested address with ...`, where it read `free a contested target`,
-  and the device-space line ends `a contested d<N> needs a hardware pass`.
-- The commissioning post-scan counts a collided address as contested, not
-  confirmed.
-
-C API:
-
-- New: `DaliDiscoveryDeviceInfo.has_identity_collision`,
-  `DaliDiscoveryInventory.identity_collision_count`,
-  `dali_discovery_gear_address_contested()` and
-  `dali_discovery_inventory_store_identity()`.
-- `DaliRestoreConflictKind` gains `DALI_RESTORE_CONFLICT_CONTESTED`, appended,
-  so existing values keep their numbers. A plan on a bus with a contested
-  address is no longer clean even when nothing wants that address.
-- `dali_snapshot_from_inventory()` and
-  `dali_commissioning_occupancy_from_inventory()` treat a collided gear address
-  as contested.
-
-ESPHome:
-
-- The integration's scan logs `N address(es) answer as one unit but hold more
-  than one; their identification numbers collide`, then one `aN: contested,
-  identity collides` line per address.
-
-### From the 2026-09-30 DTR0 read-back, clear-line and version fixes (host-tested, compile-checked)
-
-Operator-visible:
-
-- Every `address` arm (`aN set`, `aN clear`, `dN set`, `dN clear`) and every
-  `restore apply` move loads DTR0 and reads it back with QUERY CONTENT DTR0
-  (gear `0x98`, device `0x36`) before sending SET SHORT ADDRESS. A wrong,
-  silent or unreadable read-back gets one more load. If that fails too, nothing
-  further is sent, and the line reads `DTR0 did not load: a7 read back 0x0B,
-  not 0x05; nothing further sent` or `DTR0 could not be checked: ...`.
-  `restore apply` stops there, as for any failed move.
-- A write that needed the second load prints `DTR0 needed a second load: a7
-  first read back 0x0B`, on its own `address:` line or indented under the
-  `restore apply` move line.
-- Clearing a contested address sends the pair unchecked when the read-back
-  collides, and says `the DTR0 read-back at a7 collided, as units sharing an
-  address answer; sent without it`.
-- The device arms now need the device to answer QUERY CONTENT DTR0. One that
-  does not makes `address dN set|clear` and a device-space restore refuse.
-- `address aN set aM` and `dN set dM` probe the source when the destination is
-  silent: `... and aN still does -- the gear did not move`, or `neither aM nor
-  aN answers after the write -- run 'scan' to find the gear`. An undecodable
-  destination reads `whether aM answers after the write is unreadable (...)`.
-- A transport error during an `address` write says whether SET SHORT ADDRESS
-  had gone out: `<error> before SET SHORT ADDRESS; nothing moved`, or `<error>
-  while SET SHORT ADDRESS went out; run 'scan' before sending anything else`.
-  These replace `ERR <error> at sequence step N`. `restore apply` makes the
-  same distinction on the move line.
-- `restore apply`'s `nothing answers at the target` now reads `nothing answers
-  at the target, and the source still does`. A new reason, `nothing answers at
-  the target or the source`, reports a unit that answers at neither end.
-- `discover` and `inventory` print the gear version as major.minor (`v2.0`),
-  where they printed the byte halved (`v4`). A byte below 2.0 prints raw, as
-  `version=0x01`. `export inventory` and `smoke` still give the raw byte.
-
-C API:
-
-- New: `dali_restore_write_short_address()`, `DaliRestoreWriteOutcome`,
-  `DaliRestoreWriteResult`, `dali_restore_write_was_sent()` and
-  `dali_restore_write_outcome_name()`.
-- `DaliRestoreMoveCheck` gains `DALI_RESTORE_MOVE_UNIT_MISSING`, appended, so
-  existing values keep their numbers. `DALI_RESTORE_MOVE_TARGET_SILENT` now
-  also means that the source still answers; a caller switching on it must
-  handle the new value.
-- `dali_restore_confirm_move()` sends one more query when `to` is silent: the
-  probe of `from`.
-- New: `dali_cli_format_gear_version()` and `DALI_CLI_VERSION_TEXT_MAX`.
-- `restore apply` no longer calls `DaliShellHooks.config_applied`. Confirmed
-  gear moves still reach `short_address_moved`.
-
-ESPHome:
-
-- After `address aN clear` the device log reads `aN cleared: no longer polled
-  for group state (gX gY); the gear keeps its groups and still follows group
-  and broadcast commands`, where it read `retired from every group it was
-  known in`. The warning after it reads `nothing answers at aN now. Any entity
-  configured with address: N targets nothing until 'commission unaddressed'
-  re-addresses the unit, at an address only a scan can find`.
-- `restore apply` no longer logs `short address changed (target type=0
-  addr=N): group membership and poll targets are stale until the next scan`
-  for each move it sends. Confirmed moves log what they did, as before.
-
-### From the 2026-09-29 `identify` fix (compile-checked)
-
-Operator-visible:
-
-- `identify <addr>` reads QUERY ACTUAL LEVEL before it blinks and puts that
-  level back afterwards: OFF for a lamp that was off, DAPC for any other level,
-  which fades at the gear's own fade time. It ends with `identify: done, level
-  N restored` or `identify: done, switched off again`, where it used to print
-  `identify: done` and leave the lamp at min. A level it cannot read prints
-  `identify: level before unreadable (<reason>); aN will be left at min` before
-  the blink, and the lamp ends at min as before. The restore goes out even when
-  the front end disconnects mid-blink.
-- The verb's help text reads `blink one short-addressed lamp, then restore its
-  level`.
-
-ESPHome:
-
-- The Identify button restores the level the same way and logs `back to level
-  N` or `switched off again`, or `left at min` when the level was unreadable.
-  It blinks the address it started on, even if Target Address changes
-  mid-blink.
-
-### From the 2026-09-29 shell fixes (compile-checked)
-
-Operator-visible:
-
-- `backup save` sends one broadcast QUERY MISSING SHORT ADDRESS per save. It
-  warns when anything answers: `backup: gear on the bus reports no short
-  address and is NOT recorded here`, then `backup: run 'commission
-  unaddressed', then 'backup save' again, to include it`.
-- After `restore apply`, the ESPHome device log has one `aX -> aY` warning per
-  confirmed gear move, staging hops included, about YAML entities that still
-  name the old address. Each move of a grouped unit also logs `group
-  membership followed the move`.
-
-C API:
-
-- `DaliShellHooks.short_address_moved` is also called by `restore apply`, once
-  per confirmed gear move, in plan order.
-- `restore apply` no longer calls `DaliShellHooks.inventory_changed`.
-
-ESPHome:
-
-- After `restore apply`, the group map follows each gear move rather than being
-  rebuilt from the scan taken before the moves. Both ends of each move drop
-  their cached level profile, and a refresh is requested.
-
-### From the 2026-09-29 Part 103 encoding fix (`48009a8`; all three writers hardware-verified on 2k)
-
-Operator-visible:
-
-- `address d<N> set d<M>` loads device DTR0 with `M`, not `(M << 1) | 1`, and
-  prints it that way (`device DTR0=4` for d4, was 9). On `v2.0.0` the verb
-  sent the device to 2M+1, or nowhere for M ≥ 32.
-- `restore apply` loads a device move's DTR0 raw as well. Gear moves are
-  unchanged.
-- `commission devices` sends INITIALISE `0x7F`, not `0x00`. `0x00` selects the
-  device at d0: on 2k it found neither of two unaddressed devices, and on a bus
-  whose d0 is occupied it would have re-addressed that device.
-
-C API:
-
-- `DALI_DEVICE_INITIALISE_UNADDRESSED_PARAM` is `0x7F` (was `0x00`).
-- New: `dali_restore_build_move_sequence()`, the DTR0 + SET SHORT ADDRESS
-  sequence for one re-address in either space, with `to` 0..63 or
-  `DALI_COMMISSIONING_NO_SHORT_ADDRESS`.
-
-### From the 2026-09-25 stack-review fixes (host-tested; `restore apply`'s confirmation has since run on 2k)
-
-C API:
-
-- `DaliError` gains `DALI_ERR_WAIT_EXPIRED` (13), appended: a blocking caller
-  stopped waiting, and nothing is known about the bus. The shell's and the scan
-  task's blocking transports return it where they used to return
-  `DALI_ERR_TIMEOUT`. A caller that switches on `DaliError` should treat it as
-  unknown, never as absent.
-- `dali_phy_tx()` returns `DALI_ERR_TIMING`, not `DALI_ERR_TIMEOUT`, when a
-  frame does not complete in time, and reports success only once the ISR has
-  reached `DALI_PHY_TX_DONE`.
-- `dali_phy_get_last_tx_end_us()` and the scheduler's `get_last_tx_end_us` hook
-  now report the end of the forward frame's last data bit, 1.664 ms earlier
-  than before. New `DALI_TX_STOP_BITS_US`. `DALI_REPLY_WINDOW_OPEN_DECODED_US`
-  goes from 2000 to 3664 and `DALI_REPLY_WINDOW_CLOSE_US` from 27000 to 28664:
-  the same instants from the new reference. `DALI_REPLY_WINDOW_OPEN_US` keeps
-  its value and so opens 1.664 ms earlier.
-- `DaliRestoreMove` changes layout: `kind` moves ahead of `from` and `to`, and
-  `has_identification` and `identification[8]` are appended. Positional
-  initializers break; there are none in-tree.
-- New: `dali_restore_confirm_move()`, `DaliRestoreMoveCheck`,
-  `dali_restore_move_check_name()`, `dali_transport_transaction_timeout_ms()`,
-  `dali_cli_raw_frame_is_commissioning()`.
-- The scheduler routes unsolicited event frames to subscribers in every state.
-  `rx_event_unroutable` stays in `dali_stats_t` but is no longer incremented.
-- `dali_sched_is_quiescent()` no longer reports quiescent between dequeuing a
-  transaction and transmitting it.
-
-ESPHome:
-
-- The component sets `CONFIG_GPTIMER_ISR_CACHE_SAFE` and
-  `CONFIG_GPIO_CTRL_FUNC_IN_IRAM`, so the first build after upgrading is a full
-  rebuild.
-- A shell workflow's bus claim waits up to 5 s for queued work to drain and is
-  refused if it does not, logging `queued traffic did not drain; claim refused`.
-- The **DALI Command** text entity refuses a `raw`/`raw2` commissioning frame
-  with `commissioning frame; use the native CLI`.
-
-Operator-visible:
-
-- `since_tx_us` in `capture` and `trace` runs from the frame end: add 1664 to
-  compare a capture taken before this change.
-- `raw`/`raw2` of a commissioning frame on the TCP shell needs
-  `allow_commissioning: true`, and prints `raw (commissioning frame): refused
-  by session policy` without it.
-- `restore apply` confirms each move and stops at the first it cannot. Its
-  lines read `OK` or `sent, not confirmed: <reason>`, and a clean run ends with
-  `restore apply: N move(s) applied, each confirmed on the bus` in place of
-  `verify with 'restore plan' or 'discover'`.
-- `wait expired` can appear where `timeout` did when the shell stopped waiting
-  on a busy bus.
-- `discover`'s event note counts every event that arrived during the walk, so
-  it reads higher on the same bus. `stats`' `event unroutable` stays at 0.
-
-**One thing to do differently.** This section was not emptied when `v1.3.0`
-shipped, so by the time it was read for the v2.0.0 notes it had silently
-accumulated two releases' worth of items and claimed all of them were
-unreleased. The console verb renames, the decoded reply format, error names
-replacing error numbers, and `special randomize` -> `special randomise` had all
-shipped in v1.3.0 and would have been announced a second time. The entries were
-not wrong when written; the list simply outlived the tag that released them. So
-when it is next read, check each claim against the tag rather than trusting the
-heading -- `git grep <symbol> <tag>` settles it in seconds -- and empty the
-section as part of tagging rather than after it.
+New changes go into that section as they land. At the next tag it is checked
+against the tree and renamed, rather than emptied out of this file afterwards.
+The lesson that prompted the move, and the rest of the release checklist, are
+in `todo.md`, under *Release process*.
