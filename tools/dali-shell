@@ -35,7 +35,9 @@ FINDING THE DEVICE
     connects by IP. The add-on's resolver has no mDNS, so `dali-1k.local` does
     not resolve there even though the node is answering — bypassing the
     resolver is what makes zero-configuration work in the place this program
-    was written for.
+    was written for. A node whose shell another session holds is offered too,
+    marked as in use: the device answers a second connection only once the
+    first session ends.
 
 DEPENDENCIES
     The standard library only, and it degrades rather than fails if `readline`
@@ -80,6 +82,31 @@ class ShellError(Exception):
     pass
 
 
+class ShellTimeout(ShellError):
+    """No prompt before the deadline. `partial` holds what arrived first."""
+
+    def __init__(self, message, partial=""):
+        super().__init__(message)
+        self.partial = partial
+
+
+class ShellClosed(ShellError):
+    """The device closed the connection. `partial` holds what arrived first."""
+
+    def __init__(self, message, partial=""):
+        super().__init__(message)
+        self.partial = partial
+
+
+# Said wherever another session is the likely obstacle.
+IN_USE_HELP = (
+    "The device serves one shell session at a time; close the other one, or "
+    "wait.\nA session whose client went away is reclaimed within about a "
+    "minute (on v2.0.0 and earlier, only by the YAML's idle_timeout), and a "
+    "terminal left open, by idle_timeout."
+)
+
+
 def _normalise_stdout():
     """
     Emit LF regardless of platform.
@@ -118,6 +145,14 @@ RECV_POLL = 0.25
 
 # Probes run concurrently, so this bounds the whole sweep rather than each node.
 PROBE_TIMEOUT = 1.5
+
+# What probe_shell() reports for a node that has a shell.
+SHELL_READY = "ready"
+SHELL_IN_USE = "in use"
+
+# How long connect() waits for the greeting. A free shell greets at once; one
+# that another session holds stays silent until that session ends.
+GREETING_TIMEOUT = 10.0
 
 _TYPE_A, _TYPE_PTR, _TYPE_SRV = 1, 12, 33
 
@@ -300,25 +335,42 @@ def browse_esphome(seconds=BROWSE_SECONDS):
 
 def probe_shell(address, port, timeout=PROBE_TIMEOUT):
     """
-    True if the DALI shell is listening at this address.
+    SHELL_READY or SHELL_IN_USE for a DALI shell at this address, else None.
 
-    The greeting and the one-session refusal both name the shell, and either
-    answer identifies the node — so a session you already have open elsewhere
-    does not hide it. Closing immediately is what keeps this harmless: the
-    device treats an orderly close as the end of the session and releases it,
-    rather than holding it for the YAML's idle timeout.
+    A free shell greets at once, and the greeting names it. A shell that
+    another session holds does not answer at all: the device serves one
+    session at a time and leaves a second connection waiting in its listen
+    backlog, so the connection completes and then stays silent. That silence
+    is read as in use rather than as no shell, because a port with nothing
+    listening refuses the connection outright. The device's own busy notice,
+    sent when its shell will not attach, also reads as in use.
+
+    Closing immediately is what keeps the probe harmless: the device treats an
+    orderly close as the end of the session and releases it, rather than
+    holding it for the YAML's idle timeout.
     """
     try:
-        with socket.create_connection((address, port), timeout=timeout) as sock:
-            sock.settimeout(timeout)
-            greeting = sock.recv(256).decode("utf-8", "replace")
+        sock = socket.create_connection((address, port), timeout=timeout)
     except OSError:
-        return False
-    return "dali" in greeting.lower()
+        return None
+    with sock:
+        sock.settimeout(timeout)
+        try:
+            greeting = sock.recv(256).decode("utf-8", "replace").lower()
+        except socket.timeout:
+            return SHELL_IN_USE
+        except OSError:
+            return None
+    if "dali" not in greeting:
+        return None
+    return SHELL_IN_USE if "busy" in greeting else SHELL_READY
 
 
 def discover_shells(port, seconds=BROWSE_SECONDS):
-    """Return [(name, address)] for the browsed nodes whose shell answers."""
+    """
+    Return [(name, address, state)] for the browsed nodes that have a shell,
+    where state is SHELL_READY or SHELL_IN_USE.
+    """
     nodes = browse_esphome(seconds)
     if not nodes:
         return []
@@ -326,8 +378,9 @@ def discover_shells(port, seconds=BROWSE_SECONDS):
     # probe timeout, and there is no reason to wait for them one at a time.
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(nodes))) as pool:
         answered = pool.map(lambda n: probe_shell(n[2], port), nodes)
-        return [(name, address)
-                for (name, _host, address), ok in zip(nodes, answered) if ok]
+        return [(name, address, state)
+                for (name, _host, address), state in zip(nodes, answered)
+                if state is not None]
 
 
 def choose_host(port, seconds=BROWSE_SECONDS):
@@ -349,13 +402,18 @@ def choose_host(port, seconds=BROWSE_SECONDS):
             "Pass --host <address> to connect directly."
         )
 
+    # A shell in use is still offered. Connecting waits for the other session
+    # to end, and says so if it does not end in time.
     if len(nodes) == 1:
-        name, address = nodes[0]
-        print(f"found {name} at {address}", file=sys.stderr)
+        name, address, state = nodes[0]
+        note = ", its shell in use by another session" if state == SHELL_IN_USE else ""
+        print(f"found {name} at {address}{note}", file=sys.stderr)
         return address
 
-    listing = "\n".join(f"  {i + 1}. {name:<16} {address}"
-                        for i, (name, address) in enumerate(nodes))
+    listing = "\n".join(
+        f"  {i + 1}. {name:<16} "
+        + (f"{address:<15}  (in use)" if state == SHELL_IN_USE else address)
+        for i, (name, address, state) in enumerate(nodes))
 
     # Prompting a program that cannot answer would hang a cron job forever.
     if not sys.stdin.isatty():
@@ -398,14 +456,28 @@ class DaliShell:
 
         # The device greets with a banner and a prompt; consume both so the
         # first command's reply starts at a known point in the stream.
-        banner = self._read_until_prompt(echo_to=None, deadline_s=10.0)
-        if "busy" in banner.lower():
+        #
+        # A shell that another session holds sends nothing: this connection
+        # waits in the device's listen backlog until that session ends. So
+        # silence until the deadline means in use, not a dead device. The
+        # device's own busy notice, followed by a close, means the same; it is
+        # sent only when the shell will not attach.
+        try:
+            return self._read_until_prompt(echo_to=None, deadline_s=GREETING_TIMEOUT)
+        except ShellTimeout as exc:
+            if exc.partial.strip():
+                raise
             raise ShellError(
-                "the device already has a shell session open.\n"
-                "Only one is allowed at a time; it is reclaimed by the idle "
-                "timeout set in the YAML."
-            )
-        return banner
+                f"{self.host}:{self.port} accepted the connection but sent no "
+                f"greeting in {GREETING_TIMEOUT:.0f}s: another session is "
+                f"probably open.\n{IN_USE_HELP}"
+            ) from None
+        except ShellClosed as exc:
+            if "busy" not in exc.partial.lower():
+                raise
+            raise ShellError(
+                f"the shell at {self.host}:{self.port} is busy.\n{IN_USE_HELP}"
+            ) from None
 
     def close(self):
         if self.sock is not None:
@@ -484,16 +556,18 @@ class DaliShell:
             except socket.timeout:
                 elapsed += SOCKET_POLL_TIMEOUT
                 if elapsed >= deadline:
-                    raise ShellError(
+                    raise ShellTimeout(
                         f"no prompt after {deadline:.0f}s; the device may still "
-                        f"be working. Reconnect to see its state."
+                        f"be working. Reconnect to see its state.",
+                        partial="\n".join(collected + [buf])
                     )
                 continue
             except OSError as exc:
                 raise ShellError(f"connection lost: {exc}") from exc
 
             if not chunk:
-                raise ShellError("device closed the connection")
+                raise ShellClosed("device closed the connection",
+                                  partial="\n".join(collected + [buf]))
             buf += chunk.decode("utf-8", "replace")
 
     # ── schema ──────────────────────────────────────────────────────────────
@@ -686,13 +760,20 @@ def list_nodes(port):
         answered = list(pool.map(lambda n: probe_shell(n[2], port), nodes))
 
     width = max(len(name) for name, _host, _address in nodes)
-    for (name, _host, address), ok in zip(nodes, answered):
-        print(f"{name:<{width}}  {address:<15}  "
-              f"{'DALI shell on ' + str(port) if ok else '-'}")
+    for (name, _host, address), state in zip(nodes, answered):
+        if state == SHELL_READY:
+            shell = f"DALI shell on {port}"
+        elif state == SHELL_IN_USE:
+            shell = f"DALI shell on {port}, in use"
+        else:
+            shell = "-"
+        print(f"{name:<{width}}  {address:<15}  {shell}")
     if not any(answered):
         print(f"\nNo node answered on port {port}. A node needs a `shell:` block "
               "inside its `dali:` config;\nwithout one the shell is not compiled in.",
               file=sys.stderr)
+    elif SHELL_IN_USE in answered:
+        print(f"\n{IN_USE_HELP}", file=sys.stderr)
     return 0
 
 

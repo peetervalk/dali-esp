@@ -586,7 +586,7 @@ static void scan_task(void *arg) {
 }
 
 // ---------------------------------------------------------------------------
-// Public entry point — called from ESPHome loop task (Core 0).
+// Public entry point — called from the ESPHome loop task.
 // ---------------------------------------------------------------------------
 
 bool dali_scan_start(DaliComponent *component) {
@@ -595,8 +595,9 @@ bool dali_scan_start(DaliComponent *component) {
         ESP_LOGE(TAG, "failed to allocate scan task arguments");
         return false;
     }
-    // Runs alongside the DALI task, off the ESPHome main loop's core wherever
-    // there is a second one, so the sync wait cannot starve it.
+    // Pinned with the DALI task (dali_worker_core()). ESPHome 2026.9 runs its
+    // loop on that core too; the walk's sync waits block rather than spin, so
+    // the loop keeps running through a scan.
     BaseType_t created = xTaskCreatePinnedToCore(scan_task, "dali_scan", 8192, args, 9,
                                                  nullptr, dali_worker_core());
     if (created != pdPASS) {

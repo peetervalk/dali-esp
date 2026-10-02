@@ -107,9 +107,13 @@ time.sleep(60)                  # never read
 1. With one session open, run `nc <host> 2323` from a second machine.
 2. **Expected:** it connects and prints nothing. The banner arrives once the
    first session ends.
-
-`python3 dali-shell --list` run from a third machine leaves this node out while
-the first session is open. That is the known probe defect in *Fix*.
+3. Still with the first session open, run `python3 dali-shell --list` from a
+   third machine. **Expected:** the node reads `DALI shell on 2323, in use`,
+   followed by the one-session note.
+4. Run `python3 dali-shell` with no `--host` from that machine. **Expected:** it
+   reports the node's shell in use, waits 10 s, then says another session is
+   probably open. Close the first session within those 10 s and it should
+   connect instead.
 
 ### ESPHome version range
 
@@ -325,8 +329,16 @@ opened. This item settles why before anything changes the scheduler; see
 2. Put d1 onto d0 by hand:
    - `raw C13000 len=24`: device DTR0 = 0.
    - `raw2 03FE14 len=24`: SET SHORT ADDRESS at d1.
-3. Run `capture start`, then `address d0 clear`, then `capture export`. Today
-   `address d0 clear` answers `d0 does not answer; nothing to clear`.
+3. Run `capture start`, then `address d0 clear`, then `capture export`.
+   - **If the collision reads as silence,** as it did on 2k before: `address d0
+     clear` answers `d0 does not answer; nothing to clear`. Carry on with the
+     steps below.
+   - **If it reads as undecodable activity,** this is the first bus run of the
+     contested arm, which `backup save` and `restore plan` now name as the fix.
+     The verb should print `d0 answers undecodably (...) -- control devices
+     sharing one short address is the expected cause`, clear both devices, and
+     end `run 'commission devices' to give them distinct addresses`. Then skip
+     to `commission devices` in step 6.
 4. Run `raw 01FE35 len=24 wait` three times, with a capture around them.
 5. Read the export:
    - Does the merged reply to QUERY NUMBER OF INSTANCES start outside
@@ -658,9 +670,9 @@ or more. Then:
 ### Why the retry backoff works
 
 `DALI_REPLY_TIMEOUT_BACKOFF_US` took the 2k missing-lamp rate from 2/8 scans
-to 8/8. But `rx_reply_late` reads 0, so the late-reply story in its comment
-is not what happens, and the emitter-spacing candidate does not account for
-it either. Background is in `project_log.md`, *Nothing spaces a forward frame
+to 8/8. But `rx_reply_late` reads 0, so the late reply it was added for is not
+what happens, as its comment now says. The emitter-spacing candidate does not
+account for it either. Background is in `project_log.md`, *Nothing spaces a forward frame
 from a received one*.
 
 1. **Decisive test.** Build `66e85d0^`, the commit before the backoff. On 2k,
@@ -774,19 +786,14 @@ boot-time log line. An unregistered light never gets a profile and can never
 transmit. Fix: reject over-limit configs in the schema, and size the light
 registry for 64 + 16 + 1.
 
-### P1 — Core affinity: the comments are wrong, and the PHY busy-waits on the loop's core
+### P1 — The PHY busy-waits on the loop's core
 
 ESPHome 2026.9 pins `loopTask` to core 1, the core `dali_worker_core()` also
-gives the DALI, scan and shell tasks. Synchronization is unaffected, but some
-text is now wrong:
-
-- every "Core 0" comment
-- the rationale in `dali_core_affinity.h`
-- the "preferences API is Core 0 only" comment in `dali_component.cpp`
-
-Worse, the PHY's pre-TX busy-wait runs on the loop's core: 1.67 ms per frame,
-and 33 ms per attempt on a stuck bus. Fix the comments, and let the idle check
-use an edge time the ISR records.
+gives the DALI, scan and shell tasks. Synchronization is unaffected, and the
+comments in the component say which task owns what rather than which core.
+But the PHY's pre-TX busy-wait runs on that shared core: 1.67 ms per frame, and
+33 ms per attempt on a stuck bus. Let the idle check use an edge time the ISR
+records.
 
 ### P1 — One intervening frame aborts a whole scan
 
@@ -820,22 +827,6 @@ collision*. There are two candidates:
 
 Every query shares that path, so do not change the scheduler before the
 capture.
-
-Two shell messages are stale meanwhile. `backup save` and the restore planner
-print `nothing here de-addresses a control device, so a contested d<N> needs a
-hardware pass` (`dali_shell.c`), although `address d<N> clear` exists. They
-should name the by-hand clear and its caveat:
-
-- device DTR0 `0xFF`
-- then `raw2 <addr>FE14 len=24`
-
-### P1 — `tools/dali-shell` misses a node whose shell is in use
-
-`probe_shell()` expects a busy notice that the TCP binding never sends. A
-second connection waits in the listen backlog instead. So `--list`, and
-discovery without `--host`, leave out a node with a session open. Fix: treat
-a connection that is accepted but silent as "in use", and list the node with
-that note.
 
 ### P2 — Small hardening items from the stack review
 

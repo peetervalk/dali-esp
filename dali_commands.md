@@ -1350,11 +1350,15 @@ restore: free a contested address with 'address <aN> clear', then
 
 Once cleared and re-commissioned, both units answer separately, both read back
 their own identification numbers, and a second `restore plan` places them. The
-device space is reserved the same way and reported the same way. Its remedy is
-less certain, because `address d<N> clear` opens its contested arm only when
-the collision reads as undecodable activity. On 2k, two devices sharing d0 read
-as silence. So the shell names a hardware pass for a contested `d<N>`. See *The
-control-device space* for the by-hand clear.
+device space is reserved and reported the same way. Its remedy line reads
+`free a contested d<N> with 'address <dN> clear', then 'commission devices',
+then run this again`.
+
+A device address is contested only when it answered with undecodable
+activity, which is also what opens the clear's contested arm. Devices sharing
+an address can read as silence instead, as two did at d0 on 2k. Nothing then
+marks the address, and the recorded units show up as missing from the bus.
+*The control-device space* has the by-hand clear for that case.
 
 ### `restore groups` — a different repair
 

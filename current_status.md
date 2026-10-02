@@ -2,7 +2,7 @@
 
 What `dev` does, described as expected behaviour. This is an annex to
 `AGENTS.md`, which holds the architecture, the layer rules, the ISR and timing
-constraints, and the native and host build commands.
+constraints, the documentation rules, and the build, test and CI notes.
 
 **Nothing here is a verification claim.** Other files hold that:
 
@@ -452,7 +452,7 @@ Facts about the code as it stands. Each has its fix, decision or measurement in
   *The RX edge interrupt is not IRAM-safe*.
 - **ESPHome's loop shares core 1 with the DALI tasks.** The PHY's pre-TX idle
   check busy-waits there: 1.67 ms per frame, 33 ms per attempt on a stuck bus.
-  *Core affinity*.
+  *The PHY busy-waits on the loop's core*.
 
 **Scheduling and scans**
 
@@ -526,7 +526,6 @@ Facts about the code as it stands. Each has its fix, decision or measurement in
 
 **Tools**
 
-- **`tools/dali-shell` misses a node whose shell is in use.**
 - **Native `trace on` can block the DALI task** once the UART TX buffer fills.
 - **Find Couplers prints one summary,** truncated with a count.
 
@@ -603,7 +602,7 @@ layout nobody else could use, and needed editing whenever a site changed.
 | `dali_test.yaml` | Tracked CI coverage config |
 | `test/` | 34 host suites and the vendored Unity runner |
 | `tools/dali-shell` | Operator-side client for the TCP shell |
-| `AGENTS.md` | Architecture, layer rules, timing/ISR constraints, build commands |
+| `AGENTS.md` | Architecture, layer rules, timing/ISR constraints, documentation rules, build, test and CI |
 | `todo.md` | Hardware verification procedures, then the development backlog |
 | `project_log.md` | Verification history and investigations |
 | `CHANGELOG.md` | Per-release changes, with migrations; *Unreleased* collects what `dev` has since the last tag |
@@ -612,83 +611,3 @@ layout nobody else could use, and needed editing whenever a site changed.
 | `commissioning_readme.md` | Commissioning workflow: flash, walk the bus, export a config, change a commissioned bus |
 | `dali_capability_matrix.md` | Per-capability API/verb/vector/hardware/ESPHome status |
 | `steinel_bank2_reference.md` | Steinel HF 360 II: instance layout and Bank 2 tuning |
-
-## ESPHome Build And CI
-
-`AGENTS.md` carries the native ESP-IDF and host-test commands. The ESPHome side:
-
-```powershell
-python -m esphome config  dali_test.yaml      # cheapest check; validates the in-repo component
-python -m esphome compile dali_test.yaml      # the working tree, every platform
-python -m esphome compile dali-starter.yaml   # whatever ref it pins, not the working tree
-```
-
-Reach for `esphome config` first. It validates the schema without touching a
-build directory, so it cannot collide with a compile running in another
-terminal. It does not run `to_code()`, so a codegen error still needs a compile
-to surface.
-
-To prove that uncommitted component changes build, compile `dali_test.yaml`.
-It resolves `type: local` against `esphome/components`, so it compiles the
-working tree by construction. It also declares every platform and every
-optional block on purpose. **An option added to the schema but not to
-`dali_test.yaml` is an option nothing compiles.** Extend that file in the same
-change.
-
-Four workflows in `.github/workflows/`:
-
-| Workflow | Covers | Trigger |
-|---|---|---|
-| `host-tests.yml` | The 34 host suites, cmake/ctest over `test/` | push main/dev, PR to main |
-| `idf-build.yml` | Native firmware, `idf.py build` for esp32 on IDF 6.0.1 | push main/dev, PR to main |
-| `esphome-build.yml` | Source/shim/`SRCS` agreement, config discovery, per-config schema validation, and a compile of every `type: local` config | push main/dev, PR to main |
-| `release-packaging.yml` | `esphome compile` from a git tag in an empty directory | tag `v*`, manual |
-
-Notes an operator needs:
-
-- **`esphome-build.yml` names no configuration.** `discover` runs `git ls-files
-  'dali*.yaml'` and sorts the results by whether `external_components` says
-  `type: local`.
-  - Those build the tree under test, and are compiled.
-  - A config pinning `type: git` at a ref is only validated. ESPHome would
-    fetch and compile that ref instead of the branch, so a 20-minute build
-    would report on code the pull request never touched.
-- **A failure on a pinned config does not mean the branch is broken.** The
-  tracked config has drifted out of schema with the ref it names. Either the
-  pin or the config needs updating before release.
-- **Do not delete `dali_test.yaml`** without replacing what it covers. If no
-  tracked config uses `type: local`, `compile` is skipped and the ESPHome C++
-  layer gets no coverage at all. `discover` emits a warning, but the run can
-  still go green.
-- **`secrets.yaml` is gitignored,** so every ESPHome job writes its own dummy
-  one with the values the tracked configs reference. `dali_test.yaml` needs
-  none of them: its credentials are inline dummies, so it validates in a bare
-  checkout, a fork's first CI run included.
-- **`release-packaging.yml` never runs `actions/checkout` and caches nothing,**
-  on purpose. Run inside a repo checkout, it would pass for the wrong reason.
-  `workflow_dispatch` takes a ref, so a branch can be packaging-tested before
-  it is tagged.
-
-## Documentation Policy
-
-- **This file describes what the code does now,** as expected behaviour and
-  known limitations. It carries no dates, session narratives or verification
-  labels.
-  - A statement with a date on it belongs in `project_log.md`.
-  - A statement about what a release changed belongs in `CHANGELOG.md`.
-- **`todo.md` holds everything open.**
-  - Each expectation here that a real bus has not confirmed is listed there,
-    with the procedure that would confirm it.
-  - Each defect or gap named here has its fix, decision or measurement there.
-  - When an item is done, record the result in `project_log.md`, update the
-    matrix, and delete the item. Do not annotate it as done.
-- **Every operator-visible or API change** goes into `CHANGELOG.md` under
-  *Unreleased* as it lands, with its verification label (hardware-verified,
-  host-tested, or unverified). At tagging, re-check the labels and rename the
-  heading to the version.
-- **Detail lives in its own file:** verb and argument detail in
-  `dali_commands.md`, frame and opcode detail in `dali_protocol.md`, and
-  per-capability bus status in `dali_capability_matrix.md`.
-- **Pinned configs describe the tag.** `dali-starter.yaml` and the README's YAML
-  example pin a release, so their comments must stay true of that release.
-  Prose docs describe `dev`.

@@ -181,7 +181,7 @@ static uint32_t begin_light_profile_update(LightEntry *entry)
 
 /* ── Group membership (auto-selects query_address for group-type lights) ──── */
 /* Pure decision logic lives in dali_group_map.c; this layer owns one instance,
- * guards it with a spinlock (scan writes on Core 1, poll/console on Core 0), and
+ * guards it with a spinlock (scan task writes; loop task polls and edits), and
  * handles logging + flash persistence. Seeded from each light's static
  * query_address at setup() (only when no persisted snapshot exists), replaced
  * wholesale by a bus scan, and updated live by add-group/remove-group console
@@ -191,7 +191,7 @@ static DaliGroupMap    s_group_map = {};
 static portMUX_TYPE    s_group_map_mux = portMUX_INITIALIZER_UNLOCKED;
 /* Set whenever the map changes from an authoritative source (scan or console
  * edit); the main loop drains this and writes the snapshot to flash. Decouples
- * the Core 1 scan task from the Core 0-only preferences API. */
+ * the scan task from the preferences API, which is loop-task only. */
 static std::atomic<bool> s_group_members_dirty_{false};
 
 /* Persisted-to-flash layout (see load/save_group_membership). DGP2 deliberately
@@ -209,7 +209,7 @@ struct GroupMembershipPersist {
  *
  * Staged rather than written where it is produced, for the same reason group
  * membership is: `backup save` runs on the shell task and the preferences API
- * is Core 0 only, so loop() performs the write.
+ * is for the loop task only, so loop() performs the write.
  *
  * The record is sized by DALI_SNAPSHOT_BLOB_MAX, and ESPHome refuses a stored
  * preference whose size differs from the one asked for. So a format that grows
@@ -361,8 +361,8 @@ static uint64_t config_target_mask(DaliTarget target)
  * stale window in the union until the next scan. Dropping the entry makes that
  * member abstain from the union instead of skewing it.
  *
- * Core 0 owns s_level_profile_cache, so a caller on another task routes through
- * external_profile_forget_mask_ rather than calling this.
+ * The loop task owns s_level_profile_cache, so a caller on another task routes
+ * through external_profile_forget_mask_ rather than calling this.
  */
 static void forget_level_profile_mask(uint64_t mask)
 {
@@ -438,7 +438,7 @@ const DaliDispatchEntry *dali_registry_dispatch_at(uint8_t index)
     return index < s_dispatch_count ? &s_dispatch_table[index] : nullptr;
 }
 
-/* Async completion callback — runs on Core 1 (DALI task). */
+/* Async completion callback — runs on the DALI task. */
 
 static void on_input_value_done(const DaliSequenceResult *result, void *ctx)
 {
@@ -833,7 +833,7 @@ static DaliError enqueue_actual_level_query(LightEntry *entry, uint8_t query_add
     return err;
 }
 
-/* ── Cross-core string handoff (Core 1 → Core 0) ────────────────────────── */
+/* ── Cross-task string handoff (DALI task → loop task) ──────────────────── */
 /* Shared spinlock protects all three string buffers below.
  * Write side: format to a local buffer, then memcpy + dirty=true under lock.
  * Read side:  memcpy to a local buffer + dirty=false under lock, then publish. */
@@ -842,7 +842,7 @@ static portMUX_TYPE s_string_mux = portMUX_INITIALIZER_UNLOCKED;
 static char              s_bus_monitor_str[48] = {};
 static std::atomic<bool> s_bus_monitor_dirty_{false};
 
-/* ── Diag level query result (Core 1 → Core 0) ──────────────────────────── */
+/* ── Diag level query result (DALI task → loop task) ────────────────────── */
 
 static char              s_diag_level_str[24] = {};
 static std::atomic<bool> s_diag_level_dirty_{false};
@@ -866,7 +866,7 @@ static void on_diag_refresh_reply(DaliError result, const DaliFrame *reply, void
     portEXIT_CRITICAL(&s_string_mux);
 }
 
-/* ── Identify: the level to put back (Core 1 → Core 0) ──────────────────── */
+/* ── Identify: the level to put back (DALI task → loop task) ────────────── */
 
 static constexpr uint32_t IDENTIFY_DURATION_MS     = 10000u;
 static constexpr uint32_t IDENTIFY_HALF_BLINK_MS   = 500u;
@@ -896,7 +896,7 @@ static void on_identify_level_reply(DaliError result, const DaliFrame *reply, vo
     s_identify_level_.store(level, std::memory_order_release);
 }
 
-/* ── Command result (Core 1 → Core 0) ───────────────────────────────────── */
+/* ── Command result (DALI task → loop task) ─────────────────────────────── */
 
 /* Sized for the longest line dali_cli_format_response() produces — a status
  * byte with all eight flags named — so a decoded reply is never clipped. Still
@@ -1091,7 +1091,7 @@ static void on_raw2_done(DaliError result, const DaliFrame *reply, void *ctx)
     set_raw_result(result, reply, true, ctx);
 }
 
-/* ── Find-couplers recording (Core 1 writes, Core 0 reads) ──────────────── */
+/* ── Find-couplers recording (DALI task writes, loop task reads) ────────── */
 
 static constexpr uint8_t    MAX_COUPLER_FRAMES = 32u;
 static DaliInputEvent        s_coupler_frames[MAX_COUPLER_FRAMES];
@@ -1099,12 +1099,12 @@ static std::atomic<uint8_t>  s_coupler_count_{0};
 static std::atomic<bool>     s_find_couplers_active_{false};
 static std::atomic<bool>     s_find_couplers_stopped_ack_{true};
 
-/* ── Scan result pending (Core 1 → Core 0 via scan_done_ gate) ──────────── */
+/* ── Scan result pending (scan task → loop task via scan_done_ gate) ────── */
 
 static char s_scan_result_str[128]  = {};
 static char s_scan_yaml_str[2048]   = {};
 
-/* ── Coupler group mask (set on Core 0 after coupler drain, read on Core 1) */
+/* ── Coupler group mask (set in loop() after the drain, read by scan_task) */
 
 static std::atomic<uint16_t> s_coupler_group_mask_{0u};
 
@@ -1219,14 +1219,14 @@ static void format_event(char *buf, size_t len, const DaliInputEvent *e)
     snprintf(buf, len, "invalid");
 }
 
-/* ── Unsolicited-RX callback (runs on Core 1, in the DALI task) ─────────── */
+/* ── Unsolicited-RX callback (runs on the DALI task) ────────────────────── */
 
 static void on_dali_unsolicited(const DaliFrame *frame, void * /*ctx*/)
 {
     DaliInputEvent event;
     if (dali_event_parse_frame(frame, &event) != DALI_OK) return;
 
-    /* Bus monitor: format locally, then copy under lock so Core 0 never sees a
+    /* Bus monitor: format locally, then copy under lock so loop() never sees a
      * partially-written buffer. Log from the local copy, not the shared buffer. */
     char monitor_copy[sizeof(s_bus_monitor_str)];
     format_event(monitor_copy, sizeof(monitor_copy), &event);
@@ -1315,7 +1315,7 @@ static void dali_task(void *raw_component)
         dali_sched_run();
 
         /* Acknowledge a stop only after scheduler callbacks from this task have
-         * finished, so Core 0 cannot drain while a capture write is pending. */
+         * finished, so loop() cannot drain while a capture write is pending. */
         if (!s_find_couplers_active_.load(std::memory_order_acquire)) {
             s_find_couplers_stopped_ack_.store(true, std::memory_order_release);
         }
@@ -1416,7 +1416,7 @@ void DaliComponent::setup()
     if (load_group_membership()) {
         ESP_LOGI(TAG, "group membership restored from flash");
     } else {
-        /* No cross-core contention yet — dali_task is not started until below. */
+        /* No contention yet — dali_task is not started until below. */
         portENTER_CRITICAL(&s_group_map_mux);
         for (uint8_t i = 0u; i < s_light_count; i++) {
             LightEntry &e = s_light_registry[i];
@@ -1749,7 +1749,7 @@ void DaliComponent::loop()
     scan_done_.store(false);
     scan_running_.store(false);
 
-    /* Scan result summary (written from Core 1 before scan_done_ release). */
+    /* Scan result summary (written by the scan task before scan_done_ release). */
     if (scan_result_ && s_scan_result_str[0]) {
         scan_result_->publish_state(s_scan_result_str);
         s_scan_result_str[0] = '\0';
@@ -1815,7 +1815,7 @@ void DaliComponent::loop()
  *   meminfo, instances, sensor poll
  *       Each needs a blocking transport to walk a device before it knows what
  *       to ask next. Everything on this surface is one enqueue and one
- *       completion, and Core 0's loop may not block. The scan covers the first
+ *       completion, and ESPHome's loop may not block. The scan covers the first
  *       two; the sensor platform covers the third.
  *   dt8
  *       Implemented in the shared stack and reachable from the native CLI, held
@@ -1888,7 +1888,7 @@ static void set_cmd_usage(const DaliCliCommandSpec *spec)
     set_cmd_result(buf);
 }
 
-/* ── Multi-byte memory read result (Core 1 -> Core 0) ────────────────────── */
+/* ── Multi-byte memory read result (DALI task -> loop task) ──────────────── */
 
 /*
  * Shared by the control-gear (`memread`) and control-device (`devmem read`)
@@ -3010,7 +3010,7 @@ bool DaliComponent::set_group_membership_snapshot(const uint64_t masks[16],
                                                   uint64_t observed_gear)
 {
     if (masks == nullptr || verified != 0xFFFFu) return false;
-    /* Runs on the scan task (Core 1); flash write is deferred to loop() (Core 0). */
+    /* Runs on the scan task; the flash write is deferred to loop(). */
     portENTER_CRITICAL(&s_group_map_mux);
     if (!dali_group_map_scan_covers_known_members(&s_group_map,
                                                    observed_gear)) {
@@ -3069,7 +3069,7 @@ void DaliComponent::on_config_applied(DaliTarget target, DaliCommandId id,
 
     if (config_changes_level_profile(id)) {
         /* Deferred rather than applied here: this may be a shell session's
-         * task, and the cache belongs to Core 0's loop. */
+         * task, and the cache belongs to the loop task. */
         uint64_t mask = config_target_mask(target);
         external_profile_forget_mask_.fetch_or(mask, std::memory_order_acq_rel);
         notify = true;
@@ -3094,7 +3094,7 @@ void DaliComponent::on_config_applied(DaliTarget target, DaliCommandId id,
     }
 
     /* Handed over as an atomic for the same reason the profile mask is: a
-     * config verb typed into a shell session does not run on Core 0. */
+     * config verb typed into a shell session does not run on the loop task. */
     if (notify) external_refresh_request_.store(true, std::memory_order_release);
 }
 
@@ -3249,7 +3249,7 @@ bool DaliComponent::save_address_backup(const uint8_t *buf, uint32_t len)
      * True means staged, not yet on flash: loop() performs the write on its next
      * pass. The shell says "stored" on this, which is the same promise every
      * other persisted item here makes, and the alternative — blocking the shell
-     * task on a Core 0 API it must not call — is worse than the imprecision.
+     * task on a loop-task API it must not call — is worse than the imprecision.
      */
     return true;
 }
@@ -3375,7 +3375,7 @@ void DaliComponent::arm_group_seed_sweep()
 
 /*
  * One address per completion, never blocking. Shaped like pump_refresh() for
- * the same reason: Core 0's loop may not block, so a walk here is a state
+ * the same reason: ESPHome's loop may not block, so a walk here is a state
  * machine advanced by whichever pass observes the previous answer.
  */
 void DaliComponent::pump_group_seed_sweep()
@@ -3834,7 +3834,7 @@ void DaliComponent::release_bus()
      * A claimed workflow may have moved levels or changed which addresses
      * exist, so ask for a refresh pass. The request is handed over as an atomic
      * rather than by touching refresh_cursor_ directly: this runs on the shell
-     * task, and the cursor belongs to Core 0's loop.
+     * task, and the cursor belongs to the loop task.
      */
     external_refresh_request_.store(true, std::memory_order_release);
     scan_running_.store(false, std::memory_order_release);

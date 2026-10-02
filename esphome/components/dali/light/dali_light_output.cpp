@@ -103,7 +103,7 @@ void DaliLightOutput::set_level_profile(const DaliLevelProfile &profile,
 void DaliLightOutput::on_command_complete_(DaliError result,
                                            const DaliFrame * /*reply*/,
                                            void *ctx) {
-  // Runs on the DALI task. Hand the outcome over; Core 0 owns write_.
+  // Runs on the DALI task. Hand the outcome over; the loop task owns write_.
   static_cast<DaliLightOutput *>(ctx)->command_mailbox_.publish(result == DALI_OK);
 }
 

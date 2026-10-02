@@ -40,7 +40,9 @@ python3 /config/dali-shell export inventory > /config/dali_inventory.json
 There is no default host. With no `--host` and no `DALI_SHELL_HOST` it browses
 mDNS for ESPHome nodes and offers the ones whose shell answers, asking only if
 more than one does — so the device name is something you pick out of a list
-rather than something you have to type.
+rather than something you have to type. A node whose shell another session
+holds is listed as in use. Connecting to it waits 10 s for that session to end,
+then says another session is probably open.
 
 With no client to hand, `nc dali-starter.local 2323` is a complete if unfriendly
 substitute: the shell is a plain line protocol. The client adds history, tab
@@ -964,13 +966,24 @@ backup: units sharing one short address answer as one, so no identity can be
 backup: 'address <aN> clear' frees the gear ones for 'commission unaddressed'
 ```
 
-A contested **control device** address gets different advice. `address d<N>
-clear` exists, but its contested arm opens only when the collision reads as
-undecodable activity. On 2k, two devices sharing d0 read as silence instead,
-and the verb answered `does not answer`. So the shell still names a hardware
-pass. The by-hand clear that worked there is device DTR0 `0xFF` (`raw C130FF
-len=24`), then SET SHORT ADDRESS sent twice at the shared address (`raw2
-<addr>FE14 len=24`, with `01` for d0). Follow it with `commission devices`.
+A contested **control device** address gets the device-space counterpart:
+
+```text
+backup: 'address <dN> clear' frees the device ones for 'commission devices'
+```
+
+A device address is marked contested only when it answered with undecodable
+activity, which is also what opens the contested arm of `address d<N> clear`.
+Devices sharing an address can also read as silence. On 2k, two of them at d0
+did. Then nothing marks the address, the backup simply misses them, and
+`address d0 clear` answers `does not answer`.
+
+The by-hand clear that worked there:
+
+1. Load device DTR0 with `0xFF`: `raw C130FF len=24`.
+2. Send SET SHORT ADDRESS twice at the shared address: `raw2 <addr>FE14 len=24`,
+   with `01` for d0.
+3. Run `commission devices`.
 
 An unanchored entry is at least an entry — the address is in the record and in
 `backup status`, and one fixture needs doing by hand. A contested address
@@ -1056,8 +1069,15 @@ Clearing a4 and re-commissioning turns two units nothing could read into two
 units that answer separately and read back their own identification numbers — at
 which point a second `restore plan` can place them, and whatever the backup
 recorded for a4 comes back. Contested **device** addresses are reserved and
-reported the same way. Clearing one is less certain, as the backup section
-above explains, so the plan names a hardware pass for them.
+reported the same way, and the plan names their counterpart:
+
+```text
+restore: free a contested d<N> with 'address <dN> clear', then 'commission
+devices', then run this again
+```
+
+Devices sharing an address that read as silence are not marked at all; the
+backup section above has the by-hand clear for that case.
 
 #### Putting group membership back
 

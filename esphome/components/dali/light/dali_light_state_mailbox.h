@@ -7,7 +7,7 @@ namespace esphome {
 namespace dali {
 
 /*
- * Single-slot, latest-value mailbox for Core 1 -> Core 0 light-state updates.
+ * Single-slot, latest-value mailbox for light-state updates, DALI task -> loop task.
  * Packing the pair into one atomic word prevents mixed on/level snapshots. An
  * publish racing with an exchange is either returned by that exchange or
  * remains pending for the next drain.

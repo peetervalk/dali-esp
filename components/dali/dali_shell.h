@@ -228,9 +228,9 @@ typedef struct {
      * Persist and reload the address backup across a reboot.
      *
      * These are hooks rather than shell code because durable storage belongs to
-     * the integration: the ESPHome component has the preferences API and the
-     * Core 0 affinity rule that comes with it, and the native firmware has
-     * neither. The shell owns the snapshot, its codec and its verbs; the
+     * the integration: the ESPHome component has the preferences API, along
+     * with the rule that only its loop task may call it; the native firmware
+     * has neither. The shell owns the snapshot, its codec and its verbs; the
      * integration owns only the bytes.
      *
      * `save` receives an encoded blob of `len` bytes, never more than

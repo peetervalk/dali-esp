@@ -21,8 +21,8 @@ static const char *TAG = "main";
 #endif
 
 /* DALI processing task — drives RX decode and scheduler state machine.
- * Higher priority than diag (2) and ESPHome/Wi-Fi tasks.
- * Pinning to Core 1 keeps Wi-Fi (Core 0) from causing timer jitter. */
+ * Higher priority than the diag task (2), and pinned to core 1. This firmware
+ * starts no Wi-Fi. */
 #define DALI_TASK_STACK     4096u
 #define DALI_TASK_PRIORITY    10u
 #define DALI_TASK_CORE         1

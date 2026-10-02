@@ -309,9 +309,10 @@ static void sched_arm_tx_gap(uint32_t frame_done_us, uint32_t gap_us)
  * budget is gone.
  *
  * Both callers reach here having waited out most or all of a reply window, so
- * the TX guard armed at transmission expired long ago. Re-arm it from now: a
- * reply that missed the window by a little is still on the wire, and the retry
- * has to wait for the straggler instead of transmitting over it.
+ * the TX guard armed at transmission expired long ago. Re-arm it from now with
+ * DALI_REPLY_TIMEOUT_BACKOFF_US, so the retry does not go out the instant the
+ * window shuts. The hold-off measurably helps on a busy bus, though not for
+ * the reason it was added; see the comment on the constant.
  *
  * Only commands whose response is retry-safe are ever given a budget —
  * dali_command_response_retry_safe() gates it at enqueue — so spending one here

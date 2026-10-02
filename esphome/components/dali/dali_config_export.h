@@ -22,7 +22,7 @@
  *
  * s_light_registry, s_sensor_registry, and s_dispatch_table are file-static in
  * dali_component.cpp because their threading rules are file-local: entries are
- * appended during setup() on Core 0 and never afterwards, and several of their
+ * appended during setup() and never afterwards, and several of their
  * fields are touched by the DALI task. Handing out const element pointers
  * keeps that ownership intact and gives the exporter exactly what it needs —
  * the configuration each entry was built from, through describe_config().

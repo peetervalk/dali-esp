@@ -325,7 +325,12 @@ None of these renames or removes a verb.
   `contested` conflict, even with no move aimed at it.
   - The remedy line reads `free a contested address with ...`, where it read
     `free a contested target`.
-  - The device-space line ends `a contested d<N> needs a hardware pass`.
+  - A contested `d<N>` gets its own remedy line, `free a contested d<N> with
+    'address <dN> clear', then 'commission devices', then run this again`,
+    where it read `nothing here de-addresses a control device, so a contested
+    d<N> target needs a hardware pass`.
+- `backup save` names the same fix for a contested `d<N>`: `'address <dN>
+  clear' frees the device ones for 'commission devices'`.
 
 **Elsewhere:**
 
@@ -425,6 +430,24 @@ None of these renames or removes a verb.
   up. With `idle_timeout: 0`, a peer that vanished while idle held the shell
   until reboot. **Unverified** on a device.
 - **The TCP shell's sockets were not counted** in ESPHome's lwIP socket pool.
+- **`backup save` and the restore planners sent a contested `d<N>` to a hardware
+  pass.** They said nothing here de-addresses a control device, which has not
+  been true since `address d<N> clear` arrived in `v2.0.0`. Its contested arm
+  opens on the same undecodable reply that marks the address contested, so
+  they now name it. **Unverified:** that arm has not yet met a bus.
+- **`tools/dali-shell` left out a node whose shell was in use.**
+  - The cause: its probe waited for a busy notice the device never sends.
+    While a session is open, a second connection waits in the device's listen
+    backlog and gets nothing.
+  - What it did: `--list`, and discovery without `--host`, dropped the node,
+    and connecting to it ended in `no prompt after 10s; the device may still
+    be working`.
+  - Now: a connection the device accepts but does not greet reads as in use.
+    The node is listed and offered as in use, and connecting to it says another
+    session is probably open, and how long the device takes to reclaim one.
+
+  Tested against local stand-ins for each case; **unverified** against a
+  device.
 
 ### Verification
 

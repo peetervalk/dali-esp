@@ -96,11 +96,14 @@
  *
  * The ordinary forward-interframe guard is armed when the frame is sent, so it
  * has long lapsed by the time a 25 ms reply window closes: without this, the
- * retry goes out the instant the window shuts. Gear that answers a shade later
- * than the timeout is then still driving the bus, and the retransmission lands
- * on the tail of that backward frame — losing both, and making a present device
- * look absent to a scan. One backward frame (11 Te) plus the settle period
- * covers the straggler before the wire is used again.
+ * retry goes out the instant the window shuts. The hold-off is one backward
+ * frame (11 Te) plus the settle period.
+ *
+ * It was added for gear answering a shade after the timeout, whose reply the
+ * retransmission would land on. On the 2k bus it took scans that found every
+ * lamp from 2 in 8 to 8 in 8. But rx_reply_late reads 0 there, so no reply
+ * arrives after the window, and that is not why it works. The mechanism is
+ * still open; change the value only once it is understood.
  */
 #define DALI_REPLY_TIMEOUT_BACKOFF_US \
     ((DALI_BIT_US * 11u) + (DALI_SETTLE_MS * 1000u))

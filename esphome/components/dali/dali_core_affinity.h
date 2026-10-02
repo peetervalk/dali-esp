@@ -1,13 +1,18 @@
 #pragma once
 
 /*
- * Core affinity for the DALI worker tasks.
+ * Core affinity for the DALI worker tasks: the DALI task, the scan task and
+ * the shell task.
  *
- * Both the DALI task and the scan task block on bus round-trips — the scan for
- * tens of seconds — so neither belongs on the core running the ESPHome main
- * loop. On a dual-core part that means Core 1.
+ * All three block on bus round-trips — the scan for tens of seconds — so they
+ * run as tasks of their own and never on the ESPHome main loop. On a
+ * dual-core part they are pinned to core 1. ESPHome 2026.9 pins its loop
+ * task to core 1 as well (components/esp32/core.cpp), so the loop and the
+ * workers share that core. A worker that blocks yields it to the loop; one
+ * that spins does not, which is why the PHY's pre-transmit idle check costs
+ * the loop time.
  *
- * Core 1 must not be hardcoded: on a single-core target (ESP32-S2, ESP32-C3,
+ * The core must not be hardcoded: on a single-core target (ESP32-S2, ESP32-C3,
  * and the single-core ESP32 variants) it does not exist, and
  * xTaskCreatePinnedToCore() fails outright rather than falling back. There the
  * right request is no affinity, letting the scheduler interleave the workers

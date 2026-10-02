@@ -6485,13 +6485,14 @@ static void cmd_backup(const DaliCliTokens *t)
             shell_printf("backup: 'address <aN> clear' frees the gear ones for "
                          "'commission unaddressed'\r\n");
         }
-        /* The two spaces get different advice because only one of them has a
-         * verb. `address` is control-gear only, and the Part 103 SET SHORT
-         * ADDRESS is reached from `restore` alone -- which needs a unit that
-         * already answers, and a contested one does not answer as itself. */
+        /* A device address is contested here only when it answered with
+         * undecodable activity, which is also what opens the contested arm of
+         * `address <dN> clear`. Devices sharing an address that read as
+         * silence instead are not caught here at all; they show up as entries
+         * missing from the bus. */
         if (inventory->undecodable_device_count > 0u) {
-            shell_printf("backup: nothing here de-addresses a control device, "
-                         "so a contested d<N> needs a hardware pass\r\n");
+            shell_printf("backup: 'address <dN> clear' frees the device ones for "
+                         "'commission devices'\r\n");
         }
     }
 
@@ -6594,11 +6595,10 @@ static void shell_restore_print_conflicts(const char                *verb,
                      "then 'commission unaddressed', then run this again\r\n",
                      verb);
     }
-    /* Split by space for the reason 'backup save' splits it: only the gear
-     * space has a verb that takes an address away. */
+    /* Split by space because the walk that re-addresses them differs. */
     if (device_contested) {
-        shell_printf("%s: nothing here de-addresses a control device, so a "
-                     "contested d<N> needs a hardware pass\r\n", verb);
+        shell_printf("%s: free a contested d<N> with 'address <dN> clear', then "
+                     "'commission devices', then run this again\r\n", verb);
     }
 }
 
