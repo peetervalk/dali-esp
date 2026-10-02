@@ -1,11 +1,13 @@
 # DALI-ESP To-Do
 
-Everything still open, in two parts:
+Everything still open, in three parts:
 
 - **Verify**: what `current_status.md` describes but no real bus has confirmed
   yet. Each item gives the procedure that confirms it.
 - **Develop**: known defects to fix, features to build, decisions to make, and
   the release process.
+- **Design**: proposals not yet approved. Each records what was weighed and
+  the intended implementation.
 
 `current_status.md` describes what the code is built to do, without
 verification labels. This file is where "not yet confirmed" lives.
@@ -1016,3 +1018,337 @@ that is not collision-safe single-master arbitration. Say so in the README and
   changes.
 - **Complete release provenance:** project SPDX identifiers, and the full
   vendored Unity MIT license and third-party notice.
+
+# Part 3 — Design
+
+## A browser GUI for the shell
+
+A small web server on the device whose page is a GUI for the shell. It would
+have a terminal, plus views built from what the verbs already report:
+- a command reference with real descriptions,
+- a bus map,
+- per-device panels, such as a Steinel's sensitivity as a slider rather than
+  `devmem write d0 2 4 128`,
+- a live bus log.
+
+Commissioning would move there, and the Home Assistant console and buttons
+would go. Nothing here is approved. It is a software-stack change, so it waits
+for an explicit go-ahead.
+
+If adopted, this replaces *P2 — A Home Assistant commissioning workflow*.
+
+### Budget
+
+**Heap, as observed on a device:** about 80 kB free from boot to the first
+shell use, and about 60 kB with a shell session open.
+
+- **The shell is not the 20 kB.**
+  - Its caches, about 62 KiB, are static `.bss` inside the 141,792 B of static
+    DRAM, so they leave the heap before boot.
+  - Nothing in `components/dali` calls malloc, `dali_shell_attach()`
+    included.
+  - The session task's 12,288 B stack is created in `setup()`, so it is
+    already inside the 80 kB.
+- **The drop is the network stack.**
+  - Each connection can hold `CONFIG_LWIP_TCP_SND_BUF_DEFAULT` (5,760 B) of
+    unacknowledged output and `CONFIG_LWIP_TCP_WND_DEFAULT` (5,760 B) of
+    unread input.
+  - The Wi-Fi driver allocates up to 32 dynamic RX buffers and 32 dynamic TX
+    buffers, about 1.6 kB each, as traffic flows.
+
+  20 kB is still more than one idle connection should need. Measure it before
+  building anything; see *Order of work*.
+- **Enrichment costs flash, not heap.** The browser renders. The device serves
+  a constant blob from flash and streams verb output through `shell_printf()`,
+  as it already does.
+
+| Item | Heap | Flash |
+|---|---|---|
+| Page, JS and CSS, gzipped | 0 | 30–60 KB, estimated |
+| `dali_commands.md`, `commissioning_readme.md`, `steinel_bank2_reference.md` as built-in help | 0 | 57,071 B with `gzip -9` (29,371 + 25,110 + 4,886 apart) |
+| Serving the page: one short connection | the send buffer while it streams, then 0 | — |
+| A WebSocket session | about what a TCP session costs now; one replaces the other | about 8 KB of code |
+| Flash headroom on the `dali_test.yaml` build | | 798,624 B: a 1,036,384 B image in a 1,835,008 B app slot |
+
+### Transport: HTTP and WebSocket on the shell task
+
+**Chosen.** A minimal HTTP/1.1 listener on the `dali_shell` task, beside port
+2323, with one `select()` over both listeners and the client.
+
+- `GET /` serves the gzipped page from flash.
+- `GET /ws` upgrades to a WebSocket, and that connection *is* the shell
+  session:
+  - `write_cb` sends each write as a text frame.
+  - Each client text frame is one command line, fed to
+    `dali_shell_feed_byte()`.
+  - The prompt goes in a frame of its own, so the page knows a command has
+    finished. That is framing, and it stays within what a binding may do.
+- **No new task and no new stack.** SHA-1 for the handshake is already in the
+  image (`CONFIG_MBEDTLS_SHA1_C=y`), and so is mbedTLS's base64.
+- **Frames.**
+  - Client frames must be masked, unfragmented and no longer than 125 bytes.
+    A command line is at most `DALI_SHELL_LINE_MAX`, 80 characters.
+  - Ping gets pong, and close gets close. Anything else ends the session.
+- **Parsing is portable.** The request-line and header parser, the handshake
+  and frame encode/decode are pure functions in `components/dali`, host-tested
+  like `dali_cli_peer_sniff()`. The binding in `esphome/components/dali` moves
+  bytes and owns the session's lifetime, as `dali_shell_tcp.cpp` does.
+- **What a second browser sees.** While a session runs, `select()` still
+  accepts. A page request is served. A second upgrade gets a close frame that
+  says the shell is busy, so it does not wait unanswered in the backlog, as a
+  second TCP client does today.
+
+**Rejected:**
+- **ESPHome `web_server:`.** It is an entity UI, and it loads its JS from a
+  CDN unless `local: true` is set. None of the views above fit it.
+- **`web_server_base` / `esp_http_server`.** It is already linked, through
+  `captive_portal`, but it starts only in AP mode.
+  - Starting it costs a permanent 4,352 B task stack: IDF's 4,096 plus
+    ESPHome's 256.
+  - It runs handlers one at a time on that task, so a streaming `discover`
+    would block every other request. Bridging to the shell task means queues,
+    and coupling to `web_server_idf` internals that change between ESPHome
+    releases.
+  - `web_server_base` adds `Access-Control-Allow-Origin: *` to every response.
+  - It does not enable `CONFIG_HTTPD_WS_SUPPORT`.
+
+**Port.** Not 80, and the schema refuses a port another component holds.
+- The captive portal binds 80 when the AP comes up, and `web_server:` binds it
+  permanently.
+- AP mode is where the GUI is worth most: a phone on `dali-starter-ap`
+  commissioning a site that has no network yet. So the page loads nothing from
+  a CDN.
+
+**YAML,** a sub-block of the shell it binds:
+
+```yaml
+dali:
+  shell:
+    port: 2323
+    allow_commissioning: true   # one policy for both bindings
+    web:
+      port: 8080
+      allowed_hosts: [dali.lan] # beyond the IP literal, <name>.local and <name>
+```
+
+`dali_test.yaml` gains the block in the same change.
+
+### Security
+
+A WebSocket is a wider hole than the POST that `dali_cli_peer_sniff()` closed.
+Browsers apply no CORS to it, and the attacking page can read every reply. The
+upgrade is refused unless both checks pass, and both have host vectors:
+
+1. **`Host`** is the device's IP literal, `<name>.local`, `<name>`, or a name
+   in `allowed_hosts`. This blocks DNS rebinding, where `Host` and `Origin`
+   both name the attacker's domain and agree with each other.
+2. **`Origin`** is exactly `http://` plus that `Host`. This blocks cross-site
+   WebSocket hijacking. A missing `Origin` is refused too, because every
+   browser sends one on an upgrade.
+
+`GET /` checks `Host` as well. The page holds nothing secret, but the check
+keeps the two paths identical.
+
+The session takes the same `DALI_SHELL_ALLOW_*` policy as the TCP binding. The
+page greys out what the policy refuses. It never decides that itself.
+
+There is no HTTPS and no real authentication: a TLS handshake needs on the
+order of 30–40 kB of heap. Trust stays where the TCP shell and OTA already
+are: anyone who can reach the port on the LAN.
+
+### Content
+
+**The rule: DALI knowledge stays in C tables, and reaches the page through
+`schema`.** The page is a client, as `tools/dali-shell` is. It composes verbs
+and renders their output, and holds no opcode, offset or range table of its
+own. A page that grew one would be a second decoder that drifts, which is how
+the HA console became a second implementation.
+
+**On verbs that exist today:**
+
+- **Command reference.** `schema` already emits every verb with its args,
+  summary, argument counts and subcommands, and every named command table.
+  - Forms and completion come from that.
+  - The long descriptions are compiled in from `dali_commands.md` at codegen
+    time, so the help always matches the firmware. `type: git` clones the
+    whole repository, so the file is there; the `proto_dali_*.c` shims rely on
+    the same fact.
+- **Bus map**, from `export inventory`. Per address it gives status, device
+  type, level, groups, GTIN, identification number, firmware, level window,
+  curve and scenes, plus cached input devices and switch mappings. That is
+  enough for:
+  - a 64-cell gear grid and a 64-cell control-device grid,
+  - a 64×16 group matrix,
+  - contested and undecodable flags,
+  - click to `identify` a unit, or to open its panel.
+- **Files instead of copy-paste.**
+  - `export config` becomes a YAML download.
+  - `backup export` becomes a file.
+  - `backup import` becomes an upload, which the page sends as the existing
+    `begin`, `HEX` and `end` lines.
+- **A commissioning stepper.** The flow in `commissioning_readme.md` (discover,
+  commission gear, commission devices, find switches, export, back up) as
+  steps, with the live output beside each one. `commission`, `address`,
+  `backup`, `restore` and `dt8`, all refused by the HA console, are available
+  because this is the shell.
+
+**Small C additions that both shells gain:**
+
+- **Parameter metadata in `schema`.**
+  - Per instance type: each `iquery`/`iconfig` name, its range and unit. For
+    example, the Part 303 hold timer in 10 s steps.
+  - Vendor register maps from a table in `dali_steinel.c`: Bank 2 offsets with
+    labels and ranges, `0x04` global sensitivity among them.
+  - The panels render from this metadata.
+- **One structured read per panel.** For example, `export device <aN|dN>`
+  prints one JSON object. Its instance half already exists as the backup v2
+  instance-settings reader in `dali_restore`.
+- **Write, then read back, inside the verb.** This is the Known Limitation *No
+  memory or configuration write reads itself back*. Fixed in `iconfig`,
+  `devmem write` and `config`, every surface gains it. Fixed in the page alone,
+  only the page would.
+
+### Live log
+
+**Sources.**
+- The trace subscriber already sees every frame on the wire:
+  - our own forward frames,
+  - backward frames,
+  - other masters' forward frames,
+  - events.
+
+  Each has a µs timestamp and, for a reply, the time since our TX.
+- Lines start with `[BUS]`, so the page can route them out of the terminal
+  pane.
+- With `defer_foreign_task_output` they already pass through the deferred ring.
+  They never block the DALI task, as the native UART trace can.
+
+**Rate.**
+- One 16-bit forward frame and its 22 Te gap take about 25 ms, so a loaded bus
+  carries about 40–50 frames a second, replies included. Decoded, that is
+  about 4 kB/s.
+- The deferred ring holds 16 lines of 128 B and is pumped every 250 ms
+  (`SHELL_RECV_TIMEOUT_MS`), a ceiling of about 64 lines a second. While trace
+  is on, pump it from the `select()` timeout at a shorter interval rather than
+  growing the ring, because each slot is static RAM on every board.
+- Dropped lines are already reported as `[trace] N line(s) dropped`.
+
+**To build:**
+- **A frame-to-text decoder in `components/dali`,** host-tested. It reverse-
+  looks-up the command tables `dali_cli` already holds, and decodes events
+  through `dali_event_parse_frame()`.
+  The aim is `a3 QUERY ACTUAL LEVEL -> 254` and `d5 i1 occupied`, not
+  `0x47A0 (16-bit)`. The serial `trace` gains it too.
+- **History on connect.** If `capture` is running, the page pulls
+  `capture export` when it connects, to show the last 128 records.
+
+**What it cannot show today:**
+- Anything from before the session opened, except the capture ring.
+- Frames lost during an NVS commit; see *P0 — The RX edge interrupt is not
+  IRAM-safe*.
+- Which foreign master a backward frame answered. It can say only which frame
+  it followed.
+
+### Out of scope
+
+- **More than one live session.** The shell is single-session, and each
+  connection pays its own buffers.
+- **JSON assembled in RAM.** Every structured verb streams through
+  `shell_printf()`, as `export inventory` does.
+- **Auto-refreshing dashboards.** The limit is the bus, not RAM. DALI manages
+  about 40 transactions a second, and the refresh pump and sensor polls already
+  use part of that.
+- **A JS framework or a CDN.** Vanilla JS, no build toolchain. `__init__.py`
+  gzips the page and the docs into a generated header at codegen time.
+- **The native firmware.** The parser is portable, but only the ESPHome
+  binding is planned.
+
+### Removing the Home Assistant console and buttons
+
+**What stays: the runtime controller.**
+- light entities,
+- input sensors,
+- headless dispatch,
+- `bus_fault`.
+
+**What goes:**
+- the eight `button:` types and the Target Address `number:`,
+- the `text:` console and `command_result`,
+- `scan_status`, `scan_result`, `yaml_result` and `couplers_result`,
+- `bus_monitor`, which the live log supersedes.
+
+Only these platforms call `start_scan()`, `start_identify()`,
+`start_find_couplers()`, `execute_command()` and the `send_diag_*()` family,
+so the cut is clean.
+
+**What it deletes:**
+- **The console handlers,** `execute_command()` and `console_*_()`: about
+  1,140 lines of `dali_component.cpp`. They are a second implementation of
+  shell verbs, with no host vectors, that no bus has run.
+- **`dali_scan.cpp`,** 612 lines, and the 8,192 B task stack each button scan
+  takes from the heap.
+- **2,224 B of static buffers** (`s_scan_yaml_str`, `s_scan_result_str`,
+  `s_bus_monitor_str`), plus the strings those text sensors hold in heap.
+- **These items, from this file:**
+  - *The command console, verb by verb* (Part 1).
+  - The console half of *P2 — DT8 in Home Assistant*.
+  - *P1 — Find Couplers, paged or exportable*.
+  - The button-scan half of *P0 — Reserve the scheduler for a scan*. The
+    claim's missing atomic reservation stays.
+  - The console's `OK` in *P0 — Confirm transmission for every scheduler
+    client*.
+
+**What is lost:**
+- **Commissioning through Home Assistant's remote access without a terminal.**
+  The page is plain HTTP on the LAN, and an HTTPS dashboard cannot embed it
+  (mixed content). The TCP shell through HA's terminal add-on still works
+  remotely.
+- **Acting while another client holds the shell's one session.**
+- **The two-walk cross-check.** The button scan and `discover` are separate
+  implementations, and a disagreement was a finding. Lunatone DALI Cockpit
+  stays the external reference.
+- **Results in Home Assistant's history.**
+- **`dali-starter.yaml` and the README example as they stand.** Both use the
+  platforms, so this is a breaking change for a major tag: a migration note in
+  `CHANGELOG.md`, and new pinned configs at that tag.
+
+**Open question: does any automation write to the DALI Command text
+entity?** For example, `scene g1 3`. Light entities are brightness-only, so
+the console is today the only way an HA script reaches scenes or raw frames.
+If one does, that need is runtime, not commissioning. It wants a small ESPHome
+action in place of the console, not a reason to keep it.
+
+### Order of work
+
+1. **Measure heap on a device.** This needs a hardware go-ahead. Add the
+   `debug:` sensors for free heap, minimum free and largest block, and read
+   them:
+   - idle,
+   - with a TCP shell session open,
+   - during `discover`,
+   - with `trace on` while events flow,
+   - after the session closes.
+
+   This explains the 20 kB, and sets a heap floor below which the web binding
+   refuses a new page or upgrade.
+2. **The portable parser.** Request line, headers, the `Host` and `Origin`
+   checks, the handshake and frames, with host vectors and a mutation pass, as
+   the peer sniffer had.
+3. **The binding and a bare page.**
+   - The `select()` loop, the `web:` schema, and `dali_test.yaml`.
+   - A page with three parts: a terminal, help from `schema` plus
+     `dali_commands.md`, and a map from `export inventory`.
+4. **The content.**
+   - The frame decoder and the live log.
+   - Parameter and vendor metadata in `schema`.
+   - `export device`.
+   - Device panels.
+   - Read-back in the write verbs.
+5. **Remove the Home Assistant scheme** at the next major tag, with the
+   migration note. Then rewrite the fallback sections of `dali-starter.yaml`
+   and `commissioning_readme.md`.
+
+Each step that lands updates `CHANGELOG.md` with its verification label.
+`dali_commands.md` and `current_status.md` follow for any new verb or
+operator-visible behaviour, and Part 1 gains an item for each expectation no
+bus has confirmed.
