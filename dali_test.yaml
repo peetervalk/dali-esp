@@ -69,7 +69,6 @@ api:
 
 ota:
   - platform: esphome
-    password: "DUMMY-COMPILE-ONLY"
 
 logger:
   level: DEBUG

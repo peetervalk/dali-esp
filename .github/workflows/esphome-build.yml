@@ -30,8 +30,15 @@ name: ESPHome Build
 # the ref it names, and either the pin or the config then needs updating before
 # release.
 #
+# Which ESPHome: the one uv.lock pins, on the Python .python-version names —
+# the same environment `uv run esphome` gives a development machine. A new
+# ESPHome release reaches this workflow only as a commit that moves the pin, so
+# a red run here is the branch, not upstream. `uv sync --locked` also fails a
+# pin edited in pyproject.toml without re-running `uv lock`.
+#
 # The clean-room packaging build — the one that proves a consumer can build
 # from a release tag with none of this repo around it — is release-packaging.yml.
+# It runs the latest ESPHome, not the pin; see its header.
 
 on:
   push:
@@ -155,15 +162,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # No `cache: pip` here: it needs a requirements.txt or pyproject.toml to
-      # key on, and this repo has neither, so it fails the job outright rather
-      # than degrading to a miss.
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
+      # Installs uv and caches its downloads, keyed on uv.lock. A full version,
+      # unlike the other actions here: setup-uv publishes no floating major tag
+      # after v7.
+      - uses: astral-sh/setup-uv@v10.3.2
 
       - name: Install ESPHome
-        run: pip install esphome
+        run: uv sync --locked
 
       - name: Write dummy secrets
         run: |
@@ -181,11 +186,10 @@ jobs:
           wifi_password: "DUMMY-COMPILE-ONLY"
           ap_password: "DUMMY-COMPILE-ONLY"
           api_encryption_key: "$key"
-          ota_password: "DUMMY-COMPILE-ONLY"
           EOF
 
       - name: Validate
-        run: esphome config ${{ matrix.config }}
+        run: uv run --locked esphome config ${{ matrix.config }}
 
   compile:
     name: esphome compile (${{ matrix.config }})
@@ -205,27 +209,32 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # No `cache: pip` here: it needs a requirements.txt or pyproject.toml to
-      # key on, and this repo has neither, so it fails the job outright rather
-      # than degrading to a miss.
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
+      # Installs uv and caches its downloads, keyed on uv.lock. A full version,
+      # unlike the other actions here: setup-uv publishes no floating major tag
+      # after v7.
+      - uses: astral-sh/setup-uv@v10.3.2
 
-      - name: Cache PlatformIO toolchains
+      - name: Cache ESP-IDF
         uses: actions/cache@v6
         with:
-          # The xtensa toolchain and ESP-IDF framework downloads dominate a
-          # cold run. The build tree itself is deliberately not cached: a stale
-          # .pioenvs is a worse failure than a slow build.
-          path: ~/.platformio
-          key: platformio-${{ runner.os }}-${{ matrix.config }}-${{ hashFiles(matrix.config) }}
-          restore-keys: |
-            platformio-${{ runner.os }}-${{ matrix.config }}-
-            platformio-${{ runner.os }}-
+          # ESPHome installs its own ESP-IDF here: the framework, the xtensa
+          # toolchain and IDF's Python environment. On a cold run that is about
+          # a minute. A stamp file in the tree tells ESPHome the install is
+          # complete, so dist/ (the downloaded archives) is left out; a stamp
+          # mismatch just downloads again. The build tree itself is
+          # deliberately not cached: a stale build directory is a worse failure
+          # than a slow build.
+          #
+          # Keyed on uv.lock alone, because the ESPHome pin chooses the IDF
+          # version. No restore-keys: restoring an older IDF under a new key
+          # would carry every past version forward in the cache.
+          path: |
+            ~/.cache/esphome/idf
+            !~/.cache/esphome/idf/dist
+          key: esp-idf-${{ runner.os }}-${{ hashFiles('uv.lock') }}
 
       - name: Install ESPHome
-        run: pip install esphome
+        run: uv sync --locked
 
       - name: Write dummy secrets
         run: |
@@ -243,8 +252,7 @@ jobs:
           wifi_password: "DUMMY-COMPILE-ONLY"
           ap_password: "DUMMY-COMPILE-ONLY"
           api_encryption_key: "$key"
-          ota_password: "DUMMY-COMPILE-ONLY"
           EOF
 
       - name: Compile
-        run: esphome compile ${{ matrix.config }}
+        run: uv run --locked esphome compile ${{ matrix.config }}

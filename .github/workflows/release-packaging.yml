@@ -15,6 +15,11 @@ name: Release Packaging
 # from the published tag over HTTPS, exactly as a user's machine would fetch
 # it. Nothing is cached either: a cold environment is the honest one for a
 # packaging check.
+#
+# ESPHome is unpinned here on purpose, unlike esphome-build.yml, which uses the
+# uv.lock pin. A user builds with whatever ESPHome their Home Assistant ships,
+# so this proves the tag against the current release. With no checkout it
+# could not read the pin anyway.
 
 on:
   push:

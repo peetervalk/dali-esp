@@ -18,7 +18,27 @@ At tagging:
 - re-check each label against `project_log.md` and `todo.md`
 - rename this heading to the version
 
-Nothing yet.
+### Changed — `dali-starter.yaml`
+
+- **No OTA password.** ESPHome warns that one wastes flash and RAM next to an
+  API encryption key. The `ota_password` secret is no longer read.
+  **Unverified:** validates and compiles on ESPHome 2026.10.0; not flashed.
+  - With the `api:` key, firmware from ESPHome 2026.9.0 on offers encrypted
+    OTA but does not require it. To require it, add `encryption:` under `ota:`.
+    That needs ESPHome 2026.9.0 or later.
+  - A device whose firmware predates ESPHome 2026.9.0 still asks for its
+    password on the next OTA. Keep `password:` for that one install.
+
+### Changed — development
+
+- **ESPHome is pinned for development and CI.**
+  - `pyproject.toml` and `uv.lock` pin ESPHome 2026.10.0, and `uv run esphome`
+    builds with it.
+  - `esphome-build.yml` installs from the same lock. Before, it took whatever
+    `pip install esphome` resolved to on the day.
+  - `release-packaging.yml` still builds on the latest ESPHome, as a user's
+    machine would.
+  - A user's own build is unaffected.
 
 ## v3.0.0
 

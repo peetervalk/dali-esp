@@ -35,7 +35,6 @@ api:
 
 ota:
   - platform: esphome
-    password: !secret ota_password
 
 logger:
   level: INFO  # button-scan output is at INFO — set DEBUG for PHY-level tracing

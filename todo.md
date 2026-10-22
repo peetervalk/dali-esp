@@ -122,9 +122,9 @@ time.sleep(60)                  # never read
 ### ESPHome version range
 
 - **Establish the `manifest.json` floor of `>=2026.6.0`.** Compile
-  `dali_test.yaml` on 2026.6.0, from `pip install esphome==2026.6.0` in a venv.
-  If it fails, raise the floor to the oldest version that compiles, and record
-  which one.
+  `dali_test.yaml` on 2026.6.0 with `uvx --from esphome==2026.6.0 esphome
+  compile dali_test.yaml`, which leaves the pinned `.venv` alone. If it fails,
+  raise the floor to the oldest version that compiles, and record which one.
 
 ### `export config` validates
 
@@ -132,7 +132,7 @@ time.sleep(60)                  # never read
    `python3 dali-shell export config > block.yaml`.
 2. Paste the block into a copy of that node's YAML, replacing its `dali:`,
    `light:` and `sensor:` blocks.
-3. Run `python -m esphome config <copy>.yaml`.
+3. Run `uv run esphome config <copy>.yaml`.
 4. **Expected:** valid. Any error is a bug in the export. If this passes
    repeatedly, it is the vector *Host vectors for the unasserted shell
    outputs* wants.
@@ -1005,6 +1005,9 @@ Nothing yet. A `dev` change that makes a pinned comment wrong goes here.
   - The list for v2.0.0 had not been emptied at v1.3.0, so it claimed two
     releases' worth of breaks as new.
   - At v3.0.0, one label covered a fix made after the bus run it cited.
+- **Move the ESPHome pin to the current release** in `pyproject.toml`, run `uv
+  lock`, and compile. The memory table below and CI then describe the version
+  users build with.
 - **Re-measure the README's memory table.**
   - Compile `dali_test.yaml` with and without its `shell:` block.
   - Then update the RAM line in the hardware table.
@@ -1012,11 +1015,12 @@ Nothing yet. A `dev` change that makes a pinned comment wrong goes here.
 
 ### Standing
 
-- **Enforce, or document, the real ESP-IDF and ESPHome version requirements.**
-  `idf-build.yml` pins IDF 6.0.1, so the native requirement fails as soon as it
-  stops holding. The ESPHome side is still advisory: CI installs whatever `pip
-  install esphome` resolves to. The two builds compile the same
-  `components/dali` C with different toolchains.
+- **Enforce, or document, the ESPHome version range.** `idf-build.yml` pins
+  IDF 6.0.1 and `esphome-build.yml` builds the `uv.lock` pin, so each fails as
+  soon as its own version stops building. The range `manifest.json` claims is
+  still advisory between those points: `release-packaging.yml` builds the
+  latest ESPHome only at a tag, and nothing builds the floor. The two builds
+  compile the same `components/dali` C with different toolchains.
 - **Keep local filenames hyphenated in all documentation.** Re-check
   `dali_commands.md`, which tracks both verb surfaces, whenever either table
   changes.

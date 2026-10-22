@@ -36,6 +36,45 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-10-22 (ESPHome pinned with uv; uncommitted on `dev`)
+
+ESPHome had no pin anywhere. The workstation ran 2026.9.1 because nobody had
+updated it, and CI ran whatever `pip install esphome` resolved to, which was
+2026.10.0 from its release on 2026-10-21. The maintainer works from two
+machines, which made a third version possible. `pyproject.toml` now pins
+2026.10.0, `uv.lock` its dependencies, and `.python-version` Python 3.12.
+`esphome-build.yml` installs from the same files. `release-packaging.yml` stays
+on the latest release on purpose. No C source changed, and nothing touched a
+device or a bus.
+
+- `uv lock` resolved 104 packages across platforms. `uv sync --locked`
+  installed 93 on Windows, on a CPython 3.12.15 that uv downloaded.
+- `uv run esphome config dali_test.yaml` validates.
+- `uv run esphome compile dali_test.yaml` compiles on 2026.10.0, with no
+  compiler warnings.
+  - It selects ESP-IDF 5.5.6, where 2026.9.1 selected 5.5.5.
+  - The version change forced a clean rebuild.
+- One configuration warning: the OTA `password` "wastes significant flash and
+  RAM" next to the API encryption key. It is not new: 2026.9.1 makes the same
+  check. The same change drops the password; see *Investigations*, "The
+  example configs drop the OTA password".
+
+Sizes with `shell:`, against the v3.0.0 build on 2026.9.1 in the next entry.
+Sections are from `xtensa-esp32-elf-size -A`. The image is `dali-test.bin`. That
+entry does not say how it measured, so take the image row as indicative.
+
+| Segment | 2026.9.1 | 2026.10.0 | Change |
+|---|---|---|---|
+| `.dram0.bss` | 125,496 B | 125,192 B | −304 B |
+| `.dram0.data` | 16,136 B | 15,828 B | −308 B |
+| IRAM (`.text` + `.vectors`) | 78,947 B | 78,939 B | −8 B |
+| App image | 1,036,267 B | 1,032,224 B | −4,043 B |
+
+Not covered: CI on the new workflow, which runs when this is pushed. Also not
+covered: the second machine, a build without `shell:`, and a flashed image. The
+README memory table still describes `v3.0.0` on 2026.9.1, which is correct for
+that tag.
+
 ### Verified locally on 2026-10-22 (`v3.0.0` release prep, code at `7c9c465`)
 
 The checks `todo.md` lists for a release. The code is `7c9c465`, the `dev`
@@ -2255,6 +2294,83 @@ cleared by the 2026-08-14 entry above):
 ---
 
 # Investigations
+
+## The example configs drop the OTA password — decided 2026-10-22
+
+ESPHome warned on both tracked configs: `'ota' password wastes significant flash
+and RAM; using 'encryption' instead is recommended`.
+
+- Both set an OTA `password:` alongside an `api:` encryption key.
+- 2026.9.1's `components/esphome/ota/__init__.py` makes the same check, in
+  longer words, so the v3.0.0 compile on 2026.9.1 printed it too. That entry's
+  "no warnings" means compiler warnings, or missed this one.
+
+**What ESPHome offers.** A bare `encryption:` under `ota:` inherits the `api:`
+key and makes OTA require it. `esphome config dali_test.yaml` with that block:
+
+| ESPHome | Result |
+|---|---|
+| 2026.8.2 | Rejected: `[encryption] is an invalid option for [ota.esphome]` |
+| 2026.9.0 | Accepted |
+| 2026.9.1 | Accepted |
+| 2026.10.0 | Accepted |
+
+In the example configs it would have raised their floor to 2026.9.0, above the
+component's `>=2026.6.0`.
+
+**The decision.** The maintainer chose to drop both, so the example configs
+carry neither an OTA password nor OTA encryption. The `api:` key stays.
+
+- The maintainer's live devices already run that way.
+- ESPHome's builder tells a user who wants more how to add it.
+- CI no longer writes an `ota_password` secret, because nothing reads it.
+- Both configs validate on 2026.10.0 with no warnings. `dali_test.yaml`
+  compiles with no compiler warnings. Its image is 1,031,232 B, 992 B smaller
+  than with the password.
+
+**What follows,** read from 2026.10.0's `espota2.py`:
+
+- **OTA is not authenticated.**
+  - Firmware built with 2026.9.0 or later, with an API key, offers encrypted
+    OTA, and the uploader takes the offer.
+  - Without `ota: encryption:` the device still accepts a plaintext upload.
+  - So "the same posture as OTA", in the README, `commissioning_readme.md` and
+    the shell's code comments, stays true.
+- **A device flashed with an earlier starter.**
+  - If built with 2026.9.0 or later, the encrypted upload authenticates it and
+    its password is not asked for. 2026.9.1's warning says so.
+  - If built with anything older, it asks for the password, so the first
+    upload of the new starter needs `password:` once.
+- **From 2027.3.0** the uploader stops falling back to plaintext when a device
+  does not offer encryption. That is only firmware older than 2026.9.0, or
+  firmware without an API key.
+
+## CI cached a PlatformIO directory that ESPHome no longer uses — found 2026-10-22
+
+`esphome-build.yml`'s compile job cached `~/.platformio` as "PlatformIO
+toolchains". The project has not built with PlatformIO for a long time: ESPHome
+builds ESP32 with its own ESP-IDF and keeps it in `~/.cache/esphome/idf`.
+
+Evidence from the `dev` run 39753482023, on ESPHome 2026.10.0:
+
+- The restore found nothing.
+- The save failed with `Path Validation Error: Path(s) specified in the action
+  for caching do(es) not exist`.
+- The compile downloaded IDF 5.5.6 to `/home/runner/.cache/esphome/idf` and
+  installed it from scratch. That took about one minute of a 2.7-minute job.
+
+The step now caches `~/.cache/esphome/idf` without `dist/`, keyed on `uv.lock`
+alone, with no `restore-keys`.
+
+- ESPHome's `espidf/framework.py` skips the install when the stamp file in the
+  tree matches, so the downloaded archives are not needed after a restore.
+- The pin chooses the IDF version, which is why the key is `uv.lock`.
+- A fallback restore would carry every past IDF version forward, which is why
+  there are no `restore-keys`.
+
+Unverified until CI runs it. The first run should save the cache, and the
+second should restore it and skip `Downloading ESP-IDF`. Whether the restore
+beats the download is not yet measured.
 
 ## The Steinel's events lost their device address — found 2026-10-01
 

@@ -300,9 +300,13 @@ every platform and every optional block on purpose — an option no tracked conf
 names is an option nothing compiles. Extend it in the same change that extends
 the schema.
 
+The ESPHome version is pinned in [pyproject.toml](pyproject.toml) and
+`uv.lock`. With [uv](https://docs.astral.sh/uv/) installed, `uv run` builds with
+the same version CI does:
+
 ```sh
-esphome config  dali_test.yaml    # schema only; does not run to_code()
-esphome compile dali_test.yaml    # the working tree, every platform
+uv run esphome config  dali_test.yaml    # schema only; does not run to_code()
+uv run esphome compile dali_test.yaml    # the working tree, every platform
 ```
 
 Native diagnostic firmware: standard ESP-IDF flow (`idf.py build flash monitor`).
@@ -312,9 +316,9 @@ CI runs on pushes to `main` and `dev`, and on pull requests into `main`:
 | Workflow | What it checks |
 |---|---|
 | `host-tests.yml` | The host suites build and pass |
-| `esphome-build.yml` | Source/shim/CMakeLists manifests agree; every tracked `dali*.yaml` validates against the Python schema; those that build the in-repo component compile fully |
+| `esphome-build.yml` | Source/shim/CMakeLists manifests agree; every tracked `dali*.yaml` validates against the Python schema; those that build the in-repo component compile fully. All on the ESPHome version `uv.lock` pins |
 | `idf-build.yml` | The native firmware builds for esp32 against pinned ESP-IDF 6.0.1, from `sdkconfig.defaults` alone |
-| `release-packaging.yml` | A consumer can build the component from a published tag with no checkout of this repo (runs on `v*` tags) |
+| `release-packaging.yml` | A consumer can build the component from a published tag with no checkout of this repo, on the latest ESPHome (runs on `v*` tags) |
 
 ## License
 

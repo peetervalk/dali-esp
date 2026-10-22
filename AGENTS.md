@@ -184,7 +184,8 @@ portable definition of a build — see *CI* below.
 - serial port `COM6`
 - ESP-IDF 6.0.1 at `C:\Espressif`
 - MSYS2 UCRT64 toolchain at `C:\msys64`
-- ESPHome installed as a Python module, so it runs as `python -m esphome`
+- [uv](https://docs.astral.sh/uv/) 0.13.5 or newer, which supplies ESPHome; run
+  it as `uv run esphome`
 
 Run ESPHome from PowerShell. Under Git Bash the IDF configure step fails while
 the compile still reports success.
@@ -208,10 +209,25 @@ C:\msys64\ucrt64\bin\mingw32-make.exe --directory build test CTEST_OUTPUT_ON_FAI
 ESPHome:
 
 ```powershell
-python -m esphome config  dali_test.yaml      # cheapest check; validates the in-repo component
-python -m esphome compile dali_test.yaml      # the working tree, every platform
-python -m esphome compile dali-starter.yaml   # whatever ref it pins, not the working tree
+uv run esphome config  dali_test.yaml      # cheapest check; validates the in-repo component
+uv run esphome compile dali_test.yaml      # the working tree, every platform
+uv run esphome compile dali-starter.yaml   # whatever ref it pins, not the working tree
 ```
+
+**The ESPHome version is pinned in the repo.**
+
+- `pyproject.toml` pins ESPHome, `uv.lock` pins everything it depends on, and
+  `.python-version` names the interpreter. `esphome-build.yml` installs from
+  the same files.
+- `uv run` brings `.venv` in step with them before each command. A pull that
+  moves the pin needs no manual step on any machine.
+- **To bump:** change the pin in `pyproject.toml`, run `uv lock`, compile
+  `dali_test.yaml`, and commit both files. CI fails a pin changed without
+  `uv lock`.
+- **To build on another version** without touching `.venv`, for example the
+  `manifest.json` floor, run `uvx --from esphome==<version> esphome compile
+  dali_test.yaml`. It shares the build directory, so the next pinned compile
+  rebuilds from scratch.
 
 **Reach for `esphome config` first.** It validates the schema without touching
 a build directory, so it cannot collide with a compile running in another
@@ -232,8 +248,8 @@ Four workflows in `.github/workflows/`:
 |---|---|---|
 | `host-tests.yml` | The host suites, cmake/ctest over `test/` | push main/dev, PR to main |
 | `idf-build.yml` | Native firmware, `idf.py build` for esp32 on IDF 6.0.1 | push main/dev, PR to main |
-| `esphome-build.yml` | Source/shim/`SRCS` agreement, config discovery, per-config schema validation, and a compile of every `type: local` config | push main/dev, PR to main |
-| `release-packaging.yml` | `esphome compile` from a git tag in an empty directory | tag `v*`, manual |
+| `esphome-build.yml` | Source/shim/`SRCS` agreement, config discovery, per-config schema validation, and a compile of every `type: local` config, on the ESPHome version `uv.lock` pins | push main/dev, PR to main |
+| `release-packaging.yml` | `esphome compile` from a git tag in an empty directory, on the latest ESPHome | tag `v*`, manual |
 
 - **`esphome-build.yml` names no configuration.** `discover` runs `git ls-files
   'dali*.yaml'` and sorts the results by whether `external_components` says
@@ -256,6 +272,12 @@ Four workflows in `.github/workflows/`:
   on purpose. Run inside a repo checkout, it would pass for the wrong reason.
   `workflow_dispatch` takes a ref, so a branch can be packaging-tested before
   it is tagged.
+- **The two ESPHome workflows run different versions, on purpose.**
+  - `esphome-build.yml` builds the pin, so CI and the development machines
+    build the same ESPHome. A new ESPHome release reaches it only as a commit
+    that moves the pin, so a red run there is the branch, not upstream.
+  - `release-packaging.yml` installs the latest, because that is what a user's
+    Home Assistant builds with. A tag can pass one and fail the other.
 - The two builds compile the same `components/dali` C with different
-  toolchains. ESPHome 2026.9 builds with IDF 5.5.5; the native build pins IDF
-  6.0.1.
+  toolchains. ESPHome builds with the IDF its version recommends: 5.5.6 at the
+  2026.10.0 pin. The native build pins IDF 6.0.1.

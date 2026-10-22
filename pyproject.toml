@@ -1,0 +1,21 @@
+# Not a Python package. This file pins the tools that build the repo, so every
+# development machine and esphome-build.yml run the same ESPHome. uv.lock pins
+# the rest of the dependency tree. `uv run esphome ...` keeps .venv in step with
+# both, so a version bump is a commit, not a step to repeat on each machine.
+#
+# To bump: change the pin, run `uv lock`, compile dali_test.yaml, commit both
+# files. release-packaging.yml stays unpinned on purpose; see its header.
+
+[project]
+name = "dali-esp-tools"
+version = "0.0.0"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "esphome==2026.10.0",
+]
+
+[tool.uv]
+package = false
+# The uv that wrote uv.lock. An older one may not read the lock's format; this
+# makes it say so and ask for `uv self update`, or `winget upgrade astral-sh.uv`.
+required-version = ">=0.13.5"
