@@ -474,6 +474,32 @@ void test_sequence_timeout_scales_with_steps_and_retries(void)
                              dali_transport_sequence_timeout_ms(&too_many));
 }
 
+/*
+ * One transaction gets exactly what a one-step sequence with the same retry
+ * budget gets. The shell used a flat 200 ms for any single frame instead, which
+ * a query with one retry could need most of on an empty queue — and whatever
+ * was queued ahead of it made up the rest.
+ */
+void test_transaction_timeout_matches_a_one_step_sequence(void)
+{
+    for (uint8_t retries = 0u; retries <= 3u; retries++) {
+        DaliSequence one = {
+            .steps = {
+                { .frame = { 0x0190u, 16u }, .needs_reply = true,
+                  .retries_left = retries },
+            },
+            .step_count = 1u,
+        };
+        TEST_ASSERT_EQUAL_UINT32(dali_transport_sequence_timeout_ms(&one),
+                                 dali_transport_transaction_timeout_ms(retries));
+    }
+
+    TEST_ASSERT_TRUE(dali_transport_transaction_timeout_ms(1u) >
+                     dali_transport_transaction_timeout_ms(0u));
+    TEST_ASSERT_TRUE(dali_transport_transaction_timeout_ms(0u) >
+                     DALI_TRANSPORT_SEQUENCE_QUEUE_BUDGET_MS);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -491,5 +517,6 @@ int main(void)
     RUN_TEST(test_fallback_keeps_replies_gathered_before_a_failure);
     RUN_TEST(test_run_sequence_rejects_invalid_arguments);
     RUN_TEST(test_sequence_timeout_scales_with_steps_and_retries);
+    RUN_TEST(test_transaction_timeout_matches_a_one_step_sequence);
     return UNITY_END();
 }

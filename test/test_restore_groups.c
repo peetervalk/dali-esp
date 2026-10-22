@@ -298,6 +298,33 @@ void test_gear_whose_identity_cannot_be_read_is_never_edited(void)
         count_conflicts(DALI_RESTORE_CONFLICT_UNIDENTIFIED));
 }
 
+void test_an_address_whose_identity_collides_is_reported_and_never_edited(void)
+{
+    /*
+     * Two lamps that answer alike at a3: one group reply for both, no identity.
+     * A group edit there would reach every unit on the address, so the address
+     * is named as contested -- not as one unreadable unit -- and left alone.
+     */
+    record(3u, 1u, 0x0002u);
+
+    DaliDiscoveryDeviceInfo *device = &s_inventory.devices[3];
+    device->present                = true;
+    device->has_control_gear       = true;
+    device->has_identity           = false;
+    device->has_identity_collision = true;
+    device->has_groups             = true;
+    device->groups                 = 0x0000u;
+    s_inventory.identity_collision_count = 1u;
+
+    plan_ok();
+
+    TEST_ASSERT_EQUAL_UINT8(0u, s_plan.change_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_plan.matched_count);
+    TEST_ASSERT_EQUAL_UINT16(1u, count_conflicts(DALI_RESTORE_CONFLICT_CONTESTED));
+    TEST_ASSERT_EQUAL_UINT16(0u, count_conflicts(DALI_RESTORE_CONFLICT_UNIDENTIFIED));
+    TEST_ASSERT_EQUAL_UINT16(1u, count_conflicts(DALI_RESTORE_CONFLICT_MISSING));
+}
+
 /* --------------------------------------------------------------------------
  * Scope
  * -------------------------------------------------------------------------*/
@@ -433,6 +460,7 @@ int main(void)
     RUN_TEST(test_a_recorded_gear_missing_from_the_bus_is_reported);
     RUN_TEST(test_two_gear_sharing_an_identification_number_are_never_edited);
     RUN_TEST(test_gear_whose_identity_cannot_be_read_is_never_edited);
+    RUN_TEST(test_an_address_whose_identity_collides_is_reported_and_never_edited);
     RUN_TEST(test_control_devices_are_not_considered_at_all);
     RUN_TEST(test_a_hybrid_unit_is_planned_from_its_gear_half_only);
     RUN_TEST(test_a_full_bus_of_wiped_gear_fits_the_change_list);

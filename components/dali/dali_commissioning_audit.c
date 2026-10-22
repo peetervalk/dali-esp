@@ -36,7 +36,7 @@ DaliError dali_commissioning_occupancy_from_inventory(
 
         const bool contested =
             (space == DALI_COMMISSIONING_SPACE_GEAR)
-                ? device->has_undecodable_activity
+                ? dali_discovery_gear_address_contested(device)
                 : device->has_undecodable_device_activity;
         const bool occupied =
             device->present &&
@@ -47,11 +47,13 @@ DaliError dali_commissioning_occupancy_from_inventory(
         if (contested) {
             /*
              * Contested wins over occupied, and the two can genuinely coexist
-             * in device space: a hybrid unit answers QUERY STATUS as gear at
-             * this number, so the scan reaches the instance-count probe through
-             * the enrichment path, and that probe can meet undecodable activity
-             * from a second control device sharing the device address. Reading
-             * the stale instance count as "occupied, one unit" would hide
+             * in both spaces. In device space a hybrid unit answers QUERY
+             * STATUS as gear at this number, so the scan reaches the
+             * instance-count probe through the enrichment path, and that probe
+             * can meet undecodable activity from a second control device
+             * sharing the device address. In gear space two units that answer
+             * alike are present, and only their colliding identity says there
+             * are two. Reading either as "occupied, one unit" would hide
              * exactly the collision this module exists to find.
              */
             out->contested |= bit;

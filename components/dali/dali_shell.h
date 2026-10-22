@@ -115,7 +115,9 @@ typedef struct {
     bool (*bus_claim)(void *ctx, const char *what);
     void (*bus_release)(void *ctx);
     /* Called after a workflow that invalidates cached device state, so the
-     * integration can re-read what it holds. NULL when nothing caches. */
+     * integration can re-read what it holds. `restore apply` does not call it:
+     * the only inventory it holds predates its moves, so it reports each move
+     * through short_address_moved() instead. NULL when nothing caches. */
     void (*inventory_changed)(void *ctx, const DaliDiscoveryInventory *inventory);
     /*
      * Called after one addressed configuration command was accepted for
@@ -136,20 +138,25 @@ typedef struct {
     void (*config_applied)(void *ctx, DaliTarget target, DaliCommandId id,
                            uint8_t param);
     /*
-     * Called after `address <from> set <to>` re-addressed one gear and both
-     * ends were confirmed on the bus: `to` answers, `from` is silent.
+     * Called after one gear was re-addressed and both ends were confirmed on
+     * the bus: `to` answers, `from` is silent. `address <from> set <to>` calls
+     * it once. `restore apply` calls it once per confirmed gear move, in plan
+     * order, where the confirmation also reads the unit's identification
+     * number back at `to`. A plan only moves a unit onto an address the bus has
+     * already shown vacated, so applying the calls in order tracks the bus
+     * exactly, staging hops included.
      *
      * This is what config_applied() cannot say. SET SHORT ADDRESS carries its
      * destination in DTR0, so an integration told only "a config command went
      * to a5" knows the gear moved but not where, and its only safe response is
-     * to drop everything keyed by a5 and ask for a rescan. The `address` verb
-     * chose both ends and then verified them, so it can name the move and let
+     * to drop everything keyed by a5 and ask for a rescan. Both callers chose
+     * both ends and then verified them, so they can name the move and let
      * caches follow it instead.
      *
      * Only reached after verification succeeded: an unconfirmed move calls
      * nothing, because a cache moved to an address that turns out to be wrong
-     * is worse than a cache dropped. Called on the session's task. NULL when
-     * nothing caches.
+     * is worse than a cache dropped. Called on the session's task, with the
+     * bus claimed. NULL when nothing caches.
      */
     void (*short_address_moved)(void *ctx, uint8_t from, uint8_t to);
     /*
@@ -174,14 +181,26 @@ typedef struct {
      */
     void (*short_address_cleared)(void *ctx, uint8_t addr);
     /*
-     * Neither hook has a control-device counterpart, and that is a statement
-     * about the integration rather than an omission here: nothing on the other
-     * side caches a device short address. Lights are keyed by gear address,
-     * sensors by the device address in their own YAML, and `restore apply`
-     * already moves devices without notifying anything. `address d<N> set` and
-     * `address d<N> clear` therefore call nothing. Add a pair here if a cache
-     * ever keys on the device space.
+     * Neither hook has a control-device counterpart. Lights are keyed by gear
+     * address and sensors by the device address in their own YAML, so no
+     * device-space cache follows a move. What the integration does hold per
+     * device -- each sensor's event-source profile -- is read again after any
+     * workflow releases the bus, which every `address d<N>` arm and `restore
+     * apply` does, so a move needs no hook of its own.
      */
+    /*
+     * Called after `iconfig` transmitted a configuration write to the control
+     * device at `addr`. `instance` is the instance byte as sent: an instance
+     * number, a group or type selector, or every instance.
+     *
+     * `iconfig` is a single sequence, not a workflow, so it claims no bus and
+     * reaches none of the hooks above. An integration that caches what an
+     * instance says about itself -- its event scheme, its instance groups --
+     * re-reads it here rather than waiting to notice the change. Transmitted
+     * is not applied, which is why the response is a read rather than an
+     * update. Called on the session's task. NULL when nothing caches.
+     */
+    void (*instance_config_applied)(void *ctx, uint8_t addr, uint8_t instance);
     /*
      * Print the integration's own configuration as the YAML block that would
      * produce it — what `export config` emits.
@@ -209,9 +228,9 @@ typedef struct {
      * Persist and reload the address backup across a reboot.
      *
      * These are hooks rather than shell code because durable storage belongs to
-     * the integration: the ESPHome component has the preferences API and the
-     * Core 0 affinity rule that comes with it, and the native firmware has
-     * neither. The shell owns the snapshot, its codec and its verbs; the
+     * the integration: the ESPHome component has the preferences API, along
+     * with the rule that only its loop task may call it; the native firmware
+     * has neither. The shell owns the snapshot, its codec and its verbs; the
      * integration owns only the bytes.
      *
      * `save` receives an encoded blob of `len` bytes, never more than

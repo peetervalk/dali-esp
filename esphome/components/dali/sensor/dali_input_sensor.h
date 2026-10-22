@@ -13,7 +13,7 @@ namespace dali {
 /*
  * ESPHome sensor entity for a single DALI-2 input device instance.
  * Polling and value transfer are driven by DaliComponent; this class
- * only holds the configuration and the Core 1 → Core 0 value mailbox.
+ * only holds the configuration and the DALI task → loop task value mailbox.
  */
 class DaliInputSensor : public sensor::Sensor, public Component, public DaliBusSensor {
  public:
@@ -45,10 +45,10 @@ class DaliInputSensor : public sensor::Sensor, public Component, public DaliBusS
     out->offset          = offset_;
   }
 
-  /* Called from Core 1 (DALI task completion callback). */
+  /* Called on the DALI task, from a completion callback. */
   void mark_raw_value(uint16_t raw) { value_mailbox_.publish(raw); }
 
-  /* Called from Core 0 (DaliComponent::loop). Publishes if a value is waiting. */
+  /* Called from DaliComponent::loop(). Publishes if a value is waiting. */
   void apply_value() {
     uint16_t raw;
     if (!value_mailbox_.take(raw)) return;
@@ -68,7 +68,7 @@ class DaliInputSensor : public sensor::Sensor, public Component, public DaliBusS
 
   uint32_t last_poll_ms_{0};
 
-  /* Coherent latest reading — published on Core 1, drained on Core 0. */
+  /* Coherent latest reading — published on the DALI task, drained in loop(). */
   DaliInputValueMailbox value_mailbox_;
 };
 

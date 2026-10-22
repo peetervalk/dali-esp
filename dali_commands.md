@@ -3,7 +3,7 @@
 Every verb, its arguments, and its named command tables, for both surfaces that
 accept typed commands.
 
-**Last reviewed:** 2026-09-03
+**Last reviewed:** 2026-10-02
 
 Frame layouts and opcodes are in `dali_protocol.md`. Per-capability status —
 shared API, host vector, real-bus result, exposure — is in
@@ -28,7 +28,7 @@ the tokenizer, argument parsers, named tables, and reply decoding
 (`components/dali/dali_cli.c`), so a verb, an argument form, and a command name
 mean the same thing on both. What it cannot do is stream or block: a result is
 one Home Assistant text state, and every console verb is one enqueue and one
-completion because Core 0's loop may not block. That is the whole basis of the
+completion because ESPHome's main loop may not block. That is the whole basis of the
 split — see the availability column below, and
 `dali_capability_matrix.md` for the reasoning per verb.
 
@@ -91,6 +91,16 @@ address and reject group and broadcast forms. `quiescent` is the exception: it
 is device-level rather than instance-level, so it takes no instance, and its
 target is a short address or the literal `all`.
 
+`iquery` and `iconfig` also accept an instance *selector* in place of the
+number: `g<N>` reaches every instance in instance group N, `t<N>` every instance
+of type N, and `all` every instance on the device. `iconfig 0 all
+set-event-scheme 2` puts every instance of device 0 on scheme 2 in one line, and
+`iquery 0 t3 event-scheme` reads the occupancy instance without knowing its
+number. A query through a selector that reaches more than one instance draws one
+reply per instance and they collide; the shell says so before sending. Verbs
+that need one particular instance — `sensor poll`, `vendor`, `devmem` — take a
+number only.
+
 ### Console results
 
 | Result | Meaning |
@@ -134,7 +144,7 @@ named form.
 | `dt6` | yes | yes |
 | `dt8` | yes | no — held until real DT8 gear is available |
 | `iquery` `iconfig` `vendor` | yes | yes |
-| `raw` `raw2` `dtr` | yes | yes |
+| `raw` `raw2` `dtr` | yes | yes, minus commissioning frames |
 | `memread` `devmem` `dtrcheck` | yes | yes |
 | `quiescent` | yes | yes |
 | `meminfo` | yes | no — walks a bank, needs a blocking transport |
@@ -365,12 +375,12 @@ spellings are unchanged and still available.
 
 | Subverb | Sends | Checks |
 |---|---|---|
-| `set <aM>` | DTR0 + SET SHORT ADDRESS, one sequence | destination is empty and source answers, **before**; destination answers and source is silent, **after** |
+| `set <aM>` | DTR0 + QUERY CONTENT DTR0, then SET SHORT ADDRESS | destination is empty and source answers, **before**; DTR0 reads back at the source, **between**; destination answers and source is silent, **after** |
 | `add <gN>` | ADD TO GROUP | reads both group bytes back and prints the resulting membership |
 | `remove <gN>` | REMOVE FROM GROUP | the same read-back |
-| `clear` | the same sequence, DTR0 = 255 | subject answers, **before**; subject is silent and the bus reports unaddressed gear, **after** |
-| `set <dM>` | device DTR0 + SET SHORT ADDRESS DTR0 (Part 103), one sequence | the same two-sided check, over QUERY NUMBER OF INSTANCES |
-| `clear` on a `d<N>` | the same device sequence, DTR0 = 255 | subject answers, **before**; subject is silent, **after** — and only that; see below |
+| `clear` | the same frames, DTR0 = 255 | subject answers, **before**; DTR0 reads back, **between**; subject is silent and the bus reports unaddressed gear, **after** |
+| `set <dM>` | device DTR0 + QUERY CONTENT DTR0, then SET SHORT ADDRESS DTR0 (Part 103) | the same three checks, over QUERY NUMBER OF INSTANCES |
+| `clear` on a `d<N>` | the same device frames, DTR0 = 255 | subject answers, **before**; DTR0 reads back, **between**; subject is silent, **after** — and only that; see below |
 
 ```text
 > address a5 set a13
@@ -380,6 +390,57 @@ address: a13 confirmed, a5 silent
 > address a5 add g3
 address: a5 is in g1 g3
 ```
+
+### DTR0 is read back before the address is written
+
+SET SHORT ADDRESS takes the new address from the unit's DTR0, and the DTR0 load
+before it reaches every unit on the bus at once. A unit that misses the load but
+hears the pair takes whatever DTR0 already held — which after any memory read is
+that read's offset, and after the identification read `restore apply` does is
+`0x0B`, the gear encoding of a5. On the 1k bus one `restore apply` move lost a
+frame this way and was harmless only because that unit was moving *from* a5.
+
+So every arm, in both spaces, loads DTR0 and reads it back from the unit with
+QUERY CONTENT DTR0 in one sequence, and sends the SET SHORT ADDRESS pair as a
+second sequence only if the unit holds the value loaded. A read-back that is
+wrong, silent or unreadable gets one more load; if that fails too, nothing
+further is sent:
+
+```text
+> address a7 set a2
+address: a7 -> a2 (DTR0=5)
+address: DTR0 did not load: a7 read back 0x0B, not 0x05; nothing further sent
+```
+
+A second load that worked is still reported, because the first read-back is
+the evidence of a unit missing a load:
+
+```text
+> address a7 set a2
+address: a7 -> a2 (DTR0=5)
+address: DTR0 needed a second load: a7 first read back 0x0B
+address: a2 confirmed, a7 silent
+```
+
+With DTR0 right, a pair the unit did not hear whole can only do nothing, and
+when the destination is silent the source is asked too, to say which of the two
+cases this is:
+
+```text
+address: a2 does not answer after the write, and a7 still does -- the gear did not move
+address: neither a2 nor a7 answers after the write -- run 'scan' to find the gear
+```
+
+Clearing a contested address is the one exception. The units sharing it answer
+the read-back together, which collides rather than reading as a value, so that
+case sends the pair without the check and says so:
+
+```text
+address: the DTR0 read-back at a7 collided, as units sharing an address answer; sent without it
+```
+
+The raw spellings, `config-dtr0 <t> set-short-address-dtr0` and `raw2`, send
+exactly what they are given and read nothing back.
 
 ### `clear`, and what it can prove
 
@@ -438,11 +499,20 @@ address: run 'commission unaddressed' to give them distinct addresses, then
   'identify' to see which fixture is which
 ```
 
-`more than one unit` is the collision reappearing as evidence: several units
-answering the missing-address query at once is undecodable in the same way, and
-here that is the expected reading rather than an ambiguity, because for a YES/NO
+`more than one unit` is the collision reappearing as evidence, and it appears
+only when the units' replies garble. Every unit answers YES with the same byte,
+so units that reply in step decode as one YES: on 2k, two lamps cleared together
+read exactly as one does. The line can say there is more than one; its absence
+says nothing. When it does appear it is not an ambiguity, because for a YES/NO
 query NO is silence — nothing that still holds an address drives the reply
 window at all.
+
+Nor does the clear always know it is clearing a shared address. The contested
+arm opens on an undecodable reply, and units of one product in one state answer
+every probe alike. Two such lamps on a3 took the single-unit path above and were
+both cleared by it. `scan` and `discover` are what find such an address: they
+read each unit's identification number, which two units cannot share, and name
+the address as contested when that read collides. See `commissioning_readme.md`.
 
 If `a7` comes back answering *decodably* after the clear, one unit took the
 write and another did not. That is progress, not failure; repeat the clear.
@@ -479,8 +549,10 @@ The whole verb is absent from the console, like every other verb that claims the
 bus for a multi-frame workflow.
 
 A confirmed `clear` is reported to the integration the way a confirmed move is,
-but the bookkeeping is the opposite: group membership is **retired** rather than
-followed. The unit keeps its own group registers through a de-address, so it
+but the bookkeeping is the opposite: the integration's group-map entry is
+**retired** rather than followed, so no group light polls the silent address.
+The unit itself keeps its group registers through a de-address. It goes on
+acting on group and broadcast commands while it has no address, and it
 reappears in the same groups at whatever address `commission unaddressed` hands
 it — and that address is not knowable in advance, so only a scan can find it
 again. The threshold is lower than a move's, too: a move that cannot be
@@ -503,9 +575,16 @@ result back after.
 
 ```text
 > address d0 set d4
-address: d0 -> d4 (device DTR0=9)
+address: d0 -> d4 (device DTR0=4)
 address: d4 confirmed, d0 silent
 ```
+
+DTR0 is the destination itself: a control device reads it raw, where gear reads
+`(M << 1) | 1`. Builds up to and including `v2.0.0` loaded the gear form here,
+so a device asked to go to d2 went to d5 — seen on 2k — and their
+`commission devices` sent an INITIALISE that does not select unaddressed
+devices. Do not use either on those builds. `restore apply` sends its device
+moves through the same builder as this arm.
 
 Two differences from the gear arms are worth knowing.
 
@@ -537,6 +616,17 @@ address: run 'commission devices' to give it an address again; finding it there
 That last line is the resolution: `commission devices` finds unaddressed devices
 by searching for them, which is the positive evidence this path lacks. A device
 that shows up in the walk was cleared; one that does not, was not.
+
+**A shared device address can defeat `clear`.** Its contested arm opens on an
+undecodable reply. On 2k, the Steinel and the Casambi colliding at d0 read as
+silence instead, and the verb answered `d0 does not answer; nothing to clear`.
+The by-hand clear works however many units share the address:
+
+```text
+raw C130FF len=24        # device DTR0 = 0xFF, "no short address"
+raw2 01FE14 len=24       # SET SHORT ADDRESS at d0, twice; the byte is (N << 1) | 1
+commission devices
+```
 
 Both device arms are gated by `allow_commissioning: true`, for the reason the
 gear ones are — they are the same DALI command differing only in what DTR0
@@ -750,9 +840,13 @@ Kelvin as well as mirek.
 ## Input Devices — Part 103
 
 ```text
-iquery <addr> <instance> <name> [dtr0]
-iconfig <addr> <instance> <name> [v0] [v1] [v2]
+iquery <addr> <inst|gN|tN|all> <name> [dtr0]
+iconfig <addr> <inst|gN|tN|all> <name> [v0] [v1] [v2]
 ```
+
+The instance byte is IEC 62386-103's: `0`-`31` is an instance number, `gN` is
+`0x80|N` (instance group N), `tN` is `0xC0|N` (instance type N), and `all` is
+`0xFF`. See `dali_protocol.md`, *Instance byte*.
 
 Run `iquery <addr> <instance> type` first, and use Part 301, 303, or 304 names
 only on an instance of type 1, 3, or 4 respectively.
@@ -951,6 +1045,18 @@ standard describes. `raw2` takes no `wait`: a send-twice command is a
 configuration write, not a query. A value that does not fit the stated width is
 rejected rather than transmitted as a differently framed command.
 
+A raw frame that *is* a commissioning command is gated as the named verbs are,
+because spelling a command in hex should not reach what spelling it by name
+cannot. The set is exactly what `special` and `config` hold back: `INITIALISE`,
+`RANDOMISE`, `WITHDRAW`, the `SEARCHADDR` loads, `PROGRAM SHORT ADDRESS` and the
+gear memory writes; `SET SHORT ADDRESS` to a short address, group or broadcast;
+and the 24-bit control-device forms of the addressing commands. `TERMINATE`,
+`COMPARE` and the verify and query specials only end or observe a window, and
+pass. A shell session refuses a gated frame without `allow_commissioning: true`
+(`raw (commissioning frame): refused by session policy`), and the console
+refuses it outright with `commissioning frame; use the native CLI`. The native
+serial CLI sends it as before.
+
 `dtr` loads one **control-gear** DTR by broadcast. A DTR is consumed by whichever
 command reads it next, so a value loaded this way survives only if nothing else
 transmits in between — including this component's own refresh queries. Prefer the
@@ -969,10 +1075,12 @@ discover                                # short addresses, device types, groups
 inventory                               # reprint the last discover, no bus traffic
 export inventory                        # the same result as JSON
 export config                           # discovered devices as a YAML dali: block
-identify <addr>                         # blink one fixture
+identify <addr>                         # blink one fixture, then restore its level
 find switches [seconds]                 # listen for events and map switches
 events                                  # drain queued Part 103 events
-instances <addr>                        # what a control device offers
+instances <addr>                        # what a control device offers, with
+                                        # each instance's event scheme, event
+                                        # priority and instance groups
 sensor poll <addr> [instance]           # read an input instance's value
 quiescent on|off <addr|all>             # silence control-device events
 smoke <addr>                            # read/write/read-back check
@@ -980,9 +1088,10 @@ commission unaddressed [first] [max]    # assign short addresses
 ```
 
 `commission` only ever addresses gear that has none, so it is the verb for new
-gear and never the verb for a change. Re-grouping, re-addressing, and retiring
-a fixture are `config` and `config-dtr0` commands — see the recipes below and
-the reconfiguration section of `commissioning_readme.md`.
+gear and never the verb for a change. Re-grouping and re-addressing are
+`address` commands, or their unchecked `config` and `config-dtr0` spellings —
+see *Address and Group Membership*, the recipes below, and the reconfiguration
+section of `commissioning_readme.md`.
 
 `quiescent` sends the Part 103 device-level `START`/`STOP QUIESCENT MODE`
 (opcodes `0x1D`/`0x1E`, instance byte `0xFE`, send-twice). `all` is address byte
@@ -996,7 +1105,9 @@ until `quiescent off` releases it; and nothing in this project tracks the state
 or releases it on exit, so a forgotten `quiescent on all` leaves the installation
 looking broken. Whether the standard also ends the state on its own timer is not
 established here — treat `off` as the only thing that reliably releases it.
-Host-tested; no bus has run it.
+On 2k, `quiescent on all` silenced the Steinel's event traffic for a whole
+walk, and `off all` released it. Nothing reads the state back: QUERY QUIESCENT
+MODE is not implemented.
 
 Every operator-driven walk now takes this bracket on its own behalf, so an
 operator rarely needs the verb for a scan: `scan`, `discover`, both
@@ -1010,21 +1121,27 @@ stay outside it: `find switches`, whose whole purpose is listening for events,
 and the integration's own periodic scan, which runs with nobody present to
 accept a silent installation.
 
-Commissioning remains hardware-dependable only with a single unaddressed device
-on the bus. The receive path now attributes observations to a precise
-TX-end-relative reply window — opening at 5.5 ms for undecodable activity, which
-is the case `COMPARE` turns on, and closing at 27 ms — and distinguishes three
-cases during `COMPARE`:
+The receive path attributes observations to a reply window measured from the
+end of the forward frame. The window opens at 5.5 ms for undecodable activity,
+which is the case `COMPARE` turns on, and closes at 28.664 ms. During `COMPARE`
+it distinguishes three cases:
 
 - silence is NO;
 - qualified, response-like malformed activity is `DALI_ERR_RX_ACTIVITY`, which
   `COMPARE` alone treats as YES;
 - ambiguous malformed activity or RX overflow is an error and aborts the run.
 
-This fixes the software-side collision inversion recorded in `project_log.md`,
-but overlapping replies and the activity qualifier have host coverage only; they
-have not been validated as physical-bus collision detection. Do not rely on
-multi-device commissioning until that hardware validation is complete. A run now brackets itself with broadcast
+This fixes the software-side collision inversion recorded in `project_log.md`.
+
+- Walks over two unaddressed units have run correctly on 2k, for gear and for
+  control devices. Whenever both units were at or below the search address,
+  their `COMPARE` replies overlapped.
+- The activity qualifier has met one genuine physical collision, through the
+  scan.
+- Two units drawing the same random address have not met a bus, so add new
+  gear a few units at a time.
+
+A run brackets itself with broadcast
 `START`/`STOP QUIESCENT MODE`, so control devices are silent for its duration
 and cannot put an event frame into a COMPARE reply window. The release is
 unconditional, so a run also releases a quiescence started by hand with
@@ -1052,11 +1169,16 @@ There is no verb for it; the Part 102 `special terminate` is unrelated and
 addresses gear.
 
 Over TCP, `commission` and the nine commissioning specials are refused unless the
-YAML sets `allow_commissioning: true`, because the port is unauthenticated. See
+YAML sets `allow_commissioning: true`, because the port is unauthenticated. A
+connection that opens with an HTTP request is closed before any of its lines
+runs, so a web page cannot reach the shell through a browser. See
 `commissioning_readme.md` for the workflow.
 
 A long verb prints as it goes and holds the bus for as long as it runs.
-Cancellation or a TCP disconnect is noticed between ordinary bus steps. Once the
+Cancellation or a TCP disconnect is noticed between ordinary bus steps. A client
+that stops reading without closing counts as disconnected once a write has made
+no progress for 10 s, so a suspended terminal or a sleeping laptop holds the bus
+for seconds rather than the minutes TCP takes to give up. Once the
 opening atomic sequence has been handed to the transport, however, `INITIALISE`
 may already have reached the bus. Cleanup therefore bypasses the cancellation
 gate and attempts a final Part 102 `TERMINATE` before returning. The original
@@ -1090,11 +1212,17 @@ restore plan                            # what it would take to match the backup
 restore apply                           # do it
 restore groups                          # the same for gear group membership
 restore groups apply                    # do it
+restore instances                       # the same for control-device instance settings
+restore instances apply                 # do it
 ```
 
 `backup save` scans both address spaces and records, per short address, the
 8-byte **identification number** at Bank 0 offset `0x0B` for the unit holding it
-— plus its GTIN and, for gear, its group mask. That number is the anchor: it is
+— plus its GTIN and, for gear, its group mask. For each control device it also
+records every instance's generic settings: type, enabled, event scheme, event
+priority, event filter and the three instance groups, about eleven queries per
+instance. A backup holds at most 64 instances, and `backup save` names any it
+left out, or any that did not answer. That number is the anchor: it is
 the one property of a unit that no addressing operation changes, which is what
 makes a snapshot taken before a commissioning run enough to undo one. It is not
 the 24-bit random address RANDOMISE generates, which is temporary. An address whose
@@ -1102,19 +1230,76 @@ identity could not be read is still recorded, and `backup save` names it on the
 spot, because a fixture that cannot be put back is something to learn before the
 restore rather than during it.
 
+Gear with no short address cannot be recorded at all, because nothing answers
+for it. So `backup save` also broadcasts QUERY MISSING SHORT ADDRESS, and says
+so when anything answers YES:
+
+```text
+backup: gear on the bus reports no short address and is NOT recorded here
+backup: run 'commission unaddressed', then 'backup save' again, to include it
+```
+
+The save still completes, since leaving a unit unaddressed can be deliberate.
+Control devices have no such check, because the Part 103 query is not
+implemented.
+
 `restore plan` re-scans, matches each backup entry to the unit now holding its
 identification number, and prints the moves that would put every one back. It is
 read-only and needs no policy. `restore apply` executes them, and is gated
 exactly as `commission` is: a shell session refuses it without
 `allow_commissioning: true`.
 
-A move is a plain addressed `SET SHORT ADDRESS DTR0` — DTR0 and the command in
-one contiguous sequence, in whichever address space the entry came from.
+A move is a plain addressed `SET SHORT ADDRESS DTR0`, in whichever address space
+the entry came from, written the way `address` writes one: DTR0 and QUERY
+CONTENT DTR0 at the unit as one sequence, then the send-twice pair only if the
+unit read the value back.
 **`restore` opens no `INITIALISE` window.** Nothing it sends can leave the bus
 in a state that needs terminating, so it is safe to run on a live installation
-and safe to interrupt: `apply` stops at the first failed move, and re-running
-`restore plan` against the bus as it now stands is the recovery. A plan the
-planner marks `incomplete` is refused rather than partially applied.
+and safe to interrupt: `apply` stops at the first move that fails or cannot be
+confirmed, and re-running `restore plan` against the bus as it now stands is the
+recovery. A plan the planner marks `incomplete` is refused rather than partially
+applied.
+
+**Sent is not moved.** `SET SHORT ADDRESS` has no answer, and every later move
+in a plan assumes the earlier ones landed, so each move is confirmed on the bus
+before the next is sent: something answers at the destination, nothing answers
+at the source, and the identification number read back at the destination is
+the one the plan moved. A move that passes prints `OK`. One that does not says
+why, and `apply` stops there:
+
+```text
+  1/2 a4 -> a1: OK
+  2/2 a9 -> a3: sent, not confirmed: nothing answers at the target, and the source still does
+restore apply: stopped after 1 of 2 move(s); re-run 'restore plan' to see what remains
+```
+
+The other reasons are `nothing answers at the target or the source` — the unit
+took an address nobody chose, or lost power, and `restore plan` looks for it by
+identification number — `the source still answers`, `a different unit answers
+at the target`, and `unreadable` followed by the error that stopped the
+read-back. A run that confirms every move ends with `restore apply: N move(s)
+applied, each confirmed on the bus`.
+
+Every move after the first follows a confirmation, whose identification read
+leaves `0x0B` — a5 encoded — in every other unit's DTR0. That is why the DTR0
+read-back matters most here. A move whose DTR0 does not read back is not sent,
+and stops the run the same way:
+
+```text
+  2/3 a5 -> a2: DTR0 did not load: a5 read back 0x0B, not 0x05; nothing further sent
+```
+
+A move that needed a second load says so under its own line:
+
+```text
+  2/3 a5 -> a2: OK
+    DTR0 needed a second load: a5 first read back 0x0B
+```
+
+Each confirmed gear move is also reported to the integration, the way `address`
+reports one. Its group membership follows the gear and its cached level
+profile is re-read, with no rescan. A move that was not confirmed reports
+nothing.
 
 Cycles are handled. Two units that need to swap addresses cannot both move
 directly, so the plan stages one through a free address and places it on a later
@@ -1140,26 +1325,40 @@ and blocking cascades to anything queued behind the blocked unit.
 
 **A contested address is occupied, not free.** An address that answers
 undecodably holds two or more units that reply as one, and the scan deliberately
-does not mark it present because nothing there can be read. The planner reserves
-it anyway, in the space it was contested in: it is never used as a placement
-target, never borrowed to stage a cycle through, and never used to park a unit
-the backup has never seen. Writing a third unit onto it is the one fault a
-restore cannot undo by moving anything back — every other mistake it could make
-is reverted by planning again. A move that wanted such an address is dropped and
-reported as `target contested` rather than `target occupied`, because the remedy
-is a sequence rather than a lookup:
+does not mark it present because nothing there can be read. A gear address
+whose units answer alike is marked present, but its identification read
+collides, and it is contested all the same. The planner reserves both, in the
+space they were contested in: never used as a placement target, never borrowed
+to stage a cycle through, and never used to park a unit the backup has never
+seen. Writing a third unit onto one is the one fault a restore cannot undo by
+moving anything back — every other mistake it could make is reverted by
+planning again.
+
+The plan names every contested address as `contested`, whether or not a move
+wanted it: the units on it are the ones no plan can see, and a recorded unit
+reported `not on bus` is often one of them. A move that wanted such an address
+is dropped and reported as `target contested` rather than `target occupied`,
+because the remedy is a sequence rather than a lookup:
 
 ```
-restore: 1 conflict(s):
+restore: 2 conflict(s):
+  gear a4: contested
   gear a1: target contested (4)
-restore: free a contested target with 'address <aN> clear', then
+restore: free a contested address with 'address <aN> clear', then
 'commission unaddressed', then run this again
 ```
 
 Once cleared and re-commissioned, both units answer separately, both read back
 their own identification numbers, and a second `restore plan` places them. The
-device space is reserved the same way and reported the same way, but has no verb
-that takes an address away, so a contested `d<N>` target needs a hardware pass.
+device space is reserved and reported the same way. Its remedy line reads
+`free a contested d<N> with 'address <dN> clear', then 'commission devices',
+then run this again`.
+
+A device address is contested only when it answered with undecodable
+activity, which is also what opens the clear's contested arm. Devices sharing
+an address can read as silence instead, as two did at d0 on 2k. Nothing then
+marks the address, and the recorded units show up as missing from the bus.
+*The control-device space* has the by-hand clear for that case.
 
 ### `restore groups` — a different repair
 
@@ -1209,9 +1408,51 @@ It refuses to guess in two cases, both reported and neither written:
 | `groups unreadable` | the gear was identified but its `QUERY GROUPS` did not answer. Writing the recorded mask blind would add the right groups without removing the wrong ones |
 
 The remaining conflict kinds are the address planner's and mean the same things.
-**Control gear only** — IEC 62386-103 control devices have their own group
-scheme, which the scan does not read and this does not touch. Scenes are not
+**Control gear only.** A control device's instance groups are restored by
+`restore instances`; its device groups are not read at all. Scenes are not
 captured at all.
+
+### `restore instances` — control-device settings
+
+A control device keeps each instance's generic configuration in its own memory:
+whether it is enabled, its event scheme, event priority and event filter, and
+its three instance groups. A device RESET returns all of it to defaults.
+Re-addressing should not touch it, but on 2k the Steinel was found with both
+emitting instances on scheme 0 after a day of re-addressing, which left its
+occupancy sensor polling on its interval instead of following its events.
+
+```text
+restore instances: scanning
+  d0.0: scheme instance -> device-instance
+  d0.1: scheme instance -> device-instance
+restore instances: 5 located, 3 already correct, 2 to change, 0 skipped, 0 not located
+restore instances: run 'restore instances apply' to execute
+```
+
+Like `restore groups`, it is a separate repair that `restore apply` never
+reaches, and each device is found by its identification number wherever it
+answers now, printed as `d5.1 (backup d0)` when the two differ. Every setting is
+a SET, not an edit, so writing the recorded value is right whatever the device
+holds; a field the device does not report is written anyway, and the read-back
+decides. `apply` writes only the fields that differ — each as its DTR loads and
+send-twice command in one sequence, ENABLE or DISABLE last — then reads the
+instance back and prints `OK` or `NOT CONFIRMED:` with the fields that did not
+take.
+
+It skips, and says so:
+
+| Reported | Meaning |
+|---|---|
+| `does not answer; skipped` | QUERY INSTANCE TYPE went unanswered at the device's current address |
+| `now type U, recorded as type T; skipped` | a different kind of instance holds that number now, so the recorded settings would mean something else |
+| `backup d<N>: <conflict>` | the device itself could not be located: no identification number recorded, not on the bus, or on it twice |
+
+Two readings need care. QUERY INSTANCE ENABLED answers YES or nothing, so
+`backup save` records an instance as disabled only when its QUERY INSTANCE
+STATUS agrees (instanceActive clear); a lost YES otherwise stays unknown, never
+"disabled". A recorded priority outside 2-5 is not written, because SET EVENT
+PRIORITY takes nothing else. Type-specific settings — Part 301 timers, Part 303
+hold and report timers, Part 304 hysteresis — are not recorded.
 
 ### Keeping a backup off the device
 
@@ -1227,36 +1468,50 @@ reproduces it:
 ```text
 backup: 46 byte(s); the lines below re-import it
 backup import begin
-backup import 44424B31010200000000000000000A 1B2C3D4E5F60718293A4B5C6D7E8F9
+backup import 44424B31020200000000000000000A 1B2C3D4E5F60718293A4B5C6D7E8F9
 backup import 0A1B2C3D4E5F60718293A4B5C6D7E8 F9
 backup import end
 ```
 
-`44424B31` is the format magic, `01` the version and `02` the entry count; the
-rest is entry data, printed 15 bytes to a token and two tokens to a line.
+`44424B31` is the format magic, `02` the version, the next `02` the entry count
+and `00` the instance count; the rest is entry data and then instance records,
+printed 15 bytes to a token and two tokens to a line.
+
+**The format is version 2 since 2026-10-01**, when the instance records were
+added. A version-1 blob is refused on import, and `backup import` says that is
+what it is. A backup an older ESPHome build stored in flash does not load
+either, because the stored record changed size: after flashing a build with
+version 2, run `backup save` again.
 
 Redirect it to a file, paste the file back. The chunking is not decorative: a
-full snapshot is 4880 hex characters against an 80-character line limit, so the
+full snapshot is 6416 hex characters against an 80-character line limit, so the
 blob cannot arrive in one piece however it is spelled, and printing it as one
 long line would leave the operator to re-chunk it by hand.
 
 `import` is a short mode. `begin` opens it, each `backup import <hex> <hex>`
 line appends, `end` decodes and installs, `abort` discards. While it is open,
 `backup save`, `backup status`, `backup export` and both `restore` verbs refuse
-— they share the staging buffer, and a `backup save` typed in the middle of an
-82-line paste would otherwise destroy it silently. A chunk that does not parse
+— they share the staging buffer, and a `backup save` typed in the middle of a
+107-line paste would otherwise destroy it silently. A chunk that does not parse
 discards the whole import rather than being skipped, because a blob missing a
 line in the middle can still decode into a plausible-looking snapshot that moves
 fixtures to the wrong addresses.
 
 Nothing an import can contain damages the backup already held: the blob is
-validated in full — magic, version, entry count, exact length, and every entry's
-address space and short address — before the first byte is written.
+validated in full — magic, version, entry and instance counts, exact length,
+every entry's address space and short address, and every instance record's
+device entry, instance number and values — before the first byte is written.
 
-**No part of this has met a bus.** Both planners, the snapshot format, and the
-blob's rejection paths have host vectors; the moves and the group edits have
-been transmitted nowhere. See `commissioning_readme.md` for the workflow this
-belongs to.
+**Everything here except the group and instance restores has met a bus.**
+`backup save`, `status`, `export` and `import`, `restore plan` and `restore
+apply` have run on real gear and control devices, in the version-1 format. That
+covers dependent moves, a swap staged through a spare address, moving aside a
+unit the backup had never seen, and the per-move confirmation in both spaces.
+Both `restore groups` verbs, both `restore instances` verbs, and the instance
+records `backup save` now takes, have host vectors only. Bus status per
+capability is in `dali_capability_matrix.md`, what has yet to run in
+`todo.md`, and the sessions behind both in `project_log.md`. See
+`commissioning_readme.md` for the workflow this belongs to.
 
 ## Diagnostics
 
@@ -1291,7 +1546,7 @@ something else.
 | `kind` | `tx` or `rx` |
 | `timestamp_us` | Free-running microsecond clock; only differences are meaningful |
 | `raw`, `raw_bits` | The frame and its width — 16 or 24 forward, 8 backward |
-| `since_tx_us` | On an `rx` record: the backward frame's **last edge**, measured from the preceding TX **bus release** |
+| `since_tx_us` | On an `rx` record: the backward frame's **last edge**, measured from the preceding TX **bus release** — the end of the forward frame's last data bit |
 
 `since_tx_us` is the field worth being careful with, because neither end of it
 is what a first reading assumes. It is anchored to the end of the forward
@@ -1299,10 +1554,16 @@ frame, not its start, and it runs to the end of the reply, not its beginning.
 A backward frame is nine bit periods — about 7.5 ms — so the settling time the
 standard talks about is `since_tx_us` minus 7500.
 
+"Bus release" is the end of the last data bit, before the two stop bits, which
+is where this project reads IEC 62386-101 as measuring from (see *Bus Timing*
+in `dali_protocol.md` for how firm that is). Captures taken before 2026-09-25 were
+anchored after the stop bits instead, so the same reply read 1664 us lower in
+them: add 1664 to compare an old capture with a new one.
+
 IEC 62386-101 gives that settling time as 5.5 to 10.5 ms, nominal 7 ms, so
 healthy gear lands at `since_tx_us` of roughly 13000-18000. The scheduler
 attributes anything from `DALI_REPLY_WINDOW_OPEN_US` (5.5 ms) through
-`DALI_REPLY_WINDOW_CLOSE_US` (27 ms) after release; a reply outside that is
+`DALI_REPLY_WINDOW_CLOSE_US` (28.664 ms) after release; a reply outside that is
 counted in `rx_reply_early` or `rx_reply_late` — the two halves of the old
 `rx_ignored_outside_reply`, which is now their sum together with five other
 classes — and reported by `discover` as N early / N late replies outside the
@@ -1323,7 +1584,7 @@ depends on whether the observation decoded:
 
 | Observation | Open edge | Rejected below `since_tx_us` |
 |---|---:|---:|
-| Decoded 8-bit backward frame | `DALI_REPLY_WINDOW_OPEN_DECODED_US` (2 ms, the RX self-echo suppression) | ~9500 |
+| Decoded 8-bit backward frame | `DALI_REPLY_WINDOW_OPEN_DECODED_US` (3.664 ms: the stop bits plus the RX settle suppression) | ~11200 |
 | Undecodable activity | `DALI_REPLY_WINDOW_OPEN_US` (5.5 ms, the standard's minimum) | ~13000 |
 
 The split is deliberate. A decoded backward frame arriving while a query is

@@ -17,6 +17,7 @@ extern "C" {
 #include "../../../components/dali/dali_cli.h"
 #include "../../../components/dali/dali_control.h"
 #include "../../../components/dali/dali_event.h"
+#include "../../../components/dali/dali_event_source.h"
 #include "../../../components/dali/dali_dispatch.h"
 #include "../../../components/dali/dali_protocol.h"
 #include "../../../components/dali/dali_input_device.h"
@@ -180,7 +181,7 @@ static uint32_t begin_light_profile_update(LightEntry *entry)
 
 /* ── Group membership (auto-selects query_address for group-type lights) ──── */
 /* Pure decision logic lives in dali_group_map.c; this layer owns one instance,
- * guards it with a spinlock (scan writes on Core 1, poll/console on Core 0), and
+ * guards it with a spinlock (scan task writes; loop task polls and edits), and
  * handles logging + flash persistence. Seeded from each light's static
  * query_address at setup() (only when no persisted snapshot exists), replaced
  * wholesale by a bus scan, and updated live by add-group/remove-group console
@@ -190,7 +191,7 @@ static DaliGroupMap    s_group_map = {};
 static portMUX_TYPE    s_group_map_mux = portMUX_INITIALIZER_UNLOCKED;
 /* Set whenever the map changes from an authoritative source (scan or console
  * edit); the main loop drains this and writes the snapshot to flash. Decouples
- * the Core 1 scan task from the Core 0-only preferences API. */
+ * the scan task from the preferences API, which is loop-task only. */
 static std::atomic<bool> s_group_members_dirty_{false};
 
 /* Persisted-to-flash layout (see load/save_group_membership). DGP2 deliberately
@@ -208,7 +209,14 @@ struct GroupMembershipPersist {
  *
  * Staged rather than written where it is produced, for the same reason group
  * membership is: `backup save` runs on the shell task and the preferences API
- * is Core 0 only, so loop() performs the write.
+ * is for the loop task only, so loop() performs the write.
+ *
+ * The record is sized by DALI_SNAPSHOT_BLOB_MAX, and ESPHome refuses a stored
+ * preference whose size differs from the one asked for. So a format that grows
+ * the blob -- version 2 added instance settings -- also makes a backup stored
+ * by an older build unloadable: it reads as no backup at all. The magic is kept
+ * on purpose. It is the NVS key, so the first save overwrites the old entry
+ * instead of leaving it stranded in the partition.
  */
 static constexpr uint32_t ADDRESS_BACKUP_MAGIC = 0x44414231u;  /* "DAB1" */
 struct AddressBackupPersist {
@@ -353,8 +361,8 @@ static uint64_t config_target_mask(DaliTarget target)
  * stale window in the union until the next scan. Dropping the entry makes that
  * member abstain from the union instead of skewing it.
  *
- * Core 0 owns s_level_profile_cache, so a caller on another task routes through
- * external_profile_forget_mask_ rather than calling this.
+ * The loop task owns s_level_profile_cache, so a caller on another task routes
+ * through external_profile_forget_mask_ rather than calling this.
  */
 static void forget_level_profile_mask(uint64_t mask)
 {
@@ -373,14 +381,33 @@ static void forget_level_profile_cache(DaliTarget target)
 
 static constexpr uint8_t MAX_INPUT_SENSORS = 16u;
 
+/* A suspect or incomplete source profile is read again no sooner than this
+ * after the previous read. Another device whose events also fit a sensor keeps
+ * that sensor suspect for good, so this is what such a device costs in steady
+ * state: one five-query read every five minutes. */
+static constexpr uint32_t SOURCE_PROFILE_REREAD_MS = 300000u;
+
 struct SensorEntry {
     DaliBusSensor    *sensor;
     std::atomic<bool> seq_in_flight;
     std::atomic<bool> poll_requested;
+    /* What the bus says about this instance as an event source: type, event
+     * scheme, instance groups (dali_event_source.h). Written by
+     * on_source_profile_done() and read by on_dali_unsolicited(), both on the
+     * DALI task, so neither it nor source_read needs a lock. */
+    DaliEventSourceProfile source;
+    bool                   source_read;
+    std::atomic<bool> source_wanted;   /* read at the next opportunity */
+    std::atomic<bool> source_suspect;  /* read once SOURCE_PROFILE_REREAD_MS allows */
+    uint32_t          source_read_ms;  /* loop only: when the last read was queued */
 };
 
 static SensorEntry s_sensor_registry[MAX_INPUT_SENSORS];
 static uint8_t     s_sensor_count = 0u;
+
+/* One profile read at a time, so a boot with many sensors spreads its reads
+ * between other traffic instead of queueing them all at once. */
+static std::atomic<bool> s_source_read_in_flight{false};
 
 /* ── Registry accessors for the configuration exporter ───────────────────────
  *
@@ -411,7 +438,7 @@ const DaliDispatchEntry *dali_registry_dispatch_at(uint8_t index)
     return index < s_dispatch_count ? &s_dispatch_table[index] : nullptr;
 }
 
-/* Async completion callback — runs on Core 1 (DALI task). */
+/* Async completion callback — runs on the DALI task. */
 
 static void on_input_value_done(const DaliSequenceResult *result, void *ctx)
 {
@@ -454,6 +481,168 @@ static bool enqueue_sensor_poll(SensorEntry *e, uint32_t now_ms)
     ESP_LOGW(TAG, "sensor poll enqueue failed (%d); will retry next interval",
              (int)err);
     return false;
+}
+
+/* ── Input sensor source profiles ───────────────────────────────────────── */
+
+/* Does a headless dispatch rule key on this control device's short address?
+ * Such a rule matches only schemes that carry the address, 1 and 2, so it stops
+ * firing outright on any other, where a sensor only slows down. */
+static bool dispatch_keys_on_device(uint8_t address)
+{
+    for (uint8_t i = 0u; i < s_dispatch_count; i++) {
+        const DaliDispatchKey &k = s_dispatch_table[i].key;
+        if (k.frame_kind == DALI_EVENT_FRAME_INPUT_24BIT &&
+            k.address_kind == DALI_EVENT_ADDRESS_SHORT &&
+            k.address == address) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const char *scheme_name(uint8_t scheme)
+{
+    return dali_event_source_scheme_name(static_cast<DaliEventSourceScheme>(scheme));
+}
+
+/*
+ * Say what a completed read found, once: when the scheme is first read and
+ * whenever it changes. Scheme 2 is the exact path and needs no comment beyond
+ * a change. Any other scheme still works, by inference, but costs polls of
+ * every sensor its events could belong to, and stops dispatch rules keyed on
+ * the device; that is a warning when this sensor polls on events or such a rule
+ * exists, and information otherwise.
+ */
+static void report_source_profile(const SensorEntry *e, bool had_scheme,
+                                  uint8_t old_scheme)
+{
+    const DaliEventSourceProfile &p = e->source;
+    const unsigned addr = e->sensor->get_address();
+    const unsigned inst = e->sensor->get_instance();
+
+    if (!p.has_scheme) return;
+    if (had_scheme && old_scheme == p.scheme) {
+        ESP_LOGD(TAG, "sensor addr=%u inst=%u: event scheme still %s",
+                 addr, inst, scheme_name(p.scheme));
+        return;
+    }
+    if (had_scheme) {
+        ESP_LOGW(TAG, "sensor addr=%u inst=%u: event scheme changed from %s to %s",
+                 addr, inst, scheme_name(old_scheme), scheme_name(p.scheme));
+    }
+    if (p.scheme == DALI_EVENT_SOURCE_DEVICE_INSTANCE) {
+        if (!had_scheme) {
+            ESP_LOGD(TAG, "sensor addr=%u inst=%u: event scheme %s",
+                     addr, inst, scheme_name(p.scheme));
+        }
+        return;
+    }
+
+    bool consequential = e->sensor->get_poll_on_event() ||
+                         dispatch_keys_on_device((uint8_t)addr);
+    if (consequential) {
+        ESP_LOGW(TAG, "sensor addr=%u inst=%u: event scheme is %s, not "
+                      "device-instance; its events are matched by inference and "
+                      "can poll other sensors too%s. To restore: iconfig %u %u "
+                      "set-event-scheme 2",
+                 addr, inst, scheme_name(p.scheme),
+                 dispatch_keys_on_device((uint8_t)addr)
+                     ? ", and dispatch rules keyed on this address do not fire"
+                     : "",
+                 addr, inst);
+    } else {
+        ESP_LOGI(TAG, "sensor addr=%u inst=%u: event scheme is %s, not "
+                      "device-instance; polled on its interval, so this costs "
+                      "nothing", addr, inst, scheme_name(p.scheme));
+    }
+}
+
+/* Async completion callback — runs on the DALI task, as the matcher does. */
+static void on_source_profile_done(const DaliSequenceResult *result, void *ctx)
+{
+    SensorEntry *e = static_cast<SensorEntry *>(ctx);
+    const bool    had_scheme = e->source_read && e->source.has_scheme;
+    const uint8_t old_scheme = e->source.scheme;
+
+    /* A scheduler reset cancelled the read, which says nothing about the
+     * instance: keep what was known and ask again. */
+    if (result != nullptr && result->result == DALI_SCHED_RESET_ERROR) {
+        e->source_wanted.store(true, std::memory_order_release);
+        s_source_read_in_flight.store(false, std::memory_order_release);
+        return;
+    }
+
+    DaliEventSourceProfile read;
+    DaliError err = dali_event_source_profile_from_sequence(result, &read);
+    /* What the read produced replaces the old profile, even when that is
+     * nothing: a field that did not read back is unknown, and unknown only
+     * widens the match. */
+    e->source      = read;
+    e->source_read = true;
+    if (err == DALI_OK) {
+        e->source_suspect.store(false, std::memory_order_release);
+    } else {
+        e->source_suspect.store(true, std::memory_order_release);
+        ESP_LOGD(TAG, "sensor addr=%u inst=%u: source profile incomplete (%s); "
+                      "matching widely until it reads",
+                 (unsigned)e->sensor->get_address(),
+                 (unsigned)e->sensor->get_instance(), dali_error_name(err));
+    }
+    report_source_profile(e, had_scheme, old_scheme);
+    s_source_read_in_flight.store(false, std::memory_order_release);
+}
+
+static bool enqueue_source_profile_read(SensorEntry *e, uint32_t now_ms)
+{
+    /* Background work: leave a busy queue to the traffic it is busy with, and
+     * try again on a later pass rather than adding to it. */
+    DaliSchedQueueStats stats;
+    if (dali_sched_queue_stats(&stats) != DALI_OK ||
+        stats.depth > stats.capacity / 2u) {
+        return false;
+    }
+
+    DaliSequence seq;
+    DaliError err = dali_event_source_build_profile_sequence(
+        e->sensor->get_address(), e->sensor->get_instance(), &seq);
+    if (err == DALI_OK) {
+        seq.on_complete = on_source_profile_done;
+        seq.cb_ctx      = e;
+        /* Raised first: the completion clears it, and may run before the
+         * enqueue call returns. */
+        s_source_read_in_flight.store(true, std::memory_order_release);
+        err = dali_sched_enqueue_sequence(&seq);
+        if (err != DALI_OK)
+            s_source_read_in_flight.store(false, std::memory_order_release);
+    }
+    if (err != DALI_OK) {
+        /* Retried on the next loop pass, so DEBUG: a full queue would
+         * otherwise log on every pass until it drains. */
+        ESP_LOGD(TAG, "sensor source profile enqueue failed (%d); will retry", (int)err);
+        return false;
+    }
+    e->source_read_ms = now_ms;
+    return true;
+}
+
+/* A scan or a shell workflow may have moved or reconfigured any device. */
+static void want_all_source_profiles()
+{
+    for (uint8_t i = 0u; i < s_sensor_count; i++)
+        s_sensor_registry[i].source_wanted.store(true, std::memory_order_release);
+}
+
+/* An instance configuration write reached this control device. Every sensor on
+ * it is read again, whichever instance the write selected: a group or type
+ * selector can reach several, and a five-query read is cheap. */
+static void want_source_profiles_at(uint8_t address)
+{
+    for (uint8_t i = 0u; i < s_sensor_count; i++) {
+        SensorEntry &e = s_sensor_registry[i];
+        if (e.sensor->get_address() == address)
+            e.source_wanted.store(true, std::memory_order_release);
+    }
 }
 
 /*
@@ -644,7 +833,7 @@ static DaliError enqueue_actual_level_query(LightEntry *entry, uint8_t query_add
     return err;
 }
 
-/* ── Cross-core string handoff (Core 1 → Core 0) ────────────────────────── */
+/* ── Cross-task string handoff (DALI task → loop task) ──────────────────── */
 /* Shared spinlock protects all three string buffers below.
  * Write side: format to a local buffer, then memcpy + dirty=true under lock.
  * Read side:  memcpy to a local buffer + dirty=false under lock, then publish. */
@@ -653,7 +842,7 @@ static portMUX_TYPE s_string_mux = portMUX_INITIALIZER_UNLOCKED;
 static char              s_bus_monitor_str[48] = {};
 static std::atomic<bool> s_bus_monitor_dirty_{false};
 
-/* ── Diag level query result (Core 1 → Core 0) ──────────────────────────── */
+/* ── Diag level query result (DALI task → loop task) ────────────────────── */
 
 static char              s_diag_level_str[24] = {};
 static std::atomic<bool> s_diag_level_dirty_{false};
@@ -677,7 +866,37 @@ static void on_diag_refresh_reply(DaliError result, const DaliFrame *reply, void
     portEXIT_CRITICAL(&s_string_mux);
 }
 
-/* ── Command result (Core 1 → Core 0) ───────────────────────────────────── */
+/* ── Identify: the level to put back (DALI task → loop task) ────────────── */
+
+static constexpr uint32_t IDENTIFY_DURATION_MS     = 10000u;
+static constexpr uint32_t IDENTIFY_HALF_BLINK_MS   = 500u;
+/* How long past the end a refused restore frame is retried before giving up. */
+static constexpr uint32_t IDENTIFY_FINISH_RETRY_MS = 2000u;
+
+/* QUERY ACTUAL LEVEL's answer from before the blink: 0-254, or one of the
+ * negative states below. The query is queued ahead of the first half-blink and
+ * the scheduler runs its queue in order, so the answer is the lamp as the blink
+ * found it. The error is stored before the level, so a reader that sees
+ * NO_ANSWER sees the error behind it. */
+static constexpr int16_t IDENTIFY_LEVEL_PENDING   = -1;
+static constexpr int16_t IDENTIFY_LEVEL_NO_ANSWER = -2;
+static constexpr int16_t IDENTIFY_LEVEL_MASK      = -3;
+static std::atomic<int16_t> s_identify_level_{IDENTIFY_LEVEL_PENDING};
+static std::atomic<int>     s_identify_level_error_{DALI_OK};
+
+static void on_identify_level_reply(DaliError result, const DaliFrame *reply, void * /*ctx*/)
+{
+    int16_t level = IDENTIFY_LEVEL_NO_ANSWER;
+    if (result == DALI_OK && reply != nullptr) {
+        uint8_t raw = (uint8_t)(reply->data & 0xFFu);
+        /* MASK is the gear saying it has no level to give, not a level. */
+        level = raw == DALI_DAPC_MASK_LEVEL ? IDENTIFY_LEVEL_MASK : (int16_t)raw;
+    }
+    s_identify_level_error_.store((int)result, std::memory_order_relaxed);
+    s_identify_level_.store(level, std::memory_order_release);
+}
+
+/* ── Command result (DALI task → loop task) ─────────────────────────────── */
 
 /* Sized for the longest line dali_cli_format_response() produces — a status
  * byte with all eight flags named — so a decoded reply is never clipped. Still
@@ -872,7 +1091,7 @@ static void on_raw2_done(DaliError result, const DaliFrame *reply, void *ctx)
     set_raw_result(result, reply, true, ctx);
 }
 
-/* ── Find-couplers recording (Core 1 writes, Core 0 reads) ──────────────── */
+/* ── Find-couplers recording (DALI task writes, loop task reads) ────────── */
 
 static constexpr uint8_t    MAX_COUPLER_FRAMES = 32u;
 static DaliInputEvent        s_coupler_frames[MAX_COUPLER_FRAMES];
@@ -880,12 +1099,12 @@ static std::atomic<uint8_t>  s_coupler_count_{0};
 static std::atomic<bool>     s_find_couplers_active_{false};
 static std::atomic<bool>     s_find_couplers_stopped_ack_{true};
 
-/* ── Scan result pending (Core 1 → Core 0 via scan_done_ gate) ──────────── */
+/* ── Scan result pending (scan task → loop task via scan_done_ gate) ────── */
 
 static char s_scan_result_str[128]  = {};
 static char s_scan_yaml_str[2048]   = {};
 
-/* ── Coupler group mask (set on Core 0 after coupler drain, read on Core 1) */
+/* ── Coupler group mask (set in loop() after the drain, read by scan_task) */
 
 static std::atomic<uint16_t> s_coupler_group_mask_{0u};
 
@@ -1000,14 +1219,14 @@ static void format_event(char *buf, size_t len, const DaliInputEvent *e)
     snprintf(buf, len, "invalid");
 }
 
-/* ── Unsolicited-RX callback (runs on Core 1, in the DALI task) ─────────── */
+/* ── Unsolicited-RX callback (runs on the DALI task) ────────────────────── */
 
 static void on_dali_unsolicited(const DaliFrame *frame, void * /*ctx*/)
 {
     DaliInputEvent event;
     if (dali_event_parse_frame(frame, &event) != DALI_OK) return;
 
-    /* Bus monitor: format locally, then copy under lock so Core 0 never sees a
+    /* Bus monitor: format locally, then copy under lock so loop() never sees a
      * partially-written buffer. Log from the local copy, not the shared buffer. */
     char monitor_copy[sizeof(s_bus_monitor_str)];
     format_event(monitor_copy, sizeof(monitor_copy), &event);
@@ -1041,11 +1260,13 @@ static void on_dali_unsolicited(const DaliFrame *frame, void * /*ctx*/)
     rec.timestamp_us = 0u;
     dali_event_queue_push(&s_event_queue, &rec);
 
-    /* Device/instance events identify one configured query target exactly.
-     * Treat the event as a change notification only: QUERY INPUT VALUE remains
-     * authoritative for both one- and two-byte sensor entities. Other Part-103
-     * source schemes need type/group metadata that the current YAML does not
-     * carry, so do not guess a target for them.
+    /* An event is a change notification only: QUERY INPUT VALUE remains
+     * authoritative for both one- and two-byte sensor entities. Each sensor is
+     * asked whether the event could be its own (dali_event_source.h). A
+     * Device/Instance event answers that exactly. Any other scheme is matched
+     * on the fields it carries, narrowed by the sensor's source profile, and a
+     * sensor nothing rules out is polled: a poll too many costs one query, and
+     * a poll too few leaves the sensor waiting for its interval.
      *
      * Whether an event is worth a poll is per-instance, because "event" does
      * not imply "change": some instances report on a timer and repeat the same
@@ -1053,24 +1274,30 @@ static void on_dali_unsolicited(const DaliFrame *frame, void * /*ctx*/)
      * configured interval with the device's report rate and puts traffic on the
      * bus that delays other instances' events. poll_on_event: false keeps such
      * an instance on its interval. */
-    if (event.frame_kind == DALI_EVENT_FRAME_INPUT_24BIT &&
-        event.source.scheme == DALI_EVENT_SOURCE_DEVICE_INSTANCE &&
-        event.source.has_device_address && event.source.has_instance) {
+    if (event.frame_kind == DALI_EVENT_FRAME_INPUT_24BIT) {
         for (uint8_t i = 0u; i < s_sensor_count; i++) {
             SensorEntry &e = s_sensor_registry[i];
-            if (e.sensor->get_address()  != event.source.device_address ||
-                e.sensor->get_instance() != event.source.instance) {
-                continue;
-            }
+            DaliEventSourceMatch match = dali_event_source_match(
+                &event, e.sensor->get_address(), e.sensor->get_instance(), &e.source);
+            if (match == DALI_EVENT_SOURCE_MATCH_NONE) continue;
+
+            /* An event in a scheme the profile did not expect: either the
+             * instance changed scheme or another device's event fits it, and
+             * reading the profile again tells which. Checked whatever
+             * poll_on_event says, so a change is reported for every sensor. */
+            if (dali_event_source_scheme_differs(&event, &e.source))
+                e.source_suspect.store(true, std::memory_order_release);
+
             /* Gated at the source rather than at admission: a request stored
              * for a sensor that never consumes it would stay set and then fire
              * on whatever admitted the next poll. */
             if (!e.sensor->get_poll_on_event()) continue;
 
             e.poll_requested.store(true, std::memory_order_release);
-            ESP_LOGD(TAG, "event poll requested: addr=%u inst=%u info=%u raw=%06X",
-                     (unsigned)event.source.device_address,
-                     (unsigned)event.source.instance,
+            ESP_LOGD(TAG, "event poll requested%s: addr=%u inst=%u info=%u raw=%06X",
+                     match == DALI_EVENT_SOURCE_MATCH_POSSIBLE ? " (inferred)" : "",
+                     (unsigned)e.sensor->get_address(),
+                     (unsigned)e.sensor->get_instance(),
                      (unsigned)event.event_information,
                      (unsigned)event.raw.data);
         }
@@ -1088,7 +1315,7 @@ static void dali_task(void *raw_component)
         dali_sched_run();
 
         /* Acknowledge a stop only after scheduler callbacks from this task have
-         * finished, so Core 0 cannot drain while a capture write is pending. */
+         * finished, so loop() cannot drain while a capture write is pending. */
         if (!s_find_couplers_active_.load(std::memory_order_acquire)) {
             s_find_couplers_stopped_ack_.store(true, std::memory_order_release);
         }
@@ -1189,7 +1416,7 @@ void DaliComponent::setup()
     if (load_group_membership()) {
         ESP_LOGI(TAG, "group membership restored from flash");
     } else {
-        /* No cross-core contention yet — dali_task is not started until below. */
+        /* No contention yet — dali_task is not started until below. */
         portENTER_CRITICAL(&s_group_map_mux);
         for (uint8_t i = 0u; i < s_light_count; i++) {
             LightEntry &e = s_light_registry[i];
@@ -1269,9 +1496,35 @@ void DaliComponent::loop()
         boot_sensor_query_done_ = true;
     }
 
+    /* ── Input sensor: read each instance's event-source profile ── */
+    /* Behind the boot polls, one read at a time. A read wanted by boot, a scan
+     * or a shell workflow goes as soon as the bus allows; a suspect or
+     * incomplete profile waits out SOURCE_PROFILE_REREAD_MS from its last
+     * read, so a misfit event source cannot keep the bus busy with reads. */
+    if (boot_sensor_query_done_ &&
+        !scan_running_.load(std::memory_order_acquire) &&
+        !s_source_read_in_flight.load(std::memory_order_acquire)) {
+        uint32_t now = millis();
+        for (uint8_t i = 0u; i < s_sensor_count; i++) {
+            SensorEntry &e = s_sensor_registry[i];
+            if (!e.source_wanted.load(std::memory_order_acquire) &&
+                e.source_suspect.load(std::memory_order_acquire) &&
+                (uint32_t)(now - e.source_read_ms) >= SOURCE_PROFILE_REREAD_MS) {
+                e.source_suspect.store(false, std::memory_order_release);
+                e.source_wanted.store(true, std::memory_order_release);
+            }
+            if (!e.source_wanted.load(std::memory_order_acquire)) continue;
+            if (enqueue_source_profile_read(&e, now))
+                e.source_wanted.store(false, std::memory_order_release);
+            break;
+        }
+    }
+
     /* ── A shell workflow put the bus down; re-read what it may have moved ── */
-    if (external_refresh_request_.exchange(false, std::memory_order_acq_rel))
+    if (external_refresh_request_.exchange(false, std::memory_order_acq_rel)) {
         dali_refresh_cursor_request(&refresh_cursor_);
+        want_all_source_profiles();
+    }
 
     /* ── Persist group membership when a scan/console edit dirtied it ── */
     if (s_group_members_dirty_.exchange(false, std::memory_order_acq_rel))
@@ -1380,26 +1633,40 @@ void DaliComponent::loop()
                 identify_last_ms_  += paused_ms;
                 identify_scan_paused_ = false;
             }
-            if ((uint32_t)(now - identify_last_ms_) >= 500u) {
-                DaliTarget t;
-                t.type    = DALI_ADDR_SHORT;
-                t.address = diag_address_;
+            DaliTarget t;
+            t.type    = DALI_ADDR_SHORT;
+            t.address = identify_address_;
+            uint32_t elapsed = now - identify_start_ms_;
+            if (elapsed >= IDENTIFY_DURATION_MS) {
+                if (finish_identify_(elapsed - IDENTIFY_DURATION_MS)) {
+                    identify_active_ = false;
+                    identify_scan_paused_ = false;
+                }
+            } else if (!identify_level_asked_) {
+                /* The first slot reads the level to come back to. The blink
+                 * waits for it to be queued, not answered: the queue runs in
+                 * order, so every half-blink goes out after the reply. */
+                DaliError err = dali_control_query(t, DALI_CMD_QUERY_ACTUAL_LEVEL, 0u,
+                                                   on_identify_level_reply, nullptr);
+                if (err == DALI_OK) {
+                    identify_level_asked_ = true;
+                } else {
+                    ESP_LOGW(TAG, "identify enqueue failed: %d; retrying", (int)err);
+                }
+            } else if ((uint32_t)(now - identify_last_ms_) >= IDENTIFY_HALF_BLINK_MS) {
                 bool next_phase = !identify_phase_;
                 DaliError err = next_phase ? dali_control_recall_max(t)
                                            : dali_control_recall_min(t);
                 if (err == DALI_OK) {
                     identify_last_ms_ = now;
                     identify_phase_   = next_phase;
+                    identify_blinked_ = true;
                 } else {
                     /* Retain the phase and the deadline so the next loop retries
                      * this half-blink; advancing on a rejected enqueue would
                      * silently drop it and stall the blink at one level. */
                     ESP_LOGW(TAG, "identify enqueue failed: %d; retrying", (int)err);
                 }
-            }
-            if ((uint32_t)(now - identify_start_ms_) >= 10000u) {
-                identify_active_ = false;
-                identify_scan_paused_ = false;
             }
         }
     }
@@ -1482,7 +1749,7 @@ void DaliComponent::loop()
     scan_done_.store(false);
     scan_running_.store(false);
 
-    /* Scan result summary (written from Core 1 before scan_done_ release). */
+    /* Scan result summary (written by the scan task before scan_done_ release). */
     if (scan_result_ && s_scan_result_str[0]) {
         scan_result_->publish_state(s_scan_result_str);
         s_scan_result_str[0] = '\0';
@@ -1507,6 +1774,7 @@ void DaliComponent::loop()
     if (scan_success) {
         apply_scan_level_profile_snapshot_();
         start_refresh();
+        want_all_source_profiles();
     }
 }
 
@@ -1547,7 +1815,7 @@ void DaliComponent::loop()
  *   meminfo, instances, sensor poll
  *       Each needs a blocking transport to walk a device before it knows what
  *       to ask next. Everything on this surface is one enqueue and one
- *       completion, and Core 0's loop may not block. The scan covers the first
+ *       completion, and ESPHome's loop may not block. The scan covers the first
  *       two; the sensor platform covers the third.
  *   dt8
  *       Implemented in the shared stack and reachable from the native CLI, held
@@ -1588,8 +1856,8 @@ static const DaliCliCommandSpec s_console_commands[] = {
 
     { DALI_CLI_CMD_DT6, "dt6", "<addr> <name> [dtr0]", "device type 6 (LED) command", 2u, 3u, NULL },
 
-    { DALI_CLI_CMD_IQUERY,  "iquery",  "<addr> <instance> <name> [dtr0]", "Part 103 instance query", 3u, 4u, NULL },
-    { DALI_CLI_CMD_ICONFIG, "iconfig", "<addr> <instance> <name> [v0] [v1] [v2]", "Part 103 instance configuration", 3u, 6u, NULL },
+    { DALI_CLI_CMD_IQUERY,  "iquery",  "<addr> <inst|gN|tN|all> <name> [dtr0]", "Part 103 instance query", 3u, 4u, NULL },
+    { DALI_CLI_CMD_ICONFIG, "iconfig", "<addr> <inst|gN|tN|all> <name> [v0] [v1] [v2]", "Part 103 instance configuration", 3u, 6u, NULL },
     { DALI_CLI_CMD_VENDOR,  "vendor",  "lunatone <addr> <instance> <name> | steinel <instance> <raw>", "vendor helpers", 3u, 4u, "lunatone steinel" },
 
     { DALI_CLI_CMD_MEMREAD,  "memread",  "<addr> <bank> <offset> [count]", "control-gear memory read (Part 102)", 3u, 4u, NULL },
@@ -1620,7 +1888,7 @@ static void set_cmd_usage(const DaliCliCommandSpec *spec)
     set_cmd_result(buf);
 }
 
-/* ── Multi-byte memory read result (Core 1 -> Core 0) ────────────────────── */
+/* ── Multi-byte memory read result (DALI task -> loop task) ──────────────── */
 
 /*
  * Shared by the control-gear (`memread`) and control-device (`devmem read`)
@@ -1743,6 +2011,13 @@ void DaliComponent::console_raw_(const DaliCliTokens &t, bool send_twice, void *
     DaliFrame frame;
     if (!dali_cli_parse_raw_frame(t.tok[1], t.tok[2], &frame)) {
         set_cmd_result("bad raw syntax");
+        return;
+    }
+
+    /* Held to the same rule as `special` and `config` below: the text box does
+     * not send commissioning frames, whichever spelling they arrive in. */
+    if (dali_cli_raw_frame_is_commissioning(&frame)) {
+        set_cmd_result("commissioning frame; use the native CLI");
         return;
     }
 
@@ -1948,8 +2223,8 @@ void DaliComponent::console_iquery_(const DaliCliTokens &t, void *ctx)
 {
     uint8_t addr, instance;
     if (!dali_cli_parse_short_addr(t.tok[1], &addr) ||
-        !dali_cli_parse_instance(t.tok[2], &instance)) {
-        set_cmd_result("iquery: addr 0-63, inst 0-31");
+        !dali_cli_parse_instance_selector(t.tok[2], &instance)) {
+        set_cmd_result("iquery: addr 0-63, inst 0-31|gN|tN|all");
         return;
     }
 
@@ -2182,8 +2457,8 @@ void DaliComponent::console_iconfig_(const DaliCliTokens &t)
 {
     uint8_t addr, instance;
     if (!dali_cli_parse_short_addr(t.tok[1], &addr) ||
-        !dali_cli_parse_instance(t.tok[2], &instance)) {
-        set_cmd_result("iconfig: addr 0-63, inst 0-31");
+        !dali_cli_parse_instance_selector(t.tok[2], &instance)) {
+        set_cmd_result("iconfig: addr 0-63, inst 0-31|gN|tN|all");
         return;
     }
 
@@ -2225,6 +2500,8 @@ void DaliComponent::console_iconfig_(const DaliCliTokens &t)
     DaliError err = dali_input_build_config_sequence(command, spec->send_twice, false,
                                                      dtr, spec->dtr_count, &seq);
     if (err == DALI_OK) err = dali_sched_enqueue_sequence(&seq);
+    /* Queued behind the write, so the read sees what it left. */
+    if (err == DALI_OK) want_source_profiles_at(addr);
     set_cmd_enqueue_result(err);
 }
 
@@ -2733,7 +3010,7 @@ bool DaliComponent::set_group_membership_snapshot(const uint64_t masks[16],
                                                   uint64_t observed_gear)
 {
     if (masks == nullptr || verified != 0xFFFFu) return false;
-    /* Runs on the scan task (Core 1); flash write is deferred to loop() (Core 0). */
+    /* Runs on the scan task; the flash write is deferred to loop(). */
     portENTER_CRITICAL(&s_group_map_mux);
     if (!dali_group_map_scan_covers_known_members(&s_group_map,
                                                    observed_gear)) {
@@ -2771,6 +3048,15 @@ bool DaliComponent::apply_inventory_snapshot(const DaliDiscoveryInventory *inven
     return set_group_membership_snapshot(map.members, map.verified, observed_gear);
 }
 
+/* `iconfig` from a shell session wrote to the instances at `addr`. A group or
+ * type selector can reach any of them, so every sensor there is read again. */
+void DaliComponent::on_instance_config_applied(uint8_t addr, uint8_t instance)
+{
+    (void) instance;
+    if (addr >= DALI_SHORT_ADDRESS_COUNT) return;
+    want_source_profiles_at(addr);
+}
+
 void DaliComponent::on_config_applied(DaliTarget target, DaliCommandId id,
                                       uint8_t param)
 {
@@ -2783,7 +3069,7 @@ void DaliComponent::on_config_applied(DaliTarget target, DaliCommandId id,
 
     if (config_changes_level_profile(id)) {
         /* Deferred rather than applied here: this may be a shell session's
-         * task, and the cache belongs to Core 0's loop. */
+         * task, and the cache belongs to the loop task. */
         uint64_t mask = config_target_mask(target);
         external_profile_forget_mask_.fetch_or(mask, std::memory_order_acq_rel);
         notify = true;
@@ -2808,7 +3094,7 @@ void DaliComponent::on_config_applied(DaliTarget target, DaliCommandId id,
     }
 
     /* Handed over as an atomic for the same reason the profile mask is: a
-     * config verb typed into a shell session does not run on Core 0. */
+     * config verb typed into a shell session does not run on the loop task. */
     if (notify) external_refresh_request_.store(true, std::memory_order_release);
 }
 
@@ -2820,7 +3106,9 @@ void DaliComponent::on_config_applied(DaliTarget target, DaliCommandId id,
  * some address moved somewhere, and dropping every cache keyed by the old
  * address is the only safe answer. The `address` verb chose `from` and `to`,
  * checked `to` was empty before writing, and confirmed afterwards that `to`
- * answers and `from` is silent. That is enough to move the bookkeeping instead.
+ * answers and `from` is silent. `restore apply` reports each confirmed gear
+ * move the same way, in plan order, having also read the unit's identification
+ * number back at `to`. That is enough to move the bookkeeping instead.
  *
  * What can follow the gear is its group membership: a group light picks its
  * query target from this table at runtime, so moving the member keeps the
@@ -2868,10 +3156,16 @@ void DaliComponent::on_short_address_moved(uint8_t from, uint8_t to)
  * in the way that matters. A move keeps the group-membership entry and
  * re-points it, because the unit is still on the bus answering something. A
  * clear has to retire it. SET SHORT ADDRESS changes nothing but the address, so
- * the unit keeps its own group registers and will reappear in the same groups
- * at whatever address `commission unaddressed` hands it — an address not
- * knowable from here. Keeping the old entry would leave a group light polling
- * something that never answers; pointing it anywhere else would be a guess.
+ * the unit keeps its own group registers, goes on acting on group and broadcast
+ * commands while it has no address, and will reappear in the same groups at
+ * whatever address `commission unaddressed` hands it — an address not knowable
+ * from here. Keeping the old entry would leave a group light polling something
+ * that never answers; pointing it anywhere else would be a guess.
+ *
+ * The log line says that only this component's bookkeeping changed, because
+ * the obvious reading of "retired from its groups" is the wrong one: on the 1k
+ * bus a cleared lamp followed `level g0 90` right after this component logged
+ * exactly that.
  *
  * Reached on silence rather than on a proven clear, because the two cases the
  * shell cannot separate — cleared, or dropped off the bus — want exactly this
@@ -2881,24 +3175,40 @@ void DaliComponent::on_short_address_cleared(uint8_t addr)
 {
     if (addr >= DALI_SHORT_ADDRESS_COUNT) return;
 
+    const uint64_t bit = (uint64_t) 1u << addr;
+    uint16_t groups = 0u;
+
     portENTER_CRITICAL(&s_group_map_mux);
+    for (uint8_t g = 0u; g < DALI_GROUP_COUNT; g++) {
+        if ((s_group_map.members[g] & bit) != 0u) groups |= (uint16_t) (1u << g);
+    }
     bool groups_dropped =
         dali_group_map_forget(&s_group_map, addr, DALI_GROUP_MAP_ALL_GROUPS);
     portEXIT_CRITICAL(&s_group_map_mux);
 
     if (groups_dropped) {
         s_group_members_dirty_.store(true, std::memory_order_release);
-        ESP_LOGI(TAG, "a%u cleared: retired from every group it was known in",
-                 (unsigned) addr);
+
+        char names[DALI_GROUP_COUNT * 4u + 1u] = "";  /* "g15 " per group */
+        size_t len = 0u;
+        for (uint8_t g = 0u; g < DALI_GROUP_COUNT && len < sizeof(names); g++) {
+            if ((groups & (uint16_t) (1u << g)) == 0u) continue;
+            len += (size_t) snprintf(names + len, sizeof(names) - len, "%sg%u",
+                                     len > 0u ? " " : "", (unsigned) g);
+        }
+        ESP_LOGI(TAG,
+                 "a%u cleared: no longer polled for group state (%s); the gear "
+                 "keeps its groups and still follows group and broadcast "
+                 "commands",
+                 (unsigned) addr, names);
     }
 
-    external_profile_forget_mask_.fetch_or((uint64_t) 1u << addr,
-                                           std::memory_order_acq_rel);
+    external_profile_forget_mask_.fetch_or(bit, std::memory_order_acq_rel);
 
     ESP_LOGW(TAG,
-             "a%u no longer answers. Any entity configured with address: %u now "
-             "targets nothing -- the unit comes back only through 'commission "
-             "unaddressed', at an address only a scan can find",
+             "nothing answers at a%u now. Any entity configured with address: "
+             "%u targets nothing until 'commission unaddressed' re-addresses "
+             "the unit, at an address only a scan can find",
              (unsigned) addr, (unsigned) addr);
 
     external_refresh_request_.store(true, std::memory_order_release);
@@ -2939,7 +3249,7 @@ bool DaliComponent::save_address_backup(const uint8_t *buf, uint32_t len)
      * True means staged, not yet on flash: loop() performs the write on its next
      * pass. The shell says "stored" on this, which is the same promise every
      * other persisted item here makes, and the alternative — blocking the shell
-     * task on a Core 0 API it must not call — is worse than the imprecision.
+     * task on a loop-task API it must not call — is worse than the imprecision.
      */
     return true;
 }
@@ -2989,6 +3299,12 @@ void DaliComponent::register_input_sensor(DaliBusSensor *sensor)
         e.sensor      = sensor;
         e.seq_in_flight.store(false, std::memory_order_relaxed);
         e.poll_requested.store(false, std::memory_order_relaxed);
+        /* Unknown until read: every event its fields allow reaches it. */
+        dali_event_source_profile_clear(&e.source);
+        e.source_read    = false;
+        e.source_read_ms = 0u;
+        e.source_wanted.store(true, std::memory_order_relaxed);
+        e.source_suspect.store(false, std::memory_order_relaxed);
     } else {
         ESP_LOGW(TAG, "sensor registry full — increase MAX_INPUT_SENSORS");
     }
@@ -2998,7 +3314,8 @@ void DaliComponent::add_dispatch_entry(uint8_t frame_kind, uint8_t address_kind,
                                        uint8_t address, uint16_t event_information,
                                        uint8_t instance, uint8_t output_type,
                                        uint8_t output_address, uint8_t action,
-                                       uint8_t scene)
+                                       uint8_t scene, uint8_t group_kind,
+                                       uint8_t instance_type)
 {
     if (s_dispatch_count >= MAX_DISPATCH_ENTRIES) {
         ESP_LOGW(TAG, "dispatch table full — increase MAX_DISPATCH_ENTRIES");
@@ -3010,6 +3327,9 @@ void DaliComponent::add_dispatch_entry(uint8_t frame_kind, uint8_t address_kind,
     e.key.address      = address;
     e.key.event_information = event_information;
     e.key.instance     = instance;
+    e.key.group_kind   = static_cast<DaliDispatchGroupKind>(group_kind);
+    e.key.match_instance_type = instance_type != 0xFFu;
+    e.key.instance_type = e.key.match_instance_type ? instance_type : 0u;
     e.output.type      = static_cast<DaliAddressType>(output_type);
     e.output.address   = output_address;
     e.action           = static_cast<DaliDispatchAction>(action);
@@ -3055,7 +3375,7 @@ void DaliComponent::arm_group_seed_sweep()
 
 /*
  * One address per completion, never blocking. Shaped like pump_refresh() for
- * the same reason: Core 0's loop may not block, so a walk here is a state
+ * the same reason: ESPHome's loop may not block, so a walk here is a state
  * machine advanced by whichever pass observes the previous answer.
  */
 void DaliComponent::pump_group_seed_sweep()
@@ -3471,13 +3791,40 @@ void DaliComponent::start_scan()
     }
 }
 
+/* Many times the longest thing a component producer queues (a device-type
+ * enumeration is ~200 ms), and short enough that a claim which cannot drain is
+ * reported instead of leaving a terminal hanging. The scan task waits as long. */
+static constexpr uint32_t BUS_CLAIM_DRAIN_WAIT_MS = 5000u;
+
 bool DaliComponent::try_claim_bus(const char *what)
 {
+    const char *who = what != nullptr ? what : "shell";
     if (scan_running_.exchange(true)) {
         ESP_LOGW(TAG, "%s: bus already in use", what != nullptr ? what : "claim");
         return false;
     }
-    ESP_LOGI(TAG, "Bus claimed by %s", what != nullptr ? what : "shell");
+
+    /*
+     * The gate stops new component traffic, not traffic already queued: the
+     * refresh pump's current query, the sensor polls that fell due, a light
+     * command. A workflow that starts on top of those spends its first reply
+     * waits queued behind them — and release_bus() starts a refresh pass, so
+     * the verb typed right after another one meets exactly that. The shell once
+     * read the resulting expired wait as an empty address, which let `address
+     * set` write onto an occupied one. Wait for the queue to drain, as the
+     * button scan does, and refuse the claim if it will not.
+     */
+    const uint32_t started_ms = millis();
+    while (!dali_sched_is_quiescent()) {
+        if ((uint32_t)(millis() - started_ms) >= BUS_CLAIM_DRAIN_WAIT_MS) {
+            scan_running_.store(false, std::memory_order_release);
+            ESP_LOGW(TAG, "%s: queued traffic did not drain; claim refused", who);
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    ESP_LOGI(TAG, "Bus claimed by %s", who);
     return true;
 }
 
@@ -3487,7 +3834,7 @@ void DaliComponent::release_bus()
      * A claimed workflow may have moved levels or changed which addresses
      * exist, so ask for a refresh pass. The request is handed over as an atomic
      * rather than by touching refresh_cursor_ directly: this runs on the shell
-     * task, and the cursor belongs to Core 0's loop.
+     * task, and the cursor belongs to the loop task.
      */
     external_refresh_request_.store(true, std::memory_order_release);
     scan_running_.store(false, std::memory_order_release);
@@ -3497,11 +3844,70 @@ void DaliComponent::start_identify()
 {
     if (identify_active_) return;
     ESP_LOGI(TAG, "Identify: short address %u (10 s)", (unsigned)diag_address_);
-    identify_active_   = true;
-    identify_phase_    = true;
-    identify_start_ms_ = millis();
-    identify_last_ms_  = millis() - 500u;  // fire immediately on first loop tick
+    s_identify_level_.store(IDENTIFY_LEVEL_PENDING, std::memory_order_relaxed);
+    /* Held for the whole blink: the level read at the start belongs to this
+     * lamp, and a Target Address changed mid-blink must not receive it. */
+    identify_address_     = diag_address_;
+    identify_active_      = true;
+    identify_phase_       = true;
+    identify_level_asked_ = false;
+    identify_blinked_     = false;
+    identify_start_ms_    = millis();
+    // fire immediately on the first loop tick after the level query
+    identify_last_ms_     = millis() - IDENTIFY_HALF_BLINK_MS;
     identify_scan_paused_ = false;
+}
+
+/*
+ * Put the lamp back once the blink is over: OFF for 0, DAPC for any other level
+ * (which fades at the gear's own fade time; DALI has no instant way to reach an
+ * arbitrary level), and RECALL MIN LEVEL when the level could not be read, so
+ * that it ends where the shell's identify does. Returns true when identify is
+ * finished, false to be called again on the next loop tick.
+ */
+bool DaliComponent::finish_identify_(uint32_t overdue_ms)
+{
+    if (!identify_blinked_) return true;  // nothing was sent, so nothing to undo
+
+    DaliTarget t;
+    t.type    = DALI_ADDR_SHORT;
+    t.address = identify_address_;
+    const int16_t level = s_identify_level_.load(std::memory_order_acquire);
+    DaliError err;
+    if (level == 0) {
+        err = dali_control_off(t);
+    } else if (level > 0) {
+        err = dali_control_set_level(t, (uint8_t)level);
+    } else {
+        err = dali_control_recall_min(t);
+    }
+
+    if (err != DALI_OK) {
+        if (overdue_ms < IDENTIFY_FINISH_RETRY_MS) return false;
+        ESP_LOGW(TAG, "Identify: short address %u, final frame refused: %d; "
+                 "left where the blink stopped", (unsigned)identify_address_, (int)err);
+        return true;
+    }
+
+    if (level == 0) {
+        ESP_LOGI(TAG, "Identify: short address %u switched off again",
+                 (unsigned)identify_address_);
+    } else if (level > 0) {
+        ESP_LOGI(TAG, "Identify: short address %u back to level %u",
+                 (unsigned)identify_address_, (unsigned)level);
+    } else {
+        const char *why = "not read";
+        if (level == IDENTIFY_LEVEL_MASK) {
+            why = "MASK";
+        } else if (level == IDENTIFY_LEVEL_NO_ANSWER) {
+            const char *name = dali_error_name(
+                (DaliError)s_identify_level_error_.load(std::memory_order_relaxed));
+            why = name != nullptr ? name : "error";
+        }
+        ESP_LOGW(TAG, "Identify: short address %u left at min; its level before "
+                 "was unreadable (%s)", (unsigned)identify_address_, why);
+    }
+    return true;
 }
 
 void DaliComponent::start_find_couplers()

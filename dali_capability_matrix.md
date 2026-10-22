@@ -1,6 +1,9 @@
 # DALI Capability Matrix
 
-**Last reviewed:** 2026-08-25
+**Last reviewed:** 2026-10-02
+
+What has yet to run on a bus is listed in `todo.md`, with the procedure for
+each row marked `no` or `partial` here.
 
 One question per row: for a given DALI capability, what exists in the reusable C
 stack, whether the CLI exposes it, whether an independent host vector covers it,
@@ -56,12 +59,12 @@ verb by verb.
 | Addressed queries (34 names) | `dali_control_build_query` | `query`, `status` | yes | yes | yes (console) |
 | Configuration commands (19 names) | `dali_control_build_config` | `config` | yes | partial | yes (console) |
 | DTR0-consuming configuration | `dali_control_build_config` + sequence | `config-dtr0` | yes | no | yes (console, minus `set-short-address-dtr0`) |
-| Checked re-address / regroup | `dali_group_map_move` + shell workflow | `address` | partial (map only) | no | shell only |
-| Checked control-device re-address | n/a — `SET SHORT ADDRESS DTR0` (Part 103) | `address <dN> set\|clear` | partial (parsing only) | no | shell only |
+| Checked re-address / regroup | `dali_restore_write_short_address` (DTR0 read back before the pair) + `dali_group_map_move` + shell workflow | `address` | partial (the checked write and the map; not the handler) | partial (2k, 2026-09-03 to 2026-09-30: `set` with its occupied-destination refusal, `add`/`remove`, and `clear` of one unit and of two sharing an address; the contested arm not run; the DTR0 read-back has one bus reading, from a `clear`) | shell only |
+| Checked control-device re-address | `dali_restore_write_short_address` — Part 103 `SET SHORT ADDRESS DTR0`, device DTR0 read back first | `address <dN> set\|clear` | partial (parsing, frames and the checked write; not the handler) | partial (`set` on 2k, 2026-09-29, before the read-back existed) | shell only |
 | DTR0/1/2 load | `dali_control_build_dtr` | `dtr` | yes | yes | yes (console) |
 | Special/broadcast commands (18 names) | `dali_build_special` | `special` | yes | partial | partial (console) |
-| Arbitrary frame | n/a | `raw` | yes (parse only) | yes | yes (`raw`) |
-| Arbitrary frame, send-twice | scheduler `send_twice` | `raw2` | yes (parse only) | no | yes (`raw2`) |
+| Arbitrary frame | n/a | `raw` | yes (parse, commissioning gate) | yes | partial (`raw`, minus commissioning frames) |
+| Arbitrary frame, send-twice | scheduler `send_twice` | `raw2` | yes (parse, commissioning gate) | no | partial (`raw2`, minus commissioning frames) |
 
 Real-bus coverage for queries and DAPC comes from the two site deployments and
 recorded diagnostic sessions; a "partial" cell means some names in the group have
@@ -80,17 +83,20 @@ cached level profile and triggers a refresh.
 | Device-type enumeration | `dali_discovery_build_device_types_sequence` | via `discover` | yes | no | yes (scan, shell) |
 | Group membership query | `dali_discovery_build_groups_sequence` | via `discover` | yes | yes | yes (scan, shell) |
 | Bank 0 identity read | `dali_memory_read_bank0_identity` | `meminfo` | yes | partial | via scan; `meminfo` via shell |
+| Shared gear address, units answering alike | `dali_discovery_gear_address_contested` (identity read collides twice) | via `scan`, `discover`, `backup save`, `restore`, the commissioning post-scan | yes | no (2k, 2026-09-30, showed the case going undetected; the detection has not met a bus) | yes (scan log, shell) |
 | Inventory export | `dali_discovery_inventory_*` | `inventory`, `export inventory` | partial | yes | yes (YAML lines, shell) |
 | Configuration export | n/a — reads live entity state | `export config` | no | yes | shell only; the native build has no YAML to describe |
 | Commission unaddressed | `dali_commissioning_commission_unaddressed` | `commission unaddressed` | yes | partial | shell, opt-in |
-| Commission control devices | `dali_device_commissioning_commission_unaddressed` | `commission devices` | yes | no | shell, opt-in |
-| Post-scan verification | `dali_commissioning_audit` | automatic in both `commission` walks | yes | no | shell |
-| Address backup | `dali_snapshot_from_inventory` | `backup save`, `backup status` | yes | no | shell; persisted to flash |
-| Backup blob round trip | `dali_snapshot_encode` / `_decode` | `backup export`, `backup import` | yes | n/a — no bus traffic | shell |
-| Restore planning | `dali_restore_plan` | `restore plan` | yes | no | shell; moving aside a unit the backup never saw is host-only |
-| Restore execution | n/a — `SET SHORT ADDRESS DTR0` per move | `restore apply` | no | no | shell, opt-in |
+| Commission control devices | `dali_device_commissioning_commission_unaddressed` | `commission devices` | yes | yes (2k, 2026-09-29) | shell, opt-in |
+| Post-scan verification | `dali_commissioning_audit` | automatic in both `commission` walks | yes | partial (clean post-scans on 2k and 1k, gear and devices, 2026-09-03 to 2026-09-30; the contested and unrecorded classes have not met a bus) | shell |
+| Address backup | `dali_snapshot_from_inventory` | `backup save`, `backup status` | yes | partial (2k and 1k, 2026-09-03 to 2026-09-30, in format v1; the unaddressed-gear warning on 1k, 2026-09-29; format v2 not yet) | shell; persisted to flash |
+| Backup blob round trip | `dali_snapshot_encode` / `_decode` | `backup export`, `backup import` | yes | n/a — no bus traffic; round-tripped on the 2k node, 2026-09-29, in format v1; v2 refuses v1 blobs | shell |
+| Restore planning | `dali_restore_plan` | `restore plan` | yes | partial (2k, 2026-09-29: dependency order, a swap in each space, and moving aside a unit the backup never saw; 2026-09-30: no move onto a shared address it read as one unidentified unit; a contested target is host-only) | shell |
+| Restore execution | `dali_restore_write_short_address` per move (DTR0 read back before the pair), each confirmed by `dali_restore_confirm_move` | `restore apply` | partial (move frames, the checked write and confirmation; not the apply loop) | partial (2k and 1k, 2026-09-29: gear and device moves, staging hops and a move-aside included, each confirmed; 1k stopped after a move that did not land. The DTR0 read-back has not met a bus) | shell, opt-in |
 | Group restore planning | `dali_restore_plan_groups` | `restore groups` | yes | no | shell; control gear only |
 | Group restore execution | n/a — `ADD TO GROUP` / `REMOVE FROM GROUP` per bit | `restore groups apply` | no | no | shell, opt-in; read back per gear |
+| Instance settings in the backup (format v2) | `dali_restore_read_instance_settings`, `dali_snapshot_add_instance` | `backup save`, `backup status` | yes | no | shell; persisted to flash |
+| Instance settings restore | `dali_restore_locate_device`, `dali_restore_instance_write_mask`, `dali_restore_write_instance_settings` | `restore instances [apply]` | yes | no | shell, opt-in; read back per instance |
 | Identify blink | n/a | `identify` | no | yes | yes (button, shell) |
 | Smoke check | n/a | `smoke` | no | yes | shell |
 
@@ -104,19 +110,31 @@ pool without listing it as a device. The same host coverage asserts that a
 cancelled commissioning workflow uses a safety transport to attempt TERMINATE
 despite the latched front-end abort, and reports a failed cleanup separately.
 
-That is host evidence, not a real-bus multi-device result. Commissioning remains
-limited operationally to one unaddressed control gear at a time until the
-multi-device path is exercised on hardware. A run now brackets itself with
-broadcast START/STOP QUIESCENT MODE — host-tested for ordering, settle,
-release-on-every-exit, and the two failure modes, but never run on a bus, and it
-cannot reach a device that does not receive the broadcast.
+**On a bus:**
 
-Equal random addresses are handled as of 2026-08-26: VERIFY reply-window activity
-is read as co-selection, the pair is de-addressed with PROGRAM SHORT ADDRESS 0xFF
-and dropped from the search, the short address is left unconsumed, and the run
-continues -- a second run places them. Host vectors only, and it rests on the same
-undecodable-activity classification that has no physical collision capture behind
-it. Arbitration against another bus master remains open.
+- The scan's undecodable-activity classification met a genuine physical
+  collision on 2k on 2026-09-03.
+- Two-unit walks have run correctly on 2k, gear on 2026-09-03 and 2026-09-30,
+  devices on 2026-09-29.
+- Every walk since 2026-09-29 has sent the broadcast START/STOP QUIESCENT MODE
+  bracket. Its ordering, settle, release-on-every-exit and two failure modes
+  are host-tested.
+  - Its release on the error and cancel paths has not been watched on a bus.
+  - It cannot reach a device that does not receive the broadcast.
+
+The equal-random-address path has never run.
+
+Equal random addresses are handled as of 2026-08-26:
+
+- VERIFY reply-window activity is read as co-selection.
+- The pair is de-addressed with PROGRAM SHORT ADDRESS 0xFF and dropped from the
+  search.
+- The short address is left unconsumed, the run continues, and a second run
+  places them.
+
+That has host vectors only. Real gear cannot stage it, since nothing writes a
+random address; `todo.md` describes a rig with emulated gear. Arbitration
+against another bus master remains open.
 
 Cross-part interference is guarded in both directions as of 2026-08-26: a gear
 run sends IEC 62386-103 TERMINATE before INITIALISE, again immediately after, and
@@ -125,8 +143,10 @@ on seeing the Part 102 INITIALISE cannot answer COMPARE as gear; the
 control-device walk sends a Part 102 TERMINATE at the same three points, for the
 mirror-image reason. Opt-in through
 `DaliCommissioningOptions.terminate_control_devices` and
-`DaliDeviceCommissioningOptions.terminate_control_gear`, non-fatal on failure,
-host vectors only. Discovery records undecodable activity in the control-device
+`DaliDeviceCommissioningOptions.terminate_control_gear`, and non-fatal on
+failure. The shell sets both, so both have gone out in real walks on 2k. No bus
+has yet had a unit in the state they guard against, so their effect is still
+host-tested only. Discovery records undecodable activity in the control-device
 address space (`has_undecodable_device_activity`), which reserves that device
 address in the Part 103 free-address mask and nothing in the gear one — the two
 spaces are independent.
@@ -138,9 +158,9 @@ confirmed, contested, and silent, and names two classes the run does not claim �
 an address occupied now that was free before and was never recorded as an
 assignment (the signature of an abort between PROGRAM SHORT ADDRESS and the
 assignment record), and an address newly contested that the run never assigned.
-Host vectors only. Every classification rests on the same undecodable-activity
-reading as the in-run duplicate detection, so a `contested` line is an inference
-that the hardware pass has yet to confirm.
+Clean post-scans have run on both buses ("confirmed 2 of 2"). The contested and
+unrecorded classes have host vectors only, and `todo.md` stages the first of
+them with a spare driver.
 
 The shell rows are the same code the native CLI runs, reached through
 `esphome/components/dali/dali_shell_tcp.cpp`. Its commissioning entry point is
@@ -204,24 +224,30 @@ a gap.
 | Capability | Shared API | Native CLI verb | Host vector | Real bus | ESPHome |
 |---|---|---|---|---|---|
 | Instance discovery | `dali_discovery_query_input_device` | `instances` | yes | yes | yes |
+| Instance event scheme, priority, instance groups in discovery | `dali_discovery_query_input_device` | `instances` | yes | no | yes |
+| Instance-group / instance-type / all-instances selectors | `dali_build_instance_command` | `iquery`/`iconfig` `<addr> gN\|tN\|all` | yes | no | yes (`iquery`, `iconfig`) |
 | Generic instance queries | `dali_input_build_query_*` | `iquery` | yes | partial | yes (`iquery`) |
 | DTR0-selected instance query | `dali_input_build_config_sequence` | `iquery ... instance-config` | yes | no | yes (`iquery <a> <i> <n> <dtr0>`) |
-| Generic configuration (10) | `dali_input_build_set_*` | `iconfig` | yes | no | yes (`iconfig`) |
+| Generic configuration (10) | `dali_input_build_set_*` | `iconfig` | yes | partial (SET EVENT SCHEME) | yes (`iconfig`) |
 | Part 301 push-button timers | `dali_input_pb_*` | `iquery pb-*`, `iconfig pb-set-*` | yes | no | yes (`pb-*`) |
 | Part 303 occupancy | `dali_input_occ_*` | `iquery occ-*`, `iconfig occ-*` | yes | partial | yes |
 | Part 304 light sensor | `dali_input_light_*` | `iquery light-*`, `iconfig light-*` | yes | partial | yes (`light-*`) |
 | Multi-byte input polling | `dali_input_poll_build_value_sequence` | `sensor poll` | yes | yes | yes |
 | Event decode | `dali_event_*` | `events`, `capture`, `find switches` | yes | yes | yes |
 | Event dispatch rules | `dali_dispatch_*` | n/a | yes | yes | yes |
-| Quiescent mode | `dali_input_build_quiescent_mode[_broadcast]` | `quiescent on\|off <addr\|all>` | yes | no | yes (console) |
-| Commissioning quiescence bracket | `DaliCommissioningOptions.quiesce_control_devices` | automatic in `commission` | yes | no | n/a |
-| Device-walk quiescence bracket | `DaliDeviceCommissioningOptions.quiesce_control_devices` | automatic in `commission devices` | yes | no | n/a |
-| Cross-part TERMINATE bracket | `DaliCommissioningOptions.terminate_control_devices` | automatic in `commission` | yes | no | n/a |
-| Part 103 TERMINATE frame | `dali_build_device_special` / `DALI_CMD_DEVICE_TERMINATE` | via `commission` | yes | no | n/a |
-| Device broadcast (0xFF) | `dali_build_device_broadcast_command` | via `quiescent ... all` | yes | no | yes (console) |
+| Dispatch on instance group vs device group, and on instance type | `DaliDispatchKey.group_kind`, `match_instance_type` | n/a | yes | no | yes (YAML `instance_group`, `device_group`, `instance_type`) |
+| Event-source matching for sensor polls (every scheme) | `dali_event_source_*` | n/a | yes | no | yes |
+| Quiescent mode | `dali_input_build_quiescent_mode[_broadcast]` | `quiescent on\|off <addr\|all>` | yes | yes (2k, 2026-09-03: `on all` silenced events through a walk, `off all` released them; no read-back exists) | yes (console) |
+| Commissioning quiescence bracket | `DaliCommissioningOptions.quiesce_control_devices` | automatic in `commission` | yes | partial (sent in gear walks on 2k and 1k since 2026-09-29; release on the error and cancel paths not watched) | n/a |
+| Device-walk quiescence bracket | `DaliDeviceCommissioningOptions.quiesce_control_devices` | automatic in `commission devices` | yes | partial (2k, 2026-09-29: sent, no release failure printed) | n/a |
+| Cross-part TERMINATE bracket | `DaliCommissioningOptions.terminate_control_devices` | automatic in `commission` | yes | partial (sent in gear walks since 2026-09-29; nothing on either bus for it to stop) | n/a |
+| Part 103 TERMINATE frame | `dali_build_device_special` / `DALI_CMD_DEVICE_TERMINATE` | via `commission` | yes | yes (2k, 2026-09-29, closing `commission devices`) | n/a |
+| Device broadcast (0xFF) | `dali_build_device_broadcast_command` | via `quiescent ... all` | yes | yes (2k, via `quiescent ... all`) | yes (console) |
 
 Configuration writes are experimental everywhere. The native CLI says so on every
-`iconfig` success line: the result means transmitted, not applied.
+`iconfig` success line: the result means transmitted, not applied. One has been
+read back on a bus: SET EVENT SCHEME, on two Steinel instances on 2k on
+2026-10-01.
 
 ## Vendor helpers
 
@@ -278,7 +304,9 @@ The caches that cache is part of are now fed by both surfaces. A shell session's
 `DaliShellHooks::inventory_changed`, and a `config` verb reports what it sent
 through `DaliShellHooks::config_applied`, so the group-membership table and the
 level-profile cache no longer depend on which surface an operator happened to
-use. Host- and compile-verified only; no bus has run it.
+use. `short_address_moved` has run on 1k, where each confirmed `restore apply`
+move carried the group map with it. The inventory and config hooks have no
+recorded bus result.
 
 ## Known gaps this matrix is tracking
 
@@ -294,10 +322,12 @@ use. Host- and compile-verified only; no bus has run it.
   validation, and reply decoding are shared code with host vectors, but the
   dispatch in `dali_component.cpp` between them is ESPHome/FreeRTOS-bound and
   reachable only on the device.
-- Quiescent mode has frame-level host vectors but no bus result. Commissioning
-  releases what it started; the standalone verb does not, so a device left
-  quiescent by hand stays silent until `quiescent off`, which is
-  indistinguishable from a dead sensor.
+- Quiescent mode cannot be read back: QUERY QUIESCENT MODE is not
+  implemented. Commissioning and the shell's scans release what they started.
+  The standalone verb does not, so a device left quiescent by hand stays silent
+  until `quiescent off`, or until its own timeout: 15 minutes in TI's device
+  firmware, and unknown for the Steinel. That is indistinguishable from a dead
+  sensor.
 - Part 103 **device groups** have a decode path and no read or write path. They
   are recognised as an event source (`DALI_EVENT_SOURCE_DEVICE_GROUP`) and
   nowhere else: discovery does not query them, the snapshot does not record
@@ -307,5 +337,7 @@ use. Host- and compile-verified only; no bus has run it.
   membership.
 - `address <dN> clear` has one-sided evidence. Part 103 has no broadcast
   QUERY MISSING SHORT ADDRESS in this stack, so silence at the subject is the
-  whole of the confirmation, and `commission devices` is what settles it.
+  whole of the confirmation, and `commission devices` is what settles it: on 2k
+  it found both of two cleared devices. The device query exists, `0x33`, and is
+  not implemented.
 - Nothing here claims DALI Alliance certification or complete IEC 62386 coverage.

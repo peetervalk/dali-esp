@@ -1,4 +1,7 @@
 #include "dali_restore.h"
+#include "dali_commissioning.h"
+#include "dali_event.h"
+#include "dali_input_config.h"
 
 #include <string.h>
 
@@ -29,11 +32,12 @@ typedef struct {
 typedef struct {
     bool     present[DALI_SHORT_ADDRESS_COUNT];
     /*
-     * Answered undecodably in this space: the address is taken, but nothing
-     * there can be read, matched, or moved. Never both this and `present` --
-     * the scan records one or the other -- and the two mean different things
-     * to the planner. A present unit is something to plan for; a reserved
-     * address is something to plan around.
+     * Contested in this space: the address is taken by more than one unit, so
+     * nothing there can be matched or moved. Never both this and `present`,
+     * even where the scan listed the address as present -- a gear address
+     * whose identity read collided is collected here and nowhere else -- and
+     * the two mean different things to the planner. A present unit is
+     * something to plan for; a reserved address is something to plan around.
      */
     bool     reserved[DALI_SHORT_ADDRESS_COUNT];
     bool     has_ident[DALI_SHORT_ADDRESS_COUNT];
@@ -85,11 +89,17 @@ static void restore_add_conflict(const RestoreConflictSink *sink,
     (*sink->count)++;
 }
 
-static bool restore_add_move(DaliRestorePlan    *plan,
-                             DaliSnapshotSpace   space,
-                             uint8_t             from,
-                             uint8_t             to,
-                             DaliRestoreMoveKind kind)
+/*
+ * `unit_addr` is where the moving unit was found on the bus, which is where its
+ * identification number is filed. It is not `from` after a staging hop.
+ */
+static bool restore_add_move(DaliRestorePlan       *plan,
+                             const RestoreBusUnits *units,
+                             DaliSnapshotSpace      space,
+                             uint8_t                from,
+                             uint8_t                to,
+                             DaliRestoreMoveKind    kind,
+                             uint8_t                unit_addr)
 {
     if (plan->move_count >= DALI_RESTORE_MAX_MOVES) {
         plan->incomplete = true;
@@ -97,10 +107,17 @@ static bool restore_add_move(DaliRestorePlan    *plan,
     }
 
     DaliRestoreMove *move = &plan->moves[plan->move_count];
+    memset(move, 0, sizeof(*move));
     move->space = space;
     move->from  = from;
     move->to    = to;
     move->kind  = kind;
+    if (units->has_ident[unit_addr]) {
+        move->has_identification = true;
+        memcpy(move->identification,
+               units->ident[unit_addr],
+               DALI_MEMORY_BANK0_IDENTIFICATION_LEN);
+    }
     plan->move_count++;
     return true;
 }
@@ -115,12 +132,14 @@ static bool restore_add_move(DaliRestorePlan    *plan,
  * present but unidentified and reported rather than silently skipped: an
  * operator needs to know the plan cannot place it.
  *
- * An address that answered undecodably is collected too, as `reserved` rather
- * than present. Two units sharing one short address answer as one, so there is
- * no identity to read and no way to address either alone -- but the address is
- * occupied, and a plan that treated it as free would move a third unit onto it.
- * That is the one fault a restore must never create, and unlike the others it
- * cannot be undone by moving anything back.
+ * A contested address is collected too, as `reserved` rather than present:
+ * one that answered undecodably, and in the gear space one that answered as a
+ * single unit while its Bank 0 identity read collided. Two units sharing one
+ * short address answer as one, so there is no identity to read and no way to
+ * address either alone -- but the address is occupied, and a plan that treated
+ * it as free would move a third unit onto it. That is the one fault a restore
+ * must never create, and unlike the others it cannot be undone by moving
+ * anything back.
  *
  * The two spaces read their own flag for the reason they read their own
  * identity. A contested control-device address at number N says nothing about
@@ -141,7 +160,7 @@ static void restore_collect_bus(RestoreBusUnits              *units,
         }
 
         const bool contested = (space == DALI_SNAPSHOT_SPACE_GEAR)
-                                   ? device->has_undecodable_activity
+                                   ? dali_discovery_gear_address_contested(device)
                                    : device->has_undecodable_device_activity;
         if (contested) {
             units->reserved[addr] = true;
@@ -500,10 +519,22 @@ static void restore_plan_space(DaliRestorePlan    *plan,
          * incomplete. Nothing here is ever the *subject* of a move: the match
          * loop below only walks present addresses, so no pending move can
          * start on one.
+         *
+         * Reported whether or not a move wants it. The units on a contested
+         * address are the ones no plan can see, so a recorded unit that reads
+         * as missing is often one of them, and a plan that named only the
+         * missing would leave the operator no way to guess where it went.
          */
         if (units->reserved[addr]) {
             occupied  |= ((uint64_t)1u << addr);
             immovable |= ((uint64_t)1u << addr);
+            restore_add_conflict(&sink,
+                                 DALI_RESTORE_CONFLICT_CONTESTED,
+                                 space,
+                                 addr,
+                                 RESTORE_NO_ADDRESS,
+                                 false,
+                                 NULL);
         }
     }
 
@@ -580,8 +611,9 @@ static void restore_plan_space(DaliRestorePlan    *plan,
             if ((occupied & ((uint64_t)1u << pending[i].dst)) != 0u) {
                 continue;
             }
-            if (!restore_add_move(plan, space, pending[i].cur, pending[i].dst,
-                                  DALI_RESTORE_MOVE_PLACE)) {
+            if (!restore_add_move(plan, units, space, pending[i].cur,
+                                  pending[i].dst, DALI_RESTORE_MOVE_PLACE,
+                                  pending[i].origin)) {
                 return;
             }
             occupied &= ~((uint64_t)1u << pending[i].cur);
@@ -617,8 +649,9 @@ static void restore_plan_space(DaliRestorePlan    *plan,
                 break;
             }
 
-            if (!restore_add_move(plan, space, pending[victim].cur, stage,
-                                  DALI_RESTORE_MOVE_STAGE)) {
+            if (!restore_add_move(plan, units, space, pending[victim].cur,
+                                  stage, DALI_RESTORE_MOVE_STAGE,
+                                  pending[victim].origin)) {
                 return;
             }
             occupied &= ~((uint64_t)1u << pending[victim].cur);
@@ -667,7 +700,8 @@ static void restore_plan_space(DaliRestorePlan    *plan,
             continue;
         }
 
-        if (!restore_add_move(plan, space, squatter, spare, DALI_RESTORE_MOVE_DISPLACE)) {
+        if (!restore_add_move(plan, units, space, squatter, spare,
+                              DALI_RESTORE_MOVE_DISPLACE, squatter)) {
             return;
         }
         occupied &= ~((uint64_t)1u << squatter);
@@ -726,6 +760,18 @@ DaliError dali_restore_plan_groups(DaliRestoreGroupPlan         *out,
     restore_collect_bus(&units, DALI_SNAPSHOT_SPACE_GEAR, inventory);
 
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        if (units.reserved[addr]) {
+            /* A group edit here would reach every unit on the address. Named
+             * for the reason the address plan names it. */
+            restore_add_conflict(&sink,
+                                 DALI_RESTORE_CONFLICT_CONTESTED,
+                                 DALI_SNAPSHOT_SPACE_GEAR,
+                                 addr,
+                                 RESTORE_NO_ADDRESS,
+                                 false,
+                                 NULL);
+            continue;
+        }
         if (!units.present[addr]) {
             continue;
         }
@@ -816,6 +862,370 @@ bool dali_restore_plan_is_clean(const DaliRestorePlan *plan)
            !plan->incomplete;
 }
 
+/*
+ * The DTR0 value SET SHORT ADDRESS must find for the unit to take `to`. Part
+ * 102 reads (a << 1) | 1 from DTR0 and Part 103 the raw address; the 2k bus
+ * showed the difference, DTR0 = 5 putting a device on d5 rather than d2. Both
+ * read 0xFF as "none", which is never encoded.
+ */
+static uint8_t restore_short_address_dtr0(DaliSnapshotSpace space, uint8_t to)
+{
+    return (space == DALI_SNAPSHOT_SPACE_GEAR &&
+            to != DALI_COMMISSIONING_NO_SHORT_ADDRESS)
+               ? dali_commissioning_encode_short_address(to)
+               : to;
+}
+
+DaliError dali_restore_build_move_sequence(DaliSnapshotSpace space,
+                                           uint8_t           from,
+                                           uint8_t           to,
+                                           DaliSequence     *out)
+{
+    if (out == NULL || from >= DALI_SHORT_ADDRESS_COUNT ||
+        (to >= DALI_SHORT_ADDRESS_COUNT &&
+         to != DALI_COMMISSIONING_NO_SHORT_ADDRESS)) {
+        return DALI_ERR_INVALID;
+    }
+    if (space != DALI_SNAPSHOT_SPACE_GEAR && space != DALI_SNAPSHOT_SPACE_DEVICE) {
+        return DALI_ERR_INVALID;
+    }
+
+    const bool is_gear = (space == DALI_SNAPSHOT_SPACE_GEAR);
+    const DaliCommandId cmd_id = is_gear ? DALI_CMD_SET_SHORT_ADDRESS_DTR0
+                                         : DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0;
+    const DaliCommandInfo *cmd = dali_command_lookup(cmd_id);
+    if (cmd == NULL) {
+        return DALI_ERR_INVALID;
+    }
+
+    const uint8_t dtr0 = restore_short_address_dtr0(space, to);
+
+    memset(out, 0, sizeof(*out));
+    DaliError err;
+    if (is_gear) {
+        const DaliTarget target = { .type = DALI_ADDR_SHORT, .address = from };
+        err = dali_control_build_dtr(DALI_DTR0, dtr0, &out->steps[0].frame);
+        if (err == DALI_OK) {
+            err = dali_control_build_config(target, cmd_id, 0u,
+                                            &out->steps[1].frame);
+        }
+    } else {
+        /* The device space has its own DTR0: a 24-bit control-device special,
+         * not the 16-bit gear one. Loading the gear DTR0 and then addressing a
+         * control device would send the command with whatever the device's own
+         * DTR0 happened to hold. */
+        err = dali_build_control_device_dtr_data(DALI_DTR0, dtr0,
+                                                 &out->steps[0].frame);
+        if (err == DALI_OK) {
+            err = dali_build_device_command(from, cmd_id, &out->steps[1].frame);
+        }
+    }
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    out->steps[1].send_twice = cmd->send_twice;
+    out->step_count = 2u;
+    return DALI_OK;
+}
+
+/* Loads of DTR0 a write makes before it gives up: the first, and one more. */
+#define RESTORE_WRITE_LOADS 2u
+
+bool dali_restore_write_was_sent(DaliRestoreWriteOutcome outcome)
+{
+    return outcome == DALI_RESTORE_WRITE_SENT ||
+           outcome == DALI_RESTORE_WRITE_SENT_UNVERIFIED;
+}
+
+/*
+ * Run one load-and-read-back sequence. DALI_OK means the load went out and the
+ * read-back gave a reading, left in *read_err: DALI_OK with the byte in
+ * *read_value, or the error the reply window produced. Any other return is the
+ * transport failing -- the load did not go out, or the wait expired with the
+ * sequence's fate unknown -- and is the caller's to pass on.
+ */
+static DaliError restore_load_and_read_dtr0(const DaliTransport *transport,
+                                            const DaliSequence  *load,
+                                            DaliError           *read_err,
+                                            uint8_t             *read_value)
+{
+    DaliSequenceResult result;
+    DaliError err = dali_transport_run_sequence_atomic(transport, load, &result);
+
+    if (err == DALI_OK) {
+        const DaliFrame *reply = &result.replies[1];
+        if ((result.reply_mask & (1u << 1u)) == 0u ||
+            reply->bit_length != DALI_BACKWARD_FRAME_BITS) {
+            *read_err = DALI_ERR_MALFORMED;
+            return DALI_OK;
+        }
+        *read_err   = DALI_OK;
+        *read_value = (uint8_t)reply->data;
+        return DALI_OK;
+    }
+
+    if (result.failed_step == 1u &&
+        (err == DALI_ERR_TIMEOUT || err == DALI_ERR_RX_ACTIVITY ||
+         err == DALI_ERR_MALFORMED || err == DALI_ERR_INTERVENED)) {
+        *read_err = err;
+        return DALI_OK;
+    }
+    return err;
+}
+
+DaliError dali_restore_write_short_address(const DaliTransport    *transport,
+                                           DaliSnapshotSpace       space,
+                                           uint8_t                 from,
+                                           uint8_t                 to,
+                                           bool                    allow_collided_readback,
+                                           DaliRestoreWriteResult *result_out)
+{
+    if (result_out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    memset(result_out, 0, sizeof(*result_out));
+    if (!dali_transport_supports_atomic_sequence(transport)) {
+        return DALI_ERR_INVALID;
+    }
+
+    /* The builder owns the frames and the argument checks, so the pair sent
+     * here and the frames it pins cannot disagree on what a unit reads. */
+    DaliSequence seq;
+    DaliError err = dali_restore_build_move_sequence(space, from, to, &seq);
+    if (err != DALI_OK) {
+        return err;
+    }
+    const DaliSequenceStep pair = seq.steps[1];
+
+    DaliFrame readback;
+    if (space == DALI_SNAPSHOT_SPACE_GEAR) {
+        const DaliTarget target = { .type = DALI_ADDR_SHORT, .address = from };
+        err = dali_control_build_query(target, DALI_CMD_QUERY_CONTENT_DTR0, 0u,
+                                       &readback);
+    } else {
+        err = dali_input_build_query_content_dtr0(from, &readback);
+    }
+    if (err != DALI_OK) {
+        return err;
+    }
+
+    /*
+     * The load stays in step 0 and the read-back takes the pair's place. As in
+     * dali_input_build_dtr_check_sequence(), neither step has a retry budget: a
+     * read-back that fails is retried below with a fresh load, so every value
+     * read is the value just loaded.
+     */
+    memset(&seq.steps[1], 0, sizeof(seq.steps[1]));
+    seq.steps[1].frame       = readback;
+    seq.steps[1].needs_reply = true;
+    seq.step_count           = 2u;
+
+    DaliRestoreWriteResult result;
+    memset(&result, 0, sizeof(result));
+    result.dtr0 = restore_short_address_dtr0(space, to);
+
+    bool verified   = false;
+    bool unverified = false;
+    while (result.loads < RESTORE_WRITE_LOADS && !verified && !unverified) {
+        DaliError read_err = DALI_OK;
+        uint8_t   value    = 0u;
+
+        err = restore_load_and_read_dtr0(transport, &seq, &read_err, &value);
+        if (err != DALI_OK) {
+            *result_out = result;
+            return err;
+        }
+
+        if (result.loads == 0u) {
+            result.first_error = read_err;
+            result.first_read  = value;
+        }
+        result.loads++;
+        result.last_error = read_err;
+        result.last_read  = value;
+
+        if (read_err == DALI_OK && value == result.dtr0) {
+            verified = true;
+        } else if (allow_collided_readback &&
+                   (read_err == DALI_ERR_RX_ACTIVITY ||
+                    read_err == DALI_ERR_MALFORMED)) {
+            /* Units sharing `from` answering together. Retrying would collide
+             * the same way, and the caller asked to clear them anyway. */
+            unverified = true;
+        }
+    }
+
+    if (!verified && !unverified) {
+        result.outcome = (result.last_error == DALI_OK)
+                             ? DALI_RESTORE_WRITE_DTR0_MISMATCH
+                         : (result.last_error == DALI_ERR_TIMEOUT)
+                             ? DALI_RESTORE_WRITE_DTR0_SILENT
+                             : DALI_RESTORE_WRITE_DTR0_UNREADABLE;
+        *result_out = result;
+        return DALI_OK;
+    }
+
+    memset(&seq, 0, sizeof(seq));
+    seq.steps[0]   = pair;
+    seq.step_count = 1u;
+    result.pair_attempted = true;
+    err = dali_transport_run_sequence_atomic(transport, &seq, NULL);
+    if (err != DALI_OK) {
+        *result_out = result;
+        return err;
+    }
+
+    result.outcome = verified ? DALI_RESTORE_WRITE_SENT
+                              : DALI_RESTORE_WRITE_SENT_UNVERIFIED;
+    *result_out = result;
+    return DALI_OK;
+}
+
+/*
+ * Whether anything answers at `addr` in `space`, asked the way discovery asks
+ * it. DALI_OK with *present_out set means a decoded reply or a silent window;
+ * any other return is a reading that says neither, and the caller must not
+ * turn it into one.
+ */
+static DaliError restore_probe_presence(const DaliTransport *transport,
+                                        DaliSnapshotSpace    space,
+                                        uint8_t              addr,
+                                        bool                *present_out)
+{
+    uint8_t   reply = 0u;
+    DaliError err;
+
+    if (space == DALI_SNAPSHOT_SPACE_GEAR) {
+        err = dali_discovery_query_status(transport, addr, &reply);
+    } else {
+        DaliFrame frame;
+        err = dali_input_build_query_number_of_instances(addr, &frame);
+        if (err == DALI_OK) {
+            err = dali_discovery_query_u8(transport, &frame, &reply);
+        }
+    }
+
+    if (err == DALI_OK) {
+        *present_out = true;
+        return DALI_OK;
+    }
+    if (err == DALI_ERR_TIMEOUT) {
+        *present_out = false;
+        return DALI_OK;
+    }
+    return err;
+}
+
+DaliError dali_restore_confirm_move(const DaliTransport  *transport,
+                                    const DaliRestoreMove *move,
+                                    DaliRestoreMoveCheck  *check_out,
+                                    DaliError             *probe_error_out)
+{
+    if (!dali_transport_valid(transport) || move == NULL || check_out == NULL ||
+        move->from >= DALI_SHORT_ADDRESS_COUNT ||
+        move->to >= DALI_SHORT_ADDRESS_COUNT ||
+        (move->space != DALI_SNAPSHOT_SPACE_GEAR &&
+         move->space != DALI_SNAPSHOT_SPACE_DEVICE)) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliError probe_err = DALI_OK;
+    DaliRestoreMoveCheck check = DALI_RESTORE_MOVE_CONFIRMED;
+    bool present = false;
+
+    /* The destination first: silence there is the direct sign the write did
+     * not land, and it is the cheaper probe when it fails. */
+    probe_err = restore_probe_presence(transport, move->space, move->to, &present);
+    if (probe_err != DALI_OK) {
+        check = DALI_RESTORE_MOVE_UNREADABLE;
+        goto done;
+    }
+    if (!present) {
+        /* Then whether the unit stayed. A move that did nothing is repaired by
+         * planning again; a unit that answers at neither end went somewhere
+         * nobody chose, and only a scan finds it. */
+        probe_err = restore_probe_presence(transport, move->space, move->from,
+                                           &present);
+        if (probe_err != DALI_OK) {
+            check = DALI_RESTORE_MOVE_UNREADABLE;
+            goto done;
+        }
+        check = present ? DALI_RESTORE_MOVE_TARGET_SILENT
+                        : DALI_RESTORE_MOVE_UNIT_MISSING;
+        goto done;
+    }
+
+    probe_err = restore_probe_presence(transport, move->space, move->from, &present);
+    if (probe_err != DALI_OK) {
+        check = DALI_RESTORE_MOVE_UNREADABLE;
+        goto done;
+    }
+    if (present) {
+        check = DALI_RESTORE_MOVE_SOURCE_ANSWERS;
+        goto done;
+    }
+
+    /*
+     * Something answers at `to` and nothing at `from`. That is still not proof
+     * it is this unit: a unit the planning scan missed could already have been
+     * there, and two replies that happen to decode alike read as one. The
+     * identification number is the only thing that tells units apart.
+     */
+    if (move->has_identification) {
+        uint8_t ident[DALI_MEMORY_BANK0_IDENTIFICATION_LEN];
+        probe_err = (move->space == DALI_SNAPSHOT_SPACE_GEAR)
+            ? dali_memory_read_bytes(transport, move->to, DALI_MEMORY_BANK0,
+                                     DALI_MEMORY_BANK0_OFFSET_IDENTIFICATION,
+                                     ident, DALI_MEMORY_BANK0_IDENTIFICATION_LEN)
+            : dali_memory_read_device_bytes(transport, move->to, DALI_MEMORY_BANK0,
+                                            DALI_MEMORY_BANK0_OFFSET_IDENTIFICATION,
+                                            ident,
+                                            DALI_MEMORY_BANK0_IDENTIFICATION_LEN);
+        if (probe_err != DALI_OK) {
+            check = DALI_RESTORE_MOVE_UNREADABLE;
+            goto done;
+        }
+        if (!dali_snapshot_identification_equal(ident, move->identification)) {
+            check = DALI_RESTORE_MOVE_WRONG_UNIT;
+            goto done;
+        }
+    }
+
+done:
+    *check_out = check;
+    if (probe_error_out != NULL) {
+        *probe_error_out = (check == DALI_RESTORE_MOVE_UNREADABLE) ? probe_err
+                                                                   : DALI_OK;
+    }
+    return DALI_OK;
+}
+
+const char *dali_restore_move_check_name(DaliRestoreMoveCheck check)
+{
+    switch (check) {
+        case DALI_RESTORE_MOVE_CONFIRMED:      return "confirmed";
+        case DALI_RESTORE_MOVE_TARGET_SILENT:  return "nothing answers at the target, and the source still does";
+        case DALI_RESTORE_MOVE_SOURCE_ANSWERS: return "the source still answers";
+        case DALI_RESTORE_MOVE_WRONG_UNIT:     return "a different unit answers at the target";
+        case DALI_RESTORE_MOVE_UNREADABLE:     return "unreadable";
+        case DALI_RESTORE_MOVE_UNIT_MISSING:   return "nothing answers at the target or the source";
+        default:                               return "unknown";
+    }
+}
+
+const char *dali_restore_write_outcome_name(DaliRestoreWriteOutcome outcome)
+{
+    switch (outcome) {
+        case DALI_RESTORE_WRITE_SENT:            return "sent";
+        case DALI_RESTORE_WRITE_SENT_UNVERIFIED: return "sent without a DTR0 read-back";
+        case DALI_RESTORE_WRITE_DTR0_MISMATCH:   return "DTR0 did not load";
+        case DALI_RESTORE_WRITE_DTR0_SILENT:     return "nothing answered the DTR0 read-back";
+        case DALI_RESTORE_WRITE_DTR0_UNREADABLE: return "the DTR0 read-back was unreadable";
+        default:                                 return "unknown";
+    }
+}
+
 const char *dali_restore_conflict_name(DaliRestoreConflictKind kind)
 {
     switch (kind) {
@@ -829,6 +1239,7 @@ const char *dali_restore_conflict_name(DaliRestoreConflictKind kind)
         case DALI_RESTORE_CONFLICT_NO_STAGING_ADDRESS: return "no free address to stage";
         case DALI_RESTORE_CONFLICT_NO_RECORDED_GROUPS: return "no group data in backup";
         case DALI_RESTORE_CONFLICT_GROUPS_UNREADABLE:  return "groups unreadable";
+        case DALI_RESTORE_CONFLICT_CONTESTED:          return "contested";
         default:                                       return "unknown";
     }
 }
@@ -839,5 +1250,370 @@ const char *dali_restore_space_name(DaliSnapshotSpace space)
         case DALI_SNAPSHOT_SPACE_GEAR:   return "gear";
         case DALI_SNAPSHOT_SPACE_DEVICE: return "device";
         default:                         return "unknown";
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * Instance settings
+ * --------------------------------------------------------------------------*/
+
+/* QUERY INSTANCE STATUS bit 1, instanceActive. */
+#define RESTORE_INSTANCE_STATUS_ACTIVE 0x02u
+
+#define RESTORE_EVENT_PRIORITY_MIN     2u
+#define RESTORE_EVENT_PRIORITY_MAX     5u
+#define RESTORE_EVENT_FILTER_MAX       0xFFFFFFu
+
+typedef DaliError (*RestoreInstanceQueryFn)(uint8_t addr, uint8_t instance,
+                                            DaliFrame *out);
+
+static DaliError restore_query_instance(const DaliTransport   *transport,
+                                        RestoreInstanceQueryFn build,
+                                        uint8_t                addr,
+                                        uint8_t                instance,
+                                        uint8_t               *value_out)
+{
+    DaliFrame frame;
+    DaliError err = build(addr, instance, &frame);
+    if (err != DALI_OK) {
+        return err;
+    }
+    return dali_discovery_query_u8(transport, &frame, value_out);
+}
+
+/* A reply window that gave no usable answer, as opposed to a transport that
+ * failed: the first leaves one field unknown, the second ends the read. */
+static bool restore_query_soft_failure(DaliError err)
+{
+    return err == DALI_ERR_TIMEOUT || err == DALI_ERR_MALFORMED ||
+           err == DALI_ERR_RX_ACTIVITY || err == DALI_ERR_INTERVENED;
+}
+
+static bool restore_group_slot_valid(uint8_t g)
+{
+    return g < DALI_INSTANCE_COUNT || g == DALI_INPUT_INSTANCE_GROUP_NONE;
+}
+
+DaliError dali_restore_read_instance_settings(const DaliTransport  *transport,
+                                              uint8_t               addr,
+                                              uint8_t               instance,
+                                              DaliInstanceSettings *out)
+{
+    if (out == NULL) {
+        return DALI_ERR_INVALID;
+    }
+    memset(out, 0, sizeof(*out));
+    memset(out->instance_groups, DALI_INPUT_INSTANCE_GROUP_NONE,
+           sizeof(out->instance_groups));
+    if (!dali_transport_valid(transport) ||
+        addr >= DALI_SHORT_ADDRESS_COUNT || instance >= DALI_INSTANCE_COUNT) {
+        return DALI_ERR_INVALID;
+    }
+
+    uint8_t   v = 0u;
+    DaliError err = restore_query_instance(transport,
+                                           dali_input_build_query_instance_type,
+                                           addr, instance, &v);
+    if (err != DALI_OK) {
+        return err;
+    }
+    if (v >= DALI_INSTANCE_COUNT) {
+        return DALI_ERR_MALFORMED;
+    }
+    out->has_type = true;
+    out->type     = v;
+
+    err = restore_query_instance(transport, dali_input_build_query_instance_enabled,
+                                 addr, instance, &v);
+    if (err == DALI_OK) {
+        if (dali_is_yes(v)) {
+            out->has_enabled = true;
+            out->enabled     = true;
+        }
+    } else if (err == DALI_ERR_TIMEOUT) {
+        uint8_t status = 0u;
+        err = restore_query_instance(transport,
+                                     dali_input_build_query_instance_status,
+                                     addr, instance, &status);
+        if (err == DALI_OK && (status & RESTORE_INSTANCE_STATUS_ACTIVE) == 0u) {
+            out->has_enabled = true;
+            out->enabled     = false;
+        }
+    }
+    if (err != DALI_OK && !restore_query_soft_failure(err)) {
+        return err;
+    }
+
+    err = restore_query_instance(transport, dali_input_build_query_event_scheme,
+                                 addr, instance, &v);
+    if (err == DALI_OK && v <= (uint8_t)DALI_EVENT_SOURCE_INSTANCE_GROUP) {
+        out->has_event_scheme = true;
+        out->event_scheme     = v;
+    } else if (err != DALI_OK && !restore_query_soft_failure(err)) {
+        return err;
+    }
+
+    err = restore_query_instance(transport, dali_input_build_query_event_priority,
+                                 addr, instance, &v);
+    if (err == DALI_OK) {
+        out->has_event_priority = true;
+        out->event_priority     = v;
+    } else if (!restore_query_soft_failure(err)) {
+        return err;
+    }
+
+    static const RestoreInstanceQueryFn filter_queries[3] = {
+        dali_input_build_query_event_filter_zero,
+        dali_input_build_query_event_filter_one,
+        dali_input_build_query_event_filter_two,
+    };
+    uint32_t filter    = 0u;
+    bool     filter_ok = true;
+    for (uint8_t i = 0u; i < 3u; i++) {
+        err = restore_query_instance(transport, filter_queries[i], addr, instance, &v);
+        if (err != DALI_OK) {
+            if (!restore_query_soft_failure(err)) {
+                return err;
+            }
+            filter_ok = false;
+            break;
+        }
+        filter |= (uint32_t)v << (8u * i);
+    }
+    if (filter_ok) {
+        out->has_event_filter = true;
+        out->event_filter     = filter;
+    }
+
+    static const RestoreInstanceQueryFn group_queries[DALI_INPUT_INSTANCE_GROUP_SLOTS] = {
+        dali_input_build_query_primary_instance_group,
+        dali_input_build_query_instance_group1,
+        dali_input_build_query_instance_group2,
+    };
+    uint8_t groups[DALI_INPUT_INSTANCE_GROUP_SLOTS];
+    bool    groups_ok = true;
+    for (uint8_t slot = 0u; slot < DALI_INPUT_INSTANCE_GROUP_SLOTS; slot++) {
+        err = restore_query_instance(transport, group_queries[slot], addr, instance,
+                                     &groups[slot]);
+        if (err != DALI_OK) {
+            if (!restore_query_soft_failure(err)) {
+                return err;
+            }
+            groups_ok = false;
+            break;
+        }
+        if (!restore_group_slot_valid(groups[slot])) {
+            groups_ok = false;
+            break;
+        }
+    }
+    if (groups_ok) {
+        out->has_instance_groups = true;
+        memcpy(out->instance_groups, groups, sizeof(groups));
+    }
+
+    return DALI_OK;
+}
+
+static bool restore_groups_valid(const uint8_t *groups)
+{
+    for (uint8_t slot = 0u; slot < DALI_INPUT_INSTANCE_GROUP_SLOTS; slot++) {
+        if (!restore_group_slot_valid(groups[slot])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+uint8_t dali_restore_instance_write_mask(const DaliInstanceSettings *recorded,
+                                         const DaliInstanceSettings *current)
+{
+    if (recorded == NULL) {
+        return 0u;
+    }
+    DaliInstanceSettings unknown;
+    if (current == NULL) {
+        memset(&unknown, 0, sizeof(unknown));
+        current = &unknown;
+    }
+
+    uint8_t mask = 0u;
+    if (recorded->has_enabled &&
+        (!current->has_enabled || current->enabled != recorded->enabled)) {
+        mask |= DALI_RESTORE_INSTANCE_ENABLED;
+    }
+    if (recorded->has_event_scheme &&
+        recorded->event_scheme <= (uint8_t)DALI_EVENT_SOURCE_INSTANCE_GROUP &&
+        (!current->has_event_scheme ||
+         current->event_scheme != recorded->event_scheme)) {
+        mask |= DALI_RESTORE_INSTANCE_SCHEME;
+    }
+    if (recorded->has_event_priority &&
+        recorded->event_priority >= RESTORE_EVENT_PRIORITY_MIN &&
+        recorded->event_priority <= RESTORE_EVENT_PRIORITY_MAX &&
+        (!current->has_event_priority ||
+         current->event_priority != recorded->event_priority)) {
+        mask |= DALI_RESTORE_INSTANCE_PRIORITY;
+    }
+    if (recorded->has_event_filter &&
+        recorded->event_filter <= RESTORE_EVENT_FILTER_MAX &&
+        (!current->has_event_filter ||
+         current->event_filter != recorded->event_filter)) {
+        mask |= DALI_RESTORE_INSTANCE_FILTER;
+    }
+    if (recorded->has_instance_groups &&
+        restore_groups_valid(recorded->instance_groups) &&
+        (!current->has_instance_groups ||
+         memcmp(current->instance_groups, recorded->instance_groups,
+                sizeof(recorded->instance_groups)) != 0)) {
+        mask |= DALI_RESTORE_INSTANCE_GROUPS;
+    }
+    return mask;
+}
+
+bool dali_restore_locate_device(const DaliSnapshot           *snapshot,
+                                uint8_t                       entry_index,
+                                const DaliDiscoveryInventory *inventory,
+                                uint8_t                      *address_out,
+                                DaliRestoreConflictKind      *conflict_out)
+{
+    DaliRestoreConflictKind conflict = DALI_RESTORE_CONFLICT_MISSING;
+    bool    found_one = false;
+    uint8_t found_at  = 0u;
+
+    if (snapshot == NULL || inventory == NULL || !inventory->valid ||
+        address_out == NULL || entry_index >= snapshot->entry_count ||
+        snapshot->entries[entry_index].space != DALI_SNAPSHOT_SPACE_DEVICE) {
+        goto done;
+    }
+
+    const DaliSnapshotEntry *entry = &snapshot->entries[entry_index];
+    if (!entry->has_identification ||
+        dali_snapshot_identification_is_null(entry->identification)) {
+        conflict = DALI_RESTORE_CONFLICT_UNIDENTIFIED;
+        goto done;
+    }
+
+    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        const DaliDiscoveryDeviceInfo *device =
+            dali_discovery_inventory_get(inventory, addr);
+        if (device == NULL || !device->present || !device->has_input_device ||
+            device->has_undecodable_device_activity ||
+            !device->has_device_identity ||
+            !dali_snapshot_identification_equal(device->device_identity.serial,
+                                                entry->identification)) {
+            continue;
+        }
+        if (found_one) {
+            conflict  = DALI_RESTORE_CONFLICT_DUPLICATE_BUS;
+            found_one = false;
+            goto done;
+        }
+        found_one = true;
+        found_at  = addr;
+    }
+
+done:
+    if (found_one) {
+        *address_out = found_at;
+        return true;
+    }
+    if (conflict_out != NULL) {
+        *conflict_out = conflict;
+    }
+    return false;
+}
+
+static DaliError restore_send_instance_config(const DaliTransport *transport,
+                                              DaliFrame            command,
+                                              const uint8_t       *dtr,
+                                              uint8_t              dtr_count)
+{
+    if (command.bit_length == 0u) {
+        return DALI_ERR_INVALID;
+    }
+    DaliSequence seq;
+    DaliError err = dali_input_build_config_sequence(command, true, false, dtr,
+                                                     dtr_count, &seq);
+    if (err != DALI_OK) {
+        return err;
+    }
+    return dali_transport_run_sequence_atomic(transport, &seq, NULL);
+}
+
+DaliError dali_restore_write_instance_settings(const DaliTransport        *transport,
+                                               uint8_t                     addr,
+                                               uint8_t                     instance,
+                                               const DaliInstanceSettings *recorded,
+                                               uint8_t                     mask)
+{
+    if (recorded == NULL || addr >= DALI_SHORT_ADDRESS_COUNT ||
+        instance >= DALI_INSTANCE_COUNT ||
+        (mask & (uint8_t)~DALI_RESTORE_INSTANCE_ALL) != 0u ||
+        !dali_transport_supports_atomic_sequence(transport)) {
+        return DALI_ERR_INVALID;
+    }
+    /* The mask may only name fields this recording can supply. */
+    if ((mask & dali_restore_instance_write_mask(recorded, NULL)) != mask) {
+        return DALI_ERR_INVALID;
+    }
+
+    DaliError err = DALI_OK;
+
+    if (mask & DALI_RESTORE_INSTANCE_SCHEME) {
+        err = restore_send_instance_config(
+            transport, dali_input_build_set_event_scheme(addr, instance),
+            &recorded->event_scheme, 1u);
+    }
+    if (err == DALI_OK && (mask & DALI_RESTORE_INSTANCE_PRIORITY)) {
+        err = restore_send_instance_config(
+            transport, dali_input_build_set_event_priority(addr, instance),
+            &recorded->event_priority, 1u);
+    }
+    if (err == DALI_OK && (mask & DALI_RESTORE_INSTANCE_FILTER)) {
+        /* DTR0, DTR1, DTR2 carry filter bits 0-7, 8-15 and 16-23. */
+        const uint8_t filter[3] = {
+            (uint8_t)(recorded->event_filter & 0xFFu),
+            (uint8_t)((recorded->event_filter >> 8) & 0xFFu),
+            (uint8_t)((recorded->event_filter >> 16) & 0xFFu),
+        };
+        err = restore_send_instance_config(
+            transport, dali_input_build_set_event_filter(addr, instance),
+            filter, 3u);
+    }
+    if (err == DALI_OK && (mask & DALI_RESTORE_INSTANCE_GROUPS)) {
+        static DaliFrame (*const setters[DALI_INPUT_INSTANCE_GROUP_SLOTS])(uint8_t,
+                                                                           uint8_t) = {
+            dali_input_build_set_primary_group,
+            dali_input_build_set_instance_group1,
+            dali_input_build_set_instance_group2,
+        };
+        for (uint8_t slot = 0u;
+             slot < DALI_INPUT_INSTANCE_GROUP_SLOTS && err == DALI_OK; slot++) {
+            err = restore_send_instance_config(transport,
+                                               setters[slot](addr, instance),
+                                               &recorded->instance_groups[slot], 1u);
+        }
+    }
+    /* Last, so the instance starts reporting only once it reports as recorded. */
+    if (err == DALI_OK && (mask & DALI_RESTORE_INSTANCE_ENABLED)) {
+        err = restore_send_instance_config(
+            transport,
+            recorded->enabled ? dali_input_build_enable_instance(addr, instance)
+                              : dali_input_build_disable_instance(addr, instance),
+            NULL, 0u);
+    }
+    return err;
+}
+
+const char *dali_restore_instance_field_name(uint8_t field)
+{
+    switch (field) {
+        case DALI_RESTORE_INSTANCE_ENABLED:  return "enabled";
+        case DALI_RESTORE_INSTANCE_SCHEME:   return "scheme";
+        case DALI_RESTORE_INSTANCE_PRIORITY: return "priority";
+        case DALI_RESTORE_INSTANCE_FILTER:   return "filter";
+        case DALI_RESTORE_INSTANCE_GROUPS:   return "groups";
+        default:                             return "unknown";
     }
 }

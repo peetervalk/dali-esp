@@ -131,6 +131,13 @@ dali:
     # Part-103 group source; carries no instance number by rule.
     - { frame_kind: input_24bit, address_kind: group, address: 20,
         action: toggle, output_type: group, output_address: 5 }
+    # Part-103 instance group only, narrowed to occupancy instances (type 3).
+    - { frame_kind: input_24bit, address_kind: instance_group, address: 3,
+        instance_type: 3, action: recall_max,
+        output_type: group, output_address: 1 }
+    # Part-103 device group only.
+    - { frame_kind: input_24bit, address_kind: device_group, address: 31,
+        action: "off", output_type: group, output_address: 1 }
 
 # ── Lights ────────────────────────────────────────────────────────────────────
 light:

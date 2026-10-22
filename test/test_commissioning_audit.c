@@ -45,6 +45,14 @@ static void put_device_contested(uint8_t addr)
     s_inventory.undecodable_device_count++;
 }
 
+/* Units that answer alike: listed as present gear, identity read collided. */
+static void put_gear_identity_collided(uint8_t addr)
+{
+    put_gear(addr);
+    s_inventory.devices[addr].has_identity_collision = true;
+    s_inventory.identity_collision_count++;
+}
+
 static DaliCommissioningOccupancy occupancy_of(DaliCommissioningAddressSpace space)
 {
     DaliCommissioningOccupancy occ;
@@ -194,6 +202,39 @@ static void test_equal_random_address_collision_reads_as_contested(void)
     put_gear(0u);
     put_gear_contested(1u);
     DaliCommissioningOccupancy post = occupancy_of(DALI_COMMISSIONING_SPACE_GEAR);
+
+    const uint8_t addrs[] = { 0u, 1u };
+    DaliCommissioningAssignment assignments[2];
+    uint8_t count = build_assignments(assignments, addrs, 2u);
+
+    DaliCommissioningAudit audit;
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+        dali_commissioning_audit(&pre, &post, assignments, count, &audit));
+
+    TEST_ASSERT_EQUAL_HEX64(MASK(0u), audit.confirmed);
+    TEST_ASSERT_EQUAL_HEX64(MASK(1u), audit.contested);
+    TEST_ASSERT_EQUAL_UINT8(0u, audit.silent_count);
+    TEST_ASSERT_FALSE(dali_commissioning_audit_is_clean(&audit));
+}
+
+/*
+ * The same collision between units that answer alike -- the likelier case,
+ * since freshly commissioned gear of one product is in one state. The
+ * post-scan lists the address as one present unit and only the identity read
+ * collides. Read from `present` alone this would be confirmed.
+ */
+static void test_equal_random_units_that_answer_alike_read_as_contested(void)
+{
+    inventory_begin();
+    DaliCommissioningOccupancy pre = occupancy_of(DALI_COMMISSIONING_SPACE_GEAR);
+
+    inventory_begin();
+    put_gear(0u);
+    put_gear_identity_collided(1u);
+    DaliCommissioningOccupancy post = occupancy_of(DALI_COMMISSIONING_SPACE_GEAR);
+    /* Contested wins over occupied: never both. */
+    TEST_ASSERT_EQUAL_HEX64(MASK(0u), post.occupied);
+    TEST_ASSERT_EQUAL_HEX64(MASK(1u), post.contested);
 
     const uint8_t addrs[] = { 0u, 1u };
     DaliCommissioningAssignment assignments[2];
@@ -512,6 +553,7 @@ int main(void)
     RUN_TEST(test_occupancy_rejects_bad_arguments);
     RUN_TEST(test_a_clean_run_confirms_every_assignment);
     RUN_TEST(test_equal_random_address_collision_reads_as_contested);
+    RUN_TEST(test_equal_random_units_that_answer_alike_read_as_contested);
     RUN_TEST(test_a_pre_existing_contested_address_is_not_reported);
     RUN_TEST(test_a_newly_contested_unassigned_address_is_reported);
     RUN_TEST(test_an_address_written_but_not_recorded_is_reported);

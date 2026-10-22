@@ -11,10 +11,10 @@
  * A mock Part 103 bus.
  *
  * Every assertion inside it is deliberate: the mock is where the encoding traps
- * get caught. It rejects a Part 102-encoded PROGRAM SHORT ADDRESS, rejects the
- * Part 102 INITIALISE sentinel, and fails loudly on any 16-bit frame that is not
- * the cross-part TERMINATE — because a device walk emitting gear frames is
- * exactly the bug this module exists to avoid.
+ * get caught. It rejects a Part 102-encoded PROGRAM SHORT ADDRESS, selects
+ * devices by INITIALISE's parameter the way a device does, and fails loudly on
+ * any 16-bit frame that is not the cross-part TERMINATE — because a device walk
+ * emitting gear frames is exactly the bug this module exists to avoid.
  */
 typedef struct {
     bool     present;
@@ -138,17 +138,25 @@ static DaliError mock_special_no_reply(uint8_t opcode, uint8_t param)
             return DALI_OK;
 
         case 0x01u:  /* INITIALISE */
-            /* 0x00 selects unaddressed devices. The Part 102 sentinel 0xFF
-             * would mean "every control device" here, so a walk that used it
-             * would open a window over the whole bus. */
-            TEST_ASSERT_EQUAL_HEX8_MESSAGE(
-                DALI_DEVICE_INITIALISE_UNADDRESSED_PARAM, param,
-                "Part 103 INITIALISE is inverted against Part 102");
+            /*
+             * The selector as a Part 103 device reads it: 0xFF every device,
+             * 0x7F those without a short address, 0..63 the one holding that
+             * address, anything else nobody. Modelled rather than asserted: an
+             * assertion only restates whatever constant the walk uses, which
+             * is how 0x00 passed here while the 2k bus found nothing with it.
+             */
             s_bus.initialise_count++;
             for (uint8_t i = 0u; i < MOCK_DEVICE_COUNT; i++) {
-                s_bus.devices[i].active =
-                    s_bus.devices[i].present &&
-                    s_bus.devices[i].short_address == MOCK_UNADDRESSED;
+                const uint8_t held = s_bus.devices[i].short_address;
+                bool chosen = false;
+                if (param == 0xFFu) {
+                    chosen = true;
+                } else if (param == 0x7Fu) {
+                    chosen = (held == MOCK_UNADDRESSED);
+                } else if (param <= DALI_MAX_SHORT_ADDRESS) {
+                    chosen = (held == param);
+                }
+                s_bus.devices[i].active = s_bus.devices[i].present && chosen;
             }
             return DALI_OK;
 
@@ -466,26 +474,28 @@ static DaliDeviceCommissioningOptions default_options(void)
  * Sequence layout and the encoding traps
  * -------------------------------------------------------------------------*/
 
-void test_start_sequence_uses_the_inverted_initialise_parameter(void)
+void test_start_sequence_selects_unaddressed_devices_with_7f(void)
 {
     DaliSequence seq;
     TEST_ASSERT_EQUAL(DALI_OK, dali_device_commissioning_build_start_sequence(&seq));
     TEST_ASSERT_EQUAL_UINT8(DALI_COMMISSIONING_START_SEQUENCE_STEPS, seq.step_count);
 
-    /* TERMINATE, INITIALISE(0x00), RANDOMISE — all 0xC1-prefixed. */
+    /* TERMINATE, INITIALISE(0x7F), RANDOMISE — all 0xC1-prefixed. */
     TEST_ASSERT_EQUAL_HEX32(0xC10000u,
                             seq.steps[DALI_COMMISSIONING_START_STEP_TERMINATE].frame.data);
-    TEST_ASSERT_EQUAL_HEX32(0xC10100u,
+    TEST_ASSERT_EQUAL_HEX32(0xC1017Fu,
                             seq.steps[DALI_COMMISSIONING_START_STEP_INITIALISE].frame.data);
     TEST_ASSERT_EQUAL_HEX32(0xC10200u,
                             seq.steps[DALI_COMMISSIONING_START_STEP_RANDOMISE].frame.data);
 
-    /* The trap: the Part 102 sentinel is 0xFF and means "unaddressed" there.
-     * Here 0xFF would mean every control device. */
+    /* Two traps. The Part 102 "unaddressed" sentinel 0xFF means every control
+     * device here; 0x00, which this walk sent until the 2k bus found nothing
+     * with it, means the device at d0. */
     const uint8_t param =
         (uint8_t)(seq.steps[DALI_COMMISSIONING_START_STEP_INITIALISE].frame.data & 0xFFu);
-    TEST_ASSERT_EQUAL_HEX8(0x00u, param);
+    TEST_ASSERT_EQUAL_HEX8(0x7Fu, param);
     TEST_ASSERT_NOT_EQUAL_UINT8(DALI_INITIALISE_UNADDRESSED_PARAM, param);
+    TEST_ASSERT_NOT_EQUAL_UINT8(0x00u, param);
 
     TEST_ASSERT_TRUE(seq.steps[DALI_COMMISSIONING_START_STEP_INITIALISE].send_twice);
     TEST_ASSERT_TRUE(seq.steps[DALI_COMMISSIONING_START_STEP_RANDOMISE].send_twice);
@@ -571,6 +581,32 @@ void test_commission_assigns_free_addresses_in_order(void)
     TEST_ASSERT_EQUAL_UINT8(1u, s_bus.initialise_count);
     TEST_ASSERT_EQUAL_UINT8(1u, s_bus.randomise_count);
     /* Every device ends with the address the run reported. */
+    TEST_ASSERT_EQUAL_UINT8(0u, s_bus.devices[0].short_address);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_bus.devices[1].short_address);
+}
+
+/*
+ * The 2k layout: a working device at d0 beside one with no address. The walk
+ * must find only the second. With INITIALISE 0x00 it selected the device at d0
+ * instead, searched it out, and moved it to the first free address.
+ */
+void test_commission_leaves_an_addressed_device_at_d0_alone(void)
+{
+    mock_add_device(0u, 0x000010u);
+    s_bus.devices[0].short_address = 0u;
+    mock_add_device(1u, 0x00A000u);
+    DaliTransport t = transport();
+    DaliDeviceCommissioningOptions options = default_options();
+    options.used_address_mask = (uint64_t)1u;   /* the pre-scan saw d0 */
+    DaliDeviceCommissioningResult result;
+
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_device_commissioning_commission_unaddressed(
+                          &t, &options, &result, NULL, NULL));
+
+    TEST_ASSERT_EQUAL_UINT8(1u, result.assigned_count);
+    TEST_ASSERT_EQUAL_UINT32(0x00A000u, result.assignments[0].random_address);
+    TEST_ASSERT_EQUAL_UINT8(1u, result.assignments[0].short_address);
     TEST_ASSERT_EQUAL_UINT8(0u, s_bus.devices[0].short_address);
     TEST_ASSERT_EQUAL_UINT8(1u, s_bus.devices[1].short_address);
 }
@@ -1117,11 +1153,12 @@ void test_quiescence_is_refused_without_a_delay_and_sends_nothing(void)
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_start_sequence_uses_the_inverted_initialise_parameter);
+    RUN_TEST(test_start_sequence_selects_unaddressed_devices_with_7f);
     RUN_TEST(test_program_verify_sequence_carries_the_raw_short_address);
     RUN_TEST(test_search_compare_sequence_layout_matches_the_shared_classifier);
     RUN_TEST(test_sequence_builders_reject_bad_arguments);
     RUN_TEST(test_commission_assigns_free_addresses_in_order);
+    RUN_TEST(test_commission_leaves_an_addressed_device_at_d0_alone);
     RUN_TEST(test_commission_starts_from_the_requested_address);
     RUN_TEST(test_commission_skips_addresses_the_used_mask_reserves);
     RUN_TEST(test_commission_settles_after_randomise_before_the_first_compare);

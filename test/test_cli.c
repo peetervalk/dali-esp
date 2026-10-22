@@ -540,6 +540,42 @@ static void test_parse_short_addr_and_instance(void)
     TEST_ASSERT_TRUE(dali_cli_parse_instance("31", &v));
     TEST_ASSERT_EQUAL_UINT8(31u, v);
     TEST_ASSERT_FALSE(dali_cli_parse_instance("32", &v));
+    /* The single-instance parser stays strict: a sensor poll needs one. */
+    TEST_ASSERT_FALSE(dali_cli_parse_instance("g3", &v));
+}
+
+/*
+ * iquery and iconfig take the whole Part 103 instance byte: a number, an
+ * instance group (100GGGGG), an instance type (110TTTTT), or every instance.
+ */
+static void test_parse_instance_selector(void)
+{
+    uint8_t v = 0u;
+    TEST_ASSERT_TRUE(dali_cli_parse_instance_selector("1", &v));
+    TEST_ASSERT_EQUAL_HEX8(0x01u, v);
+    TEST_ASSERT_FALSE(dali_cli_instance_selector_is_multi(v));
+
+    TEST_ASSERT_TRUE(dali_cli_parse_instance_selector("g3", &v));
+    TEST_ASSERT_EQUAL_HEX8(0x83u, v);
+    TEST_ASSERT_TRUE(dali_cli_instance_selector_is_multi(v));
+    TEST_ASSERT_TRUE(dali_cli_parse_instance_selector("g31", &v));
+    TEST_ASSERT_EQUAL_HEX8(0x9Fu, v);
+
+    TEST_ASSERT_TRUE(dali_cli_parse_instance_selector("t3", &v));
+    TEST_ASSERT_EQUAL_HEX8(0xC3u, v);
+    TEST_ASSERT_TRUE(dali_cli_instance_selector_is_multi(v));
+
+    TEST_ASSERT_TRUE(dali_cli_parse_instance_selector("all", &v));
+    TEST_ASSERT_EQUAL_HEX8(0xFFu, v);
+    TEST_ASSERT_TRUE(dali_cli_instance_selector_is_multi(v));
+
+    TEST_ASSERT_FALSE(dali_cli_parse_instance_selector("32", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_instance_selector("g32", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_instance_selector("t32", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_instance_selector("g", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_instance_selector("x3", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_instance_selector("d3", &v));
+    TEST_ASSERT_FALSE(dali_cli_parse_instance_selector(NULL, &v));
 }
 
 /*
@@ -1007,6 +1043,48 @@ static void test_format_status_fits_all_eight_flags(void)
         buf);
 }
 
+/*
+ * `discover` printed the version byte halved, so DALI-2 gear read "v4". The
+ * byte packs major.minor into 6 + 2 bits: 0x08 is 2.0.
+ */
+static void test_format_gear_version_unpacks_major_and_minor(void)
+{
+    char buf[DALI_CLI_VERSION_TEXT_MAX];
+
+    TEST_ASSERT_EQUAL_UINT(strlen("v2.0"),
+                           dali_cli_format_gear_version(buf, sizeof(buf), 0x08u));
+    TEST_ASSERT_EQUAL_STRING("v2.0", buf);
+
+    dali_cli_format_gear_version(buf, sizeof(buf), 0x09u);
+    TEST_ASSERT_EQUAL_STRING("v2.1", buf);
+
+    dali_cli_format_gear_version(buf, sizeof(buf), 0x0Cu);
+    TEST_ASSERT_EQUAL_STRING("v3.0", buf);
+
+    dali_cli_format_gear_version(buf, sizeof(buf), 0xFFu);
+    TEST_ASSERT_EQUAL_STRING("v63.3", buf);
+}
+
+/* Below 2.0 the packing would claim versions nobody published, so the byte
+ * prints as it came. */
+static void test_format_gear_version_prints_older_answers_raw(void)
+{
+    char buf[DALI_CLI_VERSION_TEXT_MAX];
+
+    dali_cli_format_gear_version(buf, sizeof(buf), 0x01u);
+    TEST_ASSERT_EQUAL_STRING("version=0x01", buf);
+
+    dali_cli_format_gear_version(buf, sizeof(buf), 0x00u);
+    TEST_ASSERT_EQUAL_STRING("version=0x00", buf);
+
+    /* The longest output there is, and it fits. */
+    TEST_ASSERT_EQUAL_UINT(strlen("version=0x07"),
+                           dali_cli_format_gear_version(buf, sizeof(buf), 0x07u));
+    TEST_ASSERT_EQUAL_STRING("version=0x07", buf);
+
+    TEST_ASSERT_EQUAL_UINT(0u, dali_cli_format_gear_version(NULL, 8u, 0x08u));
+}
+
 static void test_format_response_matches_the_printed_forms(void)
 {
     char buf[DALI_CLI_RESPONSE_LINE_MAX];
@@ -1302,8 +1380,9 @@ static void test_address_device_lines_reach_the_handler(void)
 
 /*
  * The device re-addressing command must be the one the walk's own de-address
- * uses, and its DTR0 sentinel must stay outside the encoded range -- otherwise
- * `address d<N> clear` would write an address rather than remove one.
+ * uses, and its DTR0 sentinel must stay outside the range a device reads as an
+ * address -- otherwise `address d<N> clear` would write an address rather than
+ * remove one. The device space reads DTR0 raw, so that range is 0..63 itself.
  */
 static void test_device_clear_writes_a_value_no_address_encodes_to(void)
 {
@@ -1313,10 +1392,8 @@ static void test_device_clear_writes_a_value_no_address_encodes_to(void)
     TEST_ASSERT_TRUE_MESSAGE(cmd->send_twice,
                              "SET SHORT ADDRESS DTR0 is send-twice in both spaces");
 
-    for (uint8_t addr = 0u; addr <= DALI_MAX_SHORT_ADDRESS; addr++) {
-        TEST_ASSERT_NOT_EQUAL(DALI_COMMISSIONING_NO_SHORT_ADDRESS,
-                              dali_commissioning_encode_short_address(addr));
-    }
+    TEST_ASSERT_GREATER_THAN_UINT8(DALI_MAX_SHORT_ADDRESS,
+                                   DALI_COMMISSIONING_NO_SHORT_ADDRESS);
 }
 
 /*
@@ -1393,6 +1470,147 @@ static void test_config_broadcast_rejection_set(void)
     const DaliCliGearCommand *scene = dali_cli_config_find("remove-scene");
     TEST_ASSERT_NOT_NULL(scene);
     TEST_ASSERT_FALSE(dali_cli_config_rejects_broadcast(scene->id));
+}
+
+/* ---------------------------------------------------------------------------
+ * Raw frames and the commissioning policy
+ * --------------------------------------------------------------------------*/
+
+/*
+ * Every Part 102 special a raw frame can spell is classified exactly as the
+ * `special` verb classifies it by name. One list, read two ways: a special
+ * added to the gated set is gated in hex without anyone remembering to.
+ */
+static void test_raw_classifier_agrees_with_the_special_policy(void)
+{
+    for (uint8_t i = 0u; i < dali_cli_special_count(); i++) {
+        const DaliCliGearCommand *spec = dali_cli_special_at(i);
+        DaliFrame frame;
+        TEST_ASSERT_EQUAL(DALI_OK, dali_build_special(spec->id, 0x00u, &frame));
+        TEST_ASSERT_EQUAL_MESSAGE(dali_cli_special_is_commissioning(spec->id),
+                                  dali_cli_raw_frame_is_commissioning(&frame),
+                                  spec->name);
+    }
+
+    /* The two lines from the report, spelled as an operator would type them. */
+    DaliFrame initialise = { .data = 0xA500u, .bit_length = 16u };
+    DaliFrame randomise  = { .data = 0xA700u, .bit_length = 16u };
+    TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&initialise));
+    TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&randomise));
+}
+
+/* SET SHORT ADDRESS (DTR0) is gated whatever it is addressed to, including
+ * broadcast unaddressed, which no named verb can reach. Its neighbours are not. */
+static void test_raw_classifier_gates_set_short_address_on_every_target(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_command(DALI_ADDR_SHORT, 5u,
+                                                  DALI_CMD_SET_SHORT_ADDRESS_DTR0,
+                                                  0u, &frame));
+    TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&frame));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_command(DALI_ADDR_GROUP, 3u,
+                                                  DALI_CMD_SET_SHORT_ADDRESS_DTR0,
+                                                  0u, &frame));
+    TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&frame));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_command(DALI_ADDR_BROADCAST, 0u,
+                                                  DALI_CMD_SET_SHORT_ADDRESS_DTR0,
+                                                  0u, &frame));
+    TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&frame));
+    DaliFrame unaddressed = { .data = 0xFD80u, .bit_length = 16u };
+    TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&unaddressed));
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_command(DALI_ADDR_SHORT, 5u,
+                                                  DALI_CMD_ADD_TO_GROUP,
+                                                  3u, &frame));
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_command(DALI_ADDR_BROADCAST, 0u,
+                                                  DALI_CMD_RESET, 0u, &frame));
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
+
+    /* DAPC 0x80 to a5 has the opcode byte of SET SHORT ADDRESS but no selector
+     * bit: it sets a level, and must not be caught by the byte value alone. */
+    DaliFrame dapc = { .data = 0x0A80u, .bit_length = 16u };
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&dapc));
+}
+
+/* The Part 103 addressing steps are gated; the rest of the special space is
+ * not, which is the same line `special` draws for Part 102. */
+static void test_raw_classifier_gates_part_103_addressing(void)
+{
+    static const DaliCommandId gated[] = {
+        DALI_CMD_DEVICE_INITIALISE,
+        DALI_CMD_DEVICE_RANDOMISE,
+        DALI_CMD_DEVICE_WITHDRAW,
+        DALI_CMD_DEVICE_SEARCH_ADDRH,
+        DALI_CMD_DEVICE_SEARCH_ADDRM,
+        DALI_CMD_DEVICE_SEARCH_ADDRL,
+        DALI_CMD_DEVICE_PROGRAM_SHORT_ADDRESS,
+    };
+    static const DaliCommandId open[] = {
+        DALI_CMD_DEVICE_TERMINATE,
+        DALI_CMD_DEVICE_COMPARE,
+        DALI_CMD_DEVICE_VERIFY_SHORT_ADDRESS,
+        DALI_CMD_DEVICE_QUERY_SHORT_ADDRESS,
+    };
+    DaliFrame frame;
+
+    for (size_t i = 0u; i < sizeof(gated) / sizeof(gated[0]); i++) {
+        TEST_ASSERT_EQUAL(DALI_OK, dali_build_device_special(gated[i], 0x7Fu, &frame));
+        TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&frame));
+    }
+    for (size_t i = 0u; i < sizeof(open) / sizeof(open[0]); i++) {
+        TEST_ASSERT_EQUAL(DALI_OK, dali_build_device_special(open[i], 0u, &frame));
+        TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
+    }
+
+    /* Device DTR loads and memory writes are `devmem write`'s frames, and that
+     * verb is not gated. */
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_control_device_dtr_data(DALI_DTR0, 5u, &frame));
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
+    frame = dali_cmd_control_device_write_memory_location_no_reply(0x55u);
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
+}
+
+/* Device-level SET SHORT ADDRESS is `address dN set`'s frame; the instance
+ * byte is what separates it from an instance command sharing its opcode. */
+static void test_raw_classifier_gates_device_set_short_address(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_device_command(
+                                   7u, DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0, &frame));
+    TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&frame));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_device_broadcast_command(
+                                   DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0, &frame));
+    TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&frame));
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_device_broadcast_command(
+                                   DALI_CMD_START_QUIESCENT_MODE, &frame));
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
+    DaliFrame instance_command = dali_cmd_instance(7u, 0u, 0x14u);
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&instance_command));
+}
+
+/* Ordinary traffic, events, and odd widths pass. */
+static void test_raw_classifier_passes_everything_else(void)
+{
+    DaliFrame frame;
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_command(DALI_ADDR_SHORT, 0u,
+                                                  DALI_CMD_OFF, 0u, &frame));
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_build_command(DALI_ADDR_SHORT, 0u,
+                                                  DALI_CMD_QUERY_STATUS, 0u, &frame));
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
+
+    DaliFrame event = { .data = 0x008001u, .bit_length = 24u };
+    DaliFrame backward_width = { .data = 0xA5u, .bit_length = 8u };
+    DaliFrame odd_width = { .data = 0xA500u, .bit_length = 17u };
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&event));
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&backward_width));
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&odd_width));
+    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(NULL));
 }
 
 static void test_print_response_yes_no(void)
@@ -1520,6 +1738,142 @@ static void test_buffer_sink_reports_truncation(void)
     TEST_ASSERT_EQUAL_STRING("1234567", small);
 }
 
+/* ---------------------------------------------------------------------------
+ * Peer classification
+ * --------------------------------------------------------------------------*/
+
+/*
+ * Feed `text` one byte at a time, as a front end does. Returns the verdict after
+ * the last byte and, through `decided_at`, how many bytes it took to become
+ * final (0 when it never did).
+ */
+static DaliCliPeerVerdict sniff_text(const char *text, size_t *decided_at)
+{
+    DaliCliPeerSniffer sniffer;
+    dali_cli_peer_sniffer_init(&sniffer);
+
+    DaliCliPeerVerdict verdict = DALI_CLI_PEER_UNDECIDED;
+    size_t at = 0u;
+    for (size_t i = 0u; text[i] != '\0'; i++) {
+        verdict = dali_cli_peer_sniff(&sniffer, (uint8_t)text[i]);
+        if (verdict != DALI_CLI_PEER_UNDECIDED && at == 0u) {
+            at = i + 1u;
+        }
+    }
+    if (decided_at != NULL) {
+        *decided_at = at;
+    }
+    return verdict;
+}
+
+/*
+ * What a cross-site POST puts on the wire, body included: "scan" would run if
+ * the body's lines reached the shell. The verdict lands on the request
+ * target's '/', the sixth byte, long before the first line can end.
+ */
+static void test_peer_sniff_refuses_a_browser_post(void)
+{
+    size_t at = 0u;
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP,
+                      sniff_text("POST / HTTP/1.1\r\n"
+                                 "Host: dali-2k.local:2323\r\n"
+                                 "Content-Type: text/plain\r\n"
+                                 "\r\n"
+                                 "x=\r\nscan\r\n", &at));
+    TEST_ASSERT_EQUAL(6u, at);
+}
+
+/* Every request form a browser can be made to send to an origin server. */
+static void test_peer_sniff_refuses_every_request_form(void)
+{
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text("GET / HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text("GET /ws HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text("HEAD /favicon.ico HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text("OPTIONS * HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text("PUT /x HTTP/1.1\r\n", NULL));
+    /* WebDAV methods carry a hyphen; HTTP/2 prior knowledge opens with PRI. */
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text("BASELINE-CONTROL / HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text("UPDATEREDIRECTREF / HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text("PRI * HTTP/2.0\r\n", NULL));
+}
+
+/* A shell client is passed on its first byte; verbs are lowercase. */
+static void test_peer_sniff_passes_shell_lines(void)
+{
+    size_t at = 0u;
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("scan\r\n", &at));
+    TEST_ASSERT_EQUAL(1u, at);
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("discover\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("query a3 status\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("\r\n", NULL));
+    /* A telnet client opens with IAC option negotiation. */
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("\xFF\xFB\x01", NULL));
+}
+
+/*
+ * The property a front end relies on to feed bytes through without holding any
+ * back: the verdict is final by the time a CR or LF arrives, so the shell's
+ * line assembly never completes a line ahead of it.
+ */
+static void test_peer_sniff_decides_before_any_line_ends(void)
+{
+    static const char *const cases[] = {
+        "\r", "\n", "GET\r\n", "GET \r\n", "GET\n", "OPTIONS \n",
+        "POST  \r\n", "A\r\n", "TRACE on\r\n", "scan\r\n",
+    };
+
+    for (size_t c = 0u; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        DaliCliPeerSniffer sniffer;
+        dali_cli_peer_sniffer_init(&sniffer);
+        for (const char *p = cases[c]; *p != '\0'; p++) {
+            DaliCliPeerVerdict v = dali_cli_peer_sniff(&sniffer, (uint8_t)*p);
+            if (*p == '\r' || *p == '\n') {
+                TEST_ASSERT_NOT_EQUAL_MESSAGE(DALI_CLI_PEER_UNDECIDED, v, cases[c]);
+            }
+        }
+    }
+}
+
+/* An uppercase word alone is not a request line: a target must follow. */
+static void test_peer_sniff_needs_a_request_target(void)
+{
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("TRACE on\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("GET  / HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("Get / HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("-GET / HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text(" GET / HTTP/1.1\r\n", NULL));
+    /* A method and its space with nothing after them yet stay undecided,
+     * which is safe: no line has ended. */
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_UNDECIDED, sniff_text("GET ", NULL));
+}
+
+static void test_peer_sniff_bounds_the_method(void)
+{
+    char line[DALI_CLI_HTTP_METHOD_MAX + 8u];
+
+    memset(line, 'A', DALI_CLI_HTTP_METHOD_MAX);
+    strcpy(line + DALI_CLI_HTTP_METHOD_MAX, " / H");
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text(line, NULL));
+
+    memset(line, 'A', DALI_CLI_HTTP_METHOD_MAX + 1u);
+    strcpy(line + DALI_CLI_HTTP_METHOD_MAX + 1u, " / H");
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text(line, NULL));
+}
+
+/* Only the opening line counts, in both directions. */
+static void test_peer_sniff_verdict_is_final(void)
+{
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, sniff_text("help\r\nGET / HTTP/1.1\r\n", NULL));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_HTTP, sniff_text("GET / HTTP/1.1\r\nhelp\r\n", NULL));
+
+    DaliCliPeerSniffer sniffer;
+    dali_cli_peer_sniffer_init(&sniffer);
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_UNDECIDED, dali_cli_peer_sniff(&sniffer, (uint8_t)'G'));
+    dali_cli_peer_sniffer_init(&sniffer);
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, dali_cli_peer_sniff(&sniffer, (uint8_t)'s'));
+    TEST_ASSERT_EQUAL(DALI_CLI_PEER_SHELL, dali_cli_peer_sniff(NULL, (uint8_t)'G'));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1531,6 +1885,14 @@ int main(void)
     RUN_TEST(test_tokenize_rejects_too_many_tokens);
     RUN_TEST(test_tokenize_rejects_over_long_token);
     RUN_TEST(test_tokenize_accepts_longest_valid_token);
+
+    RUN_TEST(test_peer_sniff_refuses_a_browser_post);
+    RUN_TEST(test_peer_sniff_refuses_every_request_form);
+    RUN_TEST(test_peer_sniff_passes_shell_lines);
+    RUN_TEST(test_peer_sniff_decides_before_any_line_ends);
+    RUN_TEST(test_peer_sniff_needs_a_request_target);
+    RUN_TEST(test_peer_sniff_bounds_the_method);
+    RUN_TEST(test_peer_sniff_verdict_is_final);
 
     RUN_TEST(test_command_table_covers_every_id);
     RUN_TEST(test_command_table_entries_are_well_formed);
@@ -1562,6 +1924,7 @@ int main(void)
     RUN_TEST(test_parse_target_forms);
     RUN_TEST(test_parse_target_rejects_out_of_range);
     RUN_TEST(test_parse_short_addr_and_instance);
+    RUN_TEST(test_parse_instance_selector);
     RUN_TEST(test_parse_device_addr_requires_the_d_prefix);
     RUN_TEST(test_the_gear_parsers_reject_the_device_spelling);
     RUN_TEST(test_address_device_lines_reach_the_handler);
@@ -1600,9 +1963,16 @@ int main(void)
     RUN_TEST(test_address_arguments_are_targets);
     RUN_TEST(test_address_set_is_the_gated_operation);
     RUN_TEST(test_config_broadcast_rejection_set);
+    RUN_TEST(test_raw_classifier_agrees_with_the_special_policy);
+    RUN_TEST(test_raw_classifier_gates_set_short_address_on_every_target);
+    RUN_TEST(test_raw_classifier_gates_part_103_addressing);
+    RUN_TEST(test_raw_classifier_gates_device_set_short_address);
+    RUN_TEST(test_raw_classifier_passes_everything_else);
 
     RUN_TEST(test_format_status_names_only_the_set_flags);
     RUN_TEST(test_format_status_fits_all_eight_flags);
+    RUN_TEST(test_format_gear_version_unpacks_major_and_minor);
+    RUN_TEST(test_format_gear_version_prints_older_answers_raw);
     RUN_TEST(test_format_response_matches_the_printed_forms);
     RUN_TEST(test_format_response_reports_malformed);
     RUN_TEST(test_format_response_truncates_within_bounds);

@@ -289,13 +289,18 @@ static bool shell_policy_allows(uint8_t flag, const char *verb)
  * Synchronous scheduler helper — device builds only
  *
  * Enqueues one transaction and blocks the calling task via FreeRTOS task
- * notification until the completion callback fires (or 200 ms elapses).
+ * notification until the completion callback fires, or until the transport
+ * budget for that transaction elapses (dali_transport_transaction_timeout_ms).
  * The DALI processing task must be calling dali_sched_run() concurrently.
+ *
+ * A wait that expires reports DALI_ERR_WAIT_EXPIRED, never DALI_ERR_TIMEOUT.
+ * The transaction may still be queued or on the wire, so nothing is known
+ * about the bus; TIMEOUT is what every caller reads as "nothing answered", and
+ * a presence probe that read it that way would call an occupied address free.
  * --------------------------------------------------------------------------*/
 #ifndef DALI_HOST_BUILD
 
 #define SHELL_SYNC_SLOT_COUNT 4u
-#define SHELL_SYNC_WAIT_MS  200u
 #define SHELL_RESET_WAIT_MS 1000u
 #define SHELL_IDENTIFY_CYCLES 5u
 #define SHELL_IDENTIFY_STEP_MS 1000u
@@ -416,7 +421,7 @@ static DiagSyncCtx *shell_sync_alloc_slot(TaskHandle_t waiting_task)
         if (!s_diag_sync_slots[i].in_use) {
             s_diag_sync_slots[i] = (DiagSyncCtx){
                 .waiting_task = waiting_task,
-                .result       = DALI_ERR_TIMEOUT,
+                .result       = DALI_ERR_WAIT_EXPIRED,
                 .reply        = {0u, 0u},
                 .has_reply    = false,
                 .sequence     = { .failed_step = DALI_SEQUENCE_NO_FAILED_STEP },
@@ -546,7 +551,7 @@ static DaliError shell_reset_sync(void)
         (void)ulTaskNotifyTake(pdTRUE, wait_ticks - elapsed);
     }
 
-    DaliError result = DALI_ERR_TIMEOUT;
+    DaliError result = DALI_ERR_WAIT_EXPIRED;
     bool completed;
     taskENTER_CRITICAL(&s_diag_sync_mux);
     completed = ctx->complete;
@@ -572,9 +577,10 @@ static DaliError shell_reset_sync(void)
 }
 
 /*
- * Enqueue frame, wait up to SHELL_SYNC_WAIT_MS for completion.
- * retries_left is the scheduler retry budget after the first attempt.
- * reply_out may be NULL when the reply data is not needed.
+ * Enqueue frame and wait for its completion, for as long as its retry budget
+ * can take plus queue headroom. retries_left is the scheduler retry budget
+ * after the first attempt. reply_out may be NULL when the reply data is not
+ * needed.
  */
 static DaliError shell_sched_sync_impl(const DaliFrame *frame,
                                        bool needs_reply,
@@ -619,7 +625,8 @@ static DaliError shell_sched_sync_impl(const DaliFrame *frame,
         return err;
     }
 
-    TickType_t wait_ticks = pdMS_TO_TICKS(SHELL_SYNC_WAIT_MS);
+    TickType_t wait_ticks =
+        pdMS_TO_TICKS(dali_transport_transaction_timeout_ms(retries_left));
     TickType_t start_tick = xTaskGetTickCount();
     while (!shell_sync_complete(ctx)) {
         TickType_t elapsed = xTaskGetTickCount() - start_tick;
@@ -629,7 +636,7 @@ static DaliError shell_sched_sync_impl(const DaliFrame *frame,
         (void)ulTaskNotifyTake(pdTRUE, wait_ticks - elapsed);
     }
 
-    DaliError result = DALI_ERR_TIMEOUT;
+    DaliError result = DALI_ERR_WAIT_EXPIRED;
     DaliFrame reply = {0u, 0u};
     bool has_reply = false;
     bool completed = false;
@@ -731,7 +738,7 @@ static DaliError shell_sched_sequence_sync(DaliSequence *seq,
         (void)ulTaskNotifyTake(pdTRUE, wait_ticks - elapsed);
     }
 
-    DaliError result = DALI_ERR_TIMEOUT;
+    DaliError result = DALI_ERR_WAIT_EXPIRED;
     DaliSequenceResult sequence = { .failed_step = DALI_SEQUENCE_NO_FAILED_STEP };
     bool has_sequence = false;
     bool completed = false;
@@ -1890,6 +1897,19 @@ static void cmd_raw(const DaliCliTokens *t, bool send_twice)
         return;
     }
 
+    /*
+     * The escape hatch is not a way round the policy. `special`, `config`,
+     * `address` and `restore apply` refuse these frames on a session without
+     * DALI_SHELL_ALLOW_COMMISSION; spelling one in hex must not succeed where
+     * its name is refused.
+     */
+    if (dali_cli_raw_frame_is_commissioning(&frame) &&
+        !shell_policy_allows(DALI_SHELL_ALLOW_COMMISSION,
+                             send_twice ? "raw2 (commissioning frame)"
+                                        : "raw (commissioning frame)")) {
+        return;
+    }
+
     DaliFrame reply = {0u, 0u};
     DaliError err = shell_sched_sync(&frame, wait_reply, 0u, send_twice,
                                     wait_reply ? &reply : NULL);
@@ -2520,6 +2540,105 @@ static void shell_address_print_groups(uint8_t addr, uint16_t mask)
     shell_printf("\r\n");
 }
 
+/* Longest clause either formatter below writes, including the NUL. */
+#define SHELL_WRITE_NOTE_MAX 96u
+
+/*
+ * Why dali_restore_write_short_address() sent no pair, as a clause for the
+ * caller's own line: "DTR0 did not load: a5 read back 0x0B, not 0x05".
+ */
+static const char *shell_write_refusal(char *buf, size_t cap, const char *prefix,
+                                       uint8_t from,
+                                       const DaliRestoreWriteResult *write)
+{
+    switch (write->outcome) {
+        case DALI_RESTORE_WRITE_DTR0_MISMATCH:
+            snprintf(buf, cap, "DTR0 did not load: %s%u read back 0x%02X, not 0x%02X",
+                     prefix, (unsigned)from, (unsigned)write->last_read,
+                     (unsigned)write->dtr0);
+            break;
+        case DALI_RESTORE_WRITE_DTR0_SILENT:
+            snprintf(buf, cap, "DTR0 could not be checked: %s%u did not answer "
+                     "the read-back", prefix, (unsigned)from);
+            break;
+        default:
+            snprintf(buf, cap, "DTR0 could not be checked: the read-back at %s%u "
+                     "was unreadable (%s)", prefix, (unsigned)from,
+                     shell_err(write->last_error));
+            break;
+    }
+    return buf;
+}
+
+/*
+ * The first read-back of a write that needed a second load. It is the direct
+ * evidence of a unit missing a DTR0 load, so it gets a line even when the
+ * second load worked.
+ */
+static const char *shell_write_reload_note(char *buf, size_t cap,
+                                           const char *prefix, uint8_t from,
+                                           const DaliRestoreWriteResult *write)
+{
+    if (write->first_error == DALI_OK) {
+        snprintf(buf, cap, "DTR0 needed a second load: %s%u first read back 0x%02X",
+                 prefix, (unsigned)from, (unsigned)write->first_read);
+    } else {
+        snprintf(buf, cap, "DTR0 needed a second load: the first read-back at "
+                 "%s%u failed (%s)", prefix, (unsigned)from,
+                 shell_err(write->first_error));
+    }
+    return buf;
+}
+
+/*
+ * The write every `address` arm shares. DTR0 is read back from the unit before
+ * the SET SHORT ADDRESS pair goes out, because a unit that missed the load
+ * would take whatever DTR0 held -- see dali_restore_write_short_address().
+ * `contested` lets a clear of units sharing an address go out without the
+ * read-back their collision garbles.
+ *
+ * Prints anything but the plain case, and returns true when the pair was sent,
+ * which is when the caller goes on to read the result back.
+ */
+static bool shell_address_write(DaliSnapshotSpace space, uint8_t from,
+                                uint8_t to, bool contested)
+{
+    const bool  gear   = (space == DALI_SNAPSHOT_SPACE_GEAR);
+    const char *prefix = gear ? "a" : "d";
+    DaliDiscoveryTransport transport = shell_discovery_transport();
+    DaliRestoreWriteResult write;
+    char note[SHELL_WRITE_NOTE_MAX];
+
+    DaliError err = dali_restore_write_short_address(&transport, space, from, to,
+                                                     contested, &write);
+    if (err != DALI_OK) {
+        if (write.pair_attempted) {
+            shell_printf("address: %s while SET SHORT ADDRESS went out; run '%s' "
+                         "before sending anything else\r\n", shell_err(err),
+                         gear ? "scan" : "discover");
+        } else {
+            shell_printf("address: %s before SET SHORT ADDRESS; nothing moved\r\n",
+                         shell_err(err));
+        }
+        return false;
+    }
+    if (!dali_restore_write_was_sent(write.outcome)) {
+        shell_printf("address: %s; nothing further sent\r\n",
+                     shell_write_refusal(note, sizeof(note), prefix, from, &write));
+        return false;
+    }
+    if (write.outcome == DALI_RESTORE_WRITE_SENT_UNVERIFIED) {
+        shell_printf("address: the DTR0 read-back at %s%u collided, as units "
+                     "sharing an address answer; sent without it\r\n",
+                     prefix, (unsigned)from);
+    } else if (write.loads > 1u) {
+        shell_printf("address: %s\r\n",
+                     shell_write_reload_note(note, sizeof(note), prefix, from,
+                                             &write));
+    }
+    return true;
+}
+
 static void shell_address_set(uint8_t from, uint8_t to)
 {
     if (from == to) {
@@ -2561,46 +2680,14 @@ static void shell_address_set(uint8_t from, uint8_t to)
     }
 
     /*
-     * DTR0 then SET SHORT ADDRESS DTR0, as one contiguous sequence so nothing
-     * can redirect DTR0 between the two frames. The encoding is applied here
-     * and named in the output, because the gear is about to stop answering the
-     * address that would let anyone ask it what happened.
+     * The encoding is named in the output, because the gear is about to stop
+     * answering the address that would let anyone ask it what happened.
      */
-    const uint8_t encoded = dali_commissioning_encode_short_address(to);
     shell_printf("address: a%u -> a%u (DTR0=%u)\r\n",
-                 (unsigned)from, (unsigned)to, (unsigned)encoded);
+                 (unsigned)from, (unsigned)to,
+                 (unsigned)dali_commissioning_encode_short_address(to));
 
-    const DaliCommandInfo *cmd =
-        dali_command_lookup(DALI_CMD_SET_SHORT_ADDRESS_DTR0);
-    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = from };
-    DaliFrame  dtr_frame;
-    DaliFrame  config_frame;
-
-    err = dali_control_build_dtr(DALI_DTR0, encoded, &dtr_frame);
-    if (err == DALI_OK) {
-        err = dali_control_build_config(target, DALI_CMD_SET_SHORT_ADDRESS_DTR0,
-                                        0u, &config_frame);
-    }
-    if (err == DALI_OK && cmd == NULL) {
-        err = DALI_ERR_INVALID;
-    }
-    if (err != DALI_OK) {
-        dali_cli_print_error(&s_out, "address", err);
-        return;
-    }
-
-    DaliSequence seq = {
-        .steps = {
-            { .frame = dtr_frame },
-            { .frame = config_frame, .send_twice = cmd->send_twice },
-        },
-        .step_count = 2u,
-    };
-
-    DaliSequenceResult seq_result;
-    err = shell_sched_sequence_sync(&seq, &seq_result);
-    if (err != DALI_OK) {
-        shell_print_sequence_result("address", err, &seq_result);
+    if (!shell_address_write(DALI_SNAPSHOT_SPACE_GEAR, from, to, false)) {
         return;
     }
 
@@ -2611,9 +2698,30 @@ static void shell_address_set(uint8_t from, uint8_t to)
      */
     DaliError     dest_err = DALI_OK;
     ShellPresence now_to   = shell_address_presence(to, &dest_err);
+    if (now_to == SHELL_PRESENCE_ABSENT) {
+        /* Whether the gear stayed is the difference between a write that did
+         * nothing and gear gone to an address nobody chose. */
+        DaliError     stay_err = DALI_OK;
+        ShellPresence stayed   = shell_address_presence(from, &stay_err);
+        if (stayed == SHELL_PRESENCE_PRESENT) {
+            shell_printf("address: a%u does not answer after the write, and a%u "
+                         "still does -- the gear did not move\r\n",
+                         (unsigned)to, (unsigned)from);
+        } else if (stayed == SHELL_PRESENCE_ABSENT) {
+            shell_printf("address: neither a%u nor a%u answers after the write "
+                         "-- run 'scan' to find the gear\r\n",
+                         (unsigned)to, (unsigned)from);
+        } else {
+            shell_printf("address: a%u does not answer after the write, and "
+                         "whether a%u still does is unreadable (%s); run "
+                         "'scan'\r\n", (unsigned)to, (unsigned)from,
+                         shell_err(stay_err));
+        }
+        return;
+    }
     if (now_to != SHELL_PRESENCE_PRESENT) {
-        shell_printf("address: a%u does not answer after the write (%s); "
-                     "run 'scan' -- the gear may still be at a%u\r\n",
+        shell_printf("address: whether a%u answers after the write is unreadable "
+                     "(%s); run 'scan' -- the gear may still be at a%u\r\n",
                      (unsigned)to, shell_err(dest_err), (unsigned)from);
         return;
     }
@@ -2714,48 +2822,17 @@ static void shell_address_clear(uint8_t addr)
 
     /*
      * DTR0 carries the literal "no short address" value. This is the one place
-     * the DTR0 byte for SET SHORT ADDRESS is not an encoded address, so it must
-     * not go through dali_commissioning_encode_short_address() the way `set`'s
-     * destination does -- encoding 255 would write a different address rather
-     * than none.
+     * the DTR0 byte for SET SHORT ADDRESS is not an encoded address, and the
+     * write passes it through as it is -- encoding 255 would write a different
+     * address rather than none. The read-back matters most here: a unit that
+     * missed this load would not be cleared but moved, to whatever DTR0 held.
      */
     shell_printf("address: a%u -> unaddressed (DTR0=%u)\r\n",
                  (unsigned)addr,
                  (unsigned)DALI_COMMISSIONING_NO_SHORT_ADDRESS);
 
-    const DaliCommandInfo *cmd =
-        dali_command_lookup(DALI_CMD_SET_SHORT_ADDRESS_DTR0);
-    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = addr };
-    DaliFrame  dtr_frame;
-    DaliFrame  config_frame;
-
-    err = dali_control_build_dtr(DALI_DTR0,
-                                 DALI_COMMISSIONING_NO_SHORT_ADDRESS,
-                                 &dtr_frame);
-    if (err == DALI_OK) {
-        err = dali_control_build_config(target, DALI_CMD_SET_SHORT_ADDRESS_DTR0,
-                                        0u, &config_frame);
-    }
-    if (err == DALI_OK && cmd == NULL) {
-        err = DALI_ERR_INVALID;
-    }
-    if (err != DALI_OK) {
-        dali_cli_print_error(&s_out, "address", err);
-        return;
-    }
-
-    DaliSequence seq = {
-        .steps = {
-            { .frame = dtr_frame },
-            { .frame = config_frame, .send_twice = cmd->send_twice },
-        },
-        .step_count = 2u,
-    };
-
-    DaliSequenceResult seq_result;
-    err = shell_sched_sequence_sync(&seq, &seq_result);
-    if (err != DALI_OK) {
-        shell_print_sequence_result("address", err, &seq_result);
+    if (!shell_address_write(DALI_SNAPSHOT_SPACE_GEAR, addr,
+                             DALI_COMMISSIONING_NO_SHORT_ADDRESS, contested)) {
         return;
     }
 
@@ -2932,57 +3009,12 @@ static ShellPresence shell_device_presence(uint8_t addr, DaliError *err_out)
 }
 
 /*
- * DTR0 then SET SHORT ADDRESS DTR0, both in the device space, as one contiguous
- * sequence so nothing can redirect DTR0 between the two frames.
- *
- * The DTR0 here is a 24-bit control-device special, not the 16-bit gear one.
- * Loading the gear DTR0 and then addressing a control device would send the
- * command with whatever the device's own DTR0 happened to hold -- a write to an
- * address nobody chose, rather than a failure.
- *
- * The device form takes the address encoded as (a << 1) | 1, the same as
- * Part 102, because it reads the value from DTR0. The Part 103 *special*
- * PROGRAM SHORT ADDRESS takes the raw 6-bit value instead; it is a different
- * command, used only inside an addressing window, and not this path.
+ * The device arms write through shell_address_write() as the gear arms do. Its
+ * frames come from dali_restore_build_move_sequence(), the builder `restore
+ * apply` sends, so the two cannot drift apart on what a device reads from
+ * DTR0. They did once: both loaded (a << 1) | 1, which put a device the 2k bus
+ * asked to go to d2 on d5.
  */
-static DaliError shell_device_write_short_address(uint8_t addr, uint8_t dtr0)
-{
-    const DaliCommandInfo *cmd =
-        dali_command_lookup(DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0);
-    DaliFrame dtr_frame;
-    DaliFrame config_frame;
-
-    DaliError err = dali_build_control_device_dtr_data(DALI_DTR0, dtr0,
-                                                       &dtr_frame);
-    if (err == DALI_OK) {
-        err = dali_build_device_command(addr,
-                                        DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0,
-                                        &config_frame);
-    }
-    if (err == DALI_OK && cmd == NULL) {
-        err = DALI_ERR_INVALID;
-    }
-    if (err != DALI_OK) {
-        dali_cli_print_error(&s_out, "address", err);
-        return err;
-    }
-
-    DaliSequence seq = {
-        .steps = {
-            { .frame = dtr_frame },
-            { .frame = config_frame, .send_twice = cmd->send_twice },
-        },
-        .step_count = 2u,
-    };
-
-    DaliSequenceResult seq_result;
-    err = shell_sched_sequence_sync(&seq, &seq_result);
-    if (err != DALI_OK) {
-        shell_print_sequence_result("address", err, &seq_result);
-    }
-    return err;
-}
-
 static void shell_device_address_set(uint8_t from, uint8_t to)
 {
     if (from == to) {
@@ -3020,19 +3052,39 @@ static void shell_device_address_set(uint8_t from, uint8_t to)
         return;
     }
 
-    const uint8_t encoded = dali_commissioning_encode_short_address(to);
+    /* DTR0 is the destination itself: the device space does not encode. */
     shell_printf("address: d%u -> d%u (device DTR0=%u)\r\n",
-                 (unsigned)from, (unsigned)to, (unsigned)encoded);
+                 (unsigned)from, (unsigned)to, (unsigned)to);
 
-    if (shell_device_write_short_address(from, encoded) != DALI_OK) {
+    if (!shell_address_write(DALI_SNAPSHOT_SPACE_DEVICE, from, to, false)) {
         return;
     }
 
     DaliError     dest_err = DALI_OK;
     ShellPresence now_to   = shell_device_presence(to, &dest_err);
+    if (now_to == SHELL_PRESENCE_ABSENT) {
+        /* As for gear: did the device stay, or go somewhere nobody chose. */
+        DaliError     stay_err = DALI_OK;
+        ShellPresence stayed   = shell_device_presence(from, &stay_err);
+        if (stayed == SHELL_PRESENCE_PRESENT) {
+            shell_printf("address: d%u does not answer after the write, and d%u "
+                         "still does -- the device did not move\r\n",
+                         (unsigned)to, (unsigned)from);
+        } else if (stayed == SHELL_PRESENCE_ABSENT) {
+            shell_printf("address: neither d%u nor d%u answers after the write "
+                         "-- run 'discover' to find the device\r\n",
+                         (unsigned)to, (unsigned)from);
+        } else {
+            shell_printf("address: d%u does not answer after the write, and "
+                         "whether d%u still does is unreadable (%s); run "
+                         "'discover'\r\n", (unsigned)to, (unsigned)from,
+                         shell_err(stay_err));
+        }
+        return;
+    }
     if (now_to != SHELL_PRESENCE_PRESENT) {
-        shell_printf("address: d%u does not answer after the write (%s); run "
-                     "'discover' -- the device may still be at d%u\r\n",
+        shell_printf("address: whether d%u answers after the write is unreadable "
+                     "(%s); run 'discover' -- the device may still be at d%u\r\n",
                      (unsigned)to, shell_err(dest_err), (unsigned)from);
         return;
     }
@@ -3101,17 +3153,14 @@ static void shell_device_address_clear(uint8_t addr)
                      (unsigned)addr);
     }
 
-    /*
-     * DTR0 carries the literal "no short address" value, not an encoded
-     * address. Putting 255 through dali_commissioning_encode_short_address()
-     * would write a different address rather than none.
-     */
+    /* DTR0 carries the literal "no short address" value, which is 0xFF in the
+     * device space and the gear space alike. */
     shell_printf("address: d%u -> unaddressed (device DTR0=%u)\r\n",
                  (unsigned)addr,
                  (unsigned)DALI_COMMISSIONING_NO_SHORT_ADDRESS);
 
-    if (shell_device_write_short_address(
-            addr, DALI_COMMISSIONING_NO_SHORT_ADDRESS) != DALI_OK) {
+    if (!shell_address_write(DALI_SNAPSHOT_SPACE_DEVICE, addr,
+                             DALI_COMMISSIONING_NO_SHORT_ADDRESS, contested)) {
         return;
     }
 
@@ -3288,6 +3337,105 @@ static void cmd_address(const DaliCliTokens *t)
     shell_bus_release();
 }
 
+/* "3,-,-": primary, group 1 and group 2 in slot order, `-` for an unused slot;
+ * "none" when all three are unused. */
+static void shell_print_group_slots(const uint8_t *groups)
+{
+    bool any = false;
+    for (uint8_t slot = 0u; slot < DALI_INPUT_INSTANCE_GROUP_SLOTS; slot++) {
+        any = any || groups[slot] != DALI_INPUT_INSTANCE_GROUP_NONE;
+    }
+    if (!any) {
+        shell_printf("none");
+        return;
+    }
+    for (uint8_t slot = 0u; slot < DALI_INPUT_INSTANCE_GROUP_SLOTS; slot++) {
+        if (slot > 0u) {
+            shell_printf(",");
+        }
+        if (groups[slot] == DALI_INPUT_INSTANCE_GROUP_NONE) {
+            shell_printf("-");
+        } else {
+            shell_printf("%u", (unsigned)groups[slot]);
+        }
+    }
+}
+
+static void shell_print_instance_groups(const uint8_t *groups)
+{
+    shell_printf(", groups=");
+    shell_print_group_slots(groups);
+}
+
+static void shell_print_scheme_value(uint8_t scheme)
+{
+    if (scheme <= (uint8_t)DALI_EVENT_SOURCE_INSTANCE_GROUP) {
+        shell_printf("%s", dali_event_source_scheme_name((DaliEventSourceScheme)scheme));
+    } else {
+        shell_printf("%u", (unsigned)scheme);
+    }
+}
+
+/* One field of a recorded or read instance, `?` when it is not known. */
+static void shell_print_instance_field(uint8_t field, const DaliInstanceSettings *s)
+{
+    switch (field) {
+        case DALI_RESTORE_INSTANCE_ENABLED:
+            if (s->has_enabled) {
+                shell_printf("%s", s->enabled ? "yes" : "no");
+                return;
+            }
+            break;
+        case DALI_RESTORE_INSTANCE_SCHEME:
+            if (s->has_event_scheme) {
+                shell_print_scheme_value(s->event_scheme);
+                return;
+            }
+            break;
+        case DALI_RESTORE_INSTANCE_PRIORITY:
+            if (s->has_event_priority) {
+                shell_printf("%u", (unsigned)s->event_priority);
+                return;
+            }
+            break;
+        case DALI_RESTORE_INSTANCE_FILTER:
+            if (s->has_event_filter) {
+                shell_printf("0x%06lX", (unsigned long)s->event_filter);
+                return;
+            }
+            break;
+        case DALI_RESTORE_INSTANCE_GROUPS:
+            if (s->has_instance_groups) {
+                shell_print_group_slots(s->instance_groups);
+                return;
+            }
+            break;
+        default:
+            break;
+    }
+    shell_printf("?");
+}
+
+/* "type 3, enabled yes, scheme device-instance, ...": every field, in the
+ * order a restore writes them, so a backup and a plan read alike. */
+static void shell_print_instance_settings(const DaliInstanceSettings *s)
+{
+    static const uint8_t fields[] = {
+        DALI_RESTORE_INSTANCE_ENABLED,  DALI_RESTORE_INSTANCE_SCHEME,
+        DALI_RESTORE_INSTANCE_PRIORITY, DALI_RESTORE_INSTANCE_FILTER,
+        DALI_RESTORE_INSTANCE_GROUPS,
+    };
+    if (s->has_type) {
+        shell_printf("type %u", (unsigned)s->type);
+    } else {
+        shell_printf("type ?");
+    }
+    for (uint8_t i = 0u; i < sizeof(fields); i++) {
+        shell_printf(", %s ", dali_restore_instance_field_name(fields[i]));
+        shell_print_instance_field(fields[i], s);
+    }
+}
+
 static void shell_print_input_instance(const DaliInputInstanceInfo *info)
 {
     if (info == NULL) {
@@ -3312,6 +3460,16 @@ static void shell_print_input_instance(const DaliInputInstanceInfo *info)
     }
     if (info->has_error) {
         shell_printf(", error=%s", dali_is_yes(info->error) ? "yes" : "no");
+    }
+    if (info->has_event_scheme) {
+        shell_printf(", scheme=");
+        shell_print_scheme_value(info->event_scheme);
+    }
+    if (info->has_event_priority) {
+        shell_printf(", priority=%u", (unsigned)info->event_priority);
+    }
+    if (info->has_instance_groups) {
+        shell_print_instance_groups(info->instance_groups);
     }
     shell_printf("\r\n");
 }
@@ -3634,7 +3792,10 @@ static void shell_discovery_found_cb(uint8_t addr,
             shell_printf("%02u: present, %s, status=0x%02X",
                    (unsigned)addr, kind, (unsigned)device->status);
             if (device->has_version) {
-                shell_printf(", v%u", (unsigned)(device->version / 2u));
+                char version[DALI_CLI_VERSION_TEXT_MAX];
+                dali_cli_format_gear_version(version, sizeof(version),
+                                             device->version);
+                shell_printf(", %s", version);
             }
             if (device->has_actual_level) {
                 shell_printf(", level=%u", (unsigned)device->actual_level);
@@ -3656,6 +3817,11 @@ static void shell_discovery_found_cb(uint8_t addr,
             if (device->has_input_device) {
                 shell_printf(", input-device(%u instances)", (unsigned)device->instance_count);
             }
+            /* Listed, because the address does answer; marked, because more
+             * than one unit gave that answer. The scan's note names it again. */
+            if (device->has_identity_collision) {
+                shell_printf(", contested");
+            }
             shell_printf("\r\n");
         } else {
             shell_printf("%02u: input-device, %u instance(s)\r\n",
@@ -3664,9 +3830,10 @@ static void shell_discovery_found_cb(uint8_t addr,
         }
     } else {
         if (device->has_status) {
-            shell_printf("Device %2u: present (status=0x%02X)\r\n",
+            shell_printf("Device %2u: present (status=0x%02X)%s\r\n",
                    (unsigned)addr,
-                   (unsigned)device->status);
+                   (unsigned)device->status,
+                   device->has_identity_collision ? ", contested" : "");
         } else {
             shell_printf("Device %2u: input-device (%u instance(s))\r\n",
                    (unsigned)addr,
@@ -3763,7 +3930,11 @@ static uint8_t shell_discover_bus(bool detailed)
      */
     uint32_t early_rx_before = g_dali_stats.rx_reply_early;
     uint32_t late_rx_before  = g_dali_stats.rx_reply_late;
-    uint32_t event_rx_before = g_dali_stats.rx_event_unroutable +
+    /* Every event-shaped frame the walk saw, routed or not. Events are routed
+     * in every scheduler state now, so the unroutable bucket this note used to
+     * read stays at zero; counting only it would report a quiet bus. */
+    uint32_t event_rx_before = g_dali_stats.unsolicited_events_routed +
+                               g_dali_stats.rx_event_unroutable +
                                g_dali_stats.rx_event_no_subscriber;
     uint32_t other_rx_before = g_dali_stats.rx_reply_superseded +
                                g_dali_stats.rx_undecodable_ignored +
@@ -3826,7 +3997,8 @@ static uint8_t shell_discover_bus(bool detailed)
 
     uint32_t early_rx = g_dali_stats.rx_reply_early - early_rx_before;
     uint32_t late_rx  = g_dali_stats.rx_reply_late - late_rx_before;
-    uint32_t event_rx = (g_dali_stats.rx_event_unroutable +
+    uint32_t event_rx = (g_dali_stats.unsolicited_events_routed +
+                         g_dali_stats.rx_event_unroutable +
                          g_dali_stats.rx_event_no_subscriber) - event_rx_before;
     uint32_t other_rx = (g_dali_stats.rx_reply_superseded +
                          g_dali_stats.rx_undecodable_ignored +
@@ -3845,6 +4017,29 @@ static uint8_t shell_discover_bus(bool detailed)
                 shell_printf("    a%u: contested\r\n", (unsigned)addr);
             }
         }
+    }
+    if (inventory->identity_collision_count > 0u) {
+        /*
+         * The same condition the note above reports, and the quieter case of
+         * it: units of one product in one state answer every query the walk
+         * makes alike, so they are listed above as one unit. Only their
+         * identification numbers collide. Without this the second unit is
+         * simply missing, with nothing to say where it went, so the remedy is
+         * given here rather than left for 'backup save' to name.
+         */
+        shell_printf("  note: %u listed address(es) hold more than one unit.\r\n",
+                     (unsigned)inventory->identity_collision_count);
+        shell_printf("  They answer alike; their identification numbers "
+                     "collide.\r\n");
+        for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+            const DaliDiscoveryDeviceInfo *entry =
+                dali_discovery_inventory_get(inventory, addr);
+            if (entry != NULL && entry->has_identity_collision) {
+                shell_printf("    a%u: contested\r\n", (unsigned)addr);
+            }
+        }
+        shell_printf("  'address aN clear', then 'commission unaddressed', "
+                     "separates them.\r\n");
     }
     if (inventory->undecodable_device_count > 0u) {
         /*
@@ -3931,7 +4126,10 @@ static void cmd_inventory(void)
                 shell_printf("%02u: input-device", (unsigned)addr);
             }
             if (entry->has_version) {
-                shell_printf(", v%u", (unsigned)(entry->version / 2u));
+                char version[DALI_CLI_VERSION_TEXT_MAX];
+                dali_cli_format_gear_version(version, sizeof(version),
+                                             entry->version);
+                shell_printf(", %s", version);
             }
             if (entry->has_actual_level) {
                 shell_printf(", level=%u", (unsigned)entry->actual_level);
@@ -3953,14 +4151,21 @@ static void cmd_inventory(void)
             if (entry->has_input_device) {
                 shell_printf(", input-device(%u instances)", (unsigned)entry->instance_count);
             }
+            if (entry->has_identity_collision) {
+                shell_printf(", contested (identity collides)");
+            }
             shell_printf("\r\n");
             found++;
         }
     }
 
     shell_printf("Inventory: %u device(s)", (unsigned)found);
-    if (inventory->undecodable_count > 0u) {
-        shell_printf(", %u contested", (unsigned)inventory->undecodable_count);
+    /* Both kinds of contested gear address. The second kind is also counted
+     * as a device above, because it is listed; the two counts overlap there. */
+    const unsigned gear_contested = (unsigned)inventory->undecodable_count +
+                                    (unsigned)inventory->identity_collision_count;
+    if (gear_contested > 0u) {
+        shell_printf(", %u contested", gear_contested);
     }
     if (inventory->undecodable_device_count > 0u) {
         shell_printf(", %u contested (device space)",
@@ -4885,6 +5090,30 @@ static void cmd_export_inventory(void)
                             shell_printf(", \"error\": %s",
                                    dali_is_yes(info->error) ? "true" : "false");
                         }
+                        if (info->has_event_scheme) {
+                            shell_printf(", \"event_scheme\": %u",
+                                   (unsigned)info->event_scheme);
+                        }
+                        if (info->has_event_priority) {
+                            shell_printf(", \"event_priority\": %u",
+                                   (unsigned)info->event_priority);
+                        }
+                        if (info->has_instance_groups) {
+                            /* MASK slots as null, so the array keeps its slot
+                             * positions: primary, group 1, group 2. */
+                            shell_printf(", \"instance_groups\": [");
+                            for (uint8_t slot = 0u;
+                                 slot < DALI_INPUT_INSTANCE_GROUP_SLOTS; slot++) {
+                                uint8_t g = info->instance_groups[slot];
+                                if (g == DALI_INPUT_INSTANCE_GROUP_NONE) {
+                                    shell_printf("%snull", slot > 0u ? ", " : "");
+                                } else {
+                                    shell_printf("%s%u", slot > 0u ? ", " : "",
+                                           (unsigned)g);
+                                }
+                            }
+                            shell_printf("]");
+                        }
                     } else {
                         shell_printf(", \"query_error\": %d", (int)type_err);
                     }
@@ -5147,27 +5376,82 @@ static void cmd_identify(const DaliCliTokens *t)
         return;
     }
 
+    /*
+     * Read the level to come back to before changing it. The blink ends on
+     * RECALL MIN LEVEL, so without this every identify left the lamp at min,
+     * whatever it had been. MASK is the gear saying it has no level to give,
+     * which is no more use here than silence.
+     */
+    uint8_t         before     = 0u;
+    const DaliError before_err = shell_query_u8(target, DALI_CMD_QUERY_ACTUAL_LEVEL,
+                                                0u, &before);
+    const bool      restorable = before_err == DALI_OK &&
+                                 before != DALI_DAPC_MASK_LEVEL;
+    if (!restorable) {
+        shell_printf("identify: level before unreadable (%s); a%u will be left "
+                     "at min\r\n",
+                     before_err == DALI_OK ? "MASK" : shell_err(before_err),
+                     (unsigned)addr);
+    }
+
     shell_printf("Blinking addr %u between min and max for %u seconds.\r\n",
            (unsigned)addr,
            (unsigned)((SHELL_IDENTIFY_CYCLES * SHELL_IDENTIFY_STEP_MS * 2u) / 1000u));
 
+    DaliError err = DALI_OK;
     for (uint8_t i = 0u; i < SHELL_IDENTIFY_CYCLES; i++) {
-        DaliError err = shell_send_no_reply(&max_frame, false);
+        err = shell_send_no_reply(&max_frame, false);
         if (err != DALI_OK) {
             shell_printf("identify: max ERR %s\r\n", shell_err(err));
-            return;
+            break;
         }
         vTaskDelay(pdMS_TO_TICKS(SHELL_IDENTIFY_STEP_MS));
 
         err = shell_send_no_reply(&min_frame, false);
         if (err != DALI_OK) {
             shell_printf("identify: min ERR %s\r\n", shell_err(err));
-            return;
+            break;
         }
         vTaskDelay(pdMS_TO_TICKS(SHELL_IDENTIFY_STEP_MS));
     }
 
-    shell_printf("identify: done\r\n");
+    if (!restorable) {
+        if (err == DALI_OK) {
+            shell_printf("identify: done\r\n");
+        }
+        return;
+    }
+
+    /*
+     * Put the level back even when the blink stopped early. An abort means the
+     * front end went away mid-blink, which is exactly when nobody is left to
+     * do it by hand, so this frame goes out through the abort-exempt path the
+     * discovery cleanup uses. OFF for 0, DAPC for anything else: DAPC fades at
+     * the gear's own fade time, and DALI has no instant way to reach an
+     * arbitrary level.
+     */
+    const char *done = err == DALI_OK ? "done, " : "";
+    DaliFrame   restore_frame;
+    DaliError   restore_err = before == 0u
+                            ? dali_control_build_off(target, &restore_frame)
+                            : dali_control_build_dapc(target, before, &restore_frame);
+    if (restore_err == DALI_OK) {
+        restore_err = shell_sched_sync_impl(&restore_frame, false, 0u, false,
+                                            NULL, false);
+    }
+    if (before == 0u) {
+        if (restore_err == DALI_OK) {
+            shell_printf("identify: %sswitched off again\r\n", done);
+        } else {
+            shell_printf("identify: switching off again ERR %s\r\n",
+                         shell_err(restore_err));
+        }
+    } else if (restore_err == DALI_OK) {
+        shell_printf("identify: %slevel %u restored\r\n", done, (unsigned)before);
+    } else {
+        shell_printf("identify: restoring level %u ERR %s\r\n",
+                     (unsigned)before, shell_err(restore_err));
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -5604,18 +5888,18 @@ static uint8_t      s_backup_blob[DALI_SNAPSHOT_BLOB_MAX];
 /*
  * `backup import` staging.
  *
- * A full snapshot encodes to DALI_SNAPSHOT_BLOB_MAX bytes, which is 4880 hex
+ * A full snapshot encodes to DALI_SNAPSHOT_BLOB_MAX bytes, which is 6416 hex
  * characters against a DALI_SHELL_LINE_MAX of 80 and a token limit of 31. A
  * blob therefore cannot arrive on one line however it is spelled, so import is
  * a short mode: `begin`, some number of chunk lines, `end`.
  *
  * The staging buffer is s_backup_blob itself rather than a second one, because
- * a spare 2440 bytes to hold a copy of something only one command at a time can
+ * a spare 3208 bytes to hold a copy of something only one command at a time can
  * be using is not worth it. What that costs is an interlock: every other path
  * that writes s_backup_blob -- save, export, and the storage load restore()
  * goes through -- refuses while an import is open. That refusal is a feature
  * and not just a guard, because the alternative is a `backup save` typed in the
- * middle of an 82-line paste silently destroying it.
+ * middle of a 107-line paste silently destroying it.
  *
  * s_backup itself is untouched until `end` decodes successfully, so an
  * abandoned import leaves the held backup exactly as it was.
@@ -5690,6 +5974,10 @@ static void shell_backup_load_from_storage(void)
  * backup or a plan is only as good as its anchors and a single missed read is
  * the difference between a unit that can be put back and one that cannot. Each
  * space is read from its own Bank 0 and neither substitutes for the other.
+ *
+ * A gear address whose identity collided during the walk is retried too, and a
+ * read that decodes here withdraws the collision: two units cannot give one
+ * identification number, so the walk's two collisions were something else.
  */
 static void shell_fill_missing_identities(DaliDiscoveryInventory       *inventory,
                                           const DaliDiscoveryTransport *transport)
@@ -5703,8 +5991,7 @@ static void shell_fill_missing_identities(DaliDiscoveryInventory       *inventor
         DaliMemoryBank0Identity identity;
         if (entry->has_control_gear && !entry->has_identity &&
             dali_memory_read_bank0_identity(transport, addr, &identity) == DALI_OK) {
-            entry->has_identity = true;
-            entry->identity     = identity;
+            (void)dali_discovery_inventory_store_identity(inventory, addr, &identity);
         }
         if (entry->has_input_device && !entry->has_device_identity &&
             dali_memory_read_device_bank0_identity(transport, addr,
@@ -5712,6 +5999,80 @@ static void shell_fill_missing_identities(DaliDiscoveryInventory       *inventor
             entry->has_device_identity = true;
             entry->device_identity     = identity;
         }
+    }
+}
+
+typedef struct {
+    uint8_t devices;    /* device entries whose instances were read */
+    uint8_t recorded;   /* instances now in the backup */
+    uint8_t dropped;    /* read, but past DALI_SNAPSHOT_MAX_INSTANCES */
+    uint8_t unread;     /* did not answer QUERY INSTANCE TYPE */
+} ShellInstanceRecordCounts;
+
+/*
+ * Read and record the settings of every instance of every control device the
+ * snapshot just recorded, eleven-odd queries each. Called with the bus claimed.
+ * A device the scan saw without an instance count is skipped; one that answers
+ * fewer instances than it claims has the rest counted as unread.
+ */
+static void shell_backup_record_instances(const DaliDiscoveryInventory *inventory,
+                                          const DaliDiscoveryTransport *transport,
+                                          ShellInstanceRecordCounts    *counts)
+{
+    for (uint8_t e = 0u; e < s_backup.entry_count; e++) {
+        const DaliSnapshotEntry *entry = &s_backup.entries[e];
+        if (entry->space != DALI_SNAPSHOT_SPACE_DEVICE) {
+            continue;
+        }
+        const DaliDiscoveryDeviceInfo *device =
+            dali_discovery_inventory_get(inventory, entry->short_address);
+        if (device == NULL || !device->has_instance_count) {
+            continue;
+        }
+        const uint8_t count = device->instance_count < DALI_INSTANCE_COUNT
+                                  ? device->instance_count
+                                  : (uint8_t)DALI_INSTANCE_COUNT;
+        counts->devices++;
+
+        for (uint8_t instance = 0u; instance < count; instance++) {
+            DaliInstanceSettings settings;
+            DaliError err = dali_restore_read_instance_settings(
+                transport, entry->short_address, instance, &settings);
+            if (err != DALI_OK) {
+                counts->unread++;
+                continue;
+            }
+            err = dali_snapshot_add_instance(&s_backup, e, instance, &settings);
+            if (err == DALI_OK) {
+                counts->recorded++;
+            } else if (err == DALI_ERR_FULL) {
+                counts->dropped++;
+            } else {
+                counts->unread++;
+            }
+        }
+    }
+}
+
+static void shell_backup_report_instances(const char                      *verb,
+                                          const ShellInstanceRecordCounts *counts)
+{
+    if (counts->devices == 0u) {
+        return;
+    }
+    shell_printf("%s: recorded the settings of %u instance(s) on %u control "
+                 "device(s)\r\n",
+                 verb, (unsigned)counts->recorded, (unsigned)counts->devices);
+    if (counts->dropped > 0u) {
+        shell_printf("%s: %u more instance(s) NOT recorded: a backup holds at most "
+                     "%u\r\n",
+                     verb, (unsigned)counts->dropped,
+                     (unsigned)DALI_SNAPSHOT_MAX_INSTANCES);
+    }
+    if (counts->unread > 0u) {
+        shell_printf("%s: %u instance(s) did not answer and are NOT recorded; "
+                     "'instances <addr>' shows which\r\n",
+                     verb, (unsigned)counts->unread);
     }
 }
 
@@ -5733,6 +6094,20 @@ static void shell_backup_print_entry(const DaliSnapshotEntry *entry)
         shell_printf(" groups=0x%04X", (unsigned)entry->groups);
     }
     shell_printf("\r\n");
+}
+
+/* The recorded instances of the device entry at `entry_index`, under it. */
+static void shell_backup_print_instances_of(uint8_t entry_index)
+{
+    for (uint8_t i = 0u; i < s_backup.instance_count; i++) {
+        const DaliSnapshotInstance *inst = &s_backup.instances[i];
+        if (inst->entry_index != entry_index) {
+            continue;
+        }
+        shell_printf("    instance %u: ", (unsigned)inst->instance);
+        shell_print_instance_settings(&inst->settings);
+        shell_printf("\r\n");
+    }
 }
 
 /*
@@ -5814,6 +6189,14 @@ static void cmd_backup_import(const DaliCliTokens *t, const DaliCliCommandSpec *
             shell_printf("backup import: %u byte(s) did not decode (%s); the "
                          "held backup is unchanged\r\n",
                    (unsigned)len, shell_err(err));
+            /* Named, because it is the one refusal an operator will meet
+             * with a blob that was valid when it was exported. */
+            if (len > 4u && memcmp(s_backup_blob, "DBK1", 4u) == 0 &&
+                s_backup_blob[4] == 1u) {
+                shell_printf("backup import: it is a version-1 backup, from "
+                             "before instance settings were recorded; take a "
+                             "new one with 'backup save'\r\n");
+            }
             return;
         }
 
@@ -5827,9 +6210,11 @@ static void cmd_backup_import(const DaliCliTokens *t, const DaliCliCommandSpec *
             }
         }
 
-        shell_printf("backup import: %u entr%s from %u byte(s)\r\n",
+        shell_printf("backup import: %u entr%s and %u instance setting(s) from "
+                     "%u byte(s)\r\n",
                (unsigned)s_backup.entry_count,
                s_backup.entry_count == 1u ? "y" : "ies",
+               (unsigned)s_backup.instance_count,
                (unsigned)len);
         if (unanchored > 0u) {
             shell_printf("backup import: %u entr%s %s no identification "
@@ -5907,12 +6292,14 @@ static void cmd_backup(const DaliCliTokens *t)
             }
             return;
         }
-        shell_printf("backup: %u entr%s, %s\r\n",
+        shell_printf("backup: %u entr%s and %u instance setting(s), %s\r\n",
                (unsigned)s_backup.entry_count,
                s_backup.entry_count == 1u ? "y" : "ies",
+               (unsigned)s_backup.instance_count,
                s_backup_from_storage ? "loaded from storage" : "saved this session");
         for (uint8_t i = 0u; i < s_backup.entry_count; i++) {
             shell_backup_print_entry(&s_backup.entries[i]);
+            shell_backup_print_instances_of(i);
         }
         return;
     }
@@ -5936,7 +6323,7 @@ static void cmd_backup(const DaliCliTokens *t)
          * Printed as the `backup import` script that reproduces it, not as one
          * long hex line. `export inventory` already prints these facts in a
          * readable form; what this produces is meant to be fed back, and a full
-         * blob is 4880 hex characters against an 80-character line -- so a
+         * blob is 6416 hex characters against an 80-character line -- so a
          * single line would have to be re-chunked by hand before it could be,
          * which is the transcription step the pair exists to avoid. Redirect it
          * to a file, paste the file back.
@@ -6003,10 +6390,29 @@ static void cmd_backup(const DaliCliTokens *t)
     uint8_t unanchored = 0u;
     shell_fill_missing_identities(inventory, &transport);
 
+    /*
+     * Gear with no short address is invisible to the walk above: it answers
+     * nothing addressed, so it is not in the inventory, the snapshot, the entry
+     * count or the output. Asked here, inside the same claim, because nothing
+     * else in a save would ever mention it. Reported below with the contested
+     * addresses, which go missing the same way. The device space has no
+     * counterpart: Part 103 QUERY MISSING SHORT ADDRESS is not implemented.
+     */
+    DaliError              missing_err = DALI_OK;
+    const ShellUnaddressed missing     = shell_unaddressed_probe(&missing_err);
+
+    /* The snapshot is built inside the claim, because recording each control
+     * device's instance settings is more bus traffic and needs it too. */
+    err = dali_snapshot_from_inventory(&s_backup, inventory);
+    ShellInstanceRecordCounts instance_counts;
+    memset(&instance_counts, 0, sizeof(instance_counts));
+    if (err == DALI_OK) {
+        shell_backup_record_instances(inventory, &transport, &instance_counts);
+    }
+
     shell_inventory_replace(inventory);
     shell_bus_release();
 
-    err = dali_snapshot_from_inventory(&s_backup, inventory);
     if (err != DALI_OK) {
         s_backup_valid = false;
         dali_cli_print_error(&s_out, "backup save", err);
@@ -6025,6 +6431,7 @@ static void cmd_backup(const DaliCliTokens *t)
            (unsigned)s_backup.entry_count,
            s_backup.entry_count == 1u ? "y" : "ies",
            (unsigned)found);
+    shell_backup_report_instances("backup", &instance_counts);
 
     if (unanchored > 0u) {
         shell_printf("backup: %u entr%s %s no identification number and cannot "
@@ -6043,26 +6450,28 @@ static void cmd_backup(const DaliCliTokens *t)
      * Contested addresses, which are the worse case and the quieter one.
      *
      * An unanchored entry is at least an entry: the operator can see the
-     * address in `backup status` and knows one fixture needs doing by hand. An
-     * address answering undecodably produces no entry at all: the scan marks it
-     * occupied but deliberately not `present`, and the snapshot records only
-     * what is present. Without this the units on it are missing from the
-     * backup, from its entry count, and from the output, and the first anyone
-     * hears of it is a restore that puts back fewer fixtures than went in.
+     * address in `backup status` and knows one fixture needs doing by hand. A
+     * contested address produces no entry at all. One answering undecodably is
+     * marked occupied but deliberately not `present`, and the snapshot records
+     * only what is present; one listed as present whose identity collided is
+     * left out by the snapshot itself. Without this the units on it are
+     * missing from the backup, from its entry count, and from the output, and
+     * the first anyone hears of it is a restore that puts back fewer fixtures
+     * than went in.
      */
-    if (inventory->undecodable_count > 0u ||
-        inventory->undecodable_device_count > 0u) {
-        shell_printf("backup: %u address(es) answered undecodably and are NOT "
-                     "recorded here\r\n",
-               (unsigned)(inventory->undecodable_count +
-                          inventory->undecodable_device_count));
+    const unsigned gear_contested = (unsigned)inventory->undecodable_count +
+                                    (unsigned)inventory->identity_collision_count;
+    if (gear_contested > 0u || inventory->undecodable_device_count > 0u) {
+        shell_printf("backup: %u address(es) are contested and NOT recorded "
+                     "here\r\n",
+               gear_contested + (unsigned)inventory->undecodable_device_count);
         for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
             const DaliDiscoveryDeviceInfo *device =
                 dali_discovery_inventory_get(inventory, addr);
             if (device == NULL) {
                 continue;
             }
-            if (device->has_undecodable_activity) {
+            if (dali_discovery_gear_address_contested(device)) {
                 shell_printf("  gear a%u: contested\r\n", (unsigned)addr);
             }
             if (device->has_undecodable_device_activity) {
@@ -6072,18 +6481,42 @@ static void cmd_backup(const DaliCliTokens *t)
         shell_printf("backup: units sharing one short address answer as one, so "
                      "no identity can be read through them and nothing here can "
                      "put them back\r\n");
-        if (inventory->undecodable_count > 0u) {
+        if (gear_contested > 0u) {
             shell_printf("backup: 'address <aN> clear' frees the gear ones for "
                          "'commission unaddressed'\r\n");
         }
-        /* The two spaces get different advice because only one of them has a
-         * verb. `address` is control-gear only, and the Part 103 SET SHORT
-         * ADDRESS is reached from `restore` alone -- which needs a unit that
-         * already answers, and a contested one does not answer as itself. */
+        /* A device address is contested here only when it answered with
+         * undecodable activity, which is also what opens the contested arm of
+         * `address <dN> clear`. Devices sharing an address that read as
+         * silence instead are not caught here at all; they show up as entries
+         * missing from the bus. */
         if (inventory->undecodable_device_count > 0u) {
-            shell_printf("backup: nothing here de-addresses a control device, "
-                         "so a contested d<N> needs a hardware pass\r\n");
+            shell_printf("backup: 'address <dN> clear' frees the device ones for "
+                         "'commission devices'\r\n");
         }
+    }
+
+    /*
+     * Warned, not refused: saving with a unit deliberately left unaddressed is
+     * a legitimate thing to do, and the operator is the one who knows whether
+     * this is that. What must not happen is a save that drops a fixture and
+     * says nothing.
+     */
+    if (missing == SHELL_UNADDRESSED_SOME &&
+        missing_err == DALI_ERR_RX_ACTIVITY) {
+        shell_printf("backup: more than one unit on the bus reports no short "
+                     "address, and none of them is recorded here\r\n");
+        shell_printf("backup: run 'commission unaddressed', then 'backup save' "
+                     "again, to include them\r\n");
+    } else if (missing == SHELL_UNADDRESSED_SOME) {
+        shell_printf("backup: gear on the bus reports no short address and is "
+                     "NOT recorded here\r\n");
+        shell_printf("backup: run 'commission unaddressed', then 'backup save' "
+                     "again, to include it\r\n");
+    } else if (missing == SHELL_UNADDRESSED_UNREADABLE) {
+        shell_printf("backup: whether any gear has no short address is "
+                     "unreadable (%s); a unit with none would be missing "
+                     "here\r\n", shell_err(missing_err));
     }
 
     uint32_t len = 0u;
@@ -6135,17 +6568,20 @@ static void shell_restore_print_conflicts(const char                *verb,
     }
 
     /*
-     * A contested target earns a line of follow-on that the other kinds do
-     * not. Every other conflict names an address an operator can go and look
-     * at; this one names an address that holds no unit anything can address,
-     * and the fix is a sequence rather than a lookup. Read from the stored
-     * conflicts rather than the total for the same reason the list above is:
-     * one past the cap was never recorded, so nothing here knows its kind.
+     * A contested address earns a line of follow-on that the other kinds do
+     * not, whether it is reported for itself or as the target a move wanted.
+     * Every other conflict names an address an operator can go and look at;
+     * this one names an address that holds no unit anything can address
+     * alone, and the fix is a sequence rather than a lookup. Read from the
+     * stored conflicts rather than the total for the same reason the list
+     * above is: one past the cap was never recorded, so nothing here knows its
+     * kind.
      */
     bool gear_contested   = false;
     bool device_contested = false;
     for (uint8_t i = 0u; i < count; i++) {
-        if (items[i].kind != DALI_RESTORE_CONFLICT_TARGET_CONTESTED) {
+        if (items[i].kind != DALI_RESTORE_CONFLICT_TARGET_CONTESTED &&
+            items[i].kind != DALI_RESTORE_CONFLICT_CONTESTED) {
             continue;
         }
         if (items[i].space == DALI_SNAPSHOT_SPACE_GEAR) {
@@ -6155,14 +6591,14 @@ static void shell_restore_print_conflicts(const char                *verb,
         }
     }
     if (gear_contested) {
-        shell_printf("%s: free a contested target with 'address <aN> clear', then "
-                     "'commission unaddressed', then run this again\r\n", verb);
+        shell_printf("%s: free a contested address with 'address <aN> clear', "
+                     "then 'commission unaddressed', then run this again\r\n",
+                     verb);
     }
-    /* Split by space for the reason 'backup save' splits it: only the gear
-     * space has a verb that takes an address away. */
+    /* Split by space because the walk that re-addresses them differs. */
     if (device_contested) {
-        shell_printf("%s: nothing here de-addresses a control device, so a "
-                     "contested d<N> target needs a hardware pass\r\n", verb);
+        shell_printf("%s: free a contested d<N> with 'address <dN> clear', then "
+                     "'commission devices', then run this again\r\n", verb);
     }
 }
 
@@ -6286,72 +6722,26 @@ static bool shell_restore_build_group_plan(const char           *verb,
     return true;
 }
 
-/* One move: DTR0 = encoded destination, then SET SHORT ADDRESS DTR0 to the unit
- * at its current address, as one contiguous sequence so nothing can redirect
- * DTR0 between the two frames. */
-static DaliError shell_restore_apply_move(const DaliRestoreMove *move)
+/*
+ * One move: DTR0 = destination, read back from the unit at its current address,
+ * then SET SHORT ADDRESS DTR0 only when the read-back matches. Every move after
+ * the first follows a confirmation that left 0x0B -- a5 encoded -- in every
+ * other unit's DTR0, so a unit that missed the load would otherwise land on a5.
+ *
+ * Nothing is reported to the integration here. A move is reported once it is
+ * confirmed, by short_address_moved(); reporting it as sent told the
+ * integration an address had changed when, on the 1k bus, it had not.
+ */
+static DaliError shell_restore_apply_move(const DaliTransport    *transport,
+                                          const DaliRestoreMove  *move,
+                                          DaliRestoreWriteResult *write)
 {
-    if (move->to >= DALI_SHORT_ADDRESS_COUNT ||
-        move->from >= DALI_SHORT_ADDRESS_COUNT) {
-        return DALI_ERR_INVALID;
+    if (move->to >= DALI_SHORT_ADDRESS_COUNT) {
+        memset(write, 0, sizeof(*write));
+        return DALI_ERR_INVALID;   /* a restore places units; it never clears */
     }
-
-    /*
-     * Both spaces take the address encoded as (a << 1) | 1 here, because both
-     * SET SHORT ADDRESS DTR0 commands read it from DTR0. The Part 103 *special*
-     * PROGRAM SHORT ADDRESS takes the raw 6-bit value instead — a different
-     * command, used only inside an addressing window, and not this path.
-     */
-    const uint8_t encoded = dali_commissioning_encode_short_address(move->to);
-    const bool    is_gear = (move->space == DALI_SNAPSHOT_SPACE_GEAR);
-
-    const DaliCommandId cmd_id = is_gear ? DALI_CMD_SET_SHORT_ADDRESS_DTR0
-                                         : DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0;
-    const DaliCommandInfo *cmd = dali_command_lookup(cmd_id);
-    if (cmd == NULL) {
-        return DALI_ERR_INVALID;
-    }
-
-    DaliTarget target = { .type = DALI_ADDR_SHORT, .address = move->from };
-    DaliFrame  dtr_frame;
-    DaliFrame  config_frame;
-    DaliError  err;
-
-    if (is_gear) {
-        err = dali_control_build_dtr(DALI_DTR0, encoded, &dtr_frame);
-        if (err == DALI_OK) {
-            err = dali_control_build_config(target, cmd_id, 0u, &config_frame);
-        }
-    } else {
-        /* The device space has its own DTR0: a 24-bit control-device special,
-         * not the 16-bit gear one. Loading the gear DTR0 and then addressing a
-         * control device would send the command with whatever the device's own
-         * DTR0 happened to hold. */
-        err = dali_build_control_device_dtr_data(DALI_DTR0, encoded, &dtr_frame);
-        if (err == DALI_OK) {
-            err = dali_build_device_command(move->from, cmd_id, &config_frame);
-        }
-    }
-    if (err != DALI_OK) {
-        return err;
-    }
-
-    DaliSequence seq = {
-        .steps = {
-            { .frame = dtr_frame },
-            { .frame = config_frame, .send_twice = cmd->send_twice },
-        },
-        .step_count = 2u,
-    };
-
-    DaliSequenceResult seq_result;
-    err = shell_sched_sequence_sync(&seq, &seq_result);
-    if (err == DALI_OK && is_gear) {
-        /* Only the gear space has a cache on the other side of this hook; a
-         * device short address is not something the integration tracks. */
-        shell_notify_config_applied(target, cmd_id, encoded);
-    }
-    return err;
+    return dali_restore_write_short_address(transport, move->space, move->from,
+                                            move->to, false, write);
 }
 
 /* " g0 g3", or " none", so a mask reads the way `discover` prints one. */
@@ -6569,6 +6959,224 @@ static void cmd_restore_groups(const DaliCliTokens      *t,
                  "'discover'\r\n");
 }
 
+/* " scheme instance -> device-instance, enabled no -> yes" for a mask. */
+static void shell_restore_print_instance_changes(uint8_t                     mask,
+                                                 const DaliInstanceSettings *from,
+                                                 const DaliInstanceSettings *to)
+{
+    bool first = true;
+    for (uint8_t bit = 0x01u; bit <= DALI_RESTORE_INSTANCE_GROUPS; bit <<= 1u) {
+        if ((mask & bit) == 0u) {
+            continue;
+        }
+        shell_printf("%s %s ", first ? "" : ",", dali_restore_instance_field_name(bit));
+        shell_print_instance_field(bit, from);
+        shell_printf(" -> ");
+        shell_print_instance_field(bit, to);
+        first = false;
+    }
+}
+
+typedef struct {
+    uint8_t located;     /* recorded instances whose device was found */
+    uint8_t correct;     /* already holding what was recorded */
+    uint8_t changes;     /* needing at least one write */
+    uint8_t skipped;     /* not answering, or now a different type */
+    uint8_t unlocated;   /* their device could not be found */
+    uint8_t applied;     /* written and read back as recorded */
+    uint8_t mismatch;    /* written, but read back otherwise or not at all */
+} ShellInstanceRestoreCounts;
+
+/*
+ * One recorded instance: read it where its device answers now, report what
+ * differs, and with `apply` write that and read it back. False when the bus
+ * failed and the run should stop.
+ */
+static bool shell_restore_one_instance(const char                 *verb,
+                                       const DaliDiscoveryTransport *transport,
+                                       uint8_t                     addr,
+                                       const DaliSnapshotInstance *rec,
+                                       bool                        apply,
+                                       ShellInstanceRestoreCounts *counts)
+{
+    const DaliSnapshotEntry *entry = &s_backup.entries[rec->entry_index];
+    DaliInstanceSettings     current;
+    DaliError err = dali_restore_read_instance_settings(transport, addr,
+                                                        rec->instance, &current);
+    if (err == DALI_ERR_TIMEOUT) {
+        counts->skipped++;
+        shell_printf("  d%u.%u: does not answer; skipped\r\n",
+                     (unsigned)addr, (unsigned)rec->instance);
+        return true;
+    }
+    if (err != DALI_OK) {
+        shell_printf("  d%u.%u: %s\r\n", (unsigned)addr, (unsigned)rec->instance,
+                     shell_err(err));
+        shell_printf("%s: stopped; re-run 'restore instances' to see what "
+                     "remains\r\n", verb);
+        return false;
+    }
+    if (rec->settings.has_type && current.has_type &&
+        rec->settings.type != current.type) {
+        /* A different kind of instance now: its settings would mean something
+         * else, so nothing is written to it. */
+        counts->skipped++;
+        shell_printf("  d%u.%u: now type %u, recorded as type %u; skipped\r\n",
+                     (unsigned)addr, (unsigned)rec->instance,
+                     (unsigned)current.type, (unsigned)rec->settings.type);
+        return true;
+    }
+
+    const uint8_t mask = dali_restore_instance_write_mask(&rec->settings, &current);
+    if (mask == 0u) {
+        counts->correct++;
+        return true;
+    }
+    counts->changes++;
+
+    shell_printf("  d%u.%u", (unsigned)addr, (unsigned)rec->instance);
+    if (addr != entry->short_address) {
+        /* Written where the device answers now, which differs from where the
+         * backup found it until the addresses are restored. */
+        shell_printf(" (backup d%u)", (unsigned)entry->short_address);
+    }
+    shell_printf(":");
+    shell_restore_print_instance_changes(mask, &current, &rec->settings);
+    if (!apply) {
+        shell_printf("\r\n");
+        return true;
+    }
+
+    err = dali_restore_write_instance_settings(transport, addr, rec->instance,
+                                               &rec->settings, mask);
+    if (err != DALI_OK) {
+        shell_printf("  %s\r\n", shell_err(err));
+        shell_printf("%s: stopped; re-run 'restore instances' to see what "
+                     "remains\r\n", verb);
+        return false;
+    }
+
+    /* Each write is unacknowledged, so only a read says it landed. */
+    DaliInstanceSettings after;
+    err = dali_restore_read_instance_settings(transport, addr, rec->instance, &after);
+    const uint8_t remaining = (err == DALI_OK)
+        ? dali_restore_instance_write_mask(&rec->settings, &after) : mask;
+    if (err == DALI_OK && remaining == 0u) {
+        counts->applied++;
+        shell_printf("  OK\r\n");
+    } else {
+        counts->mismatch++;
+        shell_printf("  NOT CONFIRMED:");
+        for (uint8_t bit = 0x01u; bit <= DALI_RESTORE_INSTANCE_GROUPS; bit <<= 1u) {
+            if ((remaining & bit) != 0u) {
+                shell_printf(" %s", dali_restore_instance_field_name(bit));
+            }
+        }
+        shell_printf("\r\n");
+    }
+    return true;
+}
+
+/*
+ * `restore instances [apply]`: put each recorded control-device instance's
+ * generic settings back. Planned against a fresh scan, so each device is found
+ * by identification number wherever it answers now; read, compared and, with
+ * `apply`, written and read back one instance at a time.
+ */
+static void cmd_restore_instances(const DaliCliTokens      *t,
+                                  const DaliCliCommandSpec *usage)
+{
+    const bool apply = (t->count > 2u) && (strcmp(t->tok[2], "apply") == 0);
+
+    if (t->count > 3u || (t->count == 3u && !apply)) {
+        dali_cli_print_usage(&s_out, usage);
+        return;
+    }
+    /* The same authority as the group restore: it rewrites configuration on
+     * every recorded device, and an event scheme or group set wrongly is an
+     * occupancy or a switch that stops reaching its lights. */
+    if (apply &&
+        !shell_policy_allows(DALI_SHELL_ALLOW_COMMISSION, "restore instances apply")) {
+        return;
+    }
+
+    const char *verb = apply ? "restore instances apply" : "restore instances";
+    if (!shell_restore_refresh(verb)) {
+        return;
+    }
+    if (s_backup.instance_count == 0u) {
+        shell_printf("%s: the backup records no instance settings\r\n", verb);
+        return;
+    }
+    if (!shell_bus_claim(verb)) {
+        shell_printf("%s: bus busy\r\n", verb);
+        return;
+    }
+
+    const DaliDiscoveryTransport transport = shell_discovery_transport();
+    ShellInstanceRestoreCounts   counts;
+    memset(&counts, 0, sizeof(counts));
+    bool running = true;
+
+    for (uint8_t e = 0u; e < s_backup.entry_count && running; e++) {
+        bool    has_instances = false;
+        uint8_t recorded      = 0u;
+        for (uint8_t i = 0u; i < s_backup.instance_count; i++) {
+            if (s_backup.instances[i].entry_index == e) {
+                has_instances = true;
+                recorded++;
+            }
+        }
+        if (!has_instances) {
+            continue;
+        }
+
+        uint8_t                 addr     = 0u;
+        DaliRestoreConflictKind conflict = DALI_RESTORE_CONFLICT_MISSING;
+        if (!dali_restore_locate_device(&s_backup, e, &s_inventory_scratch, &addr,
+                                        &conflict)) {
+            counts.unlocated = (uint8_t)(counts.unlocated + recorded);
+            shell_printf("  backup d%u: %s; its %u instance(s) are not restored\r\n",
+                         (unsigned)s_backup.entries[e].short_address,
+                         dali_restore_conflict_name(conflict), (unsigned)recorded);
+            continue;
+        }
+
+        for (uint8_t i = 0u; i < s_backup.instance_count && running; i++) {
+            const DaliSnapshotInstance *rec = &s_backup.instances[i];
+            if (rec->entry_index != e) {
+                continue;
+            }
+            counts.located++;
+            running = shell_restore_one_instance(verb, &transport, addr, rec, apply,
+                                                 &counts);
+        }
+    }
+
+    shell_bus_release();
+
+    shell_printf("%s: %u located, %u already correct, %u to change, %u skipped, "
+                 "%u not located\r\n",
+                 verb, (unsigned)counts.located, (unsigned)counts.correct,
+                 (unsigned)counts.changes, (unsigned)counts.skipped,
+                 (unsigned)counts.unlocated);
+    if (!apply) {
+        if (counts.changes > 0u) {
+            shell_printf("restore instances: run 'restore instances apply' to "
+                         "execute\r\n");
+        } else if (counts.skipped == 0u && counts.unlocated == 0u) {
+            shell_printf("restore instances: every recorded instance matches the "
+                         "backup; nothing to do\r\n");
+        }
+        return;
+    }
+    shell_printf("%s: %u confirmed", verb, (unsigned)counts.applied);
+    if (counts.mismatch > 0u) {
+        shell_printf(", %u not confirmed by the read-back", (unsigned)counts.mismatch);
+    }
+    shell_printf("\r\n");
+}
+
 static void cmd_restore(const DaliCliTokens *t)
 {
     const DaliCliCommandSpec *usage = dali_cli_command_for_id(DALI_CLI_CMD_RESTORE);
@@ -6581,6 +7189,11 @@ static void cmd_restore(const DaliCliTokens *t)
      */
     if (strcmp(t->tok[1], "groups") == 0) {
         cmd_restore_groups(t, usage);
+        return;
+    }
+    /* Instance settings likewise: a repair of its own, never part of apply. */
+    if (strcmp(t->tok[1], "instances") == 0) {
+        cmd_restore_instances(t, usage);
         return;
     }
 
@@ -6629,25 +7242,76 @@ static void cmd_restore(const DaliCliTokens *t)
         return;
     }
 
+    DaliDiscoveryTransport transport = shell_discovery_transport();
     uint8_t applied = 0u;
     for (uint8_t i = 0u; i < plan.move_count; i++) {
         const DaliRestoreMove *move = &plan.moves[i];
-        DaliError err = shell_restore_apply_move(move);
-        shell_printf("  %u/%u %s%u -> %s%u: %s\r\n",
-               (unsigned)(i + 1u),
-               (unsigned)plan.move_count,
-               move->space == DALI_SNAPSHOT_SPACE_GEAR ? "a" : "d",
-               (unsigned)move->from,
-               move->space == DALI_SNAPSHOT_SPACE_GEAR ? "a" : "d",
-               (unsigned)move->to,
-               err == DALI_OK ? "OK" : shell_err(err));
+        const char *prefix = move->space == DALI_SNAPSHOT_SPACE_GEAR ? "a" : "d";
+
+        /*
+         * Sent is not moved. SET SHORT ADDRESS is unacknowledged and nothing
+         * here detects a collision, so each move is confirmed on the bus --
+         * the unit answers at `to`, `from` is silent, and the identification
+         * number at `to` is the unit's -- before the next move is allowed to
+         * rely on it.
+         */
+        DaliRestoreWriteResult write;
+        DaliRestoreMoveCheck check = DALI_RESTORE_MOVE_CONFIRMED;
+        DaliError probe_err = DALI_OK;
+        char note[SHELL_WRITE_NOTE_MAX];
+
+        DaliError err = shell_restore_apply_move(&transport, move, &write);
+        const bool sent = (err == DALI_OK) &&
+                          dali_restore_write_was_sent(write.outcome);
+        if (sent) {
+            err = dali_restore_confirm_move(&transport, move, &check, &probe_err);
+        }
+
         if (err != DALI_OK) {
+            shell_printf("  %u/%u %s%u -> %s%u: %s%s\r\n",
+                         (unsigned)(i + 1u), (unsigned)plan.move_count,
+                         prefix, (unsigned)move->from,
+                         prefix, (unsigned)move->to, shell_err(err),
+                         write.pair_attempted
+                             ? " while SET SHORT ADDRESS went out; the unit may "
+                               "have moved"
+                             : " before SET SHORT ADDRESS; nothing moved");
+        } else if (!sent) {
+            shell_printf("  %u/%u %s%u -> %s%u: %s; nothing further sent\r\n",
+                         (unsigned)(i + 1u), (unsigned)plan.move_count,
+                         prefix, (unsigned)move->from,
+                         prefix, (unsigned)move->to,
+                         shell_write_refusal(note, sizeof(note), prefix,
+                                             move->from, &write));
+        } else if (check != DALI_RESTORE_MOVE_CONFIRMED) {
+            shell_printf("  %u/%u %s%u -> %s%u: sent, not confirmed: %s%s%s\r\n",
+                         (unsigned)(i + 1u), (unsigned)plan.move_count,
+                         prefix, (unsigned)move->from,
+                         prefix, (unsigned)move->to,
+                         dali_restore_move_check_name(check),
+                         check == DALI_RESTORE_MOVE_UNREADABLE ? ", " : "",
+                         check == DALI_RESTORE_MOVE_UNREADABLE
+                             ? shell_err(probe_err) : "");
+        } else {
+            shell_printf("  %u/%u %s%u -> %s%u: OK\r\n",
+                         (unsigned)(i + 1u), (unsigned)plan.move_count,
+                         prefix, (unsigned)move->from,
+                         prefix, (unsigned)move->to);
+        }
+        if (sent && write.loads > 1u) {
+            shell_printf("    %s\r\n",
+                         shell_write_reload_note(note, sizeof(note), prefix,
+                                                 move->from, &write));
+        }
+
+        if (err != DALI_OK || !sent || check != DALI_RESTORE_MOVE_CONFIRMED) {
             /*
-             * Stop at the first failure. The plan's later moves assume this one
-             * landed, so continuing would send a unit onto an address the plan
-             * believes was vacated and this one proves was not. Re-running
-             * `restore plan` against the bus as it now stands is the recovery,
-             * and it is safe because nothing here opened an addressing window.
+             * Stop at the first move that did not provably land. The plan's
+             * later moves assume it did, so continuing would send a unit onto
+             * an address the plan believes was vacated and the bus has not
+             * shown to be. Re-running `restore plan` against the bus as it now
+             * stands is the recovery, and it is safe because nothing here
+             * opened an addressing window.
              */
             shell_printf("restore apply: stopped after %u of %u move(s); "
                          "re-run 'restore plan' to see what remains\r\n",
@@ -6656,20 +7320,40 @@ static void cmd_restore(const DaliCliTokens *t)
             break;
         }
         applied++;
+
+        /*
+         * The same report `address set` makes, on a stricter confirmation: both
+         * ends and the identification number at `to`. One move at a time, in
+         * plan order, is what keeps the integration's caches in step with the
+         * bus — the plan only moves a unit onto an address the bus has already
+         * shown vacated, so each report lands on a slot the previous one freed.
+         * Device moves report nothing; see the hooks in dali_shell.h.
+         */
+        if (move->space == DALI_SNAPSHOT_SPACE_GEAR &&
+            s_session.hooks.short_address_moved != NULL) {
+            s_session.hooks.short_address_moved(s_session.hooks.ctx,
+                                                move->from, move->to);
+        }
     }
 
     shell_bus_release();
 
     if (applied == plan.move_count) {
-        shell_printf("restore apply: %u move(s) applied\r\n", (unsigned)applied);
-        shell_printf("restore apply: verify with 'restore plan' or 'discover'\r\n");
+        shell_printf("restore apply: %u move(s) applied, each confirmed on the "
+                     "bus\r\n", (unsigned)applied);
+        shell_printf("restore apply: 'restore plan' shows anything the plan "
+                     "could not reach\r\n");
     }
 
-    /* Short addresses moved, so every cached view of the bus is stale. */
-    DaliDiscoveryInventory *inventory = &s_inventory_scratch;
-    if (s_session.hooks.inventory_changed != NULL && shell_inventory_snapshot(inventory)) {
-        s_session.hooks.inventory_changed(s_session.hooks.ctx, inventory);
-    }
+    /*
+     * Nothing is published as a whole here. The only inventory this session
+     * holds is the scan the plan was built from, which is the bus as it stood
+     * before the first move: handing that to the integration filed every moved
+     * gear's groups under the address it had just left, and persisted them
+     * there. Each confirmed gear move was reported above as it landed, and a
+     * move that could not be confirmed reports nothing, as it does for
+     * `address`.
+     */
 }
 
 static void cmd_dtrcheck(const DaliCliTokens *t)
@@ -6895,7 +7579,7 @@ static void cmd_iquery(const DaliCliTokens *t)
     uint8_t instance;
 
     if (!dali_cli_parse_short_addr(t->tok[1], &addr) ||
-        !dali_cli_parse_instance(t->tok[2], &instance)) {
+        !dali_cli_parse_instance_selector(t->tok[2], &instance)) {
         dali_cli_print_usage(&s_out, dali_cli_command_for_id(DALI_CLI_CMD_IQUERY));
         return;
     }
@@ -6924,6 +7608,10 @@ static void cmd_iquery(const DaliCliTokens *t)
     if (command.bit_length == 0u) {
         dali_cli_print_error(&s_out, spec->name, DALI_ERR_INVALID);
         return;
+    }
+    if (dali_cli_instance_selector_is_multi(instance)) {
+        shell_printf("note: %s can reach more than one instance; if several "
+                     "answer, the replies collide\r\n", t->tok[2]);
     }
 
     DaliFrame reply = {0u, 0u};
@@ -6967,7 +7655,7 @@ static void cmd_iconfig(const DaliCliTokens *t)
     uint8_t instance;
 
     if (!dali_cli_parse_short_addr(t->tok[1], &addr) ||
-        !dali_cli_parse_instance(t->tok[2], &instance)) {
+        !dali_cli_parse_instance_selector(t->tok[2], &instance)) {
         dali_cli_print_usage(&s_out, dali_cli_command_for_id(DALI_CLI_CMD_ICONFIG));
         return;
     }
@@ -7028,6 +7716,10 @@ static void cmd_iconfig(const DaliCliTokens *t)
         /* Transmitted, not acknowledged: read the value back with iquery before
          * treating an input-device configuration write as applied. */
         shell_printf("%s: transmitted; verify with iquery\r\n", spec->name);
+        if (s_session.hooks.instance_config_applied != NULL) {
+            s_session.hooks.instance_config_applied(s_session.hooks.ctx, addr,
+                                                    instance);
+        }
     }
 }
 

@@ -101,10 +101,9 @@ static const DaliCommandInfo s_command_table[] = {
     CMD(DALI_CMD_QUERY_DEVICE_CONTENT_DTR2, "QUERY CONTENT DTR2 (device)", 0x38u, 0x38u, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_UINT8, false, true),
     CMD(DALI_CMD_START_QUIESCENT_MODE, "START QUIESCENT MODE", 0x1Du, 0x1Du, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_NONE, true, true),
     CMD(DALI_CMD_STOP_QUIESCENT_MODE, "STOP QUIESCENT MODE", 0x1Eu, 0x1Eu, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_NONE, true, true),
-    /* Takes the address from DTR0, encoded as (a << 1) | 1 exactly as the
-     * Part 102 form does — unlike the Part 103 *special* PROGRAM SHORT ADDRESS,
-     * which takes the raw 6-bit value. The two are different commands in
-     * different spaces; see dali_protocol.md. */
+    /* Takes the address from DTR0 raw, 0..63 or 0xFF, like the Part 103
+     * special PROGRAM SHORT ADDRESS -- not the (a << 1) | 1 its Part 102
+     * namesake reads. See dali_protocol.md. */
     CMD(DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0, "SET SHORT ADDRESS DTR0 (device)", 0x14u, 0x14u, DALI_CMD_FRAME_24BIT_DEV, DALI_RESP_NONE, true, true),
     CMD(DALI_CMD_DEVICE_TERMINATE, "TERMINATE (device)", 0x00u, 0x00u, DALI_CMD_FRAME_24BIT_SPECIAL, DALI_RESP_NONE, false, true),
     /*
@@ -274,9 +273,15 @@ static DaliError target_addr_byte(DaliAddressType type,
     }
 }
 
+/* An instance number, an instance-group or instance-type selector, or every
+ * instance. Not 0xFE: device-level commands have their own builder. */
 static bool instance_valid(uint8_t instance)
 {
-    return instance < DALI_INSTANCE_COUNT || instance == DALI_ALL_INSTANCES;
+    const uint8_t form = (uint8_t)(instance & DALI_INSTANCE_SELECTOR_MASK);
+    return instance < DALI_INSTANCE_COUNT ||
+           form == DALI_INSTANCE_GROUP_SELECTOR ||
+           form == DALI_INSTANCE_TYPE_SELECTOR ||
+           instance == DALI_ALL_INSTANCES;
 }
 
 static DaliError command_opcode(const DaliCommandInfo *cmd,
@@ -768,11 +773,6 @@ DaliFrame dali_cmd_device(uint8_t addr, uint8_t cmd)
 DaliFrame dali_cmd_device_broadcast(uint8_t cmd)
 {
     return make_frame24(DALI_BROADCAST_COMMAND_ADDRESS, DALI_DEVICE_INSTANCE, cmd);
-}
-
-DaliFrame dali_cmd_instance_group(uint8_t group, uint8_t instance, uint8_t cmd)
-{
-    return make_frame24(group_addr_byte(group, 1u), instance, cmd);
 }
 
 DaliFrame dali_cmd_instance_broadcast(uint8_t instance, uint8_t cmd)

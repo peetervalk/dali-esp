@@ -131,6 +131,46 @@ DaliCliTokenizeResult dali_cli_tokenize(const char *line, DaliCliTokens *out)
 }
 
 /* ---------------------------------------------------------------------------
+ * Peer classification
+ * --------------------------------------------------------------------------*/
+
+void dali_cli_peer_sniffer_init(DaliCliPeerSniffer *sniffer)
+{
+    if (sniffer != NULL) {
+        *sniffer = (DaliCliPeerSniffer){ .verdict = DALI_CLI_PEER_UNDECIDED };
+    }
+}
+
+DaliCliPeerVerdict dali_cli_peer_sniff(DaliCliPeerSniffer *sniffer, uint8_t ch)
+{
+    if (sniffer == NULL) {
+        return DALI_CLI_PEER_SHELL;
+    }
+    if (sniffer->verdict != DALI_CLI_PEER_UNDECIDED) {
+        return sniffer->verdict;
+    }
+
+    bool upper = (ch >= (uint8_t)'A' && ch <= (uint8_t)'Z');
+    bool hyphen = (ch == (uint8_t)'-' && sniffer->method_len > 0u);
+
+    if (sniffer->saw_space) {
+        /* The byte after the method's space opens the request target. */
+        sniffer->verdict = (ch == (uint8_t)'/' || ch == (uint8_t)'*')
+                               ? DALI_CLI_PEER_HTTP
+                               : DALI_CLI_PEER_SHELL;
+    } else if (ch == (uint8_t)' ' && sniffer->method_len > 0u) {
+        sniffer->saw_space = true;
+    } else if ((upper || hyphen) && sniffer->method_len < DALI_CLI_HTTP_METHOD_MAX) {
+        sniffer->method_len++;
+    } else {
+        /* Anything else here, CR and LF included, ends the method token with
+         * something no request line contains, so the line is not one. */
+        sniffer->verdict = DALI_CLI_PEER_SHELL;
+    }
+    return sniffer->verdict;
+}
+
+/* ---------------------------------------------------------------------------
  * Verb table
  *
  * min_args/max_args count the arguments after the verb. A verb that dispatches
@@ -197,8 +237,8 @@ static const DaliCliCommandSpec s_commands[] = {
     { DALI_CLI_CMD_DT6, "dt6", "<addr> <name> [dtr0]", "device type 6 (LED) command", 2u, 3u, NULL },
     { DALI_CLI_CMD_DT8, "dt8", "<addr> <name> [v0] [v1] [v2]", "device type 8 (colour) command", 2u, 5u, NULL },
 
-    { DALI_CLI_CMD_IQUERY, "iquery", "<addr> <instance> <name> [dtr0]", "Part 103 instance query", 3u, 4u, NULL },
-    { DALI_CLI_CMD_ICONFIG, "iconfig", "<addr> <instance> <name> [v0] [v1] [v2]", "Part 103 instance configuration", 3u, 6u, NULL },
+    { DALI_CLI_CMD_IQUERY, "iquery", "<addr> <inst|gN|tN|all> <name> [dtr0]", "Part 103 instance query", 3u, 4u, NULL },
+    { DALI_CLI_CMD_ICONFIG, "iconfig", "<addr> <inst|gN|tN|all> <name> [v0] [v1] [v2]", "Part 103 instance configuration", 3u, 6u, NULL },
     { DALI_CLI_CMD_VENDOR, "vendor", "lunatone <addr> <instance> <name> | steinel <instance> <raw>", "vendor helpers", 3u, 4u,
       "lunatone steinel" },
 
@@ -214,13 +254,13 @@ static const DaliCliCommandSpec s_commands[] = {
     { DALI_CLI_CMD_FIND, "find", "switches [seconds]", "map switches by listening for events", 1u, 2u, "switches" },
     { DALI_CLI_CMD_EXPORT, "export", "inventory|config", "inventory as JSON, or the dali: YAML block for this device", 1u, 1u,
       "inventory config" },
-    { DALI_CLI_CMD_IDENTIFY, "identify", "<addr>", "blink one short-addressed lamp", 1u, 1u, NULL },
+    { DALI_CLI_CMD_IDENTIFY, "identify", "<addr>", "blink one short-addressed lamp, then restore its level", 1u, 1u, NULL },
     { DALI_CLI_CMD_QUIESCENT, "quiescent", "on|off <addr|all>", "Part 103 quiescent mode: silence control-device events", 2u, 2u,
       "on off" },
-    { DALI_CLI_CMD_BACKUP, "backup", "save|status|export|import <begin|HEX|end|abort>", "record which physical unit holds which short address", 1u, 3u,
+    { DALI_CLI_CMD_BACKUP, "backup", "save|status|export|import <begin|HEX|end|abort>", "record which physical unit holds which short address, and each control device's instance settings", 1u, 3u,
       "save export status import" },
-    { DALI_CLI_CMD_RESTORE, "restore", "plan|apply|groups [apply]", "put short addresses, or group membership, back the way the backup recorded them", 1u, 2u,
-      "plan apply groups" },
+    { DALI_CLI_CMD_RESTORE, "restore", "plan|apply|groups [apply]|instances [apply]", "put short addresses, group membership, or instance settings back the way the backup recorded them", 1u, 2u,
+      "plan apply groups instances" },
 };
 
 #define CLI_COMMAND_COUNT ((uint8_t)(sizeof(s_commands) / sizeof(s_commands[0])))
@@ -558,6 +598,38 @@ bool dali_cli_parse_instance(const char *text, uint8_t *out)
     return dali_cli_parse_u8(text, DALI_MAX_INSTANCE, out);
 }
 
+bool dali_cli_parse_instance_selector(const char *text, uint8_t *out)
+{
+    if (text == NULL || out == NULL) {
+        return false;
+    }
+    if (strcmp(text, "all") == 0) {
+        *out = DALI_ALL_INSTANCES;
+        return true;
+    }
+
+    uint8_t form;
+    if (text[0] == 'g') {
+        form = DALI_INSTANCE_GROUP_SELECTOR;
+    } else if (text[0] == 't') {
+        form = DALI_INSTANCE_TYPE_SELECTOR;
+    } else {
+        return dali_cli_parse_instance(text, out);
+    }
+
+    uint8_t value;
+    if (!dali_cli_parse_u8(text + 1, DALI_MAX_INSTANCE, &value)) {
+        return false;
+    }
+    *out = (uint8_t)(form | value);
+    return true;
+}
+
+bool dali_cli_instance_selector_is_multi(uint8_t instance_byte)
+{
+    return instance_byte >= DALI_INSTANCE_COUNT;
+}
+
 bool dali_cli_parse_level(const char *text, DaliCliLevel *out)
 {
     if (text == NULL || out == NULL) {
@@ -793,6 +865,90 @@ const DaliCliGearCommand *dali_cli_config_find(const char *name)
 bool dali_cli_config_is_commissioning(DaliCommandId id)
 {
     return id == DALI_CMD_SET_SHORT_ADDRESS_DTR0;
+}
+
+/* First byte of every IEC 62386-103 special command. */
+#define CLI_RAW_DEVICE_SPECIAL_ADDRESS 0xC1u
+/* Last group address byte with the selector bit set: 16 gear groups end at
+ * 0x9F, 32 control-device groups at 0xBF. */
+#define CLI_RAW_LAST_GEAR_GROUP_BYTE   0x9Fu
+#define CLI_RAW_LAST_DEVICE_GROUP_BYTE 0xBFu
+
+/* An address byte that carries a standard command rather than DAPC or a
+ * special: a short address, a group, broadcast unaddressed, or broadcast, all
+ * with the selector bit set. */
+static bool raw_is_command_address(uint8_t addr_byte, uint8_t last_group_byte)
+{
+    if ((addr_byte & 0x01u) == 0u) {
+        return false;
+    }
+    return addr_byte <= last_group_byte ||
+           addr_byte == 0xFDu ||
+           addr_byte == DALI_BROADCAST_COMMAND_ADDRESS;
+}
+
+static bool raw_device_special_is_commissioning(DaliCommandId id)
+{
+    switch (id) {
+        case DALI_CMD_DEVICE_INITIALISE:
+        case DALI_CMD_DEVICE_RANDOMISE:
+        case DALI_CMD_DEVICE_WITHDRAW:
+        case DALI_CMD_DEVICE_SEARCH_ADDRH:
+        case DALI_CMD_DEVICE_SEARCH_ADDRM:
+        case DALI_CMD_DEVICE_SEARCH_ADDRL:
+        case DALI_CMD_DEVICE_PROGRAM_SHORT_ADDRESS:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool dali_cli_raw_frame_is_commissioning(const DaliFrame *frame)
+{
+    if (frame == NULL) {
+        return false;
+    }
+
+    if (frame->bit_length == DALI_FORWARD_FRAME_BITS) {
+        const uint8_t addr_byte = (uint8_t)((frame->data >> 8u) & 0xFFu);
+        const uint8_t opcode    = (uint8_t)(frame->data & 0xFFu);
+
+        /* Part 102 specials are identified by their first byte alone. */
+        const DaliCommandInfo *special =
+            dali_command_lookup_opcode(DALI_CMD_FRAME_SPECIAL, addr_byte);
+        if (special != NULL) {
+            return dali_cli_special_is_commissioning(special->id);
+        }
+        if (raw_is_command_address(addr_byte, CLI_RAW_LAST_GEAR_GROUP_BYTE)) {
+            const DaliCommandInfo *cmd =
+                dali_command_lookup_opcode(DALI_CMD_FRAME_16BIT, opcode);
+            return cmd != NULL && dali_cli_config_is_commissioning(cmd->id);
+        }
+        return false;
+    }
+
+    if (frame->bit_length == DALI_EXTENDED_FRAME_BITS) {
+        const uint8_t addr_byte = (uint8_t)((frame->data >> 16u) & 0xFFu);
+        const uint8_t middle    = (uint8_t)((frame->data >> 8u) & 0xFFu);
+        const uint8_t opcode    = (uint8_t)(frame->data & 0xFFu);
+
+        /* Part 103 specials carry their opcode in the middle byte. */
+        if (addr_byte == CLI_RAW_DEVICE_SPECIAL_ADDRESS) {
+            const DaliCommandInfo *special =
+                dali_command_lookup_opcode(DALI_CMD_FRAME_24BIT_SPECIAL, middle);
+            return special != NULL &&
+                   raw_device_special_is_commissioning(special->id);
+        }
+        if (middle == DALI_DEVICE_INSTANCE &&
+            raw_is_command_address(addr_byte, CLI_RAW_LAST_DEVICE_GROUP_BYTE)) {
+            const DaliCommandInfo *cmd =
+                dali_command_lookup_opcode(DALI_CMD_FRAME_24BIT_DEV, opcode);
+            return cmd != NULL && cmd->id == DALI_CMD_DEVICE_SET_SHORT_ADDRESS_DTR0;
+        }
+        return false;
+    }
+
+    return false;
 }
 
 bool dali_cli_config_rejects_broadcast(DaliCommandId id)
@@ -1437,6 +1593,22 @@ size_t dali_cli_format_status(char *buf, size_t cap, uint8_t raw)
         len = cli_append(buf, cap, len, " none");
     }
     return len;
+}
+
+size_t dali_cli_format_gear_version(char *buf, size_t cap, uint8_t raw)
+{
+    if (buf == NULL || cap == 0u) {
+        return 0u;
+    }
+    buf[0] = '\0';
+
+    const unsigned major = (unsigned)(raw >> 2u);
+    const unsigned minor = (unsigned)(raw & 0x03u);
+
+    if (major < 2u) {
+        return cli_append(buf, cap, 0u, "version=0x%02X", (unsigned)raw);
+    }
+    return cli_append(buf, cap, 0u, "v%u.%u", major, minor);
 }
 
 size_t dali_cli_format_response(char             *buf,

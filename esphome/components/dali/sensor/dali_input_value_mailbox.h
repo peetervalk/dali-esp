@@ -7,7 +7,7 @@ namespace esphome {
 namespace dali {
 
 /*
- * Single-slot, latest-value mailbox for Core 1 -> Core 0 input-sensor readings.
+ * Single-slot, latest-value mailbox for input-sensor readings, DALI task -> loop task.
  *
  * The value and its "something is here" flag live in one atomic word for the
  * same reason the light-state mailbox packs its pair: with a separate value and

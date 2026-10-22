@@ -602,6 +602,72 @@ void test_query_input_device_clamps_and_keeps_optional_timeouts(void)
     TEST_ASSERT_EQUAL(DALI_ERR_TIMEOUT, input.instance_type_errors[2]);
 }
 
+/* Event scheme, priority and the three instance-group slots, as `instances`
+ * prints them. The slots are kept only as a full set. */
+void test_query_input_device_reads_event_addressing(void)
+{
+    DaliDiscoveryInputDevice input;
+    DaliDiscoveryTransport t = transport();
+
+    add_reply(0x0BFE35u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 2u,
+              DALI_BACKWARD_FRAME_BITS);
+    /* Instance 0: occupancy on scheme 2, priority 4, primary group 3. */
+    add_reply(0x0B0080u, DALI_EXTENDED_FRAME_BITS, DALI_OK,
+              DALI_INPUT_INSTANCE_TYPE_OCCUPANCY, DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B008Bu, DALI_EXTENDED_FRAME_BITS, DALI_OK, 2u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B0084u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 4u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B0088u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 3u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B0089u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 0xFFu,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B008Au, DALI_EXTENDED_FRAME_BITS, DALI_OK, 0xFFu,
+              DALI_BACKWARD_FRAME_BITS);
+    /* Instance 1: answers its primary group and then goes silent. */
+    add_reply(0x0B0180u, DALI_EXTENDED_FRAME_BITS, DALI_OK,
+              DALI_INPUT_INSTANCE_TYPE_LIGHT, DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B0188u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 7u,
+              DALI_BACKWARD_FRAME_BITS);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_discovery_query_input_device(&t, 5u, &input));
+
+    const DaliInputInstanceInfo *occ = &input.device.instances[0];
+    TEST_ASSERT_TRUE(occ->has_event_scheme);
+    TEST_ASSERT_EQUAL_UINT8(2u, occ->event_scheme);
+    TEST_ASSERT_TRUE(occ->has_event_priority);
+    TEST_ASSERT_EQUAL_UINT8(4u, occ->event_priority);
+    TEST_ASSERT_TRUE(occ->has_instance_groups);
+    TEST_ASSERT_EQUAL_UINT8(3u, occ->instance_groups[0]);
+    TEST_ASSERT_EQUAL_HEX8(DALI_INPUT_INSTANCE_GROUP_NONE, occ->instance_groups[1]);
+    TEST_ASSERT_EQUAL_HEX8(DALI_INPUT_INSTANCE_GROUP_NONE, occ->instance_groups[2]);
+
+    const DaliInputInstanceInfo *lux = &input.device.instances[1];
+    TEST_ASSERT_FALSE(lux->has_event_scheme);
+    TEST_ASSERT_FALSE(lux->has_event_priority);
+    TEST_ASSERT_FALSE(lux->has_instance_groups);
+}
+
+void test_query_input_device_rejects_an_out_of_range_group_slot(void)
+{
+    DaliDiscoveryInputDevice input;
+    DaliDiscoveryTransport t = transport();
+
+    add_reply(0x0BFE35u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 1u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B0080u, DALI_EXTENDED_FRAME_BITS, DALI_OK,
+              DALI_INPUT_INSTANCE_TYPE_OCCUPANCY, DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B0088u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 3u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B0089u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 40u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x0B008Au, DALI_EXTENDED_FRAME_BITS, DALI_OK, 0xFFu,
+              DALI_BACKWARD_FRAME_BITS);
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_discovery_query_input_device(&t, 5u, &input));
+    TEST_ASSERT_FALSE(input.device.instances[0].has_instance_groups);
+}
+
 void test_query_input_device_records_type_errors(void)
 {
     DaliDiscoveryInputDevice input;
@@ -2002,6 +2068,212 @@ void test_scan_skips_identity_when_bank0_absent(void)
     TEST_ASSERT_TRUE(device->present);
     TEST_ASSERT_FALSE(device->has_identity);
     TEST_ASSERT_EQUAL_UINT32(2u, s_bus.gear_memory_read_count);
+    /* A bank that does not answer is not a second unit, and silence earns no
+     * second attempt: two READs, not four. */
+    TEST_ASSERT_FALSE(device->has_identity_collision);
+    TEST_ASSERT_EQUAL_UINT8(0u, inventory.identity_collision_count);
+}
+
+/*
+ * Script one Bank 0 identity read at `address_byte` that meets undecodable
+ * activity on byte `collide_index` of the identity block, the way two units
+ * with different identification numbers answer it: every byte before that
+ * decodes, because the units agree on it. Follows the block read's chunking,
+ * and its byte-at-a-time retry of a failed chunk from the chunk's start.
+ * Returns the READ frames the attempt transmits.
+ */
+static uint32_t add_identity_collision(uint8_t address_byte, uint8_t collide_index)
+{
+    const uint32_t read_frame  = ((uint32_t)address_byte << 8u) | 0xC5u;
+    const uint8_t  chunk_size  = (uint8_t)DALI_MEMORY_MAX_SEQUENCE_READ_BYTES;
+    const uint8_t  chunk_start = (uint8_t)((collide_index / chunk_size) * chunk_size);
+    const uint8_t  remaining   =
+        (uint8_t)(DALI_MEMORY_BANK0_IDENTITY_SIZE - chunk_start);
+    const uint8_t  chunk_len   = remaining < chunk_size ? remaining : chunk_size;
+    /* A one-byte chunk is not retried byte by byte: it already was one. */
+    const uint8_t  passes      = (chunk_len == 1u) ? 1u : 2u;
+    uint32_t       reads       = 0u;
+
+    for (uint8_t i = 0u; i < chunk_start; i++) {
+        add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 0x5Au,
+                  DALI_BACKWARD_FRAME_BITS);
+        reads++;
+    }
+    for (uint8_t pass = 0u; pass < passes; pass++) {
+        for (uint8_t i = chunk_start; i < collide_index; i++) {
+            add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_OK, 0x5Au,
+                      DALI_BACKWARD_FRAME_BITS);
+            reads++;
+        }
+        add_reply(read_frame, DALI_FORWARD_FRAME_BITS, DALI_ERR_RX_ACTIVITY, 0u, 0u);
+        reads++;
+    }
+    return reads;
+}
+
+/* Where two lamps of one product usually part: the last identification byte. */
+#define LAST_IDENTIFICATION_INDEX                                            \
+    ((uint8_t)(DALI_MEMORY_BANK0_OFFSET_IDENTIFICATION +                     \
+               DALI_MEMORY_BANK0_IDENTIFICATION_LEN - 1u -                   \
+               DALI_MEMORY_BANK0_IDENTITY_FIRST))
+
+void test_scan_marks_an_address_whose_identity_collides_twice(void)
+{
+    /*
+     * The 2k bench: two lamps of one product on a3. They answer QUERY STATUS
+     * alike, so the address decodes as one present unit, and they agree on
+     * every Bank 0 byte until the identification number's last, where their
+     * serials part. Both attempts at the identity collide there.
+     */
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+    s_bus.present[3] = true;
+    s_bus.status[3] = 0x00u;
+
+    uint32_t reads = add_identity_collision(0x07u, LAST_IDENTIFICATION_INDEX);
+    reads += add_identity_collision(0x07u, LAST_IDENTIFICATION_INDEX);
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    const DaliDiscoveryDeviceInfo *device = dali_discovery_inventory_get(&inventory, 3u);
+    TEST_ASSERT_NOT_NULL(device);
+    /* Still listed: the address does answer, and what it answered is true. */
+    TEST_ASSERT_EQUAL_UINT8(1u, found);
+    TEST_ASSERT_TRUE(device->present);
+    TEST_ASSERT_TRUE(device->has_status);
+    TEST_ASSERT_FALSE(device->has_identity);
+    TEST_ASSERT_TRUE(device->has_identity_collision);
+    TEST_ASSERT_FALSE(device->has_undecodable_activity);
+    TEST_ASSERT_TRUE(dali_discovery_gear_address_contested(device));
+    TEST_ASSERT_EQUAL_UINT8(1u, inventory.identity_collision_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, inventory.undecodable_count);
+    /* Exactly two attempts, each read to the colliding byte and no further. */
+    TEST_ASSERT_EQUAL_UINT32(reads, s_bus.gear_memory_read_count);
+}
+
+void test_scan_takes_an_identity_that_decodes_on_the_second_read(void)
+{
+    /* One collided attempt, then a clean one: something caught one read, and
+     * a single unit answers here. Nothing is flagged. */
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+    s_bus.present[3] = true;
+    s_bus.status[3] = 0x00u;
+
+    uint32_t reads = add_identity_collision(0x07u, 0u);
+    for (uint8_t i = 0u; i < DALI_MEMORY_BANK0_IDENTITY_SIZE; i++) {
+        add_reply(0x07C5u, DALI_FORWARD_FRAME_BITS, DALI_OK, (uint8_t)(0x20u + i),
+                  DALI_BACKWARD_FRAME_BITS);
+        reads++;
+    }
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    const DaliDiscoveryDeviceInfo *device = dali_discovery_inventory_get(&inventory, 3u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_TRUE(device->has_identity);
+    TEST_ASSERT_EQUAL_UINT8(0x20u + LAST_IDENTIFICATION_INDEX,
+                            device->identity.serial[DALI_MEMORY_BANK0_IDENTIFICATION_LEN - 1u]);
+    TEST_ASSERT_FALSE(device->has_identity_collision);
+    TEST_ASSERT_FALSE(dali_discovery_gear_address_contested(device));
+    TEST_ASSERT_EQUAL_UINT8(0u, inventory.identity_collision_count);
+    TEST_ASSERT_EQUAL_UINT32(reads, s_bus.gear_memory_read_count);
+}
+
+void test_scan_counts_an_identity_collision_found_through_the_device_probe(void)
+{
+    /*
+     * The walk's other route to gear: QUERY STATUS missed, the Part 103 probe
+     * answered, and enrichment's decoded QUERY GROUPS showed gear after all.
+     * Its Bank 0 is read from there, so a collision must be counted there too.
+     */
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+    add_reply(0x07FE35u, DALI_EXTENDED_FRAME_BITS, DALI_OK, 2u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x07C0u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0x04u,
+              DALI_BACKWARD_FRAME_BITS);
+    add_reply(0x07C1u, DALI_FORWARD_FRAME_BITS, DALI_OK, 0x00u,
+              DALI_BACKWARD_FRAME_BITS);
+    (void)add_identity_collision(0x07u, LAST_IDENTIFICATION_INDEX);
+    (void)add_identity_collision(0x07u, LAST_IDENTIFICATION_INDEX);
+
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    const DaliDiscoveryDeviceInfo *device = dali_discovery_inventory_get(&inventory, 3u);
+    TEST_ASSERT_NOT_NULL(device);
+    TEST_ASSERT_FALSE(device->has_status);
+    TEST_ASSERT_TRUE(device->has_control_gear);
+    TEST_ASSERT_TRUE(device->has_identity_collision);
+    TEST_ASSERT_TRUE(dali_discovery_gear_address_contested(device));
+    TEST_ASSERT_EQUAL_UINT8(1u, inventory.identity_collision_count);
+}
+
+void test_store_identity_withdraws_an_identity_collision(void)
+{
+    DaliDiscoveryInventory inventory;
+    TEST_ASSERT_EQUAL(DALI_OK, dali_discovery_inventory_reset(&inventory));
+    inventory.devices[3].present                = true;
+    inventory.devices[3].has_control_gear       = true;
+    inventory.devices[3].has_identity_collision = true;
+    inventory.identity_collision_count          = 1u;
+    inventory.devices[5].present                = true;
+    inventory.devices[5].has_control_gear       = true;
+
+    DaliMemoryBank0Identity identity;
+    memset(&identity, 0, sizeof(identity));
+    identity.serial[7] = 0x42u;
+
+    /* A decoded read is what one unit looks like: the collision goes. */
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_inventory_store_identity(&inventory, 3u, &identity));
+    TEST_ASSERT_TRUE(inventory.devices[3].has_identity);
+    TEST_ASSERT_EQUAL_UINT8(0x42u, inventory.devices[3].identity.serial[7]);
+    TEST_ASSERT_FALSE(inventory.devices[3].has_identity_collision);
+    TEST_ASSERT_FALSE(dali_discovery_gear_address_contested(&inventory.devices[3]));
+    TEST_ASSERT_EQUAL_UINT8(0u, inventory.identity_collision_count);
+
+    /* An address that never collided leaves the count alone. */
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_inventory_store_identity(&inventory, 5u, &identity));
+    TEST_ASSERT_TRUE(inventory.devices[5].has_identity);
+    TEST_ASSERT_EQUAL_UINT8(0u, inventory.identity_collision_count);
+
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_inventory_store_identity(NULL, 3u, &identity));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_inventory_store_identity(&inventory,
+                                                              DALI_SHORT_ADDRESS_COUNT,
+                                                              &identity));
+    TEST_ASSERT_EQUAL(DALI_ERR_INVALID,
+                      dali_discovery_inventory_store_identity(&inventory, 3u, NULL));
+}
+
+void test_gear_address_contested_reads_both_kinds_and_only_gear(void)
+{
+    DaliDiscoveryDeviceInfo device;
+    memset(&device, 0, sizeof(device));
+
+    TEST_ASSERT_FALSE(dali_discovery_gear_address_contested(NULL));
+    TEST_ASSERT_FALSE(dali_discovery_gear_address_contested(&device));
+
+    /* The device space is independent: a collision there says nothing here. */
+    device.has_undecodable_device_activity = true;
+    TEST_ASSERT_FALSE(dali_discovery_gear_address_contested(&device));
+
+    device.has_undecodable_activity = true;
+    TEST_ASSERT_TRUE(dali_discovery_gear_address_contested(&device));
+
+    memset(&device, 0, sizeof(device));
+    device.present                = true;
+    device.has_identity_collision = true;
+    TEST_ASSERT_TRUE(dali_discovery_gear_address_contested(&device));
 }
 
 /* ---------------------------------------------------------------------------
@@ -2200,6 +2472,8 @@ int main(void)
     RUN_TEST(test_scan_still_aborts_on_a_real_bus_error);
     RUN_TEST(test_query_status_rejects_bad_reply_width);
     RUN_TEST(test_query_input_device_clamps_and_keeps_optional_timeouts);
+    RUN_TEST(test_query_input_device_reads_event_addressing);
+    RUN_TEST(test_query_input_device_rejects_an_out_of_range_group_slot);
     RUN_TEST(test_query_input_device_records_type_errors);
     RUN_TEST(test_inventory_update_input_device_marks_present);
     RUN_TEST(test_query_device_type_returns_value);
@@ -2237,6 +2511,11 @@ int main(void)
     RUN_TEST(test_scan_skips_dt6_enrichment_for_non_dt6_devices);
     RUN_TEST(test_scan_reads_bank0_identity);
     RUN_TEST(test_scan_skips_identity_when_bank0_absent);
+    RUN_TEST(test_scan_marks_an_address_whose_identity_collides_twice);
+    RUN_TEST(test_scan_takes_an_identity_that_decodes_on_the_second_read);
+    RUN_TEST(test_scan_counts_an_identity_collision_found_through_the_device_probe);
+    RUN_TEST(test_store_identity_withdraws_an_identity_collision);
+    RUN_TEST(test_gear_address_contested_reads_both_kinds_and_only_gear);
     RUN_TEST(test_has_device_type_helper);
     RUN_TEST(test_scan_enriches_multi_device_type_gear);
     RUN_TEST(test_scan_handles_gear_with_no_device_types);

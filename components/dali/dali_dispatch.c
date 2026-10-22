@@ -17,9 +17,11 @@ static bool key_matches(const DaliDispatchKey *key, const DaliInputEvent *event)
                     key->address != event->source.device_address) return false;
                 break;
             case DALI_EVENT_ADDRESS_GROUP:
-                if (event->source.has_device_group) {
+                if (event->source.has_device_group &&
+                    key->group_kind != DALI_DISPATCH_GROUP_INSTANCE) {
                     if (key->address != event->source.device_group) return false;
-                } else if (event->source.has_instance_group) {
+                } else if (event->source.has_instance_group &&
+                           key->group_kind != DALI_DISPATCH_GROUP_DEVICE) {
                     if (key->address != event->source.instance_group) return false;
                 } else {
                     return false;
@@ -39,6 +41,9 @@ static bool key_matches(const DaliDispatchKey *key, const DaliInputEvent *event)
         if (key->instance != DALI_DISPATCH_INSTANCE_ANY &&
             (!event->source.has_instance ||
              key->instance != event->source.instance)) return false;
+        if (key->match_instance_type &&
+            (!event->source.has_instance_type ||
+             key->instance_type != event->source.instance_type)) return false;
     }
 
     if (key->event_information != DALI_DISPATCH_EVENT_ANY &&

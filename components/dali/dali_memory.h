@@ -131,7 +131,8 @@ DaliError dali_memory_build_read_sequence(uint8_t       short_addr,
  * Part 103 control-device equivalent of dali_memory_build_read_sequence(). Uses
  * the 24-bit control-device DTR frames and the addressed device READ MEMORY
  * LOCATION command rather than the 16-bit control-gear forms. Multi-byte reads
- * rely on the same DTR0 auto-increment and are not hardware-verified here.
+ * rely on the same DTR0 auto-increment, which the device Bank 0 read below has
+ * confirmed on hardware.
  */
 DaliError dali_memory_build_control_device_read_sequence(uint8_t       short_addr,
                                                          uint8_t       bank,

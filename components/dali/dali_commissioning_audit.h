@@ -22,7 +22,10 @@
  *     this cannot distinguish either.
  *   - `contested` is undecodable reply-window activity, which is the signature
  *     of two units sharing one short address but is not proof of it. One unit
- *     with a marginal backward waveform presents the same way.
+ *     with a marginal backward waveform presents the same way. In the gear
+ *     space it is also an address that answered as one unit while its Bank 0
+ *     identity read collided: units of one product in one state answer the
+ *     scan's other queries alike, and would otherwise read as confirmed.
  *   - `silent` is the absence of an answer, which cannot separate gear that
  *     left the bus from gear whose reply landed outside the window.
  *
@@ -78,9 +81,11 @@ typedef struct {
     /* Assigned, and one unit answers there. The only good outcome. */
     uint64_t confirmed;
     /*
-     * Assigned, and the address answers undecodably. Two gear that generated
-     * the same 24-bit random address were selected, programmed and withdrawn as
-     * one: the walk counted a single assignment, and both now hold it.
+     * Assigned, and the address is contested. Two gear that generated the same
+     * 24-bit random address were selected, programmed and withdrawn as one: the
+     * walk counted a single assignment, and both now hold it. Freshly
+     * commissioned gear of one product is usually in one state, so this is the
+     * case where the identity collision, not an undecodable status, shows it.
      */
     uint64_t contested;
     /* Assigned, and nothing answers. VERIFY confirmed the write, so the unit
@@ -119,10 +124,12 @@ typedef struct {
 /*
  * Reduce one scan's inventory to the two masks an audit compares.
  *
- * Gear space reads `has_undecodable_activity` and `present && has_control_gear`;
- * device space reads `has_undecodable_device_activity` and
- * `present && has_input_device`. In both, contested is tested first, because an
- * address that answered undecodably has no reading to report.
+ * Gear space reads dali_discovery_gear_address_contested() and
+ * `present && has_control_gear`; device space reads
+ * `has_undecodable_device_activity` and `present && has_input_device`. In both,
+ * contested is tested first: an address that answered undecodably has no
+ * reading to report, and one whose identity collided is present but holds more
+ * than the one unit `occupied` would claim.
  */
 DaliError dali_commissioning_occupancy_from_inventory(
     const DaliDiscoveryInventory  *inventory,

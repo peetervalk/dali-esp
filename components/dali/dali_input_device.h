@@ -15,6 +15,11 @@
 #define DALI_INPUT_INSTANCE_DEVICE  DALI_DEVICE_INSTANCE
 #define DALI_INPUT_INSTANCE_ALL     DALI_ALL_INSTANCES
 
+/* An instance belongs to up to three instance groups: primary, 1 and 2. A slot
+ * holding MASK is unused. */
+#define DALI_INPUT_INSTANCE_GROUP_SLOTS 3u
+#define DALI_INPUT_INSTANCE_GROUP_NONE  0xFFu
+
 typedef enum {
     DALI_INPUT_INSTANCE_TYPE_GENERIC     = 0,
     DALI_INPUT_INSTANCE_TYPE_PUSH_BUTTON = 1,
@@ -60,9 +65,23 @@ typedef struct {
     uint8_t              status;
     bool                 has_error;
     uint8_t              error;
-    DaliInputRole        role;
-    DaliInputRoleSource  role_source;
-    DaliInputUsableState usable;
+    /* How the instance addresses its events, and to whom. The scheme decides
+     * whether an integration can tell which instance an event came from
+     * without asking: only Device/Instance (2) carries the pair it polls by.
+     * Raw values, as read. */
+    bool                 has_event_scheme;
+    uint8_t              event_scheme;
+    bool                 has_event_priority;
+    uint8_t              event_priority;
+    /* All three slots, or none: a partial set would misreport membership. */
+    bool                 has_instance_groups;
+    uint8_t              instance_groups[DALI_INPUT_INSTANCE_GROUP_SLOTS];
+    /* Stored as bytes, not as their enum types. An enum is int-sized, and the
+     * shell caches SHELL_INPUT_CACHE_MAX devices of 32 of these each, so three
+     * int fields cost 4.5 kB of static RAM where three bytes cost 1.5 kB. */
+    uint8_t              role;          /* DaliInputRole */
+    uint8_t              role_source;   /* DaliInputRoleSource */
+    uint8_t              usable;        /* DaliInputUsableState */
 } DaliInputInstanceInfo;
 
 typedef struct {
@@ -71,6 +90,29 @@ typedef struct {
     uint8_t instance_count;
     DaliInputInstanceInfo instances[DALI_INPUT_MAX_INSTANCES];
 } DaliInputDeviceInfo;
+
+/*
+ * The generic IEC 62386-103 configuration of one instance: what a device RESET
+ * returns to its defaults, and so what a backup records and a restore puts
+ * back. Type-specific settings -- Part 301 timers, Part 303 hold and report
+ * timers, Part 304 hysteresis -- are not part of it. Each field comes from its
+ * own query and is optional for that reason; the type is recorded so a restore
+ * can refuse to configure an instance that is no longer the same kind of thing.
+ */
+typedef struct {
+    uint32_t event_filter;      /* eventFilter bits 0-23 */
+    bool     has_type;
+    uint8_t  type;
+    bool     has_enabled;
+    bool     enabled;
+    bool     has_event_scheme;
+    uint8_t  event_scheme;      /* 0-4 */
+    bool     has_event_priority;
+    uint8_t  event_priority;    /* 2-5 when valid */
+    bool     has_event_filter;
+    bool     has_instance_groups;
+    uint8_t  instance_groups[DALI_INPUT_INSTANCE_GROUP_SLOTS]; /* 0-31 or NONE */
+} DaliInstanceSettings;
 
 DaliError dali_input_build_query_number_of_instances(uint8_t addr, DaliFrame *out);
 

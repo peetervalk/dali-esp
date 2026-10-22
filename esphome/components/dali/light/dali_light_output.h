@@ -54,7 +54,7 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   void setup_state(light::LightState *state) override;
   void write_state(light::LightState *state) override;
 
-  // DaliBusLight interface — Core 1 writes, Core 0 drains.
+  // DaliBusLight interface — the DALI task writes, the loop task drains.
   void mark_state_from_bus(bool is_on, uint8_t level) override;
   void apply_bus_state() override;
   void flush_pending_write() override;
@@ -99,13 +99,13 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   uint8_t         query_address_{0xFFu};
   uint16_t        member_groups_{0};
 
-  // Coherent latest bus state — published on Core 1, drained on Core 0.
+  // Coherent latest bus state — published on the DALI task, drained in loop().
   DaliLightStateMailbox bus_state_mailbox_;
-  // Scheduler completion for the in-flight command — Core 1 publishes,
-  // Core 0 drains before it decides what to send next.
+  // Scheduler completion for the in-flight command — the DALI task publishes,
+  // and loop() drains it before deciding what to send next.
   DaliLightCommandMailbox command_mailbox_;
 
-  // Core 0 only — desired/in-flight/confirmed arbitration. The confirmed state
+  // Loop task only — desired/in-flight/confirmed arbitration. The confirmed state
   // it holds is what suppresses a redundant command, and it is committed only
   // from a scheduler completion, never from a successful enqueue.
   DaliLightWrite    write_{};
@@ -131,7 +131,7 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   bool              has_curve_override_{false};
   DaliDimCurve      curve_override_{DALI_DIM_CURVE_STANDARD};
 
-  // Core 0 only — tells apart the two write_state() calls that are not an
+  // Loop task only — tells apart the two write_state() calls that are not an
   // operator's intent. See the comment on write_state().
   //
   // suppress_initial_write_ covers ESPHome's one restore/default write at
@@ -151,9 +151,9 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   bool brightness_to_level_(float brightness, uint8_t *level) const;
   bool level_to_brightness_(uint8_t level, float *brightness) const;
   void map_logical_request_();
-  // Core 1 — scheduler completion for a level/off command.
+  // DALI task — scheduler completion for a level/off command.
   static void on_command_complete_(DaliError result, const DaliFrame *reply, void *ctx);
-  // Core 0 — collect completions, then admit at most one command.
+  // Loop task — collect completions, then admit at most one command.
   void pump_write_();
 };
 

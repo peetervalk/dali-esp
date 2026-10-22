@@ -111,7 +111,7 @@ static bool scan_sync_acquire() {
         return false;
     }
     s_scan_slot.waiting_task = xTaskGetCurrentTaskHandle();
-    s_scan_slot.result       = DALI_ERR_TIMEOUT;
+    s_scan_slot.result       = DALI_ERR_WAIT_EXPIRED;
     s_scan_slot.reply        = {};
     s_scan_slot.has_reply    = false;
     s_scan_slot.sequence     = {};
@@ -169,8 +169,11 @@ static void scan_sequence_result_init(DaliSequenceResult *result, DaliError erro
     result->failed_step = DALI_SEQUENCE_NO_FAILED_STEP;
 }
 
-// One DALI round-trip is ~50 ms; 500 ms leaves ample headroom for a single frame.
-static constexpr uint32_t SCAN_SYNC_FRAME_WAIT_MS = 500u;
+// How long a single frame may take is the shared transport budget for its retry
+// count (dali_transport_transaction_timeout_ms), the same figure the shell waits.
+// An expired wait reports DALI_ERR_WAIT_EXPIRED, never DALI_ERR_TIMEOUT: the
+// walk reads TIMEOUT as "nothing at this address", and a wait that gave up has
+// learned nothing about the address at all.
 static constexpr uint32_t SCAN_DRAIN_WAIT_MS = 5000u;
 
 static bool scan_wait_for_quiescent_scheduler() {
@@ -212,7 +215,9 @@ static DaliError scan_sync_transact(const DaliFrame *frame,
     }
 
     ScanSyncCtx taken = {};
-    if (!scan_sync_wait(SCAN_SYNC_FRAME_WAIT_MS, &taken)) return DALI_ERR_TIMEOUT;
+    if (!scan_sync_wait(dali_transport_transaction_timeout_ms(retries_left), &taken)) {
+        return DALI_ERR_WAIT_EXPIRED;
+    }
 
     if (reply_out != nullptr && taken.has_reply) *reply_out = taken.reply;
     return taken.result;
@@ -245,8 +250,8 @@ static DaliError scan_sync_sequence_transact(const DaliSequence *seq,
 
     ScanSyncCtx taken = {};
     if (!scan_sync_wait(dali_transport_sequence_timeout_ms(seq), &taken)) {
-        scan_sequence_result_init(result_out, DALI_ERR_TIMEOUT);
-        return DALI_ERR_TIMEOUT;
+        scan_sequence_result_init(result_out, DALI_ERR_WAIT_EXPIRED);
+        return DALI_ERR_WAIT_EXPIRED;
     }
 
     if (!taken.has_sequence) {
@@ -479,6 +484,24 @@ static void scan_task(void *arg) {
             }
         }
     }
+    if (inventory.identity_collision_count > 0u) {
+        /*
+         * The same fault, and the one the device list above does show -- as a
+         * single unit. Units of one product in one state answer every query
+         * the scan makes alike; only their identification numbers collide. The
+         * light entity at that address drives all of them.
+         */
+        ESP_LOGW(TAG, "%u address(es) answer as one unit but hold more than "
+                      "one; their identification numbers collide",
+                 (unsigned)inventory.identity_collision_count);
+        for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+            const DaliDiscoveryDeviceInfo *d =
+                dali_discovery_inventory_get(&inventory, addr);
+            if (d != nullptr && d->has_identity_collision) {
+                ESP_LOGW(TAG, "  a%u: contested, identity collides", (unsigned)addr);
+            }
+        }
+    }
     if (inventory.undecodable_device_count > 0u) {
         /*
          * The Part 103 device address space, which is independent of the gear
@@ -563,7 +586,7 @@ static void scan_task(void *arg) {
 }
 
 // ---------------------------------------------------------------------------
-// Public entry point — called from ESPHome loop task (Core 0).
+// Public entry point — called from the ESPHome loop task.
 // ---------------------------------------------------------------------------
 
 bool dali_scan_start(DaliComponent *component) {
@@ -572,8 +595,9 @@ bool dali_scan_start(DaliComponent *component) {
         ESP_LOGE(TAG, "failed to allocate scan task arguments");
         return false;
     }
-    // Runs alongside the DALI task, off the ESPHome main loop's core wherever
-    // there is a second one, so the sync wait cannot starve it.
+    // Pinned with the DALI task (dali_worker_core()). ESPHome 2026.9 runs its
+    // loop on that core too; the walk's sync waits block rather than spin, so
+    // the loop keeps running through a scan.
     BaseType_t created = xTaskCreatePinnedToCore(scan_task, "dali_scan", 8192, args, 9,
                                                  nullptr, dali_worker_core());
     if (created != pdPASS) {

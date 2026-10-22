@@ -694,15 +694,16 @@ void test_reply_between_minimum_and_nominal_settling_is_accepted(void)
 }
 
 /*
- * Gear that settles faster than the standard's 5.5 ms minimum still gets read,
- * as long as what arrived decoded as a complete backward frame.
+ * A decoded backward frame is accepted from the earliest edge the PHY can
+ * observe at all, before the standard's 5.5 ms minimum, as long as it decoded
+ * as a complete backward frame.
  *
- * Measured on a real installation: four LED-strip drivers reply at 5.24-5.62 ms
- * and straddle the edge, so most of their replies were discarded and the caller
- * saw a timeout while a correctly decoded byte sat in the buffer. Retries do
- * not help gear sitting on a threshold, so the window has to give.
+ * The edge is the PHY's own RX suppression — the stop bits, then the settle —
+ * not a chosen margin: for a decoded frame there is no other floor with a
+ * physical meaning, and every fixed margin tried near the minimum was overtaken
+ * by the next device.
  */
-void test_decoded_backward_frame_is_accepted_before_the_standard_open(void)
+void test_decoded_backward_frame_is_accepted_from_the_phy_rx_floor(void)
 {
     DaliTransaction txn = {
         .frame        = { .data = 0x1BC0u, .bit_length = 16u },
@@ -716,21 +717,18 @@ void test_decoded_backward_frame_is_accepted_before_the_standard_open(void)
     dali_sched_run();
     TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
 
-    /* The edge is the self-echo suppression itself, not a chosen margin above
-     * it: for a decoded frame there is no other floor with a physical meaning,
-     * and every fixed margin so far has been overtaken by the next device. */
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)DALI_SETTLE_MS * 1000u,
+    TEST_ASSERT_EQUAL_UINT32(1664u, (uint32_t)DALI_TX_STOP_BITS_US);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)DALI_TX_STOP_BITS_US +
+                                 (uint32_t)DALI_SETTLE_MS * 1000u,
                              (uint32_t)DALI_REPLY_WINDOW_OPEN_DECODED_US);
     TEST_ASSERT_TRUE(DALI_REPLY_WINDOW_OPEN_DECODED_US < DALI_REPLY_WINDOW_OPEN_US);
 
-    /* 4.122 ms — the fastest reply actually observed on the 1k bus, from the
-     * a0 DT6 driver answering QUERY STATUS. 25% faster than the standard's
-     * minimum, and it decoded correctly. */
     DaliPhyRxObservation observation = {
         .result         = DALI_OK,
         .frame          = { .data = 0x08u, .bit_length = 8u },
-        .first_edge_us  = 4122u,
-        .last_edge_us   = 4122u + DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+        .first_edge_us  = DALI_REPLY_WINDOW_OPEN_DECODED_US + 2u,
+        .last_edge_us   = DALI_REPLY_WINDOW_OPEN_DECODED_US + 2u +
+                          DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
         .edge_count     = 16u,
         .has_timestamps = true,
     };
@@ -740,6 +738,43 @@ void test_decoded_backward_frame_is_accepted_before_the_standard_open(void)
     TEST_ASSERT_EQUAL(1, g_cb_count);
     TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
     TEST_ASSERT_EQUAL_HEX32(0x08u, g_cb_reply.data);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_outside_reply);
+}
+
+/*
+ * The collision the frame-end reference exists for.
+ *
+ * The 1k bus's fastest driver answered 4.122 ms after the old TX-end stamp,
+ * which was taken after the stop bits: 5.786 ms after the frame end, inside
+ * IEC 62386-101's range. Measured from the old stamp, two such units answering
+ * together — a COMPARE with several matches, or a contested QUERY STATUS —
+ * fell before the undecodable open edge and read as silence: NO, or a free
+ * address. Measured from the frame end it is qualified activity.
+ */
+void test_collision_from_fast_conformant_gear_is_rx_activity(void)
+{
+    DaliTransaction txn = {
+        .frame        = { .data = 0xA900u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+
+    const uint32_t first_edge_us = 4122u + DALI_TX_STOP_BITS_US;
+    TEST_ASSERT_TRUE(first_edge_us >= DALI_REPLY_WINDOW_OPEN_US);
+    inject_rx_activity(first_edge_us,
+                       first_edge_us + DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+                       16u,
+                       DALI_ERR_MALFORMED);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_RX_ACTIVITY, g_cb_result);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.reply_rx_activity);
     TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_outside_reply);
 }
 
@@ -762,9 +797,13 @@ void test_malformed_activity_keeps_the_standard_open_edge(void)
     advance_past_settle();
     dali_sched_run();
 
-    /* Same 4.122 ms the decoded frame above is accepted at. */
-    inject_rx_activity(4122u,
-                       4122u + DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+    /* Between the two edges: a decoded frame here would be accepted, and
+     * undecodable activity here is still refused. */
+    const uint32_t first_edge_us = 4600u;
+    TEST_ASSERT_TRUE(first_edge_us > DALI_REPLY_WINDOW_OPEN_DECODED_US);
+    TEST_ASSERT_TRUE(first_edge_us < DALI_REPLY_WINDOW_OPEN_US);
+    inject_rx_activity(first_edge_us,
+                       first_edge_us + DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
                        16u,
                        DALI_ERR_MALFORMED);
 
@@ -1050,6 +1089,58 @@ void test_precise_phy_tx_end_is_preferred_over_delayed_task_clock(void)
 
     TEST_ASSERT_EQUAL(1, g_cb_count);
     TEST_ASSERT_EQUAL(DALI_ERR_RX_ACTIVITY, g_cb_result);
+}
+
+/*
+ * The PHY's stamp is the frame end, which comes DALI_TX_STOP_BITS_US before
+ * the call returns. The reply window hangs off the stamp; the inter-frame
+ * guard still hangs off the return, so moving the reference did not shorten
+ * the spacing between forward frames.
+ */
+void test_window_uses_frame_end_and_guard_uses_tx_return(void)
+{
+    const uint32_t frame_end_us = 10000u;
+    const uint32_t tx_return_us = frame_end_us + DALI_TX_STOP_BITS_US;
+    g_mock_time_us = tx_return_us;
+    g_mock_tick_ms = tx_return_us / 1000u;
+    g_mock_last_tx_end_us = frame_end_us;
+    g_mock_last_tx_end_result = DALI_OK;
+
+    DaliTransaction query = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&query));
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+
+    /* Undecodable activity exactly at the standard's minimum after the frame
+     * end: 3.836 ms after the return, which the old reference refused. */
+    inject_rx_activity(frame_end_us + DALI_REPLY_WINDOW_OPEN_US,
+                       frame_end_us + DALI_REPLY_WINDOW_OPEN_US +
+                           DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+                       16u,
+                       DALI_ERR_MALFORMED);
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_RX_ACTIVITY, g_cb_result);
+
+    /* The next forward frame waits the full guard from the return time. */
+    g_mock_time_us = tx_return_us + DALI_FORWARD_INTERFRAME_US - 1u;
+    g_mock_tick_ms = (tx_return_us + DALI_FORWARD_INTERFRAME_US - 1u) / 1000u;
+    DaliTransaction command = {
+        .frame = { .data = 0x0100u, .bit_length = 16u },
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&command));
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    g_mock_time_us = tx_return_us + DALI_FORWARD_INTERFRAME_US;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x0100u, g_mock_last_tx.data);
 }
 
 void test_timestamped_reply_survives_delayed_wait_settle_state(void)
@@ -1624,8 +1715,14 @@ void test_unsolicited_16bit_idle_routes_event(void)
     TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_outside_reply);
 }
 
-/* 8. A 24-bit RX candidate during settle is ignored, not routed as an event */
-void test_24bit_rx_during_settle_is_ignored_not_routed(void)
+/*
+ * 8. An event decoded while the scheduler settles is routed, and the
+ * transaction in hand is unaffected.
+ *
+ * This used to be dropped and counted rx_event_unroutable. It is not a corner:
+ * see the next-but-one vector for the path that produces it every time.
+ */
+void test_24bit_rx_during_settle_is_routed(void)
 {
     TEST_ASSERT_EQUAL(DALI_OK,
                       dali_sched_set_event_callback(on_event, &g_event_marker));
@@ -1642,30 +1739,123 @@ void test_24bit_rx_during_settle_is_ignored_not_routed(void)
     dali_sched_run();
     TEST_ASSERT_EQUAL(SCHED_WAIT_SETTLE, dali_sched_state());
 
-    inject_event(0x123456u);
+    inject_event(0x00840Cu);
     dali_sched_run();
 
-    TEST_ASSERT_EQUAL(0, g_event_count);
+    TEST_ASSERT_EQUAL(1, g_event_count);
+    TEST_ASSERT_EQUAL_HEX32(0x00840Cu, g_event_frame.data);
     TEST_ASSERT_EQUAL(0, g_cb_count);
     TEST_ASSERT_EQUAL(SCHED_WAIT_SETTLE, dali_sched_state());
-    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.unsolicited_events_routed);
-    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_ignored_outside_reply);
-    /*
-     * This is the 2k bus in miniature: a subscribed control device emits while
-     * the scheduler is mid-transmission, and the frame is dropped for the
-     * state it arrived in. A 64-address walk is back-to-back TX, so this is
-     * the bucket that made the scan note track whether someone was standing
-     * in the corridor. It is event traffic, not a timing fault.
-     */
-    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_event_unroutable);
-    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_reply_early);
-    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_reply_late);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.unsolicited_events_routed);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_outside_reply);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_event_unroutable);
     assert_ignored_buckets_sum();
 
     advance_past_settle();
     dali_sched_run();
     TEST_ASSERT_EQUAL(1, g_cb_count);
     TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+}
+
+/*
+ * An event decoded while the next frame waits out the inter-frame guard is
+ * routed too. The scheduler sits in SCHED_TX for the whole guard, on a quiet
+ * bus, and that state used to drop events as well.
+ */
+void test_event_during_tx_guard_is_routed(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_set_event_callback(on_event, &g_event_marker));
+
+    DaliTransaction first = {
+        .frame = { .data = 0x0100u, .bit_length = 16u },
+    };
+    DaliTransaction second = {
+        .frame = { .data = 0x0300u, .bit_length = 16u },
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&first));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&second));
+
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_TX, dali_sched_state());
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    inject_legacy_event(0x8B10u);
+
+    TEST_ASSERT_EQUAL(1, g_event_count);
+    TEST_ASSERT_EQUAL_HEX32(0x8B10u, g_event_frame.data);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.unsolicited_events_routed);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_outside_reply);
+
+    advance_to_next_forward();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+}
+
+/*
+ * The deterministic path. A control device's event is on the wire when a
+ * query is queued; the PHY waits for it to end and transmits, and the RX
+ * decode that completes the event runs only afterwards. Its edges all precede
+ * the query, so it is routed as an event and is no part of the query's reply
+ * window: the reply that follows is still accepted.
+ */
+void test_event_on_the_wire_before_a_queued_query_is_routed(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_set_event_callback(on_event, &g_event_marker));
+
+    /* The event: 25 bits, ending 1.7 ms before our frame goes out. */
+    const uint32_t event_first_edge_us = 1000u;
+    const uint32_t event_last_edge_us  = event_first_edge_us + 25u * DALI_BIT_US;
+    const uint32_t frame_end_us        = event_last_edge_us + 1700u + 16000u;
+    g_mock_time_us = frame_end_us + DALI_TX_STOP_BITS_US;
+    g_mock_tick_ms = g_mock_time_us / 1000u;
+    g_mock_last_tx_end_us = frame_end_us;
+    g_mock_last_tx_end_result = DALI_OK;
+
+    DaliTransaction query = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&query));
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_SETTLE, dali_sched_state());
+
+    DaliPhyRxObservation event = {
+        .result         = DALI_OK,
+        .frame          = { .data = 0x008001u, .bit_length = 24u },
+        .first_edge_us  = event_first_edge_us,
+        .last_edge_us   = event_last_edge_us,
+        .edge_count     = 40u,
+        .has_timestamps = true,
+    };
+    inject_phy_observation(&event);
+    TEST_ASSERT_EQUAL(1, g_event_count);
+    TEST_ASSERT_EQUAL_HEX32(0x008001u, g_event_frame.data);
+
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+
+    DaliPhyRxObservation reply = {
+        .result         = DALI_OK,
+        .frame          = { .data = 0x02u, .bit_length = 8u },
+        .first_edge_us  = frame_end_us + 6400u,
+        .last_edge_us   = frame_end_us + 6400u + DALI_BIT_US * 9u,
+        .edge_count     = 16u,
+        .has_timestamps = true,
+    };
+    inject_phy_observation(&reply);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+    TEST_ASSERT_EQUAL_HEX32(0x02u, g_cb_reply.data);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.unsolicited_events_routed);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_outside_reply);
 }
 
 /* 9. Another 24-bit forward frame invalidates the pending local query. */
@@ -3081,7 +3271,8 @@ int main(void)
     RUN_TEST(test_reply_received);
     RUN_TEST(test_frame_like_rx_activity_completes_reply_with_distinct_error);
     RUN_TEST(test_reply_between_minimum_and_nominal_settling_is_accepted);
-    RUN_TEST(test_decoded_backward_frame_is_accepted_before_the_standard_open);
+    RUN_TEST(test_decoded_backward_frame_is_accepted_from_the_phy_rx_floor);
+    RUN_TEST(test_collision_from_fast_conformant_gear_is_rx_activity);
     RUN_TEST(test_malformed_activity_keeps_the_standard_open_edge);
     RUN_TEST(test_early_and_late_malformed_activity_do_not_become_replies);
     RUN_TEST(test_in_window_short_malformed_activity_aborts_instead_of_becoming_no);
@@ -3091,6 +3282,7 @@ int main(void)
     RUN_TEST(test_in_window_malformed_reports_error_once_the_budget_is_gone);
     RUN_TEST(test_timestamped_activity_survives_delayed_wait_settle_state);
     RUN_TEST(test_precise_phy_tx_end_is_preferred_over_delayed_task_clock);
+    RUN_TEST(test_window_uses_frame_end_and_guard_uses_tx_return);
     RUN_TEST(test_timestamped_reply_survives_delayed_wait_settle_state);
     RUN_TEST(test_timestamped_phy_callback_delivers_normal_backward_reply);
     RUN_TEST(test_timestamped_phy_callback_rejects_early_and_late_backward_frames);
@@ -3116,7 +3308,9 @@ int main(void)
     RUN_TEST(test_trace_reaches_primary_callback_and_added_subscriber);
     RUN_TEST(test_trace_subscriber_removal_stops_delivery);
     RUN_TEST(test_unsolicited_16bit_idle_routes_event);
-    RUN_TEST(test_24bit_rx_during_settle_is_ignored_not_routed);
+    RUN_TEST(test_24bit_rx_during_settle_is_routed);
+    RUN_TEST(test_event_during_tx_guard_is_routed);
+    RUN_TEST(test_event_on_the_wire_before_a_queued_query_is_routed);
     RUN_TEST(test_unsolicited_24bit_during_reply_window_invalidates_query);
     RUN_TEST(test_16bit_frame_during_reply_window_invalidates_query);
     RUN_TEST(test_reply_timeout_then_retry_succeeds);

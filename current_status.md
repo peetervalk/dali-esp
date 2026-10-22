@@ -1,622 +1,594 @@
 # DALI-ESP Current Status
 
-**Last updated:** 2026-09-18, at the `v2.0.0` release.
+What `dev` does, described as expected behaviour. This is an annex to
+`AGENTS.md`, which holds the architecture, the layer rules, the ISR and timing
+constraints, the documentation rules, and the build, test and CI notes.
 
-Annex to `AGENTS.md`. That file holds the architecture, the layer rules, the ISR
-and timing constraints, and the native/host build commands; this one holds what
-is true right now — what works, what is proven, and what is open.
+**Nothing here is a verification claim.** Other files hold that:
 
-Everything dated lives elsewhere: verification history and investigations are in
-`project_log.md`, and per-release changes in `CHANGELOG.md`. Verb and argument
-detail is in `dali_commands.md`, frame and opcode detail in `dali_protocol.md`,
-per-capability API/verb/vector/hardware status in `dali_capability_matrix.md`.
+| File | What it holds |
+|---|---|
+| `todo.md` | Every expectation below that a real bus has not yet confirmed, each with the procedure that would confirm it; also the development backlog |
+| `dali_capability_matrix.md` | Per capability, whether it has run on a bus |
+| `project_log.md` | The dated evidence |
+| `CHANGELOG.md` | Per-release changes, including what is unreleased on `dev` |
+| `dali_commands.md` | Verb and argument detail |
+| `dali_protocol.md` | Frames and opcodes |
 
-## Release And Deployment State
+## Release State
 
 | | |
 |---|---|
-| Latest tag | `v2.0.0`, which is what `main` points at |
-| Last hardware-tested release | `v1.1.1` as a tagged build. The `v2.0.0` tree has real-bus results (below), taken from `dev` rather than from a flashed tag |
-| `dev` vs `main` | level at the tag; `dev` accumulates work between releases |
+| Latest tag | `v3.0.0`. `main` is the tag, and the tagged tree pins it |
+| Next release | Not planned. What `dev` changes after the tag collects in `CHANGELOG.md` under *Unreleased* |
+| `dev` vs `main` | `dev` carries everything since the tag |
 
-`v2.0.0` releases the post-scan verification, VERIFY-based duplicate detection,
-mixed-device work, the backup/restore path, the `address` verb, and
-control-device commissioning — none of which any earlier tag had. It is a
-breaking release for C API consumers and for out-of-tree build systems;
-`CHANGELOG.md` has the migration.
+Two defects in `v2.0.0`, fixed in `v3.0.0`, matter to anyone still running it:
 
-`dali-starter.yaml` and the README example pin the current tag, so a new
-installation gets released code by default. Work lands on `dev` between
-releases, and pointing an installation there is a deliberate move: compile and
-test it separately first.
+- **Both Part 103 addressing encodings are wrong.**
+  - `address d<N> set d<M>` sends the device to 2M+1, and a device-space
+    `restore apply` does the same.
+  - `commission devices` finds no unaddressed device.
+  - Do not use them on `v2.0.0`. Gear addressing is unaffected.
+- **The TCP shell runs whatever a browser POSTs to its port.** That includes
+  commissioning where `allow_commissioning: true`, which `dali-starter.yaml`
+  sets. On `v2.0.0`, keep it off wherever a browser is used on that network.
 
-**What is deployed is not recorded here, and this is not the place to look.**
-The authoritative site configurations live in Home Assistant. Nothing in this
-repository is evidence of what any device runs or of which ref it was built
-from.
+`CHANGELOG.md`, *v3.0.0*, lists the rest under *Fixed*.
 
-**Overall:** the ESPHome controller is operational on the two known
-installations. The repository has a strong reusable C foundation, but CLI
-completeness, several DALI-2 protocol paths, and general-purpose ESPHome
-reliability remain active work. This is not a conformance claim, and the project
-is not DALI Alliance certified.
+`dali-starter.yaml` and the README example pin the tag, so a new installation
+gets released code. Pointing an installation at `dev` is a deliberate move:
+compile and test that build first.
 
-## Goal Assessment
+**What is deployed is not recorded here.** The site configurations live in
+Home Assistant. Nothing in this repository is evidence of what a device runs,
+or of which ref it was built from.
 
-| Aim | Current state |
+The project is not DALI Alliance certified, and nothing here claims
+conformance.
+
+## Where The Aims Stand
+
+| Aim | State |
 |---|---|
-| CLI completeness | **Surface complete, verification incomplete.** Every shared capability has a typed verb, including memory, DT6, DT8, input-device query/configuration, vendor helpers, control-device memory, gear *and* control-device commissioning, gear *and* control-device re-addressing, backup/restore, CONTINUOUS UP/DOWN, arc power MASK, and send-twice `raw2`. What is missing is real-bus results for DT6, DT8, memory writes, and input-device configuration. |
-| ESP32 / ESPHome controller | **Working installation-grade baseline.** The two known sites have operational brightness control, observation, sensor polling, diagnostics, and discovery. Not yet a general, fully state-correct DALI controller. |
-| Protocol separation | **Directionally strong.** The reusable C stack is independent of ESPHome, and every frame the ESPHome layer sends is built by a shared builder in `components/dali`. What stays ESPHome-bound is the wiring — console dispatch, the refresh pump, the entity registries — none of which host tests can reach. |
-| Standards confidence | **Selected workflows verified, not complete conformance.** Some tests repeat implementation constants rather than independent standard-derived vectors. |
+| CLI completeness | Every shared capability has a typed verb. That includes memory, DT6, DT8, input-device query and configuration, vendor helpers and control-device memory. It also covers gear and control-device commissioning and re-addressing, backup and restore of addresses, groups and instance settings, CONTINUOUS UP/DOWN, arc power MASK, and send-twice `raw2`. Which of these has met a bus is the matrix's job |
+| ESP32 / ESPHome controller | Runs two installations: brightness control, coupler observation, sensor polling, diagnostics and discovery. It is not yet a general, fully state-correct controller; see *Known Limitations* |
+| Protocol separation | The C stack in `components/dali` has no ESPHome dependency. Every frame the ESPHome layer sends is built by a shared builder. Only the wiring is ESPHome-bound, and host tests cannot reach it: console dispatch, the refresh pump, and the entity registries |
+| Standards | Selected workflows behave as the standard requires on real buses. That is not conformance. Some tests repeat implementation constants rather than independent vectors derived from the standard |
 
-The next development phase should prioritize protocol and state correctness
-before adding broad new device support.
+Protocol and state correctness come before broad new device support.
 
-## Verification State
+## Hardware
 
-**At the `v2.0.0` tag, 2026-09-18:**
+- **Board:** ESP32-DevKitC-VE (ESP32-WROVER-E) with a MikroE DALI 2 Click. TX
+  is on GPIO18 and RX on GPIO19.
+- **GPIO16/17:** the WROVER-E's PSRAM uses them. The pin schema does not
+  reject them, because they are ordinary pins on WROOM and other variants.
+- **Installations:** two run the ESPHome controller, called 1k and 2k
+  throughout. Their bus layouts are at the top of `todo.md`.
+- **Couplers:** existing DALI-1 push-button couplers in direct-control mode
+  drive the lamps themselves. The controller observes their frames to keep
+  Home Assistant in step.
 
-- 31/31 host suites build and pass, locally and in CI.
-- `dali_test.yaml` passes `esphome config` and `esphome compile` on ESPHome
-  2026.9.0. Because that config is `type: local`, it validates the Python schema
-  in `esphome/components/dali/__init__.py` against this tree and compiles the
-  C++ layer and the vendored C stack from it. It is deliberately the widest
-  config here — every platform, every optional block.
-- The native ESP-IDF firmware builds in CI, compiling the same
-  `components/dali` C under a second toolchain.
-- The tag itself builds as an external component in an empty directory with no
-  checkout around it (`release-packaging.yml`), which is the only thing that
-  proves a consumer can fetch and build it.
-- Scope, stated precisely: `esphome config` exercises the Python schema only;
-  the compile is what covers the C++ layer and the vendored C.
-- **Not a hardware pass.** The real-bus results below were taken from `dev`
-  during development, not from a flashed `v2.0.0` build.
+## What The Code Does
 
-### Recorded hardware state
+### Bus layer
 
-What a real bus has established. The sessions themselves — dates, refs,
-counters, captures, and what each did *not* cover — are in `project_log.md`.
+- **PHY.**
+  - A 104 µs GPTIMER tick clocks TX.
+  - RX is buffer-first: the edge ISR writes a fixed ring buffer, and a
+    task-context decoder turns it into frames.
+  - Allocation is static throughout. `dali_phy_init()` checks every
+    acquisition and releases what earlier steps took before it returns an
+    error.
+  - Core affinity is not hardcoded.
+  - 16- and 24-bit frames are both first-class.
+- **Frame end.** The TX ISR stamps the end of the forward frame's last data
+  bit. `dali_phy_tx()` reports success only once the ISR reaches
+  `DALI_PHY_TX_DONE`, and returns `DALI_ERR_TIMING` when a frame does not
+  complete in time.
+- **Reply attribution** runs from that stamp, with two opening edges:
 
-- **Gear commissioning and the backup/restore core work on real gear.** `backup
-  save`/`status`, `restore plan`/`apply`, `address set`/`add`/`remove`,
-  `commission unaddressed` with its post-scan, `quiescent`, `identify`,
-  `meminfo` and `config-dtr0` all produced correct results on 2k. The
-  `contested` classification met a genuine physical two-unit collision — the
-  first real collision behind `RX_ACTIVITY`, which every commissioning safety
-  claim depends on.
-- **No control gear on 2k answers past the reply window.** `rx_reply_late` reads
-  0 across every measured walk. This retires the earlier late-reply reading; the
-  backoff fix that reading produced still works, but its mechanism is now
-  unexplained — see the P1 item below.
-- **The TX-retry counter cannot detect reply loss.** A fully quiesced 2k walk
-  carries 132 retries and 264 reply timeouts with zero event, early, late or
-  superseded observations: absent addresses, at two timeouts and one retry each,
-  dominate it.
-- **2k's baseline event rate is ~0.36/s**, established by two independent
-  methods, and rises to at least 3.2x that while a walk runs. a0's lux instance
-  is a 3.000 s metronome with an unchanging payload, so the count tracks elapsed
-  time, not movement.
-- **Scan duration is a property of bus composition**: ~0.34 s per empty address
-  against ~1.79 s per present device, because enrichment runs several queries
-  per device. A 16-gear 1k walk takes 45 s against 29 s for a 5-gear 2k one, so
-  events-per-walk is not comparable across buses or across gear changes.
-- **A query to known-present gear can be lost silently.** a0's instance
-  enumeration failed on one 2k walk and succeeded on the next with no error
-  printed — the first such loss seen on the current build, and the cheapest
-  handle on the backoff question above.
+  | Observation | Accepted from | Constant |
+  |---|---|---|
+  | Decoded backward frame | 3.664 ms | `DALI_REPLY_WINDOW_OPEN_DECODED_US`, derived from `DALI_SETTLE_MS` |
+  | Undecodable activity | 5.5 ms, the standard's minimum | `DALI_REPLY_WINDOW_OPEN_US` |
 
-Established on or before the `v1.1.1` flash of 2026-08-14:
+  The window closes at 28.664 ms. The asymmetry is the safety: undecodable
+  activity must not read as a reply, because COMPARE maps it to YES and would
+  invent gear that is not there.
+- **Undecodable activity.** Frame-like activity inside the window is
+  `DALI_ERR_RX_ACTIVITY`. COMPARE alone reads it as YES; every other query
+  keeps it as an error.
+- **Sequences.** Scheduler sequences run contiguously and report a
+  `DaliSequenceResult`: the overall error, the failing step, the steps
+  attempted, and one backward frame per reply-bearing step. Every multi-frame
+  workflow is built on them:
+  - memory reads, and the control-device memory write
+  - discovery's ENABLE DEVICE TYPE pairs, and the group query
+  - commissioning's search/COMPARE probe and its PROGRAM/VERIFY pair
+  - DT6/DT8 command grouping
+  - Part 103 DTR loads
 
-- Hardware target: ESP32-DevKitC-VE / ESP32-WROVER-E with MikroE DALI-2 Click.
-- Known wiring: TX on GPIO18, RX on GPIO19. GPIO16/17 are PSRAM and unusable.
-- Bidirectional DALI traffic works on the two installed buses.
-- Existing DALI-1 pushbutton couplers in BF6/direct-control mode operate the
-  lamps directly; the ESP32 observes their traffic for Home Assistant state.
-- Native and ESPHome diagnostics have been used successfully for control,
-  queries, discovery, inventory, capture, and sensor investigation.
+  Only genuine single-frame queries use `transact` directly.
+- **Retries.**
+  - A retry-safe command is re-sent once on a timeout, after
+    `DALI_REPLY_TIMEOUT_BACKOFF_US`.
+  - It is also re-sent on a MALFORMED or OVERFLOW observation inside its reply
+    window.
+  - Nothing that could not already repeat is repeated.
+- **Events.** Unsolicited event frames reach their subscribers in every
+  scheduler state. An event that lands inside a reply window aborts that
+  transaction with `DALI_ERR_INTERVENED`.
+- **Waiting.** A blocking caller that stops waiting gets
+  `DALI_ERR_WAIT_EXPIRED`, never the `DALI_ERR_TIMEOUT` that means silence. The
+  wait is sized from the transport's retry budget.
+- **Admission is observable.** `dali_sched_queue_stats()` reports depth,
+  capacity, high-water and admitted count. Rejections are split into
+  queue-full and reset-barrier. A rejection is dropped work; the scheduler
+  never retries a refused submission.
+- **Transport.** `dali_transport` is the single bus abstraction the higher
+  modules share. Only its whole-sequence entry point is atomic, and that entry
+  point is optional, so a caller that needs atomicity asks
+  `dali_transport_supports_atomic_sequence()`.
 
-### Not yet verified
+### Protocol and device support
 
-- **Most of `dev` since `v1.1.1`.** The 2k pass cleared gear commissioning,
-  the backup/restore core, and the contested classification; the rest of the
-  protocol work has host vectors and no bus behind it.
-- Hardware round-trip for input-device configuration writes, DT6/DT8 helpers,
-  memory operations, and vendor helpers. No write path reads its value back.
-- **Equal-random-address handling** — the largest untested slice. The two units
-  commissioned so far drew distinct randoms, so the path never ran.
-- Control-device commissioning (`commission devices`) on a real bus, and the
-  quiescence bracket it now takes. `address <dN> clear` makes the fixture
-  reachable for the first time: until it existed there was no way to produce an
-  unaddressed control device from the shell, so the walk could not be run
-  against anything.
-- `backup import`, `backup export`, and `restore groups` against real gear.
-  `backup save`/`status` and `restore plan`/`apply` are now covered.
-- The commissioning post-scan audit's own contested path. The scan path met a
-  real collision, but the commission run that followed was clean, so the audit's
-  classification is still an inference.
-- `manifest.json`'s `>=2026.6.0` ESPHome floor, which is tested against nothing
-  but whatever `pip install esphome` last resolved to. The 2026.8.1 end is now
-  covered at both stages — schema validation and a full compile of the C++ layer
-  and vendored C — but nothing establishes the floor itself.
-- Independent conformance of every protocol constant, timing boundary, memory
-  layout, discovery path, and commissioning collision case.
+- **Part 102 control gear:**
+  - DAPC and arc power MASK
+  - every level command, CONTINUOUS UP/DOWN and GO TO SCENE included
+  - 34 named queries
+  - 19 configuration commands, with each DTR0-consuming one sent as a single
+    sequence
+  - 18 special commands
+  - send-twice
+- **DT6 (IEC 62386-207):** 5 configuration commands and 19 queries. Each goes
+  out with its ENABLE DEVICE TYPE 6, and its DTR0 load if it has one, as one
+  sequence.
+- **DT8 (IEC 62386-209):** temporary set, step, activate, store and query
+  commands, and the four-step 16-bit colour read. It is reachable from the
+  shell only.
+- **DT1 and the other device types are not implemented.**
+- **Part 103 instance commands** take the whole instance byte:
 
-Dated evidence for each of these is in `project_log.md`.
+  | Byte | Selects |
+  |---|---|
+  | `0`–`31` | one instance by number |
+  | `0x80\|G` | instance group G |
+  | `0xC0\|T` | every instance of type T |
+  | `0xFF` | every instance |
 
-## Current Software State
+- **Input-device configuration.** Builders for the Part 103 generic instance
+  configuration and for Parts 301 (type 1), 303 (type 3) and 304 (type 4) have
+  an independently audited opcode surface.
+- **Event decoding.** Part 103 events decode into canonical source fields for
+  all five normal schemes. Command and reserved frames are rejected, and all
+  ten event-information bits are kept.
+- **Event source matching.** `dali_event_source` answers one question: could
+  this event have come from the instance at (address, instance)?
+  - Device/Instance events match exactly.
+  - Other schemes match on the fields they carry, narrowed by a profile read
+    from the instance: its type, scheme and three instance groups.
+  - An unknown fact never excludes a match, and the profile's scheme is never
+    used to exclude one.
+- **Memory.**
+  - The Part 102 helper reads a gear's Bank 0 identity block.
+  - The Part 103 form reads a control device's own Bank 0 over 24-bit framing.
+  - Block reads go out as one sequence.
+  - `devmem write` sends its unlock and write as one queue entry.
+- **Quiescent mode.** Part 103 START/STOP QUIESCENT MODE can be sent per device
+  or by broadcast.
+- **Vendor helpers.** Lunatone sensor scaling queries, and the Steinel HF 360 II
+  instance profile and value conversions.
+- **The two address spaces are independent.** A unit that is both gear and a
+  control device answers each from a separate Bank 0. On 2k the two spaces of
+  one unit report different GTINs, so nothing may infer that gear address N
+  and device address N are the same unit.
 
-### Shared DALI stack
+### Discovery
 
-- `components/dali` is the reusable plain-C PHY, RX ring buffer, scheduler,
-  transport, protocol/control APIs, discovery, gear and control-device
-  commissioning, snapshot/restore, group mapping, memory helpers, DT6/DT8
-  builders, input-device support, events, mapping, dispatch, and vendor helpers.
-- `dali_transport` is the single bus abstraction the higher modules share. Only
-  the whole-sequence entry point is atomic, and it is optional, so callers that
-  require atomicity must ask via `dali_transport_supports_atomic_sequence()`.
-- Static allocation and the buffer-first ISR model are preserved throughout the
-  timing and protocol layers. `dali_phy_init()` checks every acquisition and
-  releases what earlier steps took before returning an error. Core affinity is
-  not hardcoded.
-- Scheduler sequences run contiguously and report a `DaliSequenceResult` holding
-  the overall error, the failing step, the steps attempted, and one backward
-  frame per reply-bearing step. **Every multi-frame workflow in the stack is
-  built on it** — memory reads, the control-device memory write, discovery's
-  ENABLE DEVICE TYPE pairs, group query, commissioning's search/COMPARE probe
-  and PROGRAM/VERIFY pair, DT6/DT8 command grouping, and Part 103 DTR loads.
-  Only genuine single-frame queries go through `transact` directly.
-- Reply attribution uses two window edges. `DALI_REPLY_WINDOW_OPEN_US` (5500 us,
-  the standard's minimum) applies to undecodable activity;
-  `DALI_REPLY_WINDOW_OPEN_DECODED_US`, derived from `DALI_SETTLE_MS` rather than
-  chosen, applies to an observation that decoded as a complete backward frame.
-  The asymmetry is the safety: qualified undecodable activity must not be read
-  as a reply, because COMPARE maps it to YES and invents gear that is not there.
-- Part 103 events decode into canonical source fields, reject command and
-  reserved frames, and preserve all ten event-information bits. Independent
-  vectors cover all five normal source schemes.
-- Part 103 generic instance configuration plus Part 301/type 1, Part 303/type 3,
-  and Part 304/type 4 builders have an independently audited opcode surface.
-  Software-level evidence only.
-- The Part 102 memory helper reads the common Bank 0 identity block, and the
-  Part 103 form beside it reads a control device's own Bank 0 over 24-bit
-  framing. Discovery performs each read in its own space, independently: gear
-  identity for confirmed control gear, device identity for any address an input
-  device answered. A unit that is both answers each space from a separate
-  Bank 0, and on the 2026-09-02 bus those reported different GTINs and different
-  identification numbers — so nothing may infer that gear address N and device
-  address N are one unit.
-- `dali_snapshot` records which *physical* unit (by Bank 0 identification
-  number) holds which short address; `dali_restore` turns a snapshot plus a live
-  bus into an ordered move list of plain addressed SET SHORT ADDRESS traffic. No
-  INITIALISE window, interruptible at any point, and convergent on re-run. The
-  blob round-trips both ways: `backup export` prints the
-  `backup import` script that reproduces it, so a backup kept off the device can
-  be loaded back — which is what the native CLI, having no persistent store,
-  needs. `dali_snapshot_decode()` validates a blob in full before writing, so a
-  rejected import costs the held backup nothing.
-- `dali_restore_plan_groups` is the second, separate planner: it diffs each
-  gear's recorded group mask against the one on the bus and emits the ADD/REMOVE
-  bits, matched by identification number and addressed to wherever the gear
-  answers now. It is deliberately not part of `restore apply` — group membership
-  survives a re-address untouched, so this repairs a `RESET` rather than a
-  commissioning walk, and it is the one part of a restore that can destroy
-  something a restore cannot give back. Both "the backup never read this gear's
-  groups" and "this gear's groups will not read back now" are reported and
-  skipped rather than written blind.
-- `dali_device_commissioning` is the Part 103 counterpart of
-  `dali_commissioning` — same walk shape over a different command space, sharing
-  the reply classification rather than the encodings. Both directions of the
-  cross-part guard exist (`terminate_control_devices` and
-  `terminate_control_gear`), and since 2026-09-04 both walks take the broadcast
-  quiescence bracket. The device walk went without one on the assumption that
-  silencing control devices would silence the devices it searches; quiescent
-  mode does not gate replies, which a real bus shows directly — `discover` under
-  `quiescent on` enumerates devices and instances normally. The walk searching
-  the event sources themselves, at ~25 COMPARE probes per device, is the one
-  with the most to gain from the bracket rather than the least. What is still
-  inferred is COMPARE answered from inside an open Part 103 addressing window by
-  a device with no short address; nothing separates it from the addressed-query
-  case, but the bus has not been asked that exact question.
-- DT1 and other specialized/legacy device types remain intentionally
-  unimplemented.
+- **The walk.** `scan` and `discover` walk both address spaces.
+  - Each present gear has its groups, device type, version, actual level and
+    level profile read, along with QUERY NUMBER OF INSTANCES.
+  - Each control device has its instances enumerated: type, resolution,
+    status, event scheme, event priority and three instance groups.
+  - Bank 0 identity is read in each space independently.
+- **Contested addresses.** Two kinds of address are contested:
+
+  | How it shows | What happens to it |
+  |---|---|
+  | The status reply is undecodable activity | Reserved, not listed, and held out of every free pool |
+  | The Bank 0 identity read collides twice running: units of one product that answer every status probe in step | Listed, but marked and named |
+
+  `dali_discovery_gear_address_contested()` is the one test, and the planner,
+  the snapshot, the commissioning audit and `backup save` all use it.
+- **Quiescence.** Every operator-driven walk brackets itself with broadcast
+  START/STOP QUIESCENT MODE, and releases on every exit path:
+  - `scan` and `discover`
+  - both commissioning pre-scans and the post-scan
+  - `backup save`
+  - the `restore` scans
+
+  Two walks deliberately do not take the bracket. `find switches` exists to
+  hear events. The integration's periodic scan runs unattended, and silencing
+  occupancy for minutes is a trade nobody is present to accept. A release
+  that fails prints a line naming `quiescent off all` as the fix.
+- **The event note.** A walk names the events that arrived during it as
+  expected traffic on a bus with sensors, not as a timing fault.
+- **Duration.** A walk costs about 0.34 s per empty address and 1.79 s per
+  present gear, so walk length depends on what is on the bus: about 45 s for
+  16 gear and 29 s for 5.
+
+### Commissioning
+
+- **`commission unaddressed [first] [max]`** runs the Part 102 walk:
+  1. a pre-scan for occupied and contested addresses
+  2. INITIALISE for unaddressed gear, then RANDOMISE
+  3. a binary search by COMPARE
+  4. PROGRAM SHORT ADDRESS, VERIFY and WITHDRAW for each unit found
+
+  It assigns the lowest free addresses, and never touches addressed gear.
+- **Brackets.** The walk is bracketed by broadcast START/STOP QUIESCENT MODE
+  and by Part 103 TERMINATE, sent before INITIALISE, again right after it, and
+  in the unwind. Quiescence stops control devices transmitting into a COMPARE
+  window. TERMINATE stops one answering COMPARE from its own addressing state.
+- **Equal random addresses** are detected at VERIFY. The pair is de-addressed
+  with PROGRAM SHORT ADDRESS `0xFF`, dropped from the search, and left for a
+  second run to place.
+- **Cleanup.** Every exit after the opening sequence converges on one Part 102
+  TERMINATE. It goes through a cleanup transport that ignores a disconnected
+  front end, so closing the terminal does not cancel the safety unwind.
+- **The post-scan audit** runs on every exit that could have written an
+  address. It sorts the run's addresses into confirmed, contested and silent.
+  It also names two classes the run did not claim:
+  - an address occupied now that was free before and was never recorded
+  - an address newly contested that the run never assigned
+- **`commission devices`** is the same walk in the Part 103 space:
+  - INITIALISE `0x7F` selects unaddressed devices.
+  - It is bracketed by quiescence and a Part 102 TERMINATE.
+  - Its post-scan names addresses as `d<N>`.
+- **Policy.** Both walks need `DALI_SHELL_ALLOW_COMMISSION`. Over TCP that means
+  `allow_commissioning: true`.
+
+### Addressing, backup and restore
+
+- **`address`** is the checked tier over re-addressing.
+  - `<aN>` reaches gear. `<dN>` reaches control devices, and the `d` is
+    mandatory.
+  - `set` and `clear` exist in both spaces. `add` and `remove` exist for gear
+    only, because nothing reads Part 103 device groups back.
+  - Every arm proves its result by reading it back.
+  - `set` and `clear` need the commissioning policy. `add` and `remove` are
+    ungated.
+- **The checked write.** Every `address` arm and every `restore apply` move
+  writes through `dali_restore_write_short_address()`:
+  1. It loads DTR0 and reads it back with QUERY CONTENT DTR0: gear `0x98`,
+     device `0x36`.
+  2. It sends the SET SHORT ADDRESS pair only once the unit holds the value.
+  3. A wrong, silent or unreadable read-back gets one more load. If that fails
+     too, nothing more is sent.
+
+  Three cases report specially:
+  - Clearing a contested address sends the pair unchecked when the read-back
+    collides, and says so.
+  - When the destination is silent afterwards, the source is probed too, so a
+    unit that stayed is told apart from one that answers nowhere.
+  - A transport error says whether SET SHORT ADDRESS had already gone out.
+- **`backup save`** records which physical unit holds which short address in
+  both spaces, keyed by the unit's Bank 0 identification number. It also
+  records:
+  - each gear's group mask
+  - each control device's instance settings: type, enabled, event scheme,
+    priority, filter and three instance groups, up to 64 instances
+
+  It leaves contested addresses out and says so, flags entries it cannot
+  anchor, and warns when a broadcast QUERY MISSING SHORT ADDRESS shows
+  unaddressed gear.
+- **The format is version 2.** A full blob is 3,208 bytes, and a version-1
+  blob is refused. `dali_snapshot_decode()` validates a blob in full before it
+  writes anything.
+  - On ESPHome the backup persists to NVS as a 3,216-byte record, written by
+    the main loop.
+  - The native build has no store. `backup export` prints the `backup import`
+    script that reproduces the backup.
+- **`restore plan` and `restore apply`** turn a backup plus a live bus into an
+  ordered list of plain addressed moves. There is no INITIALISE window, so a
+  restore is interruptible at any point and converges on re-run.
+  - Cycles are broken by staging through a spare address.
+  - A unit the backup never saw is moved aside.
+  - Contested addresses are reserved, and reported as `contested` or `target
+    contested`.
+  - `apply` confirms each move before sending the next: the destination
+    answers, the source is silent, and the identification number there is the
+    unit's. It stops at the first move that fails.
+  - Confirmed gear moves carry the integration's group map with them.
+- **`restore groups [apply]`** is a separate planner, and `restore apply` never
+  reaches it.
+  - It diffs each gear's recorded group mask against the bus, matched by
+    identification number, and writes the ADD/REMOVE bits wherever the gear
+    answers now.
+  - It skips gear whose groups the backup never read, or that will not read
+    back.
+  - It reads every gear back afterwards, and flags `MISMATCH`.
+- **`restore instances [apply]`** finds each control device by identification
+  number. It writes each recorded instance field that differs, ENABLE or
+  DISABLE last, and reads it back.
+  - It records "disabled" only when QUERY INSTANCE STATUS agrees with a silent
+    QUERY INSTANCE ENABLED.
+  - Type-specific settings, such as Part 303 timers, are not recorded.
+- **Scenes are not captured.**
 
 ### Diagnostic shell
 
-- `components/dali/dali_shell.c` is the shell: one session owning every verb,
-  the blocking transport, and the caches a workflow accumulates. It is the
-  single implementation both front ends run.
-- `components/dali/dali_cli.c` is the portable core beneath it — tokenizing, the
-  verb tables, argument-count validation, and reply formatting — with no
-  ESP-IDF, FreeRTOS, or bus dependency, so the host tests build it.
-- `main/dali_diag.c` is the UART0 binding and nothing else;
-  `esphome/components/dali/dali_shell_tcp.cpp` is the TCP binding. Both move
-  bytes and own a session's lifetime. Neither implements, gates, or rewords a
-  verb; a surface that must refuse one declares a `DALI_SHELL_ALLOW_*` policy.
-- Dispatch is one table. `dali_cli_resolve()` tokenizes, looks the verb up, and
-  checks argument-count bounds before any handler runs, so trailing tokens are
-  rejected rather than ignored. Help and `list <table>` are generated from the
-  same tables, so neither can describe a command the parser will not accept.
-- `address` is the one verb that spans both address spaces. `<aN>` reaches
-  control gear and `<dN>` reaches control devices, and the `d` is mandatory
-  because every other address argument in the CLI accepts a bare number — the
-  spaces are independent, so a line that does not say which one it means is
-  refused rather than resolved. The device arms are `set` and `clear` only: the
-  group arms stay gear-only because Part 103 device groups have no read-back
-  path here, and every arm of this verb proves its result by reading it.
-- `raw` sends one arbitrary 16- or 24-bit frame and `raw2` sends one twice
-  through the send-twice path. Both are diagnostic escape hatches, not
-  substitutes for the typed atomic verbs.
-- `identify`, `smoke`, `capture`, and the inventory JSON export have no host
-  vectors of their own; they are composed from covered primitives, but their
-  output formats are unasserted.
+- **One implementation, two bindings.**
+  - `components/dali/dali_shell.c` is the shell: one session owning every
+    verb, the blocking transport, and the caches a workflow builds up.
+  - `components/dali/dali_cli.c` is its portable core: tokenizing, the verb
+    tables, argument validation and reply formatting. It has no ESP-IDF,
+    FreeRTOS or bus dependency.
+  - The bindings are `main/dali_diag.c` (UART0) and
+    `esphome/components/dali/dali_shell_tcp.cpp` (TCP).
+  - A binding moves bytes and owns a session's lifetime. A surface that must
+    refuse a verb declares a `DALI_SHELL_ALLOW_*` policy.
+- **Dispatch is one table.** `dali_cli_resolve()` checks the argument count
+  before any handler runs, so trailing tokens are refused. `help`, `list` and
+  `schema` are generated from the same tables.
+- **`raw` and `raw2`** send one arbitrary 16- or 24-bit frame, once or as a
+  send-twice pair. A frame that is itself a commissioning command needs the
+  commissioning policy, as the named verbs do. `dali_cli_raw_frame_is_commissioning()`
+  decides which frames those are.
+- **Bus claim.** A multi-frame workflow claims the bus through
+  `try_claim_bus()`. That raises the scan gate, then waits up to 5 s for queued
+  work to drain. A claim that cannot drain is refused.
+- **The TCP binding:**
 
-### ESPHome component
+  | Behaviour | How |
+  |---|---|
+  | One session at a time | A second client waits in the listen backlog until the first ends |
+  | Browser requests are refused | A connection that opens with an HTTP request line is closed before any of its lines is dispatched. The device logs the sender's address at WARN. `dali_cli_peer_sniff()` decides, within the first line |
+  | A client that stops reading is dropped | A send that makes no progress for 10 s (`SO_SNDTIMEO`) marks the peer lost, which ends a running workflow at its next step |
+  | A vanished client is reclaimed | TCP keepalive (30 s idle, then 3 probes 5 s apart) frees it in about 45 s |
+  | An unused terminal is closed | after `idle_timeout` |
+  | Sockets are counted | The listener and its one client are registered with ESPHome's socket count, adding two lwIP sockets |
 
-- Active component: `esphome/components/dali`.
-- `dali-starter.yaml` provides discovery and diagnostics: scan, identify,
-  find-couplers, target controls, bus monitoring, group-map output, and
-  generated YAML log lines.
-- Light entities expose brightness only. Shared DT8 support is not yet mapped to
-  Home Assistant colour-temperature, XY, or RGB controls — deliberately held
-  behind hardware verification.
-- Brightness maps through the gear's own window and curve, not `[1, 254]`. MIN
-  LEVEL, MAX LEVEL, and (for DT6) dimming curve are queried per short address at
-  boot, on every refresh, after a scan, and after any command that moves them. A
-  group or broadcast entity uses the union of its known members' windows; YAML
-  `min_level`/`max_level`/`dimming_curve` override what was read. A reduced
-  ceiling therefore reports 100 % at MAX LEVEL.
-- The console covers control-gear output and configuration, control-gear and
-  control-device memory, DTR loads, non-commissioning special commands, DT6,
-  Part 103 instance query and configuration, vendor helpers, quiescent mode,
-  `raw`/`raw2`, and the local `queue`/`group` verbs. It is the shell's verb set
-  minus what needs a terminal or a blocking transport — so no `backup`,
-  `restore`, or `commission`. `dali_capability_matrix.md` lists the exclusions
-  with reasons.
-- Console `OK` means **queued**, not executed or device-acknowledged. Async
-  commands publish `pending`, replace it on completion, and ignore callbacks
-  belonging to an older submitted command. Replies are decoded by the same
-  shared function the shell prints through.
-- Light state crossing from the DALI task to ESPHome is one coherent packed
-  update; multiple pending observations coalesce to the latest.
-  `DaliInputSensor` uses the same packed mailbox, so neither surface has a
-  lost-update window.
-- Writes the operator did not issue are identified by what they are, not when
-  they arrive: ESPHome's restore/default write is the first `write_state()`
-  after `setup()`, and a bus reading pushed back is matched on the exact
-  `(is_on, level)` pair `apply_bus_state()` sent. There is no startup time
-  window, so a command issued seconds after boot reaches the bus.
-- A light entity suppresses a redundant command only against state a scheduler
-  *completion* confirmed, never against a successful enqueue. A rejected enqueue
-  retains the desired state and retries; a failed transmission invalidates the
-  cache and re-arms one bounded retry. One command per light is in flight at a
-  time. Confirmation still means transmitted, not device-acknowledged.
-- Every component-owned producer observes the scan gate — refresh and due sensor
-  polls stay pending, identify pauses, console and diagnostic actions are
-  rejected, HA light writes retain their target and retry. The exception is the
-  local-only `queue` verb. Headless events are drained so their fixed queue
-  cannot overflow, but actions observed during a scan are dropped rather than
-  replayed against a stale physical context.
-- Queue admission is observable: `dali_sched_queue_stats()` reports depth,
-  capacity, high-water, admitted, and rejections split into queue-full and
-  reset-barrier. A rejection is dropped work — the scheduler never retries a
-  refused submission.
-- Only complete group discovery replaces and persists membership. A failed
-  optional query or a missed known member retains the prior map and withholds
-  generated YAML. `group forget <addr> [group]` retires a departed member
-  without touching the bus.
-- Sensor readings are one scheduler sequence, so a two-byte instance cannot have
-  its latching query and latch read separated by other traffic. Matching
-  Device/Instance events request an immediate authoritative poll; event
-  information is never published as a sensor value.
-- `bus_fault` separates current availability from cumulative history. The
-  `tx_frames_ok` PHY counter is the recovery signal: it publishes
-  `Bus stuck (N total)` and returns to `OK (N past faults)` once a frame clocks
-  out in full.
-- The GPIO schema is board-aware and rejects TX equal to RX. It declares the
-  modes `dali_phy_init()` actually requests — TX as output plus pulldown, RX as
-  plain input — so ESPHome's per-variant pin tables reject an input-only pin
-  named as TX instead of letting it silently never transmit. No pin numbers are
-  hardcoded: GPIO16/17 are a WROVER wiring caveat, not a schema error, since
-  they are ordinary pins on WROOM and other variants.
-  DALI-task creation is checked and fails the component rather than running
-  without a bus task.
-- The TCP shell exposes the guarded `commission` verb only when
-  `allow_commissioning: true`. The Home Assistant text surface blocks raw
-  commissioning primitives and has no dedicated workflow entity.
+### ESPHome integration
 
-## Installation State
+- **Lights.**
+  - They expose brightness only. DT8 is not mapped to colour traits.
+  - Brightness maps through each gear's own MIN/MAX LEVEL window and DT6
+    dimming curve. These are read at boot, on every refresh, after a scan, and
+    after any command that moves them.
+  - A group or broadcast entity uses the union of its known members' windows.
+  - YAML `min_level`, `max_level` and `dimming_curve` override what was read.
+- **Group lights.**
+  - A group entity polls one member, picked from membership read off the bus.
+    No `query_address` is needed.
+  - Only a complete group discovery replaces the membership, which persists to
+    flash. A failed query keeps the previous map and withholds the generated
+    YAML.
+  - `group forget` retires a departed member.
+  - A re-address confirmed by `address` or `restore apply` moves the member.
+  - A clear retires the integration's entry. The gear keeps its groups and
+    still follows group and broadcast commands.
+- **Writes.**
+  - A light suppresses a redundant command only against state a scheduler
+    completion confirmed, never against an enqueue.
+  - A rejected enqueue keeps the target and retries. A failed transmission
+    invalidates the cache and re-arms one bounded retry.
+  - One command per light is in flight at a time. "Confirmed" means
+    transmitted, not acknowledged by the device.
+  - ESPHome's restore write is told apart by being the first `write_state()`
+    after `setup()`. A bus reading pushed back is told apart by matching the
+    exact `(is_on, level)` pair sent. There is no startup time window.
+- **Cross-task state.** Light state and sensor values cross from the DALI task
+  in one packed mailbox each. Pending observations coalesce to the latest.
+- **Sensors.**
+  - Polling is authoritative, and each reading is one sequence.
+  - An event that could be the sensor's own requests an immediate poll.
+    Device/Instance events match exactly; other schemes match by inference
+    through `dali_event_source`, logged as `event poll requested (inferred)`.
+  - The source profile is read after boot, after a scan, after a shell
+    workflow, and after an `iconfig` to the sensor's device. It is read again,
+    at most every five minutes, when an event arrives in a scheme it did not
+    expect.
+  - A sensor whose instance is off scheme 2 is logged once. That is a WARN
+    when it polls on events or a dispatch rule keys on its device.
+  - Event information is never published as a sensor value.
+- **Headless dispatch.** YAML rules act on observed frames: legacy 16-bit
+  coupler commands, and Part 103 events keyed by short address, instance,
+  instance group, device group or instance type. An `observe` rule keeps Home
+  Assistant in step with a coupler without retransmitting.
+- **The scan gate.** Every component-owned producer observes it:
+  - Refresh and due sensor polls stay pending.
+  - Identify pauses.
+  - Console and diagnostic actions are refused.
+  - Home Assistant light writes keep their target and retry.
 
-**The live site configurations are in Home Assistant, not here.** Nothing in
-this repository establishes what a site runs or which ref it was built from. To
-learn what a device actually runs, ask Home Assistant or the device.
+  The local-only `queue` verb is the exception. Headless events are drained so
+  their queue cannot overflow, but actions observed during a scan are dropped,
+  not replayed.
+- **`bus_fault`** separates current availability from history. A frame that
+  clocks out in full turns `Bus stuck (N total)` back into `OK (N past
+  faults)`.
+- **The console** (`text:` platform) runs the shell's verb set, minus anything
+  that needs a terminal or a blocking transport: no `backup`, `restore`,
+  `commission`, `address` or `dt8`. It also refuses the commissioning
+  spellings of `special`, `config`, `raw` and `raw2`.
+  - `OK` means queued.
+  - An asynchronous command publishes `pending`, then its result.
+  - Replies are decoded by the same function the shell prints through.
+  - A level a console verb sets reaches the light entity on the next refresh;
+    `dt6 select-curve` starts that refresh itself.
+- **The Identify button** blinks the target address for 10 s, then restores
+  its level. The log reads `back to level N`, `switched off again`, or `left
+  at min` when the level could not be read.
+- **Pins.**
+  - The GPIO schema is board-aware and refuses TX equal to RX.
+  - It declares the modes `dali_phy_init()` requests, so an input-only pin
+    named as TX is refused.
+  - No pin number is hardcoded.
+  - A failure to create the DALI task fails the component.
+- **sdkconfig.** The component sets `CONFIG_GPTIMER_ISR_CACHE_SAFE` and
+  `CONFIG_GPIO_CTRL_FUNC_IN_IRAM`, as the native `sdkconfig.defaults` does, so
+  the TX bit clock keeps running through flash writes.
 
-Two configurations are tracked, and neither is a deployment:
+## Known Limitations
 
-| Configuration | Component source | Role |
-|---|---|---|
-| `dali-starter.yaml` | `ref:` the current tag | Starter/commissioning firmware — the config to flash first on a new bus |
-| `dali_test.yaml` | `type: local` | CI coverage config; fictitious layout, never flashed |
+Facts about the code as it stands. Each has its fix, decision or measurement in
+`todo.md` under the heading named.
 
-The tracked site copies that used to sit beside them are gone. Tracking a real deployment to obtain CI
-coverage was the wrong trade — they carried an address layout nobody else could
-use and needed editing whenever the site changed. `dali_test.yaml` replaces them
-and keeps the property that mattered: `type: local` with
-`path: esphome/components`, so a configuration and the component it configures
-always agree within a commit.
+**Bus timing and arbitration**
 
-### 1k site: gear that answers just before the attribution window opens
+- **No collision arbitration.** The controller has no proven collision
+  detection or arbitration strategy. DALI-2 priority and backoff are not
+  implemented. Direct-control couplers transmit too, so simultaneous traffic
+  remains a risk. *Space forward frames from received frames*.
+- **Forward frames follow received frames too closely.** Ours follows a reply
+  by about 2.9 ms and an event by as little as 1.7 ms. DALI-2 devices wait at
+  least 13.5 ms after any frame, by priority. *Space forward frames from
+  received frames*.
+- **The RX edge interrupt is not IRAM-safe.** A frame that arrives during an
+  NVS commit (light state, the group map, a backup) can be lost or garbled.
+  *The RX edge interrupt is not IRAM-safe*.
+- **ESPHome's loop shares core 1 with the DALI tasks.** The PHY's pre-TX idle
+  check busy-waits there: 1.67 ms per frame, 33 ms per attempt on a stuck bus.
+  *The PHY busy-waits on the loop's core*.
 
-Four of sixteen fixtures settle faster than IEC 62386-101's 5.5 ms minimum
-(measured 4.12–5.85 ms) and were being read as silent. The decoded-frame window
-edge fixed it, confirmed on hardware. Group membership now reads from the bus
-with no `query_address` anywhere in the YAML and is persisted to flash. The full
-investigation — captures, timings, and why a hand-picked margin does not survive
-this bus — is in `project_log.md`.
+**Scheduling and scans**
 
-### 2k site: the scan's event note counts sensor traffic, not interference
+- **A scan is not reserved.** The TCP shell's single-frame verbs can interleave
+  with a button scan. *Reserve the scheduler for a scan*.
+- **Some clients act on admission, not transmission:** the console's `OK`, the
+  refresh pump, and headless dispatch. *Confirm transmission for every
+  scheduler client*.
+- **One intervening frame ends a scan.** Any per-address error other than
+  TIMEOUT, MALFORMED or RX_ACTIVITY stops the walk. *One intervening frame
+  aborts a whole scan*.
+- **`discover` can drop an input-device enumeration silently.** The device line
+  shows N instances, with no enumeration and no error. *Report a failed
+  input-device enumeration*.
 
-Every `discover` here notes control-device events arriving mid-walk, N running
-14-39. There is no timing fault and no interference. The Steinel at a0 emits on
-four instances continuously, only one of which is occupancy, so the count tracks
-elapsed time rather than whether anyone is in the corridor; Home Assistant's
-recorder stores only value changes and so shows almost none of this traffic.
+**Shared addresses**
 
-"Unroutable" is a weaker claim than the note's wording suggests. `SCHED_TX`
-covers the inter-frame guard as well as the frame, so an event arriving in a
-guard gap — on an idle bus, colliding with nothing — is classified the same way
-as one arriving mid-transmission, and a sizeable share of a walk sits in that
-state. An event that genuinely landed inside a reply window would set
-`s_reply_intervened` and abort the scan with `DALI_ERR_INTERVENED`, which has
-never happened on either bus. What is real is the *volume*: while a walk runs
-the wire carries at least 3.2x the idle rate, most likely the sensor
-retransmitting after losing its slot. Investigation in `project_log.md`.
+- **Some shared addresses stay invisible.** Two units that answer alike are
+  found only through a colliding identity read. Gear with an empty Bank 0, or a
+  collision that reads as silence or as a malformed reply, stays listed as one
+  unit.
+- **A shared control-device address can read as silence.** Then `address d<N>
+  clear` answers `does not answer`. The by-hand clear is device DTR0 `0xFF`
+  (`raw C130FF len=24`), then `raw2 <addr>FE14 len=24`. *Clearing a shared
+  device address*.
 
-### Observed Steinel instance layout
+**Backup and restore**
 
-| Instance | Type | Meaning | Authoritative handling |
-|---:|---:|---|---|
-| 0 | 4 | Light/lux | Two-byte poll, `scale: 0.01` |
-| 1 | 3 | Occupancy | One-byte poll and HA mapping |
-| 2 | 0 | Temperature | Two-byte poll, `T_C = raw * 0.1 - 5` |
-| 3 | 0 | Humidity | One-byte poll, `H_percent = raw * 0.5` |
+- **`restore_find_spare()` can stage onto a missing unit's recorded address.**
+  A unit that was only unpowered then returns to a contested address.
+- **Part 103 device groups are decode-only.** Discovery does not read them, the
+  backup does not record them, and `address <dN> add` is refused. A replaced
+  control device gets its address back, but not its device groups. *Part 103
+  device groups*.
+- **Backups do not hold scenes or type-specific instance settings,** such as
+  Part 303 hold and report timers.
 
-Polling is authoritative for occupancy. A matching Device/Instance event
-requests an immediate poll, but the event information itself is never treated as
-a sensor value.
+**Writes and read-back**
 
-## Prioritized Work
+- **No memory or configuration write reads itself back.** `iconfig`, `devmem
+  write` and `config` report transmitted, not applied. Read the value back.
+- **Quiescent state cannot be read back.** QUERY QUIESCENT MODE is not
+  implemented. A device left quiescent with `quiescent on` stays silent until
+  `quiescent off`, or until its own timeout: 15 minutes in TI's firmware, and
+  unknown for the Steinel. That looks the same as a dead sensor.
 
-### P0 — Protocol correctness and conformance
+**Home Assistant**
 
-- **Hardware validation of the rest of the commissioning work.** Unmet by a
-  bus: equal-random-address handling, control-device commissioning, `backup
-  import`/`export`, and `restore groups`. The single-unaddressed-device envelope
-  no longer stands on nothing; the equal-random path is where it is still an
-  assumption. The control-device half is no longer blocked on a fixture:
-  `address <dN> clear` de-addresses a control device, so the 2k Steinel can be
-  cleared and re-commissioned in one session. Worth settling in the same
-  session: whether a device answers COMPARE from inside an addressing window
-  while quiescent, which is the one part of the new bracket's reasoning the bus
-  has not been asked.
-- **Prove bus timing beyond the local own-forward-frame guard.** TX-end and
-  observation timestamps are exported and host-tested; HIL must validate both
-  attribution edges (5.5 ms undecodable, 2 ms decoded) against the 27 ms close,
-  physical collision behavior, and external-frame cases. DALI-2 priority/backoff
-  remains open, as does a deadline-aware PHY call when a repeat would cross the
-  100 ms limit.  
-- **The post-scan audit's contested path has no bus behind it.** Both walks
-  self-check on every exit that could have written an address, and the diff
-  (`dali_commissioning_audit`) is host-covered; `RX_ACTIVITY` has a real
-  collision behind it via the scan path. But the commission run that followed
-  was clean, so the audit's own classification remains an inference.
+- **An input sensor holds its last value** when its device stops answering.
+  Nothing marks it stale. *What an input sensor shows when its device stops
+  answering*.
+- **No addressing fault reaches Home Assistant.** `bus_fault` reports PHY
+  liveness only, and contested addresses appear only in logs. A group light
+  entity is not told when its membership changes. *Addressing faults and
+  membership changes reach Home Assistant*.
+- **Entity limits drop silently.** The 33rd light, 17th sensor and 33rd
+  dispatch rule are dropped with a boot-time log line. *Entity limits fail
+  silently*.
+- **Light entities are brightness-only,** and DT8 is reachable from the shell
+  alone.
+- **Brightness maps linearly onto light output,** and bypasses ESPHome's
+  `gamma_correct`. *The brightness mapping*.
 
-### P0 — Transaction and runtime reliability
+**ESPHome internals**
 
-- If new scheduler clients are added outside `DaliComponent`, add a true
-  scheduler admission reservation for scans. The current quiescence check plus
-  component-wide gate covers present local producers but is not an atomic
-  check-and-reserve primitive.
-- Give the remaining fire-and-forget scheduler clients the confirmed-transmission
-  treatment the light entities have. Console `OK`, the refresh pump, and
-  headless dispatch still report or act on admission rather than transmission.
+- **The DALI PHY can disable ESPHome pin interrupts that attach after it.** The
+  workaround is `use_interrupt: false` on a `gpio` binary sensor. *The DALI PHY
+  can break every other GPIO interrupt*.
+- **`load_address_backup()` reads ESPHome preferences from the shell task,**
+  which races the loop's `save()`.
 
-### P1 — Verification on real hardware
+**Tools**
 
-The typed verb surface is in place; what is missing is evidence. Keep
-`dali_capability_matrix.md` current as each row is exercised.
-
-- Run the DT6 and DT8 verbs against real gear. Every DT8 row is host-covered and
-  hardware-unverified, and both the P2 colour mapping and DT8's absence from the
-  ESPHome console are held behind this. The DT6 console verbs send the same
-  frames as the native ones, so one session clears both columns — start with
-  `dt6 <a> dimming-curve` and `dt6 <a> failure-status` on the 1k LED drivers,
-  where a wrong answer is visible rather than destructive.
-- Complete the memory read/write/read-back cycle for both `memread`/`meminfo`
-  (Part 102) and `devmem` (Part 103). No write path reads its value back today,
-  so `devmem write` reports transmitted, not applied.
-- Validate input-device configuration writes with read/write/read-back per
-  parameter. `iconfig` success means transmitted; until this is done the whole
-  surface stays experimental.
-- Run a restore against a bus carrying gear no backup has seen. The planner now
-  moves such a unit aside to a free address instead of dropping the move, which
-  is host-covered but has never sent a frame. The 2026-09-03 bus is the exact
-  fixture: an unrecorded driver holding an address a recorded unit is owed.
-  Worth checking the operator reading as much as the moves — a displacement and
-  a placement look alike in the apply log apart from the plan's note.
-- Add host vectors for `identify`, `smoke`, `capture`, and the inventory JSON
-  export, whose output formats are unasserted.
-- Nothing in the shared-`dali_cli` migration, or the verb-parity work built on
-  it, has been exercised on a real bus.
-
-### P1 — ESPHome correctness and architecture
-
-- **No addressing fault reaches Home Assistant.** `bus_fault` is a PHY liveness
-  signal (`"OK"` / `"Bus stuck: N"`) and reports correctly, but nothing surfaces
-  a contested short address — the one failure the bus cannot undo remotely; it
-  read `OK` throughout a real collision, an address wipe, and a commissioning
-  walk. The scan already computes `undecodable_count` and the per-address flags.
-  Wanted: an addressing-health sensor, or a widened `bus_fault` reporting
-  `"Contested: a4"`. The same shape one layer along, group membership changes do
-  not reach the integration either, so a group light entity cannot know its
-  membership changed underneath it.
-- **Part 103 device groups are decode-only.** They are recognised as an event
-  source and nowhere else: discovery does not query them, the snapshot does not
-  record them, `restore groups` is control gear only, and `address <dN> add
-  <gN>` is refused rather than sent because nothing could read the result back.
-  A control device that is replaced can be given its address back but not its
-  group membership. Wanted, in order: a query path in discovery, a `groups`
-  field on the device snapshot entry, then the planner and the verb arm.
-- Extend the compact Part 103 dispatch key if a site needs to distinguish
-  Device-Group from Instance-Group sources or match instance type. The canonical
-  event/capture path retains these fields; the five-field rule key does not. No
-  site needs this today, and it changes a C struct layout.
-- A paged or exportable Find Couplers result, rather than one
-  truncated-with-a-count summary. The log already holds every frame.
-- Define recovery after bus-only power cycles, beyond the current/cumulative
-  fault split.
-- The console's own dispatch has no host vectors. Its parsing, validation, and
-  reply decoding are shared code that does, but the wiring in
-  `dali_component.cpp` is ESPHome/FreeRTOS-bound and testable only on device.
-
-### P1 — Diagnostic shell correctness
-
-- **Re-derive why the retry backoff works.** `DALI_REPLY_TIMEOUT_BACKOFF_US`
-  demonstrably fixed the 2k missing-lamp rate — 8/8 scans against 2/8 — but
-  `rx_reply_late` reads 0 on that bus, so the late-straggler story asserted in
-  the comment on the constant in `dali_frame.h` and the one on
-  `sched_retry_active_step()` in `dali_scheduler.c` is not what is happening.
-  Two ways of measuring it are ruled out: `TX retries` is dominated by absent
-  addresses, and the `s_reply_intervened` path aborts the whole scan rather than
-  losing a single address, which no walk on either bus has ever done. The cheap
-  test is the silently lost instance enumeration on 2k — run `discover`
-  repeatedly, count how often the enumeration line is missing, then repeat under
-  `quiescent on all`; if event traffic is losing queries to present gear, the
-  rate should go to zero. Also worth adding: a counter on the intervened path,
-  the one reply-loss mode that increments nothing today.
-- **`discover` hides a failed input-device enumeration.** The post-scan loop in
-  `cmd_discover` only prints on `DALI_OK` from
-  `dali_discovery_query_input_device()` and has no else branch, so a lost query
-  leaves the operator with a device line claiming N instances, no enumeration
-  line, and no error. Observed on hardware. Report the failure, and keep the
-  count the device line already reported rather than silently dropping the
-  device's instance view.
-- **Confirm the scan's quiescence bracket on a bus.** Every operator-driven
-  walk in the shell brackets itself with `START QUIESCENT MODE` and releases on
-  every exit path; the integration's own periodic scan opts out, because an
-  unattended walk that silences occupancy for minutes is a trade nobody is
-  present to accept. Host-covered and mutation-checked; no bus has seen it. What
-  to watch for is the failure direction — a release that does not land leaves
-  the installation's sensors quiet, and the shell's line saying so is the only
-  thing that would tell an operator to run `quiescent off all`.
-- **`address <aN> clear` has never run on a bus.** Added with the `backup save`
-  contested warning; host-covered only at the CLI layer (arity, subcommand, and
-  that the "no short address" value is outside the encoded range), because the
-  shell handler itself has no host vectors. Three things want a real bus. The
-  broadcast QUERY MISSING SHORT ADDRESS check is new to this codebase and its
-  three-way reading — silence as NONE, decoded `0xFF` or RX activity as SOME —
-  is asserted from the standard, not observed; the second arm in particular
-  assumes several units answering YES collide the way several units answering a
-  status query do. The contested path has the same problem the post-scan audit's
-  does: no collision has been driven through it. And the partial-clear branch
-  (`a7` answering decodably after the write, meaning one unit took it and one
-  did not) is a guess about what a half-applied broadcast-to-one-address write
-  looks like. Worth doing on 2k with two drivers deliberately set to one
-  address: clear, confirm both report missing, `commission unaddressed`,
-  `identify`, then `restore`.
-- **No restore has planned against a real contested address.** The planner
-  reserves one now — it used to read "not present" as "free" and could stage or
-  displace a third unit onto it, which is recorded in `project_log.md` — and the
-  reservation, the new `target contested` conflict and the space independence
-  are all host-covered and mutation-checked. What no test can supply is the
-  input: `has_undecodable_activity` set by genuine overlapping replies rather
-  than by a struct field a test wrote. The same 2k bench that proves
-  `address <aN> clear` proves this, one command earlier: with two drivers on one
-  address, a `backup save` taken beforehand and a `restore plan` afterwards
-  should report `target contested` for whatever the backup says belongs there,
-  and must never list a move onto it.
-
-### P1 — Release and verification quality
-
-- **Empty the unreleased-change list as part of tagging, not after it.** The
-  v2.0.0 notes were written from a list that had not been emptied at `v1.3.0`
-  and so claimed two releases' worth of breaks as pending; each item had to be
-  checked against the tag to find which had already shipped. The list is in
-  `project_log.md` and the released notes are in `CHANGELOG.md`.
-- Enforce or document the actual ESP-IDF and ESPHome version requirements.
-  `idf-build.yml` pins IDF 6.0.1, so the native requirement now fails when it
-  stops holding. The ESPHome side is still advisory — CI installs whatever
-  `pip install esphome` resolves to. Note that the two builds compile the same
-  `components/dali` C with different toolchains.
-- Keep local filenames hyphenated in all documentation. `dali_commands.md`
-  tracks both verb surfaces and needs re-checking whenever either table changes.
-- Complete release provenance: project SPDX identifiers and the full vendored
-  Unity MIT license/third-party notice.
-- Clarify the bus topology: direct-control couplers also transmit. Their
-  coexistence is field-tested, but that is not collision-safe single-master
-  arbitration.
-
-### P2 — Further development
-
-- Map DT8 to Home Assistant colour-temperature, XY, and RGB/RGBWAF traits after
-  hardware validation.
-- Add typed Part 303/type 3 occupancy and Part 304/type 4 illuminance profiles.
-- Add a dedicated Home Assistant commissioning workflow/UI only after the shared
-  path is hardware-proven. The TCP shell already exposes the guarded verb behind
-  `allow_commissioning: true`.
-- Improve scene/fade UX. A level-changing command arms a deferred re-read, but
-  the refresh it triggers is a full pass over every light rather than a query of
-  the one that moved, and nothing reads a final value after a transition longer
-  than the arming window.
-- Add capture replay, parser fuzzing, and hardware-in-loop tests for timing,
-  collisions, queue pressure, bus faults, and power restoration.
-- Add DT1 and other device types only when an installation requires them,
-  following the DT6/DT8 module pattern.
+- **Native `trace on` can block the DALI task** once the UART TX buffer fills.
+- **Find Couplers prints one summary,** truncated with a count.
 
 ## Operational Constraints
 
 - Do not imply DALI Alliance certification or complete IEC 62386 coverage.
-- The controller has no proven collision-detection/arbitration strategy.
-  Existing direct-control couplers work on the installed buses, but simultaneous
-  transmissions remain a risk.
-- Treat input-device configuration writes as experimental until real-bus
-  read/write/read-back validation is complete.
-- Build every new multi-frame workflow on `DaliSequence`. The migration covers
-  everything that exists today, so what remains is regression risk: issuing
-  dependent frames as separate transactions reintroduces the class of bug this
-  removed. The tell is a query whose answer depends on a register or enumeration
-  pointer that the same query, or an immediately preceding frame, modifies.
-- Do not use GPIO16 or GPIO17 on the WROVER-E target. Nothing enforces this:
-  the schema deliberately does not ban them, because they are ordinary pins on
-  WROOM and the S3 puts PSRAM elsewhere.
-- **Static DRAM is ~134 KiB and the shell is 65 KiB of it.** Two builds of the
-  same tree on 2026-09-04: `dali_test.yaml` uses 133.9 KiB of the 176.5 KiB
-  static window, and the same config without its `shell:` block uses 69.1 KiB
-  — 64.8 KiB of RAM and 78.8 KiB of flash. `dali_shell.c` is compiled
-  unconditionally through the `proto_dali_shell.c` shim, but nothing outside
-  `dali_shell_tcp.cpp` references it, so `--gc-sections` drops the whole of it
-  when the block is absent. Every file-scope buffer added there is paid for on
-  each board that does run the shell.
-- **`sram1_as_iram` is inert at this IRAM level.** IRAM is
-  76.7 KiB of the default 128 KiB and this build's `.iram0.text` ends at
-  `0x4009369F`. IDF reserves D/IRAM out of the heap only in proportion to what
-  the app's IRAM actually uses above `0x400A0000` — `_sram1_iram_len` in
-  `memory.ld.in`, clamped at zero — so below that line the option costs
-  nothing and buys nothing. Above it the heap pays byte for byte, and the image
-  then needs a bootloader that knows the region.
+- Treat every input-device configuration write and memory write as transmitted
+  until a read-back confirms it.
+- Build every new multi-frame workflow on `DaliSequence`.
+  - Issuing dependent frames as separate transactions brings back the class of
+    bug the migration removed.
+  - The tell is a query whose answer depends on a register, or an enumeration
+    pointer, that the same query or the frame just before it modifies.
+- Do not use GPIO16 or GPIO17 on the WROVER-E. Nothing enforces this.
+- **Static DRAM: `dali_test.yaml` links at 141,792 B of the 176.5 KiB static
+  window.** The diagnostic shell is the largest single item in it.
+  - `dali_shell.c` is compiled unconditionally through the
+    `proto_dali_shell.c` shim. Nothing outside `dali_shell_tcp.cpp` references
+    it, so `--gc-sections` drops all of it when a config has no `shell:` block.
+  - Every file-scope buffer added to the shell is paid for on each board that
+    runs it.
+  - The shell caches 16 devices of 32 instance records, so one byte per record
+    costs 512 B.
+  - The version-2 backup holds its 768-byte instance table twice in blob form,
+    once as the shell's staging copy and once as the integration's flash
+    record, and its 1,536-byte model once.
+- **`sram1_as_iram` is inert at this IRAM level.** `.iram0.text` ends at
+  `0x40093464`, about 77 KiB of the default 128 KiB.
+  - IDF takes D/IRAM out of the heap only in proportion to what the app's IRAM
+    uses above `0x400A0000`: `_sram1_iram_len` in `memory.ld.in`, clamped at
+    zero. Below that line the option costs nothing and buys nothing.
+  - Above the line, the heap pays byte for byte, and the image needs a
+    bootloader that knows the region.
+
+## Configurations In This Repository
+
+**The live site configurations are in Home Assistant, not here.** To learn what
+a device runs, ask Home Assistant or the device.
+
+| Configuration | Component source | Role |
+|---|---|---|
+| `dali-starter.yaml` | `ref:` the current tag | Starter and commissioning firmware: the config to flash first on a new bus |
+| `dali_test.yaml` | `type: local` | CI coverage config. A fictitious layout, never flashed, and the widest configuration this repository compiles against its own tree |
+
+`dali_test.yaml` is `type: local` with `path: esphome/components`, so a
+configuration and the component it configures always agree within a commit.
+Tracked copies of real sites were tried and dropped. They carried an address
+layout nobody else could use, and needed editing whenever a site changed.
 
 ## Source Layout
 
 | Path | Role |
 |---|---|
 | `components/dali/` | Reusable C protocol, PHY, scheduler, transport, discovery, commissioning, memory, device types, dispatch |
-| `components/dali/dali_shell.c/.h` | The diagnostic CLI as a reusable session: every verb, the blocking transport, workflow caches |
-| `components/dali/dali_cli.c/.h` | Portable CLI core: tokenizing, verb tables, validation, formatting. Shared by both front ends |
+| `components/dali/dali_shell.c/.h` | The diagnostic CLI as a reusable session: every verb, the blocking transport, the workflow caches |
+| `components/dali/dali_cli.c/.h` | Portable CLI core: tokenizing, verb tables, validation, formatting, and peer classification. Shared by both front ends |
 | `components/dali/dali_commissioning.*` | Part 102 control-gear commissioning walk |
 | `components/dali/dali_device_commissioning.*` | Part 103 control-device commissioning walk |
-| `components/dali/dali_snapshot.*` | Records which physical unit (Bank 0 id) holds which short address |
-| `components/dali/dali_restore.*` | Turns a snapshot plus a live bus into an ordered move list |
-| `components/dali/dali_group_map.*` | Group→member bookkeeping; picks a group light's poll representative |
+| `components/dali/dali_commissioning_audit.*` | The post-scan diff both walks check themselves against |
+| `components/dali/dali_snapshot.*` | Records which physical unit (by Bank 0 id) holds which short address, plus group masks and instance settings |
+| `components/dali/dali_restore.*` | Turns a snapshot plus a live bus into moves, group edits and instance writes; the checked short-address write |
+| `components/dali/dali_group_map.*` | Group-to-member bookkeeping; picks a group light's poll representative |
+| `components/dali/dali_event_source.*` | Could this event be that instance's? The matcher behind event-triggered sensor polls, and the profile read that narrows it |
 | `components/dali/dali_light_write.h` | Header-only desired/in-flight/confirmed write arbitration |
 | `components/dali/dali_refresh_cursor.h` | Header-only refresh-pump cursor |
 | `components/dali/dali_dim_curve.*` | IEC 62386-102 arc power level ↔ light output conversion |
@@ -625,85 +597,17 @@ The typed verb surface is in place; what is missing is evidence. Keep
 | `main/dali_diag.c/.h` | UART0 binding for the shell; moves bytes only |
 | `esphome/components/dali/` | Active ESPHome external component |
 | `esphome/components/dali/dali_shell_tcp.cpp` | TCP binding for the shell |
-| `esphome/components/dali/proto_dali_*.c` | Shims pulling the vendored C in behind ESPHome's source glob |
-| `dali-starter.yaml` | Tracked starter/commissioning firmware |
-| `dali_test.yaml` | Tracked CI coverage config; the widest configuration this repo compiles against its own tree |
-| `test/` | 31 host suites and the vendored Unity runner |
-| `tools/dali-shell` | Operator-side script for the TCP shell |
-| `AGENTS.md` | Architecture, layer rules, timing/ISR constraints, build commands |
+| `esphome/components/dali/proto_dali_*.c` | Shims that pull the vendored C in behind ESPHome's source glob |
+| `dali-starter.yaml` | Tracked starter and commissioning firmware |
+| `dali_test.yaml` | Tracked CI coverage config |
+| `test/` | 34 host suites and the vendored Unity runner |
+| `tools/dali-shell` | Operator-side client for the TCP shell |
+| `AGENTS.md` | Architecture, layer rules, timing/ISR constraints, documentation rules, build, test and CI |
+| `todo.md` | Hardware verification procedures, then the development backlog |
 | `project_log.md` | Verification history and investigations |
-| `CHANGELOG.md` | Per-release changes, with the C API and operator-visible migrations |
+| `CHANGELOG.md` | Per-release changes, with migrations; *Unreleased* collects what `dev` has since the last tag |
 | `dali_commands.md` | Every verb and named command table, both surfaces |
 | `dali_protocol.md` | Frame layouts, opcode tables by IEC part, event decoding |
-| `commissioning_readme.md` | Commissioning workflow: flash, walk the bus, export a config |
+| `commissioning_readme.md` | Commissioning workflow: flash, walk the bus, export a config, change a commissioned bus |
 | `dali_capability_matrix.md` | Per-capability API/verb/vector/hardware/ESPHome status |
-| `steinel_bank2_reference.md` | Installation-specific Steinel memory observations |
-
-## ESPHome Build And CI
-
-`AGENTS.md` carries the native ESP-IDF and host-test commands. The ESPHome side:
-
-```powershell
-python -m esphome config  dali_test.yaml      # cheapest check; validates the in-repo component
-python -m esphome compile dali_test.yaml      # the working tree, every platform
-python -m esphome compile dali-starter.yaml   # whatever ref it pins, not the working tree
-```
-
-`esphome config` is what to reach for first: it validates the schema without
-touching a build directory, so it cannot collide with a compile running in
-another terminal. It does not run `to_code()`, so a codegen error still needs a
-compile to surface.
-
-To prove uncommitted component changes actually build, compile `dali_test.yaml`
-— it resolves `type: local` against `esphome/components`, so it compiles the
-working tree by construction, and it declares every platform and every optional
-block on purpose. **An option added to the schema without being added to
-`dali_test.yaml` is an option nothing compiles.** Extend that file in the same
-change.
-
-Four workflows in `.github/workflows/`:
-
-| Workflow | Covers | Trigger |
-|---|---|---|
-| `host-tests.yml` | 31 host suites, cmake/ctest over `test/` | push main/dev, PR to main |
-| `idf-build.yml` | Native firmware, `idf.py build` for esp32 on IDF 6.0.1 | push main/dev, PR to main |
-| `esphome-build.yml` | Source/shim/`SRCS` agreement, config discovery, per-config schema validation, and compile of every `type: local` config | push main/dev, PR to main |
-| `release-packaging.yml` | `esphome compile` from a git tag in an empty directory | tag `v*`, manual |
-
-Notes an operator needs:
-
-- `esphome-build.yml` names no configuration: `discover` runs
-  `git ls-files 'dali*.yaml'` and sorts by whether `external_components` says
-  `type: local`. Those build the tree under test and are compiled; a config
-  pinning `type: git` at a ref is validated only, because ESPHome would fetch
-  and compile that ref instead of the branch, so a 20-minute build would report
-  on code the pull request never touched.
-- A failure on a pinned config does not mean the branch is broken. It means the
-  tracked config has drifted out of schema with the ref it names, and either the
-  pin or the config needs updating before release.
-- If no tracked config uses `type: local`, `compile` is skipped and the ESPHome
-  C++ layer gets no coverage at all. `discover` emits a warning, but a run can
-  still go green — **do not delete `dali_test.yaml`** without replacing what it
-  covers.
-- `secrets.yaml` is gitignored, so every ESPHome job writes its own dummy one at
-  the values the tracked configs reference. `dali_test.yaml` needs none of them:
-  its credentials are inline dummies, so it validates in a bare checkout,
-  including a fork's first CI run.
-- `release-packaging.yml` deliberately never runs `actions/checkout` and caches
-  nothing. Run it inside a repo checkout and it passes for the wrong reason.
-  `workflow_dispatch` takes a ref, so a branch can be packaging-tested before it
-  is tagged.
-
-## Documentation Policy
-
-- Keep this file limited to current state, constraints, and open work. If an
-  entry has a date on it, it belongs in `project_log.md`; if it describes what
-  changed in a release, it belongs in `CHANGELOG.md`.
-- Record completed work in Git history or `project_log.md`; remove it from the
-  backlog rather than annotating it as done.
-- Keep verb and argument detail in `dali_commands.md`, frame and opcode detail
-  in `dali_protocol.md`, and per-capability status in
-  `dali_capability_matrix.md`.
-- Label every claim as host-tested, hardware-verified, or unverified.
-- Do not add session-log TODO files; merge active work into the prioritized list
-  above.
+| `steinel_bank2_reference.md` | Steinel HF 360 II: instance layout and Bank 2 tuning |

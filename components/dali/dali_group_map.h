@@ -10,7 +10,7 @@
  *
  * Pure data logic only: no atomics, no logging, no persistence, no ESP deps.
  * The integration layer (dali_component.cpp) owns one instance, guards it for
- * cross-core access, and handles logging / flash persistence.
+ * access from several tasks, and handles logging / flash persistence.
  */
 
 #include <stdint.h>

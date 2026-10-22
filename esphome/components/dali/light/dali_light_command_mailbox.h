@@ -8,7 +8,7 @@ namespace dali {
 
 /*
  * Single-slot mailbox for the scheduler completion of one light command
- * (Core 1 -> Core 0).
+ * (DALI task -> loop task).
  *
  * Only one command per light is in flight at a time, so a second publish before
  * a drain cannot happen in practice. The counter still makes the handoff

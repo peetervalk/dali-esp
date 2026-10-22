@@ -53,6 +53,12 @@ DaliError dali_transport_transact_cleanup(const DaliTransport *transport,
               transport->ctx);
 }
 
+static uint32_t transport_step_budget_ms(uint8_t retries_left)
+{
+    uint32_t attempts = 1u + (uint32_t)retries_left;
+    return attempts * DALI_TRANSPORT_SEQUENCE_STEP_BUDGET_MS;
+}
+
 uint32_t dali_transport_sequence_timeout_ms(const DaliSequence *seq)
 {
     uint32_t ms = DALI_TRANSPORT_SEQUENCE_QUEUE_BUDGET_MS;
@@ -64,10 +70,15 @@ uint32_t dali_transport_sequence_timeout_ms(const DaliSequence *seq)
                   ? DALI_SEQUENCE_MAX_STEPS
                   : seq->step_count;
     for (uint8_t i = 0u; i < steps; i++) {
-        uint32_t attempts = 1u + (uint32_t)seq->steps[i].retries_left;
-        ms += attempts * DALI_TRANSPORT_SEQUENCE_STEP_BUDGET_MS;
+        ms += transport_step_budget_ms(seq->steps[i].retries_left);
     }
     return ms;
+}
+
+uint32_t dali_transport_transaction_timeout_ms(uint8_t retries_left)
+{
+    return DALI_TRANSPORT_SEQUENCE_QUEUE_BUDGET_MS +
+           transport_step_budget_ms(retries_left);
 }
 
 static bool sequence_runnable(const DaliSequence *seq)

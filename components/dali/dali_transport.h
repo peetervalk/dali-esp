@@ -145,3 +145,14 @@ DaliError dali_transport_run_sequence_atomic(const DaliTransport *transport,
  * size their wait with this rather than a fixed constant.
  */
 uint32_t dali_transport_sequence_timeout_ms(const DaliSequence *seq);
+
+/*
+ * The same budget for one transaction: every attempt its retry budget allows,
+ * plus the queue headroom. Equal to the sequence budget of a one-step sequence
+ * with the same retries, so the two waits cannot drift apart.
+ *
+ * A blocking transport whose wait expires must report DALI_ERR_WAIT_EXPIRED,
+ * never DALI_ERR_TIMEOUT: the transaction's fate is unknown, and TIMEOUT is
+ * what callers read as "nothing answered".
+ */
+uint32_t dali_transport_transaction_timeout_ms(uint8_t retries_left);
