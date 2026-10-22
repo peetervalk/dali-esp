@@ -18,7 +18,9 @@ verification labels. This file is where "not yet confirmed" lives.
 ESPHome version, bus, what ran, the results, and what was not covered. Then
 update the matrix row and delete the item here, or cut it down to what
 remains. Do not mark an item done in place. If the item backs a claim in
-`CHANGELOG.md`'s Unreleased section, update that claim's label too.
+`CHANGELOG.md`'s Unreleased section, update that claim's label too. A claim in
+a released section stays as it shipped: record the result under *Unreleased*,
+*Verification*, instead.
 
 ---
 
@@ -119,12 +121,10 @@ time.sleep(60)                  # never read
 
 ### ESPHome version range
 
-- **Compile `dali_test.yaml` on 2026.9.1.** Only `esphome config` has run on it.
-  - Run `pip install esphome==2026.9.1` in a venv.
-  - Then run `python -m esphome compile dali_test.yaml`.
-- **Establish the `manifest.json` floor of `>=2026.6.0`.** Do the same compile
-  on 2026.6.0. If it fails, raise the floor to the oldest version that
-  compiles, and record which one.
+- **Establish the `manifest.json` floor of `>=2026.6.0`.** Compile
+  `dali_test.yaml` on 2026.6.0, from `pip install esphome==2026.6.0` in a venv.
+  If it fails, raise the floor to the oldest version that compiles, and record
+  which one.
 
 ### `export config` validates
 
@@ -983,28 +983,32 @@ that is not collision-safe single-master arbitration. Say so in the README and
 
 ## Release process
 
-### Before tagging v3.0.0
+### Before tagging the next release
+
+Nothing yet. A `dev` change that makes a pinned comment wrong goes here.
+
+### Every release
 
 - **Pin the tag in the tree being tagged.** At `v2.0.0`, `dali-starter.yaml`
   and the README still pinned `v1.3.0`; `7f26fef` fixed that after tagging.
-  - Bump the pins in the release-prep commit.
+  - Bump the pins in the release-prep commit, with the comments that described
+    the previous tag.
+  - A pin to a tag that does not exist yet fails `esphome config` on the
+    starter. Merge and tag locally, then push `dev`, `main` and the tag in one
+    `git push --atomic`.
   - Make `release-packaging.yml` fail when a tag's starter config names a
-    different ref.
-- **Update the comments that describe `dev`-only behaviour.** The
-  `idle_timeout` comments in `dali-starter.yaml` ("closed without quitting",
-  "a lost session locking out the shell until reboot") and in the README
-  example ("a terminal that dropped") describe `v2.0.0`. They go stale the
-  moment the pins move.
+    different ref. Not done: at `v3.0.0` the pins were still bumped by hand.
 - **Check `CHANGELOG.md`'s Unreleased section against the tag.** Check each
-  claim, not the heading: `git grep <symbol> v2.0.0` settles it in seconds.
-  Re-check every verification label against `project_log.md`, then rename the
-  heading to the version.
+  claim, not the heading: `git grep <symbol> <previous tag>` settles it in
+  seconds. Re-check every verification label against `project_log.md`, then
+  rename the heading to the version.
   - The list for v2.0.0 had not been emptied at v1.3.0, so it claimed two
     releases' worth of breaks as new.
-- **Re-measure the README's memory table.** It dates from 2026-09-04.
+  - At v3.0.0, one label covered a fix made after the bus run it cited.
+- **Re-measure the README's memory table.**
   - Compile `dali_test.yaml` with and without its `shell:` block.
   - Then update the RAM line in the hardware table.
-- **Bump `manifest.json`** if the version range item above moved the floor.
+- **Bump `manifest.json`** if the version range item in Part 1 moved the floor.
 
 ### Standing
 

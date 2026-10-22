@@ -19,22 +19,22 @@ constraints, the documentation rules, and the build, test and CI notes.
 
 | | |
 |---|---|
-| Latest tag | `v2.0.0`, 2026-09-18. `main` is the tag plus `7f26fef`, which moved the sample configs' pins to `v2.0.0`. The tagged tree itself still pins `v1.3.0` |
-| Next release | `v3.0.0`. `dev` breaks the backup format and the C API; the notes collect in `CHANGELOG.md` under *Unreleased* |
+| Latest tag | `v3.0.0`. `main` is the tag, and the tagged tree pins it |
+| Next release | Not planned. What `dev` changes after the tag collects in `CHANGELOG.md` under *Unreleased* |
 | `dev` vs `main` | `dev` carries everything since the tag |
 
-Two defects in `v2.0.0` that `dev` fixes matter to anyone running the tag:
+Two defects in `v2.0.0`, fixed in `v3.0.0`, matter to anyone still running it:
 
 - **Both Part 103 addressing encodings are wrong.**
   - `address d<N> set d<M>` sends the device to 2M+1, and a device-space
     `restore apply` does the same.
   - `commission devices` finds no unaddressed device.
-  - Do not use them on the tag. Gear addressing is unaffected.
+  - Do not use them on `v2.0.0`. Gear addressing is unaffected.
 - **The TCP shell runs whatever a browser POSTs to its port.** That includes
   commissioning where `allow_commissioning: true`, which `dali-starter.yaml`
-  sets. On the tag, keep it off wherever a browser is used on that network.
+  sets. On `v2.0.0`, keep it off wherever a browser is used on that network.
 
-`CHANGELOG.md`, *Unreleased*, lists the rest under *Fixed*.
+`CHANGELOG.md`, *v3.0.0*, lists the rest under *Fixed*.
 
 `dali-starter.yaml` and the README example pin the tag, so a new installation
 gets released code. Pointing an installation at `dev` is a deliberate move:

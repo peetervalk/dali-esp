@@ -26,7 +26,7 @@ A reusable C protocol stack (`components/dali`) drives the bus — PHY, schedule
 |---|---|
 | MCU | ESP32 (classic), tested on ESP32-WROVER-E / ESP32-DevKitC-VE. Other variants are untested |
 | Cores | Two recommended; a single-core part is handled but has never been built or run here |
-| RAM | ~138 KiB of static DRAM at link time with every option on; the diagnostic shell is the largest single item. No PSRAM required |
+| RAM | ~138 KiB of static DRAM at link time with every option on, ~70 KiB without the diagnostic shell, which is the largest single item. No PSRAM required |
 | Flash | 4 MB. ESPHome's default ESP32 layout is two 1.75 MB app slots plus a 448 KiB NVS partition, and NVS is where a saved backup lives |
 | DALI interface | MikroE [DALI 2 Click](https://www.mikroe.com/dali-2-click) |
 | Wiring | TX → GPIO18, RX → GPIO19 |
@@ -41,19 +41,19 @@ A single-core target is handled rather than supported: `dali_core_affinity.h` re
 
 ### Memory
 
-Both columns are the same tree (`dev`, 2026-09-04) built for the classic ESP32 with esp-idf: [dali_test.yaml](dali_test.yaml) — the CI config, which enables everything the component has — and the same config with the `shell:` block removed. The table is re-measured at each release. Since that build, `dali_test.yaml` has grown to 141,792 B (138.5 KiB) of static DRAM, mostly in the shell's caches and the larger backup. The without-shell column has not been re-measured.
+Both columns are the `v3.0.0` tree built on ESPHome 2026.9.1 for the classic ESP32 with esp-idf: [dali_test.yaml](dali_test.yaml) — the CI config, which enables everything the component has — and the same config with the `shell:` block removed. The table is re-measured at each release.
 
 | Segment | With `shell:` | Without | Region |
 |---|---|---|---|
-| Static DRAM (`.data` + `.bss` + `.noinit`) | 133.9 KiB (76%) | 69.1 KiB (39%) | 176.5 KiB (`dram0_0_seg`) |
-| IRAM (`.text` + `.vectors`) | 76.7 KiB (60%) | 76.7 KiB (60%) | 128 KiB (`iram0_0_seg`, default) |
-| App image | 1,053,739 B (57%) | 973,083 B (53%) | 1.75 MB partition |
+| Static DRAM (`.data` + `.bss` + `.noinit`) | 138.5 KiB (78%) | 70.4 KiB (40%) | 176.5 KiB (`dram0_0_seg`) |
+| IRAM (`.text` + `.vectors`) | 77.1 KiB (60%) | 77.1 KiB (60%) | 128 KiB (`iram0_0_seg`, default) |
+| App image | 1,036,267 B (56%) | 943,615 B (51%) | 1.75 MB partition |
 
-What is left of the static window — 42.6 KiB with the shell, 107.4 KiB without — joins the ~128 KiB D/IRAM pool as heap, less whatever Wi-Fi and the API hold at runtime. Every buffer in the protocol stack is fixed-size, so none of this grows with the number of fixtures on the bus, and none of it shrinks on a small one either. On a real board the number to watch is free heap, which ESPHome's `debug:` component reports; the link-time figure only says where you start.
+What is left of the static window — 38.0 KiB with the shell, 106.1 KiB without — joins the ~128 KiB D/IRAM pool as heap, less whatever Wi-Fi and the API hold at runtime. Every buffer in the protocol stack is fixed-size, so none of this grows with the number of fixtures on the bus, and none of it shrinks on a small one either. On a real board the number to watch is free heap, which ESPHome's `debug:` component reports; the link-time figure only says where you start.
 
-**The diagnostic shell is the largest single item, by a distance.** Its session caches — the input-instance cache, two capture rings, two inventories, the held backup — are 62 KiB of static `.bss` between them. `dali_shell.c` is compiled unconditionally (`proto_dali_shell.c` is a build shim), but nothing outside the shell's own TCP front end references it, so with no `shell:` block the linker drops all of it: **64.8 KiB of RAM and 78.8 KiB of flash back**. Once a bus is commissioned, that is the cheapest headroom on offer.
+**The diagnostic shell is the largest single item, by a distance.** Its static data is 68.0 KiB, and most of that is session caches: the input-instance cache (13.1 KiB), two capture rings (19.0 KiB), two inventories (12.5 KiB), and the held backup with its wire form (7.6 KiB). `dali_shell.c` is compiled unconditionally (`proto_dali_shell.c` is a build shim), but nothing outside the shell's own TCP front end references it, so with no `shell:` block the linker drops all of it: **68.1 KiB of RAM and 90.5 KiB of flash back**. Once a bus is commissioned, that is the cheapest headroom on offer.
 
-**`sram1_as_iram: true` is inert at this size** IRAM sits at 76.7 KiB of the default 128 KiB — the same with or without the shell, whose code is all in flash — so there is no overflow for it to relieve. An image whose code really does land above `0x400A0000` needs a bootloader that knows the region, so a device OTA'd from a bootloader older than the option can fail to boot.
+**`sram1_as_iram: true` is inert at this size.** IRAM sits at 77.1 KiB of the default 128 KiB — the same with or without the shell, whose code is all in flash — so there is no overflow for it to relieve. An image whose code really does land above `0x400A0000` needs a bootloader that knows the region, so a device OTA'd from a bootloader older than the option can fail to boot.
 
 ### Persistent state
 
@@ -109,8 +109,8 @@ The native ESP-IDF serial firmware passes no persistence hooks at all, so a back
      control device's instance settings, which `restore groups` and `restore
      instances` put back. `backup export` prints it as the `backup import`
      script that reads it back, which is how a backup is kept off a device with
-     no persistent store. On `dev` the backup format is version 2, and a backup
-     taken by `v2.0.0` does not load. [todo.md](todo.md) lists what has yet to
+     no persistent store. Since `v3.0.0` the backup format is version 2, and a
+     backup taken by `v2.0.0` does not load. [todo.md](todo.md) lists what has yet to
      run on a bus.
 
      `export config` answers the other half: it prints the `dali:` block, and
@@ -141,7 +141,7 @@ The native ESP-IDF serial firmware passes no persistence hooks at all, so a back
 
 A bus with two lamp groups, one individually addressed lamp, and a DALI-2 multi-sensor (e.g. Steinel HF 360 II) at short address 0:
 
-The example pins `v2.0.0`, the current release. `dev` carries newer work;
+The example pins `v3.0.0`, the current release. `dev` carries newer work;
 compile and test it separately before pointing an installation at it.
 
 ```yaml
@@ -154,7 +154,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/peetervalk/dali-esp.git
-      ref: v2.0.0
+      ref: v3.0.0
     components: [dali]
 
 dali:
@@ -171,7 +171,7 @@ dali:
     - { frame_kind: legacy_16bit, address_kind: group, address: 0, action: observe, output_type: group, output_address: 0 }
   shell:                   # diagnostic shell over TCP; omit the block entirely
     port: 2323             # and the shell is not compiled in at all
-    idle_timeout: 10min    # reclaims the session from a terminal that dropped
+    idle_timeout: 10min    # closes a terminal left open and unused
     # The port is unauthenticated — the same posture as OTA and the web server,
     # but a lower bar than physical access to a UART — so the commissioning
     # verbs are refused unless this opts in. Leave it false on anything left

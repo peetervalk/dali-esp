@@ -36,6 +36,65 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-10-22 (`v3.0.0` release prep, code at `7c9c465`)
+
+The checks `todo.md` lists for a release. The code is `7c9c465`, the `dev`
+head CI last passed; the release-prep change touches only documentation and
+the two pinned configs. Nothing touched a device or a bus.
+
+- 34/34 host suites build and pass with MSYS2 UCRT64.
+- `dali_test.yaml` compiles on ESPHome 2026.9.1 (ESP-IDF 5.5.5), with no
+  warnings. That closes the Part 1 item asking for it: until now only `esphome
+  config` had run on 2026.9.1. A copy without its `shell:` block, renamed so it
+  built in its own directory, compiles as well.
+- The native firmware builds on IDF 6.0.1.
+
+**Static DRAM and the shell's share, re-measured.** The README table is
+updated from this.
+
+| Segment | With `shell:` | Without | Region |
+|---|---|---|---|
+| Static DRAM | 141,792 B (78.5%) | 72,072 B (39.9%) | 180,736 B (`dram0_0_seg`) |
+| ↳ `.bss` | 125,496 B | 55,808 B | |
+| ↳ `.data` | 16,136 B | 16,104 B | |
+| IRAM (`.text` + `.vectors`) | 78,947 B (60.2%) | 78,947 B (60.2%) | 131,072 B |
+| App image | 1,036,267 B (56.5%) | 943,615 B (51.4%) | 1,835,008 B |
+| lwIP sockets | 14 | 12 | |
+
+- The shell costs 69,720 B of RAM and 92,652 B of flash.
+- `proto_dali_shell.c.obj` holds 69,588 B of static data. The largest items
+  are `s_input_cache` (13,440 B), `s_capture` and `s_capture_export` (9,728 B
+  each), `s_inventory` and `s_inventory_scratch` (6,408 B each), `s_backup`
+  (4,612 B), the restore plan (4,412 B) and `s_backup_blob` (3,208 B).
+- The 2026-09-04 entry put the session caches at 62 KiB. The same caches, the
+  backup's wire form included, read 53,532 B (52.3 KiB) now. Not reconciled:
+  that entry does not list what it summed.
+- The app image is smaller in both builds than on 2026-09-04, by 17,472 B and
+  29,468 B. The 2026-10-02 build already read 1,036,283 B. Not investigated.
+
+**`CHANGELOG.md` against the tree.**
+
+- Every symbol the v3.0.0 section names as new is in `HEAD` and absent at
+  `v2.0.0`. Three apparent exceptions are older names that share a prefix, or
+  an existing hook the section only says is now called. `dali_cmd_instance_group()`
+  is gone.
+- The constants hold their stated values: the reply window's decoded edge at
+  3,664 us and its close at 28,664 us, the 5,500 us undecodable edge,
+  INITIALISE `0x7F` for unaddressed devices, snapshot format 2, and a blob 768
+  B larger.
+- Every quoted output string is in the source.
+- One label was wrong. The removal of `restore apply`'s per-move `short address
+  changed ... stale until the next scan` line was labelled hardware-verified on
+  1k. That run, the seventh session on 2026-09-29, predates the removal, made
+  locally on 2026-09-30, and logged the line. The label now covers only what
+  that run showed.
+- Five items had no label and now carry one: the claim drain, the console's
+  `raw` refusal, `idle_timeout`, the cleared-lamp log line and the socket
+  count.
+
+Not covered: any device or bus, and a flashed `v3.0.0` build. CI and
+`release-packaging.yml` run on the tag only once it is pushed.
+
 ### Moved from `current_status.md` on 2026-10-02 (records that had no entry here)
 
 `current_status.md` now describes capabilities only, without dates. Its dated

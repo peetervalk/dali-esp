@@ -7,16 +7,20 @@ bus produced the result), **host-tested** (host vectors only, no bus), and
 
 Dated evidence for every claim here is in [project_log.md](project_log.md).
 
-## Unreleased: v3.0.0
+## Unreleased
 
-Everything on `dev` since `v2.0.0`. New changes are added here as they land.
+Everything on `dev` since `v3.0.0`. New changes are added here as they land.
 
 At tagging:
 
-- check each claim against the tree (`git grep <symbol> v2.0.0` settles most
+- check each claim against the tree (`git grep <symbol> v3.0.0` settles most
   of them in seconds)
 - re-check each label against `project_log.md` and `todo.md`
 - rename this heading to the version
+
+Nothing yet.
+
+## v3.0.0
 
 **This is a breaking release.**
 
@@ -353,7 +357,11 @@ None of these renames or removes a verb.
   - Each move logs `group membership followed the move` and an `aX -> aY`
     warning about YAML entities that still name the old address.
   - The per-move `short address changed ... stale until the next scan` line is
-    gone. **Hardware-verified** on 1k.
+    gone.
+
+  **Hardware-verified** on 1k: the map following each confirmed move, and its
+  log line. The stale line's removal is **unverified**: it came after that run,
+  which still logged it.
 - After `address aN clear`, the device log reads `aN cleared: no longer polled
   for group state (gX gY); the gear keeps its groups and still follows group
   and broadcast commands`, where it read `retired from every group it was
@@ -361,6 +369,8 @@ None of these renames or removes a verb.
   - The warning after it reads `nothing answers at aN now. Any entity
     configured with address: N targets nothing until 'commission unaddressed'
     re-addresses the unit, at an address only a scan can find`.
+
+  **Unverified.**
 
 **Other behaviour:**
 
@@ -370,11 +380,13 @@ None of these renames or removes a verb.
   changes mid-blink. **Unverified.**
 - A shell workflow's bus claim waits up to 5 s for queued work to drain, and is
   refused if it does not, logging `queued traffic did not drain; claim
-  refused`.
+  refused`. **Unverified.**
 - The **DALI Command** text entity refuses a `raw` or `raw2` commissioning
-  frame with `commissioning frame; use the native CLI`.
+  frame with `commissioning frame; use the native CLI`. **Host-tested**
+  classifier; the entity's refusal is unverified.
 - `idle_timeout` now only reclaims a terminal left open and unused, and
   `idle_timeout: 0` no longer costs the shell to a dropped connection.
+  **Unverified** on a device.
 
 ### Fixed
 
@@ -420,6 +432,7 @@ None of these renames or removes a verb.
 - **The gear version printed as the byte halved.** **Host-tested.**
 - **The ESPHome log called a cleared lamp "retired from every group".** The
   gear keeps its groups; only the integration's polling changed.
+  **Unverified.**
 - **A sensor whose instance was not on event scheme 2 polled only on its
   interval.** Its events matched nothing. This is what slowed the 2k Steinel.
   **Host-tested.**
@@ -430,6 +443,7 @@ None of these renames or removes a verb.
   up. With `idle_timeout: 0`, a peer that vanished while idle held the shell
   until reboot. **Unverified** on a device.
 - **The TCP shell's sockets were not counted** in ESPHome's lwIP socket pool.
+  **Unverified** on a device; the build log counts them.
 - **`backup save` and the restore planners sent a contested `d<N>` to a hardware
   pass.** They said nothing here de-addresses a control device, which has not
   been true since `address d<N> clear` arrived in `v2.0.0`. Its contested arm
@@ -452,7 +466,10 @@ None of these renames or removes a verb.
 ### Verification
 
 - **Host and CI.** 34 host suites, all passing. `dali_test.yaml` compiles on
-  ESPHome 2026.9.0, and the native firmware builds on IDF 6.0.1.
+  ESPHome 2026.9.1, with and without its `shell:` block, and the native
+  firmware builds on IDF 6.0.1.
+- **No hardware pass at the tag.** Every bus result above came from `dev`
+  during development, not from a flashed `v3.0.0` build.
 - **`v2.0.0` features that have run on a bus since that tag:**
   - `commission devices`
   - `backup export` and `backup import`, in the version-1 format
