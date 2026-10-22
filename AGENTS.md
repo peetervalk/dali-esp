@@ -240,6 +240,12 @@ tree by construction. It also declares every platform and every optional block
 on purpose. An option added to the schema but not to `dali_test.yaml` is an
 option nothing compiles, so extend that file in the same change.
 
+**`dali_test_psram.yaml` is the same tree with PSRAM on.** There ESP-IDF
+compiles the ESP32 and ESP32-S3 with `-mdisable-hardware-atomics`, so
+`std::atomic` is not lock-free and read-modify-writes become library calls.
+Compile it too when a change touches an atomic. It covers code generation, not
+options, so keep it small.
+
 ### CI
 
 Four workflows in `.github/workflows/`:

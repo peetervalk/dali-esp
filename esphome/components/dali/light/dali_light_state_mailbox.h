@@ -11,13 +11,19 @@ namespace dali {
  * Packing the pair into one atomic word prevents mixed on/level snapshots. An
  * publish racing with an exchange is either returned by that exchange or
  * remains pending for the next drain.
+ *
+ * Both sides are tasks, so the word need not be lock-free, and on an ESP32 or
+ * ESP32-S3 with PSRAM it is not: IDF builds with -mdisable-hardware-atomics,
+ * and an exchange becomes a call that takes a spinlock when the word is in
+ * PSRAM. publish() exchanges rather than stores so it takes that lock too; a
+ * plain store could land between the call's read and its write and be lost.
  */
 class DaliLightStateMailbox {
  public:
   void publish(bool is_on, uint8_t level) {
     uint32_t value = VALID_BIT | static_cast<uint32_t>(level);
     if (is_on) value |= ON_BIT;
-    value_.store(value, std::memory_order_release);
+    value_.exchange(value, std::memory_order_release);
   }
 
   bool take(bool &is_on, uint8_t &level) {
@@ -33,8 +39,6 @@ class DaliLightStateMailbox {
   static constexpr uint32_t VALID_BIT = 1u << 8u;
   static constexpr uint32_t ON_BIT = 1u << 9u;
 
-  static_assert(std::atomic<uint32_t>::is_always_lock_free,
-                "light-state mailbox requires lock-free 32-bit atomics");
   std::atomic<uint32_t> value_{0u};
 };
 

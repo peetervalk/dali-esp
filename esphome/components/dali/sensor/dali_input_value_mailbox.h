@@ -19,11 +19,17 @@ namespace dali {
  *
  * A publish racing with a take is either returned by that take or stays pending
  * for the next one.
+ *
+ * Both sides are tasks, so the word need not be lock-free, and on an ESP32 or
+ * ESP32-S3 with PSRAM it is not: IDF builds with -mdisable-hardware-atomics,
+ * and an exchange becomes a call that takes a spinlock when the word is in
+ * PSRAM. publish() exchanges rather than stores so it takes that lock too; a
+ * plain store could land between the call's read and its write and be lost.
  */
 class DaliInputValueMailbox {
  public:
   void publish(uint16_t raw) {
-    value_.store(VALID_BIT | static_cast<uint32_t>(raw), std::memory_order_release);
+    value_.exchange(VALID_BIT | static_cast<uint32_t>(raw), std::memory_order_release);
   }
 
   bool take(uint16_t &raw) {
@@ -37,8 +43,6 @@ class DaliInputValueMailbox {
   static constexpr uint32_t RAW_MASK = 0xFFFFu;
   static constexpr uint32_t VALID_BIT = 1u << 16u;
 
-  static_assert(std::atomic<uint32_t>::is_always_lock_free,
-                "input-value mailbox requires lock-free 32-bit atomics");
   std::atomic<uint32_t> value_{0u};
 };
 

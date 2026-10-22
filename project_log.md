@@ -36,6 +36,34 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-10-22 (PSRAM build fix; uncommitted on `dev`)
+
+The fix in *Investigations*, "`v3.0.0` does not compile with PSRAM". Nothing
+touched a device or a bus.
+
+- The host suites pass, 34 of 34. `test_light_state_mailbox` covers the
+  light-state mailbox's `publish()`, now an exchange.
+- `uv run esphome config dali_test_psram.yaml` validates on 2026.10.0.
+- `uv run esphome compile dali_test_psram.yaml` compiles on 2026.10.0 with
+  IDF 5.5.6, with no compiler warnings. ESPHome reports RAM 61,172 B and flash
+  811,071 B.
+- **The build exercised the failing case.**
+  - The sdkconfig has `CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND=y` and
+    `CONFIG_SPIRAM_USE_CAPS_ALLOC=y`.
+  - `build.ninja` carries `-mdisable-hardware-atomics`.
+  - In the ELF, `mark_state_from_bus`, `mark_raw_value`, `apply_bus_state`,
+    `apply_value` and `pump_write_` call `__atomic_exchange_4` or
+    `__atomic_compare_exchange_4`.
+
+Not covered:
+
+- CI, which runs when this is pushed.
+- The ESP32-S3, which gets the same flag.
+- `dali_test.yaml`, whose header comment changed and nothing else.
+- A flashed PSRAM image.
+- Nobody put an assertion back to watch this config fail. The flag in this
+  build and the original report are the evidence that it would.
+
 ### Verified locally on 2026-10-22 (ESPHome pinned with uv; uncommitted on `dev`)
 
 ESPHome had no pin anywhere. The workstation ran 2026.9.1 because nobody had
@@ -2294,6 +2322,85 @@ cleared by the 2026-08-14 entry above):
 ---
 
 # Investigations
+
+## `v3.0.0` does not compile with PSRAM — found 2026-10-22
+
+The maintainer added `psram: mode: quad` to `_local/dali-2k.yaml`, a WROVER-E
+config pinned to `v3.0.0`, and built it in the Home Assistant ESPHome add-on.
+The compile stopped in `dali_light_output.cpp`:
+
+```text
+dali_light_state_mailbox.h:36:40: error: static assertion failed: light-state mailbox requires lock-free 32-bit atomics
+dali_light_command_mailbox.h:47:40: error: static assertion failed: light-command mailbox requires lock-free 32-bit atomics
+```
+
+The same config without `psram:` builds. `dali_input_value_mailbox.h` makes
+the same assertion, so a sensor would have failed next. No tracked config
+enabled PSRAM, so CI never built this way.
+
+**The cause,** read from the IDF 5.5.4 tree under `~/.platformio`. The pinned
+ESPHome builds with 5.5.6, which was not read.
+
+- `newlib/Kconfig`: `STDATOMIC_S32C1I_SPIRAM_WORKAROUND` defaults to
+  `SPIRAM && (IDF_TARGET_ESP32 || IDF_TARGET_ESP32S3) && !IDF_TOOLCHAIN_CLANG`.
+  It has no prompt, so no `sdkconfig_options` entry can clear it.
+- `newlib/project_include.cmake` adds `-mdisable-hardware-atomics` to every
+  compile when it is set. S32C1I does not work on PSRAM addresses.
+- `newlib/priv_include/esp_stdatomic.h`: IDF's `__atomic_*_4` check the address.
+  Outside external RAM they call the S32C1I version; inside it, they take a
+  `portMUX` spinlock.
+
+**What the flag does to the code,** from `xtensa-esp32-elf-g++` 14.2.0
+(`esp-14.2.0_20260121`, PlatformIO's copy) at `-O2`, on a test file:
+
+| Operation | Default | `-mdisable-hardware-atomics` |
+|---|---|---|
+| `store` (release) | `memw`, `s32i` | Same |
+| `__atomic_load_n` (acquire) | `l32i`, `memw` | Same |
+| `exchange` | Inline `l32i`/`s32c1i` loop | `call8 __atomic_exchange_4` |
+| `__GCC_ATOMIC_INT_LOCK_FREE` | 2 | 1 |
+
+- **The PHY is unaffected.** `dali_ringbuf.c` uses only atomic loads and
+  stores, so the ISR side compiles to the same instructions.
+- **The mailboxes never needed lock-free atomics.** Every `publish()` runs on
+  the DALI task: `on_command_complete_`, `mark_state_from_bus`, and
+  `mark_raw_value` from `on_input_value_done`. Every `take()` runs in `loop()`.
+- **The build already relied on IDF's emulation.**
+  `external_profile_forget_mask_` is a `std::atomic<uint64_t>`, which has
+  never been lock-free on Xtensa.
+
+**A store can be lost, but only in PSRAM.** In the emulated path the reader's
+exchange takes the spinlock, reads, and writes 0. A plain store from the
+other core does not take the lock. If it lands between that read and that
+write, the published value is overwritten.
+
+- The light-state and input-value mailboxes publish with a store.
+- In internal RAM the exchange is a hardware CAS loop, which retries instead.
+- ESPHome's `psram:` sets `CONFIG_SPIRAM_USE_CAPS_ALLOC`, so `new` and
+  `malloc` never return PSRAM. The mailboxes are members of objects ESPHome
+  creates with `new`. They are therefore in internal RAM, and the emulated
+  path is not reached.
+
+**The fix.**
+
+- The three `static_assert`s are removed.
+- The light-state and input-value mailboxes publish with `exchange`, so in the
+  emulated path both sides take the same lock. This is defensive: it costs one
+  CAS loop per publish, and it does not depend on where the object lives.
+- The command mailbox is unchanged. Every write in it is already a
+  compare-exchange or exchange.
+- `dali_test_psram.yaml` compiles the tree with PSRAM in CI.
+
+**Not changed:** the flags in `dali_component.cpp` that a writer `store`s and a
+reader `exchange`s, such as `external_refresh_request_` and
+`s_group_members_dirty_`.
+
+- They have the same exposure in principle.
+- The statics are in `.bss`, which is internal RAM.
+- The members belong to the component object, allocated with `new`.
+- `CONFIG_SPIRAM_USE_MALLOC` forced through `sdkconfig_options` would still
+  keep allocations under `SPIRAM_MALLOC_ALWAYSINTERNAL` (16 KiB by default)
+  internal. The size of the component object against that was not checked.
 
 ## The example configs drop the OTA password — decided 2026-10-22
 

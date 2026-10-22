@@ -31,8 +31,9 @@
 #
 # Adding an option to the schema without adding it here is how that option
 # stops being compiled. Any dali*.yaml in this repo is picked up by
-# .github/workflows/esphome-build.yml automatically; this is the one that is
-# also compiled, because it is the one that builds this checkout.
+# .github/workflows/esphome-build.yml automatically, and the ones that build
+# this checkout are also compiled. dali_test_psram.yaml is the other one: it
+# covers the PSRAM build's code generation, not options, so options go here.
 
 esphome:
   name: dali-test

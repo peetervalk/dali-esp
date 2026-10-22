@@ -39,6 +39,29 @@ At tagging:
   - `release-packaging.yml` still builds on the latest ESPHome, as a user's
     machine would.
   - A user's own build is unaffected.
+- **CI compiles a PSRAM build.** `dali_test_psram.yaml` builds the same tree
+  with `psram:` on. That changes how atomics compile, which nothing tracked
+  covered; see *Fixed*.
+
+### Fixed
+
+- **The component did not compile with `psram:` on an ESP32 or ESP32-S3.**
+  A config with a DALI light or sensor failed with `static assertion failed:
+  ... requires lock-free 32-bit atomics`.
+  - With PSRAM, ESP-IDF builds those chips with `-mdisable-hardware-atomics`,
+    because their atomic instruction does not work on PSRAM addresses. No YAML
+    option turns it off.
+  - Three mailbox headers asserted lock-free atomics they do not need: both
+    sides of each are tasks. The assertions are gone.
+  - The light-state and input-value mailboxes now publish with an exchange
+    rather than a store. If one were ever placed in PSRAM, a store could land
+    inside the reader's emulated exchange and be lost.
+  - On `v3.0.0`, remove `psram:` to build. Nothing in this component uses
+    PSRAM.
+
+  **Unverified:** the ESP32 build compiles on ESPHome 2026.10.0, and the host
+  suites pass; not flashed. The ESP32-S3 gets the same flag but was not
+  compiled.
 
 ## v3.0.0
 
