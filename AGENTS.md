@@ -68,6 +68,7 @@ the control/protocol APIs.
 | `dali_dispatch` | `components/dali` | Headless dispatch engine; pure C, no ESPHome dependency |
 | `headless_dispatch` rules | YAML, per site | Installation-specific dispatch table; no source file. Schema and codegen in `esphome/components/dali/__init__.py`, loaded through `DaliComponent::add_dispatch_entry()`; active when the list is non-empty |
 | `dali_shell` | `components/dali` | Every CLI verb, the blocking transport, and session caches; one implementation both front ends run |
+| `dali_web` | `components/dali` | HTTP and WebSocket parsing for a browser binding; pure functions, no socket, host-tested |
 | `dali_diag` | `main/` | UART0 binding for the shell; moves bytes only |
 | `dali_shell_tcp` | `esphome/components/dali` | TCP binding for the shell: one session, idle timeout, policy from YAML. Refuses a peer that opens with an HTTP request |
 | `main.c` | `main/` | App entry point |

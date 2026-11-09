@@ -1050,6 +1050,13 @@ If adopted, this replaces *P2 — A Home Assistant commissioning workflow*.
 **Heap, as observed on a device:** about 80 kB free from boot to the first
 shell use, and about 60 kB with a shell session open.
 
+**Read the right sensor.** ESPHome's debug `free`, `block` and `min_free` use
+`MALLOC_CAP_INTERNAL`. That counts about 52 kB of IRAM that takes 32-bit access
+only, so 1k's `free` reads about 147 kB while about 94 kB is usable. On a PSRAM
+build `MALLOC_CAP_8BIT` alone counts the PSRAM. Measure with
+`MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`, as `_local/dali-2k.yaml` now does. See
+`project_log.md`, 2026-11-09.
+
 - **The shell is not the 20 kB.**
   - Its caches, about 62 KiB, are static `.bss` inside the 141,792 B of static
     DRAM, so they leave the heap before boot.
@@ -1091,8 +1098,11 @@ shell use, and about 60 kB with a shell session open.
     `dali_shell_feed_byte()`.
   - The prompt goes in a frame of its own, so the page knows a command has
     finished. That is framing, and it stays within what a binding may do.
-- **No new task and no new stack.** SHA-1 for the handshake is already in the
-  image (`CONFIG_MBEDTLS_SHA1_C=y`), and so is mbedTLS's base64.
+- **No new task and no new stack.**
+- **SHA-1 and base64 are `dali_web`'s own, about 1 KB of flash.** mbedTLS has
+  both in the image (`CONFIG_MBEDTLS_SHA1_C=y`), but using them would give
+  `components/dali` an IDF dependency and leave the handshake untestable on the
+  host. The local copies are checked against the FIPS 180 and RFC 6455 vectors.
 - **Frames.**
   - Client frames must be masked, unfragmented and no longer than 125 bytes.
     A command line is at most `DALI_SHELL_LINE_MAX`, 80 characters.
@@ -1105,6 +1115,15 @@ shell use, and about 60 kB with a shell session open.
   accepts. A page request is served. A second upgrade gets a close frame that
   says the shell is busy, so it does not wait unanswered in the backlog, as a
   second TCP client does today.
+  - **Only between verbs.** `dali_shell_dispatch()` holds the task for the
+    whole verb, and a `discover` takes tens of seconds. While it runs, nothing
+    is accepted, and a page load waits for the verb to end. Either accept that,
+    or serve the page from somewhere that does not wait on the shell.
+- **There is no cancel.** The session's `aborted` hook fires only when a send
+  fails. A page will want a Stop button. The binding's `aborted` could peek
+  the socket without blocking and treat a close frame, or an agreed cancel
+  line, as the stop. The TCP shell has the same gap, so fix it in both
+  bindings.
 
 **Rejected:**
 - **ESPHome `web_server:`.** It is an entity UI, and it loads its JS from a
@@ -1156,6 +1175,16 @@ upgrade is refused unless both checks pass, and both have host vectors:
 
 `GET /` checks `Host` as well. The page holds nothing secret, but the check
 keeps the two paths identical.
+
+A `Host` that names a port must name the listener's. One that names none
+means port 80, because a browser omits only the default.
+
+**Framing is forbidden** (`X-Frame-Options: DENY`, `frame-ancestors 'none'`).
+A page elsewhere could otherwise show the device's own page in an invisible
+frame, where its socket passes both checks, and steer the operator's clicks
+into it: clickjacking onto `commission`. The rest of the page's
+`Content-Security-Policy` waits for the page. Whether `connect-src 'self'`
+covers `ws:` needs checking in each browser first.
 
 The session takes the same `DALI_SHELL_ALLOW_*` policy as the TCP binding. The
 page greys out what the policy refuses. It never decides that itself.
@@ -1320,17 +1349,18 @@ so the cut is clean.
   platforms, so this is a breaking change for a major tag: a migration note in
   `CHANGELOG.md`, and new pinned configs at that tag.
 
-**Open question: does any automation write to the DALI Command text
-entity?** For example, `scene g1 3`. Light entities are brightness-only, so
-the console is today the only way an HA script reaches scenes or raw frames.
-If one does, that need is runtime, not commissioning. It wants a small ESPHome
-action in place of the console, not a reason to keep it.
+**Answered 2026-11-09: no automation writes to the DALI Command text
+entity.** Neither installation exposes the console, a DALI button or the
+Target Address number. The two automations that touch DALI use a light and the
+occupancy sensor. See `project_log.md`. A later need for scenes or raw frames
+from an HA script is runtime, not commissioning. It wants a small ESPHome
+action, not the console back.
 
 ### Order of work
 
-1. **Measure heap on a device.** This needs a hardware go-ahead. Add the
-   `debug:` sensors for free heap, minimum free and largest block, and read
-   them:
+1. **Measure heap on a device.** This needs a hardware go-ahead. The sensors
+   exist in `_local/dali-2k.yaml`, using the caps in *Budget*. Flash them and
+   read them:
    - idle,
    - with a TCP shell session open,
    - during `discover`,
@@ -1339,9 +1369,16 @@ action in place of the console, not a reason to keep it.
 
    This explains the 20 kB, and sets a heap floor below which the web binding
    refuses a new page or upgrade.
-2. **The portable parser.** Request line, headers, the `Host` and `Origin`
-   checks, the handshake and frames, with host vectors and a mutation pass, as
-   the peer sniffer had.
+2. **The portable parser. Host-tested 2026-11-09** as `dali_web`: 59 vectors,
+   56 of 56 mutants killed. See `project_log.md`. What it does beyond the
+   sketch above:
+   - A refused head is read to its blank line before it is answered, because
+     closing with unread bytes makes lwIP send a reset, and the reset can
+     destroy the answer.
+   - One text frame is one line of printable ASCII. A CR or LF inside one
+     fails the connection rather than becoming a second command.
+   - The page head forbids framing; see *Security*.
+   - Neither binding nor browser has exercised it.
 3. **The binding and a bare page.**
    - The `select()` loop, the `web:` schema, and `dali_test.yaml`.
    - A page with three parts: a terminal, help from `schema` plus

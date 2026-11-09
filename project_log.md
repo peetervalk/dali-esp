@@ -36,6 +36,105 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-11-09 (`dali_web`, the browser front end's portable half; uncommitted on `dev` at `bf7e93c`)
+
+Step 2 of *A browser GUI for the shell* in `todo.md`. Nothing touched a device
+or a bus. No browser has spoken to it either: no binding exists yet.
+
+New files:
+
+- `components/dali/dali_web.c/.h`;
+- `test/test_web.c`;
+- `esphome/components/dali/proto_dali_web.c`.
+
+`dali_web.c` is also listed in `components/dali/CMakeLists.txt`.
+
+- **The host suites pass, 35 of 35.** `test_web` has 59 tests.
+  - Published vectors are used as published:
+    - FIPS 180 SHA-1: `abc`, the empty message, the 448-bit two-block message
+      and a million `a`;
+    - RFC 4648 base64;
+    - the RFC 6455 §1.3 accept value;
+    - RFC 6455 §5.7 frames. The masked text and masked pong are accepted. The
+      unmasked text and ping are refused. The 256-byte and 64 KiB headers are
+      encoded.
+  - Python's `hashlib` supplied the SHA-1 digests at the padding boundaries
+    (55, 56, 63, 64, 65, 119 and 120 bytes) and a second accept value.
+  - Request heads are fed as Chrome and Firefox send them, and as the attacks
+    send them:
+    - DNS rebinding;
+    - cross-site hijacking, with foreign, `null`, `https`, suffix-extended and
+      wrong-port Origins;
+    - duplicate Host, whitespace before a colon, obs-fold, bare CR and
+      absolute-form;
+    - an overflowed Host or Origin that would otherwise store as an exact
+      match;
+    - a port that wraps a `uint32_t` to the listener's.
+- **Mutation pass: 56 mutants, 56 killed.** The first run killed 53 of them.
+  - Two survivors were test gaps, now closed:
+    - No close reason of 124 or 125 bytes was exercised.
+    - No non-canonical key set only padding bits 2 and 3 (`E`, `I`).
+  - The third was equivalent. A guard in `req_fail()` kept the first fault, but
+    the skip phase never calls it twice, so the guard is gone. The head-limit
+    path has a guard that does matter. A vector was added for it, and its
+    mutant is killed.
+- **Device compilers.** `-fsyntax-only` ran with the flags of a sibling file in
+  two builds, and neither printed anything:
+  - the native IDF 6.0.1 build, with xtensa gcc 15.2.0 and `dali_group_map.c`
+    as template;
+  - the last ESPHome build of `dali-2k`, with xtensa gcc 14.2.0 and
+    `proto_dali_cli.c` as template.
+
+  A probe file with a planted error is reported under the native flags, so
+  silence there means clean.
+
+Not covered:
+
+- Any binding, browser, device or bus.
+- `uv run esphome compile` and `idf.py build`. Both now compile one more file.
+  The ESPHome flags came from a build tree dated 2026-08-12.
+- Flash and RAM cost. Nothing references the module yet, so `--gc-sections`
+  should drop it, as it drops `dali_shell.c` from a config with no `shell:`
+  block. No image was linked to confirm it.
+
+### Observed 2026-11-09 through Home Assistant (console entities and heap sensors)
+
+Read with ha-mcp. Nothing was written to Home Assistant or to a device.
+
+- **No installation uses the HA console.** Neither 1k nor 2k exposes a DALI
+  `text` console, a DALI `button` or the Target Address `number`. A search for
+  `dali` returns 8 lights and 10 sensors.
+  - Two automations reference DALI entities: *2k Corridor – presence light
+    control* and *2k trepimade on/off*.
+  - Both use only `light.dali_2k_dali_group_0` and
+    `sensor.2k_koridor_dali_2k_zone_2_occupancy`.
+  - No script or scene references one.
+  - That answers the open question in *A browser GUI for the shell*. Nothing
+    writes to the console.
+- **Heap, daily statistics from 2026-10-30 to 2026-11-08:**
+
+  | Node | Build | debug `free` | `heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT)` |
+  |---|---|---|---|
+  | 1k | `v3.0.0`, no PSRAM | mean 146.6 kB; no day below 144.7 kB | 86,016 B since a restart around 2026-11-04; 84,288 B before it |
+  | 2k | `dev`, PSRAM | mean 156.8 kB | 4,276,596 B, because it counts the PSRAM |
+
+- **The debug `free` sensor overstates usable heap by about 52 kB.**
+  - ESPHome reads `free`, `block` and `min_free` with `MALLOC_CAP_INTERNAL`. That
+    is `debug_esp32.cpp` in 2026.9.1 and in the pinned 2026.10.0.
+  - `MALLOC_CAP_INTERNAL` includes the IRAM between `_iram_text_end` and
+    `0x400A0000`. That IRAM takes 32-bit access only, so no socket buffer can
+    come from it.
+  - In the 2026-08-13 ELFs of both sites, `_iram_text_end` is `0x4009300C`,
+    which leaves 53,236 B.
+  - So 1k has about 94 kB of byte-addressable heap at idle. The design's "about
+    80 kB" is consistent with that.
+  - PSRAM does not change it. ESPHome's `psram:` sets
+    `CONFIG_SPIRAM_USE_CAPS_ALLOC`, so plain `malloc()` never reaches PSRAM.
+- `_local/dali-2k.yaml` replaces both sensors with three template sensors on
+  `MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`: free, largest block and minimum
+  free. It validates with `uv run esphome config` on 2026.10.0. It is not
+  flashed.
+
 ### Verified locally on 2026-10-22 (PSRAM build fix; uncommitted on `dev`)
 
 The fix in *Investigations*, "`v3.0.0` does not compile with PSRAM". Nothing

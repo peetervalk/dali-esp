@@ -582,6 +582,7 @@ layout nobody else could use, and needed editing whenever a site changed.
 | `components/dali/` | Reusable C protocol, PHY, scheduler, transport, discovery, commissioning, memory, device types, dispatch |
 | `components/dali/dali_shell.c/.h` | The diagnostic CLI as a reusable session: every verb, the blocking transport, the workflow caches |
 | `components/dali/dali_cli.c/.h` | Portable CLI core: tokenizing, verb tables, validation, formatting, and peer classification. Shared by both front ends |
+| `components/dali/dali_web.c/.h` | The portable half of the planned browser front end: HTTP request heads, Host and Origin checks, response heads, WebSocket frames, SHA-1 and base64. No binding uses it yet |
 | `components/dali/dali_commissioning.*` | Part 102 control-gear commissioning walk |
 | `components/dali/dali_device_commissioning.*` | Part 103 control-device commissioning walk |
 | `components/dali/dali_commissioning_audit.*` | The post-scan diff both walks check themselves against |
@@ -600,7 +601,7 @@ layout nobody else could use, and needed editing whenever a site changed.
 | `esphome/components/dali/proto_dali_*.c` | Shims that pull the vendored C in behind ESPHome's source glob |
 | `dali-starter.yaml` | Tracked starter and commissioning firmware |
 | `dali_test.yaml` | Tracked CI coverage config |
-| `test/` | 34 host suites and the vendored Unity runner |
+| `test/` | 35 host suites and the vendored Unity runner |
 | `tools/dali-shell` | Operator-side client for the TCP shell |
 | `AGENTS.md` | Architecture, layer rules, timing/ISR constraints, documentation rules, build, test and CI |
 | `todo.md` | Hardware verification procedures, then the development backlog |

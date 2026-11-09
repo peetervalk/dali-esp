@@ -18,6 +18,22 @@ At tagging:
 - re-check each label against `project_log.md` and `todo.md`
 - rename this heading to the version
 
+### Added
+
+- **`dali_web`, the portable half of a browser front end to the shell.** It is
+  step 2 of *A browser GUI for the shell* in `todo.md`. It holds:
+  - an HTTP/1.1 request-head parser;
+  - routing, with the Host and Origin checks that keep other web pages out;
+  - the page, handshake and refusal response heads;
+  - the WebSocket frame receiver and encoder;
+  - its own SHA-1 and base64.
+
+  Nothing uses it yet: there is no binding and no YAML option. Out-of-tree
+  build systems gain one more translation unit, `dali_web.c`.
+  **Host-tested:** 59 vectors, the published FIPS 180 and RFC 4648/6455 ones
+  among them. A mutation pass killed 56 of 56 mutants. Not on a device, and
+  not driven by a browser.
+
 ### Changed — `dali-starter.yaml`
 
 - **No OTA password.** ESPHome warns that one wastes flash and RAM next to an
