@@ -36,6 +36,182 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-11-09 (shell task at priority 1; uncommitted on `dev` at `b05520a`)
+
+The fix tried first for the entry below. `SHELL_TASK_PRIORITY` in
+`dali_shell_tcp.cpp` goes from 4 to 1, level with ESPHome's loop task.
+
+- **Before the change, two things were read:**
+  - **Hooks.** Every hook the session calls into `DaliComponent` already hands
+    state over through atomics or `portMUX` critical sections. So a loop task
+    that can now interrupt the shell mid-hook adds no race.
+  - **Timing.** The scheduler expands send-twice pairs and enforces their
+    100 ms bound on the DALI task. The shell only waits for the result.
+- **`uv run esphome compile dali_test.yaml` succeeds on 2026.10.0** with IDF
+  5.5.6. It printed no compiler warning. RAM is 141,148 B and flash
+  1,031,159 B.
+
+Not covered: any device. 2k builds `ref: dev` from GitHub, so it cannot run
+this until it is pushed.
+
+### Observed 2026-11-09 on 2k (the reboot on connect is the task watchdog)
+
+This supersedes one claim in the entry below: *lwIP's send queue does not
+reach 28 kB on its own*. The log is the operator's, printed by ESPHome's
+`esp32.crash` handler on the boot after a crash.
+
+- **The crash record:**
+  - `Reason: Task wdt`, `Crashed core: 1`, PC `0x4000BFF0` (ROM).
+  - The decoded backtrace, innermost first: `vPortExitCritical`,
+    `esp_task_wdt_reset`, `esphome::arch_feed_wdt`,
+    `Application::feed_wdt_slow_`, `Application::loop`, `loop_task`.
+- **A rollback came first.** The new image, with the 1 s heap sensor and the
+  reset-reason sensor, crashed soon after its first boot, and the device came
+  back on the previous image. A second flash stayed.
+
+What it shows:
+
+- **The task that missed its deadline is ESPHome's loop task.**
+  - The ESPHome IDF build watches no idle task:
+    `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0` and `_CPU1` are unset.
+  - The loop task is the one ESPHome subscribes. In 2026.10.0 it runs at
+    priority 1, pinned to core 1 (`components/esp32/core.cpp`).
+- **The loop was held off, not stuck.** It was caught inside its own feed, so
+  it had just got the CPU back after more than 5 s. The backtrace shows the
+  victim. Whatever held it off is not in it.
+- **The rollback is `enable_ota_rollback: true`.** `safe_mode` confirms a new
+  image only after `boot_is_good_after`, 1 min by default. An image that
+  crashes before then is replaced by the previous one. So a connect soon after
+  an OTA can silently revert the update.
+- **The 28 kB is lwIP's transmit buffers.** It is about 25 kB of buffers, plus
+  segment and driver overhead:
+  - ESP-IDF builds lwIP with `LWIP_NETIF_TX_SINGLE_PBUF` set to 1. So
+    `tcp_pbuf_prealloc()` allocates a full MSS, 1,440 B plus headers, for
+    every new segment, whatever its length. `TCP_NODELAY` does not change
+    that.
+  - Under `TCP_NODELAY`, each one-byte `send()` leaves as its own segment.
+  - Up to `TCP_SND_QUEUELEN`, 16, of them can wait for an ACK.
+
+Not settled: what held the loop for 5 s.
+
+- On core 1, the tasks above the loop's priority 1 are the DALI task (10) and
+  the shell task (4). lwIP's tcpip thread (18) has no affinity.
+- `CONFIG_LWIP_TCPIP_CORE_LOCKING` is on. So each of `schema`'s sends runs
+  TCP, IP and the Wi-Fi driver's transmit path in the shell task, under the
+  same lock the loop's own sockets take.
+- That makes the shell task the suspect. It is not shown.
+
+### Observed 2026-11-09 on 2k (the shell client rebooted the device on connect)
+
+Reported by the operator. This corrects *Output does not cause it* in the
+entry two below.
+
+- **Three of four `tools/dali-shell` connections rebooted 2k.**
+  - A reboot is likelier soon after boot. It has happened before.
+  - After the reboot, the client sat silent until interrupted with Ctrl-C.
+  - The reset reason was not recorded.
+
+Read from the code the same day:
+
+- **An interactive session runs `schema` as soon as it opens.** The path is
+  `setup_readline()`, then `fetch_schema()`.
+- **`schema` writes one character at a time.** `shell_json_escape_print()`
+  writes each character with its own `shell_printf()`, so each one is a
+  `send()` under `TCP_NODELAY`. Counted from the tables in `dali_cli.c`, that
+  is about 5,700 one-byte writes and about 860 others. No other verb writes a
+  character at a time.
+- **So the banner was not all a session wrote at open.** `schema` followed it,
+  and the entry two below missed that. The 28 kB spike, about 7 s long, fits
+  this burst better than connection setup. Not tested.
+- **lwIP's send queue does not reach 28 kB on its own.** With `TCP_NODELAY`,
+  lwIP does not apply `TCP_OVERSIZE` to these writes, and `TCP_SND_QUEUELEN`
+  caps the queue at 16 pbufs. Where the rest goes is not known.
+- **2k's resolved config** shows `watchdog_timeout: 5s`,
+  `power_save_mode: LIGHT`, and `enable_lwip_assert` and
+  `enable_lwip_check_thread_safety` on. ESPHome's loop and the shell task both
+  run on core 1, the shell at priority 4.
+- **The client waits up to 400 s.** `fetch_schema()` uses the 400 s command
+  timeout. A rebooted device sends nothing, and neither does the waiting
+  client, so no reset arrives to end the wait.
+- **`_local/dali-2k.yaml` gains a `debug` `reset_reason` text sensor.** It
+  validates with `uv run esphome config`. It is not flashed.
+
+### Observed 2026-11-09 on 2k (heap free through a TCP shell session)
+
+Supersedes *Held or a spike* in the entry below, which was written before this
+reading. Read by the operator, with the same build and sensors.
+
+- **`Heap free (internal)`** fell from about 108 kB to about 80 kB when the
+  session opened. About 7 s later it was back, to about 300 B below where it
+  had been. Those 300 B returned at about the time the session closed. The
+  sensor samples every 10 s, so the 7 s is approximate.
+
+What that shows:
+
+- **Opening a session costs about 28 kB for seconds. Holding one costs about
+  300 B.** That is about what lwIP's control blocks for one connection take.
+- **The 300 B fit the largest block's fall.** The block fell by about 28 kB,
+  the size of the spike, and stayed down until close. That is what a small
+  allocation placed just past the spike's buffers would do: their release
+  leaves a 28 kB hole in front of it. This is consistent, not proven.
+- **Output does not cause it.** The banner and first prompt are 56 bytes, and
+  `discover`, which writes far more, set no new low.
+
+Not settled:
+
+- **The cause.** Something in lwIP or the Wi-Fi driver at connection setup, or
+  a coincidence: this is one opening.
+- **Whether it repeats per connection.** A browser opens two or three
+  connections close together for one page: `GET /`, `GET /ws`, and
+  `/favicon.ico` unless the page names an icon. If each costs 28 kB for
+  seconds and they overlap, 108 kB falls to about 25 kB.
+
+### Observed 2026-11-09 on 2k (heap with a TCP shell session open)
+
+Step 1 of *A browser GUI for the shell* in `todo.md`, run by the operator. 2k
+ran `_local/dali-2k.yaml`, which fetches `ref: dev`; the commit was not
+recorded. Its three template sensors read `MALLOC_CAP_INTERNAL |
+MALLOC_CAP_8BIT` every 10 s. `Heap free (internal)` was not read.
+
+- **Heap min free (internal)** fell from 99,828 B to 76,612 B when a TCP shell
+  session opened. `discover`, `trace on` and closing the session left it there.
+- **Heap largest block (internal)** fell to 77,824 B while the session was
+  open, and was back above about 106 kB after it closed.
+
+What that shows:
+
+- **`discover` and `trace on` cost nothing beyond the session.** Min free
+  latches its lowest value. It moves only on a new low, and cannot rise when a
+  session closes. Neither verb took the heap below where opening the session
+  had.
+- **The drop from idle is larger than 23 kB.** 99,828 B was the low-water mark
+  since boot, not the idle level. Free is never below the largest block, so
+  idle free was at least about 106 kB. The lowest point with a session open was
+  therefore up to about 30 kB below idle. The sensor sums each region's own
+  low, so 76,612 B is at or below the true minimum.
+- **Closing releases it.** The largest block returned to above 106 kB.
+- **The binding allocates nothing at open.** `DaliShellServer` creates its task
+  and 12,288 B stack in `setup()`. Its receive buffer is 64 B on that stack,
+  and `dali_shell_attach()` copies the session into a static. The cost is
+  below the binding, in lwIP and the Wi-Fi driver.
+  - On 2k those allocate from internal RAM. Its YAML sets no sdkconfig option
+    for it, and the `dali_test_psram.yaml` build leaves
+    `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` unset. 2k's own build tree is not on
+    this machine.
+
+Not settled:
+
+- **Held or a spike.** Two readings fit:
+  - about 30 kB held for the whole session;
+  - a spike at open, after which one small allocation that lives as long as
+    the session splits the large block.
+
+  `Heap free (internal)` at idle, mid-session and after close tells which.
+- **What in lwIP or the Wi-Fi driver takes it.** An idle connection's PCB is
+  small, and its send and receive buffers (5,760 B each) fill only under
+  traffic.
+- 1k, and what a second connection costs while a session is open.
+
 ### Verified locally on 2026-11-09 (`dali_web`, the browser front end's portable half; uncommitted on `dev` at `bf7e93c`)
 
 Step 2 of *A browser GUI for the shell* in `todo.md`. Nothing touched a device

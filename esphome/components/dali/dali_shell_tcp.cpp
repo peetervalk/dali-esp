@@ -25,9 +25,18 @@ static const char *const TAG = "dali.shell";
  * runs one walk and nothing else, while a session task carries its own command
  * dispatch under everything a workflow nests. */
 static constexpr uint32_t SHELL_TASK_STACK = 12288u;
-/* Below the DALI task (10) and the scan task (9): a shell session is
- * interactive work and must never delay bus servicing. */
-static constexpr UBaseType_t SHELL_TASK_PRIORITY = 4u;
+/*
+ * Level with ESPHome's loop task (1), on the same core, so FreeRTOS time-slices
+ * the two and neither can hold the other off. Above the loop, a burst of output
+ * can keep it from running: `schema` makes thousands of sends, and with lwIP
+ * core locking each runs TCP, IP and the Wi-Fi transmit path on this task. The
+ * loop missed the 5 s task watchdog when a session opened with one, at priority
+ * 4. Still below the DALI task (10) and the scan task
+ * (9): a shell session is interactive work and must never delay bus servicing.
+ * Nothing here times the bus; the scheduler expands and times send-twice pairs
+ * on the DALI task, and the shell only waits for the result.
+ */
+static constexpr UBaseType_t SHELL_TASK_PRIORITY = 1u;
 
 /* How long recv() waits before returning so the loop can pump deferred trace
  * output and re-check the idle deadline. */

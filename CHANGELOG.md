@@ -61,6 +61,22 @@ At tagging:
 
 ### Fixed
 
+- **Opening a TCP shell session could reboot the device.** An interactive
+  `tools/dali-shell` session opens with `schema`, about 6,500 sends. The
+  session task ran at priority 4, above ESPHome's loop on the same core. With
+  lwIP core locking, each send runs the TCP/IP and Wi-Fi transmit path on that
+  task. On 2k the loop then missed the 5 s task watchdog. Three connections in
+  four did this, most often soon after boot, and an OTA image that crashed in
+  its first minute was rolled back.
+  - The session task now runs at priority 1, level with the loop, so FreeRTOS
+    time-slices the two.
+  - It stays below the DALI and scan tasks.
+  - `schema` still writes a character at a time; see *Opening a
+    `tools/dali-shell` session can reboot the device* in `todo.md`.
+
+  **Unverified:** it compiles; that the reboots stop has not been shown on a
+  device.
+
 - **The component did not compile with `psram:` on an ESP32 or ESP32-S3.**
   A config with a DALI light or sensor failed with `static assertion failed:
   ... requires lock-free 32-bit atomics`.

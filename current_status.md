@@ -526,6 +526,14 @@ Facts about the code as it stands. Each has its fix, decision or measurement in
 
 **Tools**
 
+- **`schema` writes one character per send.** An interactive
+  `tools/dali-shell` session opens with it: about 6,500 sends, and about 28 kB
+  of lwIP transmit buffers for several seconds. The shell task runs level
+  with ESPHome's loop, so the burst shares the core with it rather than
+  holding it off. *Opening a `tools/dali-shell` session can reboot the
+  device*.
+- **`tools/dali-shell` waits up to 400 s** when the device restarts during a
+  command, `schema` included, before it reports the connection lost.
 - **Native `trace on` can block the DALI task** once the UART TX buffer fills.
 - **Find Couplers prints one summary,** truncated with a count.
 

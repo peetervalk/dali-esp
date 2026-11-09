@@ -119,6 +119,22 @@ time.sleep(60)                  # never read
    probably open. Close the first session within those 10 s and it should
    connect instead.
 
+**No watchdog reset on connect**
+
+The shell task now runs at priority 1, level with ESPHome's loop. At priority
+4, three interactive connections in four reset 2k through the task watchdog.
+See *P0 — Opening a `tools/dali-shell` session can reboot the device*.
+
+1. Flash the node. Wait for `Boot seems successful` in the log, about a minute
+   after boot, so that a crash cannot roll the image back.
+2. Reboot it. Within 30 s of boot, open an interactive `dali-shell` session.
+   That runs `schema`. Close it, and repeat five times.
+3. Repeat step 2 with the node up for several minutes.
+4. **Expected:** the node never restarts. ESPHome prints `CRASH DETECTED ON
+   PREVIOUS BOOT` on the boot after a crash, and the `Reset reason` sensor
+   names it. `Heap free (internal)` at 1 s still dips by about 28 kB for each
+   `schema`. Only the fix to `schema` itself removes that.
+
 ### ESPHome version range
 
 - **Establish the `manifest.json` floor of `>=2026.6.0`.** Compile
@@ -699,6 +715,61 @@ input-device enumeration* under *Fix*.
 
 ## Fix
 
+### P0 — Opening a `tools/dali-shell` session can reboot the device
+
+On 2026-11-09, three of four connections rebooted 2k, more often soon after
+boot. It has happened before. See `project_log.md`.
+
+**The reset is the task watchdog.** ESPHome's loop task, priority 1 on core 1,
+went 5 s without feeding it. The crash record caught the loop just as it fed
+again, so it was held off, not stuck.
+
+**A crash soon after an OTA reverts the update.** `enable_ota_rollback` keeps
+the previous image until `safe_mode` confirms the new one, after
+`boot_is_good_after`, 1 min by default.
+
+- **The likely trigger is `schema`.**
+  - An interactive session runs it as soon as it opens.
+  - `shell_json_escape_print()` writes each character with its own
+    `shell_printf()`. That is about 5,700 one-byte `send()` calls and about
+    860 others, under `TCP_NODELAY`.
+  - Free heap fell by about 28 kB for about 7 s at that point. ESP-IDF gives
+    every segment a full-MSS buffer; see *A browser GUI for the shell*,
+    *Budget*.
+  - One-shot mode, `dali-shell <command>`, does not run `schema`.
+- **What held the loop is not shown.** The suspect is the shell task.
+  - It ran at priority 4 on core 1, above the loop.
+  - With `CONFIG_LWIP_TCPIP_CORE_LOCKING`, each of its sends runs TCP, IP and
+    the Wi-Fi transmit path in its own context, under the lock the loop's
+    sockets also take.
+  - The DALI task (10) is the other task above the loop on that core.
+  - **The shell task now runs at priority 1.** Unverified; see *No watchdog
+    reset on connect* in Part 1. If the resets go on, the DALI task is next.
+
+  2k also runs `power_save_mode: LIGHT`, which delays the ACKs that clock
+  these sends.
+- **The client then waits up to 400 s.** `fetch_schema()` uses the command
+  timeout. A rebooted device sends nothing, and neither does the waiting
+  client, so no reset arrives to end the wait.
+
+**Measure: is `schema` the trigger?** Soon after boot, connect several times
+in one-shot mode, then several times interactively. Then type `schema` by hand
+in a raw TCP client. ESPHome prints the crash record on the next boot, so each
+reset is visible in the log.
+
+**Fix.** This is a software-stack change, so it waits for a go-ahead:
+- **`schema` writes whole entries,** not characters. Escape into a buffer and
+  write each entry once: about 250 writes instead of 6,500, and every surface
+  gains it. The browser binding needs it too, since it would send each write
+  as a frame.
+- **The TCP binding coalesces writes** and sends at a newline, at the prompt,
+  or when its buffer fills. Each segment then carries a line rather than one
+  byte in a 1,440 B buffer, whatever a verb does.
+- **In `tools/dali-shell`:**
+  - give `schema` a short deadline;
+  - set TCP keepalive on the socket, so any command notices a device that
+    restarted.
+
 ### P0 — The RX edge interrupt is not IRAM-safe
 
 The TX bit clock is cache-safe in both builds. The RX handler is not: it goes
@@ -1050,6 +1121,26 @@ If adopted, this replaces *P2 — A Home Assistant commissioning workflow*.
 **Heap, as observed on a device:** about 80 kB free from boot to the first
 shell use, and about 60 kB with a shell session open.
 
+**Measured on 2k, 2026-11-09,** with the caps below:
+- **Opening a TCP shell session** moved the low-water mark from 99,828 B, the
+  low since boot, to 76,612 B.
+- **For the session,** the largest block fell from above about 106 kB to
+  77,824 B.
+- **`discover` and `trace on`** set no new low.
+- **Closing the session** gave the block back.
+- **Free heap** fell from about 108 kB to about 80 kB at open. About 7 s later
+  it was back to within about 300 B, and those 300 B returned at close.
+
+So a session holds about 300 B. Opening an interactive `tools/dali-shell`
+session cost about 28 kB for seconds. The client runs `schema` at once, about
+6,500 one-character sends.
+- ESP-IDF's `LWIP_NETIF_TX_SINGLE_PBUF` gives each segment a full 1,440 B
+  MSS buffer, however short.
+- Under `TCP_NODELAY`, 16 one-byte segments can wait for an ACK at once.
+
+So the spike is that burst, not the connection. See *Order of work* and *P0 — Opening a `tools/dali-shell` session
+can reboot the device*.
+
 **Read the right sensor.** ESPHome's debug `free`, `block` and `min_free` use
 `MALLOC_CAP_INTERNAL`. That counts about 52 kB of IRAM that takes 32-bit access
 only, so 1k's `free` reads about 147 kB while about 94 kB is usable. On a PSRAM
@@ -1071,8 +1162,9 @@ build `MALLOC_CAP_8BIT` alone counts the PSRAM. Measure with
   - The Wi-Fi driver allocates up to 32 dynamic RX buffers and 32 dynamic TX
     buffers, about 1.6 kB each, as traffic flows.
 
-  20 kB is still more than one idle connection should need. Measure it before
-  building anything; see *Order of work*.
+  An idle connection measured about 300 B. The 20 kB was the spike at open,
+  caught by a sensor, and the `schema` the client runs then is the likely
+  cause.
 - **Enrichment costs flash, not heap.** The browser renders. The device serves
   a constant blob from flash and streams verb output through `shell_printf()`,
   as it already does.
@@ -1093,7 +1185,10 @@ build `MALLOC_CAP_8BIT` alone counts the PSRAM. Measure with
 - `GET /` serves the gzipped page from flash.
 - `GET /ws` upgrades to a WebSocket, and that connection *is* the shell
   session:
-  - `write_cb` sends each write as a text frame.
+  - `write_cb` sends each write as a text frame. `schema` writes a character
+    at a time, about 6,500 writes, so that must be fixed first or the binding
+    must coalesce. See *P0 — Opening a `tools/dali-shell` session can reboot
+    the device*.
   - Each client text frame is one command line, fed to
     `dali_shell_feed_byte()`.
   - The prompt goes in a frame of its own, so the page knows a command has
@@ -1358,17 +1453,33 @@ action, not the console back.
 
 ### Order of work
 
-1. **Measure heap on a device.** This needs a hardware go-ahead. The sensors
-   exist in `_local/dali-2k.yaml`, using the caps in *Budget*. Flash them and
-   read them:
-   - idle,
-   - with a TCP shell session open,
-   - during `discover`,
-   - with `trace on` while events flow,
-   - after the session closes.
+1. **Measure heap on a device.** Read on 2k on 2026-11-09; see *Budget* and
+   `project_log.md`. A session holds about 300 B, and opening one costs about
+   28 kB for seconds. The binding allocates nothing at open. Still open, with
+   `Heap free (internal)` at `update_interval: 1s` (set in
+   `_local/dali-2k.yaml`, not yet flashed):
+   - **Is the spike `schema` or the connection?** One-shot mode,
+     `dali-shell --host <ip> stats`, sends no `schema`. Open a few one-shot
+     sessions, then type `schema` by hand in a raw TCP client. If only
+     `schema` dips, the connection costs about 300 B, and the floor needs
+     only a reserve.
+   - **If the connection itself dips:** does every connection cost it, and do
+     overlapping ones add up?
+     - With a session open, connect a second client to 2323. lwIP completes
+       its handshake and holds it in the backlog, and the binding never
+       accepts it. A dip there puts the cost below the shell.
+     - Open the two within a second of each other. A new min-free low near
+       50 kB means overlapping opens add up.
+   - **The floor,** from that. If the spike comes before `accept()` returns,
+     no floor check can prevent it. The bound is then how many setups can
+     overlap: the listen backlog, and the page's own connections. The page
+     names an inline icon so the browser does not fetch `/favicon.ico`. The
+     floor covers what the binding does after `accept()`: one connection's
+     worst case plus a reserve for an OTA or API connection, read on current
+     free with the caps in *Budget*.
 
-   This explains the 20 kB, and sets a heap floor below which the web binding
-   refuses a new page or upgrade.
+   What a page load costs on top of an open session is measured once step 3
+   exists.
 2. **The portable parser. Host-tested 2026-11-09** as `dali_web`: 59 vectors,
    56 of 56 mutants killed. See `project_log.md`. What it does beyond the
    sketch above:
