@@ -36,6 +36,62 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-11-09 (`schema` in chunks, TCP output gathered; uncommitted on `dev` at `2c32956`)
+
+The two fixes left after the priority change below.
+
+- **`schema` moves to `dali_cli_print_schema()` in `dali_cli.c`.** It writes
+  through a 160 B chunk, flushed only when full and at the end.
+  `cmd_schema()` in `dali_shell.c` now calls it, and
+  `shell_json_escape_print()` and `shell_print_gear_table_json()` are gone.
+- **The TCP binding gathers writes in a 512 B buffer.** It sends at a line
+  end, from `aborted_cb()` before each bus wait, once per pass of the session
+  loop (which carries the prompt), before close, or when the next write would
+  not fit. A longer write goes straight through.
+- **The old output is the reference.** A host program transcribing the
+  pre-change `cmd_schema()` produced 15,539 bytes in 6,660 writes, 6,132 of
+  them one byte (15,538 with commissioning on). `dali_cli_print_schema()`
+  produces the same bytes under both policies, in 98 writes.
+- **The host suites pass, 35 of 35.** `test_cli` gains four vectors, 101 tests
+  in all:
+  - every write but the last is a full 159-byte chunk;
+  - the output is well formed: brackets balance, escapes are valid, and no
+    control character sits in a string;
+  - every verb, its subcommands, every table and the list separators are
+    present;
+  - the policy is reported.
+- **Mutation pass: 10 mutants, 9 killed.**
+  - The survivor drops JSON escaping. It is equivalent on today's tables: the
+    output holds no backslash, so no table string has a quote or backslash.
+  - A first run killed `subcommands` dropped only after a check was added.
+  - **A trap in that pass.** `mingw32-make` compares mtimes in whole seconds.
+    A mutant written, built and restored inside one second left its object in
+    place. The baseline then failed, and every result was suspect until the
+    script deleted the object before each build.
+- **Device builds.** Neither printed a compiler warning.
+  - `uv run esphome compile dali_test.yaml` on 2026.10.0: RAM 141,660 B
+    (+512, the buffer) and flash 1,031,259 B.
+  - `idf.py build` on IDF 6.0.1: `dali_esp.bin` is `0x4a1e0` bytes.
+
+Not covered: any device. Connect time, the heap at connect and the order of
+interleaved trace output are in *Opening an interactive session*, Part 1 of
+`todo.md`.
+
+### Observed 2026-11-09 on 2k (shell task at priority 1, `2c32956`)
+
+Reported by the operator. 2k built `dev` at `2c32956`, which carries the
+change in the entry below.
+
+- **No reset across sequential interactive `tools/dali-shell` connections.** At
+  priority 4, three connections in four reset it.
+- **Each connection still takes close to 10 s.** That is the client waiting for
+  `schema`: about 6,500 one-byte segments, at most 16 awaiting an ACK at once.
+  2k runs `power_save_mode: LIGHT`, which delays those ACKs. One-shot mode
+  sends no `schema` and was not timed.
+
+Not recorded: whether a connection was made in the first minute after boot,
+which is where most of the resets happened.
+
 ### Verified locally on 2026-11-09 (shell task at priority 1; uncommitted on `dev` at `b05520a`)
 
 The fix tried first for the entry below. `SHELL_TASK_PRIORITY` in

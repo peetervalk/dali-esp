@@ -119,21 +119,31 @@ time.sleep(60)                  # never read
    probably open. Close the first session within those 10 s and it should
    connect instead.
 
-**No watchdog reset on connect**
+**Opening an interactive session**
 
-The shell task now runs at priority 1, level with ESPHome's loop. At priority
-4, three interactive connections in four reset 2k through the task watchdog.
-See *P0 — Opening a `tools/dali-shell` session can reboot the device*.
+Three changes, each checked here:
+- The shell task runs at priority 1, level with ESPHome's loop.
+- `schema` writes in 159-byte chunks.
+- The binding gathers writes into sends of a line or more.
+
+At priority 4, three interactive connections in four reset 2k through the
+task watchdog, and each took close to 10 s. At priority 1, repeated
+connections no longer reset it, but still took close to 10 s. See
+`project_log.md`, 2026-11-09.
 
 1. Flash the node. Wait for `Boot seems successful` in the log, about a minute
    after boot, so that a crash cannot roll the image back.
 2. Reboot it. Within 30 s of boot, open an interactive `dali-shell` session.
    That runs `schema`. Close it, and repeat five times.
 3. Repeat step 2 with the node up for several minutes.
-4. **Expected:** the node never restarts. ESPHome prints `CRASH DETECTED ON
-   PREVIOUS BOOT` on the boot after a crash, and the `Reset reason` sensor
-   names it. `Heap free (internal)` at 1 s still dips by about 28 kB for each
-   `schema`. Only the fix to `schema` itself removes that.
+4. **Expected:**
+   - The node never restarts. ESPHome prints `CRASH DETECTED ON PREVIOUS
+     BOOT` on the boot after a crash, and the `Reset reason` sensor names it.
+   - The prompt appears within about a second of the banner, not 10 s.
+   - `Heap free (internal)` at 1 s no longer dips by about 28 kB at each
+     connect. A few kilobytes is what one MSS-sized segment per line costs.
+5. Run `discover` and `trace on` in the same session. Each line should appear
+   as it completes, as before.
 
 ### ESPHome version range
 
@@ -715,61 +725,6 @@ input-device enumeration* under *Fix*.
 
 ## Fix
 
-### P0 — Opening a `tools/dali-shell` session can reboot the device
-
-On 2026-11-09, three of four connections rebooted 2k, more often soon after
-boot. It has happened before. See `project_log.md`.
-
-**The reset is the task watchdog.** ESPHome's loop task, priority 1 on core 1,
-went 5 s without feeding it. The crash record caught the loop just as it fed
-again, so it was held off, not stuck.
-
-**A crash soon after an OTA reverts the update.** `enable_ota_rollback` keeps
-the previous image until `safe_mode` confirms the new one, after
-`boot_is_good_after`, 1 min by default.
-
-- **The likely trigger is `schema`.**
-  - An interactive session runs it as soon as it opens.
-  - `shell_json_escape_print()` writes each character with its own
-    `shell_printf()`. That is about 5,700 one-byte `send()` calls and about
-    860 others, under `TCP_NODELAY`.
-  - Free heap fell by about 28 kB for about 7 s at that point. ESP-IDF gives
-    every segment a full-MSS buffer; see *A browser GUI for the shell*,
-    *Budget*.
-  - One-shot mode, `dali-shell <command>`, does not run `schema`.
-- **What held the loop is not shown.** The suspect is the shell task.
-  - It ran at priority 4 on core 1, above the loop.
-  - With `CONFIG_LWIP_TCPIP_CORE_LOCKING`, each of its sends runs TCP, IP and
-    the Wi-Fi transmit path in its own context, under the lock the loop's
-    sockets also take.
-  - The DALI task (10) is the other task above the loop on that core.
-  - **The shell task now runs at priority 1.** Unverified; see *No watchdog
-    reset on connect* in Part 1. If the resets go on, the DALI task is next.
-
-  2k also runs `power_save_mode: LIGHT`, which delays the ACKs that clock
-  these sends.
-- **The client then waits up to 400 s.** `fetch_schema()` uses the command
-  timeout. A rebooted device sends nothing, and neither does the waiting
-  client, so no reset arrives to end the wait.
-
-**Measure: is `schema` the trigger?** Soon after boot, connect several times
-in one-shot mode, then several times interactively. Then type `schema` by hand
-in a raw TCP client. ESPHome prints the crash record on the next boot, so each
-reset is visible in the log.
-
-**Fix.** This is a software-stack change, so it waits for a go-ahead:
-- **`schema` writes whole entries,** not characters. Escape into a buffer and
-  write each entry once: about 250 writes instead of 6,500, and every surface
-  gains it. The browser binding needs it too, since it would send each write
-  as a frame.
-- **The TCP binding coalesces writes** and sends at a newline, at the prompt,
-  or when its buffer fills. Each segment then carries a line rather than one
-  byte in a 1,440 B buffer, whatever a verb does.
-- **In `tools/dali-shell`:**
-  - give `schema` a short deadline;
-  - set TCP keepalive on the socket, so any command notices a device that
-    restarted.
-
 ### P0 — The RX edge interrupt is not IRAM-safe
 
 The TX bit clock is cache-safe in both builds. The RX handler is not: it goes
@@ -823,6 +778,20 @@ Also open:
 A 1k `restore apply` move lost a frame right after another unit's reply. That
 fits, but one miss does not establish it. Measure first: *Bus timing with a
 logic analyzer*, step 3, and the second-load counts.
+
+### P1 — `tools/dali-shell` waits up to 400 s for a device that restarted
+
+Every command, `schema` included, waits with the 400 s command timeout. A
+device that restarted sends nothing, and neither does the waiting client, so
+no reset arrives to end the wait. Seen on 2026-11-09, when connecting reset 2k;
+see `project_log.md`.
+
+Fix. This is a software-stack change, so it waits for a go-ahead:
+- **Give `schema` a short deadline,** about 15 s. It now takes about a second;
+  see *Opening an interactive session* in Part 1.
+- **Set TCP keepalive on the client socket,** so any command notices a device
+  that restarted within seconds. On Windows that is `SIO_KEEPALIVE_VALS`, and
+  elsewhere `TCP_KEEPIDLE`, `TCP_KEEPINTVL` and `TCP_KEEPCNT`.
 
 ### P1 — The DALI PHY can break every other GPIO interrupt
 
@@ -1138,8 +1107,9 @@ session cost about 28 kB for seconds. The client runs `schema` at once, about
   MSS buffer, however short.
 - Under `TCP_NODELAY`, 16 one-byte segments can wait for an ACK at once.
 
-So the spike is that burst, not the connection. See *Order of work* and *P0 — Opening a `tools/dali-shell` session
-can reboot the device*.
+So the spike is that burst, not the connection. `schema` now writes in 159-byte
+chunks, and the TCP binding gathers writes into sends of a line or more; see
+*Opening an interactive session* in Part 1.
 
 **Read the right sensor.** ESPHome's debug `free`, `block` and `min_free` use
 `MALLOC_CAP_INTERNAL`. That counts about 52 kB of IRAM that takes 32-bit access
@@ -1185,10 +1155,9 @@ build `MALLOC_CAP_8BIT` alone counts the PSRAM. Measure with
 - `GET /` serves the gzipped page from flash.
 - `GET /ws` upgrades to a WebSocket, and that connection *is* the shell
   session:
-  - `write_cb` sends each write as a text frame. `schema` writes a character
-    at a time, about 6,500 writes, so that must be fixed first or the binding
-    must coalesce. See *P0 — Opening a `tools/dali-shell` session can reboot
-    the device*.
+  - `write_cb` gathers writes as the TCP binding does, and sends one text
+    frame per flush: at a line end, before a bus wait, or when full. A frame
+    per write would make even a line printed in pieces several frames.
   - Each client text frame is one command line, fed to
     `dali_shell_feed_byte()`.
   - The prompt goes in a frame of its own, so the page knows a command has

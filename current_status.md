@@ -350,6 +350,11 @@ Protocol and state correctness come before broad new device support.
   | A vanished client is reclaimed | TCP keepalive (30 s idle, then 3 probes 5 s apart) frees it in about 45 s |
   | An unused terminal is closed | after `idle_timeout` |
   | Sockets are counted | The listener and its one client are registered with ESPHome's socket count, adding two lwIP sockets |
+  | Output goes out a line or more per send | Writes gather in a 512 B buffer, sent at a line end, after the prompt, before each bus wait, or when full. Under `TCP_NODELAY`, ESP-IDF's lwIP holds a full-MSS buffer per unacknowledged segment, however short |
+  | The session shares the loop's core and priority | The task runs at priority 1 on core 1 beside ESPHome's loop, so FreeRTOS time-slices the two. Bus timing stays with the DALI task (10) |
+
+  `schema` writes its JSON in 159-byte chunks, about a hundred writes on
+  every binding.
 
 ### ESPHome integration
 
@@ -526,14 +531,9 @@ Facts about the code as it stands. Each has its fix, decision or measurement in
 
 **Tools**
 
-- **`schema` writes one character per send.** An interactive
-  `tools/dali-shell` session opens with it: about 6,500 sends, and about 28 kB
-  of lwIP transmit buffers for several seconds. The shell task runs level
-  with ESPHome's loop, so the burst shares the core with it rather than
-  holding it off. *Opening a `tools/dali-shell` session can reboot the
-  device*.
 - **`tools/dali-shell` waits up to 400 s** when the device restarts during a
   command, `schema` included, before it reports the connection lost.
+  *`tools/dali-shell` waits up to 400 s for a device that restarted*.
 - **Native `trace on` can block the DALI task** once the UART TX buffer fills.
 - **Find Couplers prints one summary,** truncated with a count.
 

@@ -275,6 +275,16 @@ const DaliCliCommandSpec *dali_cli_command_for_id(DaliCliCommandId id);
 void dali_cli_print_help(const DaliCliOut *out);
 void dali_cli_print_usage(const DaliCliOut *out, const DaliCliCommandSpec *spec);
 
+/*
+ * `schema`: every verb and every named command table as JSON, then the session
+ * policy a client should grey out against. Written in chunks of
+ * DALI_CLI_FORMAT_MAX - 1 bytes and a shorter last one, never a write per
+ * character: on a socket each write can become a TCP segment.
+ */
+void dali_cli_print_schema(const DaliCliOut *out,
+                           bool              allow_commission,
+                           bool              allow_reset);
+
 typedef enum {
     DALI_CLI_RESOLVE_OK = 0,
     DALI_CLI_RESOLVE_EMPTY,      /* blank line; produce no output             */

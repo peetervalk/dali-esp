@@ -101,20 +101,18 @@ void DaliShellServer::dump_config()
                   allow_commissioning_ ? "allowed" : "refused");
 }
 
-/* ── Session bindings ────────────────────────────────────────────────────── */
+/* ── Output ──────────────────────────────────────────────────────────────── */
 
-void DaliShellServer::write_cb(void *ctx, const char *text)
+void DaliShellServer::send_all(const char *data, size_t len)
 {
-    auto *self = static_cast<DaliShellServer *>(ctx);
-    if (self == nullptr || self->client_fd_ < 0 || text == nullptr ||
-        self->peer_lost_) {
+    if (client_fd_ < 0 || peer_lost_) {
         return;
     }
 
-    size_t remaining = strlen(text);
-    const char *cursor = text;
+    const char *cursor = data;
+    size_t remaining = len;
     while (remaining > 0u) {
-        int sent = ::send(self->client_fd_, cursor, remaining, 0);
+        int sent = ::send(client_fd_, cursor, remaining, 0);
         if (sent > 0) {
             cursor += sent;
             remaining -= (size_t) sent;
@@ -129,15 +127,75 @@ void DaliShellServer::write_cb(void *ctx, const char *text)
         if (sent < 0 && errno == EINTR) {
             continue;
         }
-        self->peer_lost_ = true;
+        peer_lost_ = true;
         return;
     }
 }
 
+void DaliShellServer::flush_output()
+{
+    if (out_len_ == 0u) {
+        return;
+    }
+    size_t len = out_len_;
+    out_len_ = 0u;
+    send_all(out_buf_, len);
+}
+
+/* ── Session bindings ────────────────────────────────────────────────────── */
+
+/*
+ * The shell writes in pieces: a line or less per shell_printf(), a table row in
+ * several calls. Sent as written, under TCP_NODELAY each piece is a segment of
+ * its own, and ESP-IDF's lwIP gives every segment a full-MSS buffer until it is
+ * acknowledged. A verb that wrote a character at a time once held about 28 kB
+ * that way. So writes are gathered and sent:
+ * - when a write ends a line;
+ * - before the shell waits on the bus, from aborted_cb();
+ * - after the prompt, once per pass of the session loop in serve();
+ * - when the next write would not fit.
+ * An operator sees each line as soon as it is complete, and a partial line no
+ * later than the bus wait that follows it.
+ */
+void DaliShellServer::write_cb(void *ctx, const char *text)
+{
+    auto *self = static_cast<DaliShellServer *>(ctx);
+    if (self == nullptr || self->client_fd_ < 0 || text == nullptr ||
+        self->peer_lost_) {
+        return;
+    }
+
+    size_t len = strlen(text);
+    if (len == 0u) {
+        return;
+    }
+    if (self->out_len_ + len > sizeof(self->out_buf_)) {
+        self->flush_output();
+        if (len > sizeof(self->out_buf_)) {
+            self->send_all(text, len);
+            return;
+        }
+    }
+    memcpy(self->out_buf_ + self->out_len_, text, len);
+    self->out_len_ += len;
+    if (text[len - 1u] == '\n') {
+        self->flush_output();
+    }
+}
+
+/*
+ * The shell asks this before every wait on the bus, so it is where a partial
+ * line goes out rather than being held through the wait. A send that fails
+ * here also finds a dead peer before the wait instead of after it.
+ */
 bool DaliShellServer::aborted_cb(void *ctx)
 {
     auto *self = static_cast<DaliShellServer *>(ctx);
-    return self == nullptr || self->peer_lost_;
+    if (self == nullptr) {
+        return true;
+    }
+    self->flush_output();
+    return self->peer_lost_;
 }
 
 bool DaliShellServer::bus_claim_cb(void *ctx, const char *what)
@@ -356,6 +414,7 @@ void DaliShellServer::serve(int client_fd)
 
     client_fd_ = client_fd;
     peer_lost_ = false;
+    out_len_ = 0u;
 
     DaliShellSession session = {};
     session.out.write = write_cb;
@@ -395,6 +454,7 @@ void DaliShellServer::serve(int client_fd)
     ESP_LOGI(TAG, "Shell session opened");
     dali_shell_write_banner();
     dali_shell_write_prompt();
+    flush_output();
 
     uint32_t last_activity_ms = millis();
 
@@ -465,8 +525,13 @@ void DaliShellServer::serve(int client_fd)
             ESP_LOGI(TAG, "Shell session closed on idle timeout");
             break;
         }
+
+        /* The prompt has no line end, so it goes out here, as does any partial
+         * line, before the next recv() waits. */
+        flush_output();
     }
 
+    flush_output();
     dali_shell_detach();
     ::close(client_fd);
     client_fd_ = -1;

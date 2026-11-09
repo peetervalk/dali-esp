@@ -61,21 +61,32 @@ At tagging:
 
 ### Fixed
 
-- **Opening a TCP shell session could reboot the device.** An interactive
-  `tools/dali-shell` session opens with `schema`, about 6,500 sends. The
-  session task ran at priority 4, above ESPHome's loop on the same core. With
-  lwIP core locking, each send runs the TCP/IP and Wi-Fi transmit path on that
-  task. On 2k the loop then missed the 5 s task watchdog. Three connections in
-  four did this, most often soon after boot, and an OTA image that crashed in
-  its first minute was rolled back.
-  - The session task now runs at priority 1, level with the loop, so FreeRTOS
-    time-slices the two.
-  - It stays below the DALI and scan tasks.
-  - `schema` still writes a character at a time; see *Opening a
-    `tools/dali-shell` session can reboot the device* in `todo.md`.
+- **Opening a TCP shell session could reboot the device, and took close to
+  10 s.** An interactive `tools/dali-shell` session opens with `schema`.
+  - **`schema` wrote one character per write:** 6,660 writes for 15.5 kB. Under
+    `TCP_NODELAY` each became a segment, and ESP-IDF's lwIP holds a full-MSS
+    buffer per unacknowledged segment, about 28 kB at the peak.
+  - **The session task ran at priority 4, above ESPHome's loop on the same
+    core.** With lwIP core locking, each send runs the TCP/IP and Wi-Fi
+    transmit path on that task.
+  - **On 2k the loop then missed the 5 s task watchdog.** Three connections in
+    four did this, most often soon after boot. An OTA image that crashed in
+    its first minute was rolled back.
 
-  **Unverified:** it compiles; that the reboots stop has not been shown on a
-  device.
+  Three changes:
+  - **The session task runs at priority 1,** level with the loop, so FreeRTOS
+    time-slices the two. It stays below the DALI and scan tasks.
+    **Hardware-verified on 2k:** repeated interactive connections no longer
+    reset it. Connections in the first minute after boot were not recorded.
+  - **`schema` writes its JSON in 159-byte chunks:** 98 writes, and the same
+    bytes as before. The JSON is now built by `dali_cli_print_schema()` in
+    `dali_cli.c`, so every binding gains it. **Host-tested:** byte-identical to
+    the old output under both policies, and four new `test_cli` vectors. A
+    mutation pass killed 9 of 10 mutants; the tenth is equivalent on today's
+    tables.
+  - **The TCP binding gathers writes in a 512 B buffer.** It sends at a line
+    end, after the prompt, before each bus wait, or when the buffer is full.
+    **Unverified:** it compiles; not run on a device.
 
 - **The component did not compile with `psram:` on an ESP32 or ESP32-S3.**
   A config with a DALI light or sensor failed with `static assertion failed:

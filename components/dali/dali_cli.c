@@ -1509,6 +1509,206 @@ void dali_cli_print_table(const DaliCliOut *out, DaliCliTableId table)
 }
 
 /* ---------------------------------------------------------------------------
+ * schema
+ * --------------------------------------------------------------------------*/
+
+/*
+ * `schema` is assembled here and written a full chunk at a time.
+ *
+ * It used to escape its strings with one write per character: 6,660 writes for
+ * 15.5 kB, 6,132 of them one byte. Over a socket each write is a send(), and
+ * under TCP_NODELAY each send a segment. ESP-IDF's lwIP gives every segment a
+ * full-MSS buffer (LWIP_NETIF_TX_SINGLE_PBUF), so sixteen unacknowledged
+ * one-byte segments held about 28 kB of heap. The burst took close to 10 s,
+ * and while the session task ran above ESPHome's loop it tripped the task
+ * watchdog. Chunking makes it about a hundred writes on every front end.
+ *
+ * Only a full chunk is written before the end, so the bytes are the same as a
+ * write per character would give; only where the writes split moves.
+ */
+typedef struct {
+    const DaliCliOut *out;
+    size_t            len;
+    char              buf[DALI_CLI_FORMAT_MAX];
+} DaliCliChunk;
+
+static void cli_chunk_flush(DaliCliChunk *chunk)
+{
+    if (chunk->len == 0u) {
+        return;
+    }
+    chunk->buf[chunk->len] = '\0';
+    dali_cli_write(chunk->out, chunk->buf);
+    chunk->len = 0u;
+}
+
+static void cli_chunk_putc(DaliCliChunk *chunk, char c)
+{
+    if (chunk->len + 1u >= sizeof(chunk->buf)) {
+        cli_chunk_flush(chunk);
+    }
+    chunk->buf[chunk->len++] = c;
+}
+
+static void cli_chunk_puts(DaliCliChunk *chunk, const char *text)
+{
+    for (const char *c = text; *c != '\0'; c++) {
+        cli_chunk_putc(chunk, *c);
+    }
+}
+
+static void cli_chunk_printf(DaliCliChunk *chunk, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+
+/* For the fixed punctuation and numbers between strings. Every format here is
+ * far shorter than the scratch buffer; table text goes through the escaper. */
+static void cli_chunk_printf(DaliCliChunk *chunk, const char *fmt, ...)
+{
+    char    text[DALI_CLI_FORMAT_MAX];
+    va_list args;
+    va_start(args, fmt);
+    int written = vsnprintf(text, sizeof(text), fmt, args);
+    va_end(args);
+    if (written < 0) {
+        return;
+    }
+    cli_chunk_puts(chunk, text);
+}
+
+/* The tables hold verb names, argument sketches and summaries. Only the quote
+ * and the backslash occur in practice, but both must be escaped for the output
+ * to parse at all. */
+static void cli_chunk_json_string(DaliCliChunk *chunk, const char *text)
+{
+    if (text == NULL) {
+        return;
+    }
+    for (const char *c = text; *c != '\0'; c++) {
+        if (*c == '"' || *c == '\\') {
+            cli_chunk_putc(chunk, '\\');
+        }
+        cli_chunk_putc(chunk, *c);
+    }
+}
+
+static void cli_schema_gear_table(DaliCliChunk *chunk,
+                                  const char   *label,
+                                  uint8_t       count,
+                                  const DaliCliGearCommand *(*at)(uint8_t))
+{
+    cli_chunk_printf(chunk, "  \"%s\": [", label);
+    for (uint8_t i = 0u; i < count; i++) {
+        const DaliCliGearCommand *cmd = at(i);
+        if (cmd == NULL) {
+            continue;
+        }
+        cli_chunk_printf(chunk, "%s\n    {\"name\": \"", i == 0u ? "" : ",");
+        cli_chunk_json_string(chunk, cmd->name);
+        cli_chunk_printf(chunk, "\", \"needs_param\": %s, \"max_param\": %u}",
+                         cmd->needs_param ? "true" : "false",
+                         (unsigned)cmd->max_param);
+    }
+    cli_chunk_puts(chunk, "\n  ],\n");
+}
+
+/* The name-only tables differ in type; each adapter reads one's names. */
+static const char *cli_dt6_name_at(uint8_t i)
+{
+    const DaliCliDtCommand *cmd = dali_cli_dt6_at(i);
+    return cmd != NULL ? cmd->name : NULL;
+}
+
+static const char *cli_dt8_name_at(uint8_t i)
+{
+    const DaliCliDtCommand *cmd = dali_cli_dt8_at(i);
+    return cmd != NULL ? cmd->name : NULL;
+}
+
+static const char *cli_iquery_name_at(uint8_t i)
+{
+    const DaliCliInstanceQuery *cmd = dali_cli_iquery_at(i);
+    return cmd != NULL ? cmd->name : NULL;
+}
+
+static const char *cli_iconfig_name_at(uint8_t i)
+{
+    const DaliCliInstanceConfig *cmd = dali_cli_iconfig_at(i);
+    return cmd != NULL ? cmd->name : NULL;
+}
+
+/* The names of one table as a JSON list body: `"a", "b"`. */
+static void cli_schema_names(DaliCliChunk *chunk,
+                             uint8_t       count,
+                             const char *(*name_at)(uint8_t))
+{
+    for (uint8_t i = 0u; i < count; i++) {
+        const char *name = name_at(i);
+        if (name == NULL) {
+            continue;
+        }
+        cli_chunk_puts(chunk, i == 0u ? "\"" : ", \"");
+        cli_chunk_json_string(chunk, name);
+        cli_chunk_putc(chunk, '"');
+    }
+}
+
+void dali_cli_print_schema(const DaliCliOut *out,
+                           bool              allow_commission,
+                           bool              allow_reset)
+{
+    DaliCliChunk chunk;
+    chunk.out = out;
+    chunk.len = 0u;
+
+    cli_chunk_puts(&chunk, "{\n  \"verbs\": [");
+    uint8_t verb_count = dali_cli_command_count();
+    for (uint8_t i = 0u; i < verb_count; i++) {
+        const DaliCliCommandSpec *spec = dali_cli_command_at(i);
+        if (spec == NULL) {
+            continue;
+        }
+        cli_chunk_printf(&chunk, "%s\n    {\"name\": \"", i == 0u ? "" : ",");
+        cli_chunk_json_string(&chunk, spec->name);
+        cli_chunk_puts(&chunk, "\", \"args\": \"");
+        cli_chunk_json_string(&chunk, spec->args);
+        cli_chunk_puts(&chunk, "\", \"summary\": \"");
+        cli_chunk_json_string(&chunk, spec->summary);
+        cli_chunk_printf(&chunk, "\", \"min_args\": %u, \"max_args\": %u",
+                         (unsigned)spec->min_args, (unsigned)spec->max_args);
+        if (spec->subcommands != NULL) {
+            cli_chunk_puts(&chunk, ", \"subcommands\": \"");
+            cli_chunk_json_string(&chunk, spec->subcommands);
+            cli_chunk_putc(&chunk, '"');
+        }
+        cli_chunk_putc(&chunk, '}');
+    }
+    cli_chunk_puts(&chunk, "\n  ],\n");
+
+    cli_schema_gear_table(&chunk, "query", dali_cli_query_count(), dali_cli_query_at);
+    cli_schema_gear_table(&chunk, "special", dali_cli_special_count(), dali_cli_special_at);
+    cli_schema_gear_table(&chunk, "config", dali_cli_config_count(), dali_cli_config_at);
+
+    /* DT6/DT8 and the instance tables carry different fields, so they are
+     * emitted by name only: a completer needs the spelling, and anything more
+     * detailed is already in `list <table>` for a human to read. */
+    cli_chunk_puts(&chunk, "  \"dt6\": [");
+    cli_schema_names(&chunk, dali_cli_dt6_count(), cli_dt6_name_at);
+    cli_chunk_puts(&chunk, "],\n  \"dt8\": [");
+    cli_schema_names(&chunk, dali_cli_dt8_count(), cli_dt8_name_at);
+    cli_chunk_puts(&chunk, "],\n  \"iquery\": [");
+    cli_schema_names(&chunk, dali_cli_iquery_count(), cli_iquery_name_at);
+    cli_chunk_puts(&chunk, "],\n  \"iconfig\": [");
+    cli_schema_names(&chunk, dali_cli_iconfig_count(), cli_iconfig_name_at);
+
+    /* What this session will actually run, so a client can grey out what it
+     * cannot use rather than letting the operator discover it by refusal. */
+    cli_chunk_printf(&chunk, "],\n  \"policy\": {\"commission\": %s, \"reset\": %s}\n}\r\n",
+                     allow_commission ? "true" : "false",
+                     allow_reset ? "true" : "false");
+    cli_chunk_flush(&chunk);
+}
+
+/* ---------------------------------------------------------------------------
  * Response formatting
  * --------------------------------------------------------------------------*/
 

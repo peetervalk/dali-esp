@@ -70,12 +70,17 @@ class DaliShellServer : public Component {
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
 
  protected:
-  // Accept loop and session pump. Runs on its own task, off the ESPHome loop
-  // core, because a verb may block for tens of seconds.
+  // Accept loop and session pump. Runs on its own task, because a verb may
+  // block for tens of seconds. The task shares the ESPHome loop's core and
+  // priority; see SHELL_TASK_PRIORITY in the .cpp.
   static void task_entry(void *arg);
   void        run();
   // Serve one accepted connection until it closes or goes idle.
   void        serve(int client_fd);
+  // Output is gathered in out_buf_ and sent a line or more at a time; see the
+  // note above write_cb() in the .cpp.
+  void        send_all(const char *data, size_t len);
+  void        flush_output();
 
   // ── Session bindings handed to dali_shell_attach() ──────────────────────
   static void write_cb(void *ctx, const char *text);
@@ -108,6 +113,12 @@ class DaliShellServer : public Component {
   // Set when a send() fails or the peer closes; read by aborted_cb() so an
   // in-flight workflow stops instead of writing into a dead socket.
   bool peer_lost_{false};
+
+  // Output not yet sent. Touched only on the session task: output raised on
+  // another task is deferred by the shell and pumped from serve().
+  static constexpr size_t OUT_BUF_SIZE = 512;
+  char   out_buf_[OUT_BUF_SIZE];
+  size_t out_len_{0};
 };
 
 }  // namespace dali
