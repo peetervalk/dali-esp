@@ -353,6 +353,7 @@ Protocol and state correctness come before broad new device support.
   | An unused terminal is closed | after `idle_timeout` |
   | Sockets are counted | The listener and its one client are registered with ESPHome's socket count, adding two lwIP sockets |
   | Output goes out when the shell waits | Writes gather in a 512 B buffer, sent before each bus wait, before the bus claim that starts a walk, after the prompt, or when full; never merely at a line end. Under `TCP_NODELAY`, ESP-IDF's lwIP holds a full-MSS buffer per unacknowledged segment, however short, so a verb that prints a hundred lines at once goes out in a few full segments |
+  | Trace arrives during a verb | `trace on` lines raised on the DALI task wait in a 16-line ring. It is emptied between verbs, and before each bus wait while the output stands at a line start, so a verb's own traffic interleaves with its output, one wait behind. Lines that overflow the ring are reported as `[trace] N line(s) dropped` |
   | The session shares the loop's core and priority | The task runs at priority 1 on core 1 beside ESPHome's loop, so FreeRTOS time-slices the two. Bus timing stays with the DALI task (10) |
 
   `schema` writes its JSON in 159-byte chunks, about a hundred writes on
@@ -568,9 +569,6 @@ Facts about the code as it stands. Each has its fix, decision or measurement in
   connection is noticed at the verb's next write. A WebSocket close frame is
   not read until the verb ends, so a browser that closes a tab politely and
   waits leaves the verb running. *A browser GUI for the shell*, *Transport*.
-- **Trace lines raised during a verb are lost,** on both network bindings,
-  all but the last 16. The rest are reported as `[trace] N line(s) dropped`
-  at the prompt. *P2 — Network trace loses what a verb puts on the bus*.
 - **Plain HTTP with no authentication.** Anyone who can reach the port on the
   LAN can use the shell, as with the TCP port and OTA. An HTTPS dashboard
   cannot embed the page.

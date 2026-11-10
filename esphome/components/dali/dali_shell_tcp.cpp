@@ -286,6 +286,7 @@ void DaliShellServer::write_cb(void *ctx, const char *text)
     if (len == 0u) {
         return;
     }
+    self->at_line_start_ = text[len - 1u] == '\n';
     if (self->client_kind_ == ClientKind::WEBSOCKET) {
         self->write_ws(text, len);
         return;
@@ -302,15 +303,41 @@ void DaliShellServer::write_cb(void *ctx, const char *text)
 }
 
 /*
+ * Trace lines raised on the DALI task, written into this session's output from
+ * this one, with a note when the ring overflowed: a silent gap would read as a
+ * quiet bus.
+ */
+void DaliShellServer::pump_trace()
+{
+    uint32_t dropped = dali_shell_pump_deferred_output();
+    if (dropped > 0u) {
+        char note[64];
+        snprintf(note, sizeof(note), "[trace] %u line(s) dropped\r\n", (unsigned) dropped);
+        write_cb(this, note);
+    }
+}
+
+/*
  * The shell asks this before every wait on the bus, so it is where gathered
  * output goes out rather than being held through the wait. A send that fails
  * here also finds a dead peer before the wait instead of after it.
+ *
+ * It is also where trace reaches the operator during a verb. The session task
+ * spends a verb inside dali_shell_dispatch(), so session_tick() cannot pump the
+ * 16-line ring until the verb ends, and a walk under `trace on` once lost all
+ * but 16 of its lines. Pumped here, each wait carries the lines the previous
+ * one raised. Only at a line start, though: a verb can print part of a line,
+ * wait on the bus, and finish it, and a trace line pumped between the two would
+ * split it. Those lines wait for the next wait instead.
  */
 bool DaliShellServer::aborted_cb(void *ctx)
 {
     auto *self = static_cast<DaliShellServer *>(ctx);
     if (self == nullptr) {
         return true;
+    }
+    if (!self->peer_lost_ && self->at_line_start_) {
+        self->pump_trace();
     }
     self->flush_output();
     return self->peer_lost_;
@@ -642,6 +669,7 @@ bool DaliShellServer::begin_session(int fd, ClientKind kind)
     ws_close_reason_ = nullptr;
     peer_lost_ = false;
     out_len_ = 0u;
+    at_line_start_ = true;
 
     DaliShellSession session = {};
     session.out.write = write_cb;
@@ -842,15 +870,8 @@ void DaliShellServer::session_input_ws(uint8_t byte)
 void DaliShellServer::session_tick()
 {
     if (session_end_ == SessionEnd::NONE && !peer_lost_) {
-        /* Trace lines raised on the DALI task, flushed from this one. */
-        uint32_t dropped = dali_shell_pump_deferred_output();
-        if (dropped > 0u) {
-            /* Said out loud: a silent gap would read as a quiet bus. */
-            char note[64];
-            snprintf(note, sizeof(note),
-                     "[trace] %u line(s) dropped\r\n", (unsigned) dropped);
-            write_cb(this, note);
-        }
+        /* Between verbs, after the prompt; during one, aborted_cb() pumps. */
+        pump_trace();
 
         if (idle_timeout_s_ > 0u &&
             (millis() - last_activity_ms_) >= idle_timeout_s_ * 1000u) {

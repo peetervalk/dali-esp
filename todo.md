@@ -128,9 +128,8 @@ first 30 s after boot were not recorded. See `project_log.md`, 2026-11-09 and
    names it.
 4. Run `discover` and `trace on` in the same session. Each `discover` line
    should appear as it completes, as before the binding gathered its output.
-   Trace lines raised during the walk are lost, as on the web binding: expect
-   `[trace] N line(s) dropped` at the prompt, until *P2 — Network trace loses
-   what a verb puts on the bus* is fixed.
+   The walk's trace lines should arrive during it, one bus wait behind, as in
+   *Output sent only when the shell waits, and trace during a verb*.
 
 **The TCP binding after the `select()` rewrite**
 
@@ -172,14 +171,20 @@ page works, at phone width, with nothing fetched from the internet.
 `dali_shell_web.cpp` raised above the node's free heap, both the page and an
 upgrade should get `503`, with a WARN that gives the free heap and the floor.
 
-### Output sent only when the shell waits
+### Output sent only when the shell waits, and trace during a verb
 
-Both network bindings stopped sending at every line end. Output now goes out
-before each bus wait, before the bus claim that starts a walk, after the
-prompt, or when the 512 B buffer is full. Before the change, `help` lowered
-the min-free floor by 9.4 kB on 2k and 4.6 kB on 1k, a dip estimated at 23 kB
-and 18 kB; see `project_log.md`, 2026-11-11. Needs a node flashed with the
-change, which has a `Restart` button.
+Two changes to both network bindings, checked together. See `project_log.md`,
+2026-11-11, for the readings before each.
+- **They stopped sending at every line end.** Output now goes out before each
+  bus wait, before the bus claim that starts a walk, after the prompt, or when
+  the 512 B buffer is full. Before, `help` lowered the min-free floor by
+  9.4 kB on 2k and 4.6 kB on 1k, a dip estimated at 23 kB and 18 kB.
+- **They empty the trace ring before each bus wait** as well as between verbs,
+  whenever the output stands at a line start. Before, a 2k `discover` under
+  `trace on` delivered no trace line during the walk and reported `[trace] 925
+  line(s) dropped` at the prompt.
+
+Needs a node flashed with both, which has a `Restart` button.
 
 1. Press **Restart**, then wait two minutes with the shell closed. Note `Heap
    min free (internal)`.
@@ -192,6 +197,14 @@ change, which has a `Restart` button.
    finishes it, about 2 s apart on 1k, and the prompt as soon as it ends.
 5. Run `trace on` and leave the session idle for 30 s. **Expected:** `[BUS]`
    lines still arrive between commands.
+6. On 2k, still under `trace on`, run `discover`. **Expected:**
+   - `[BUS]` lines arrive throughout the walk, between the address lines,
+     each `TX` followed by its reply.
+   - No trace line splits an address line.
+   - At most a small `[trace] N line(s) dropped`, against 925 before. A count
+     that remains names a single wait that carried more than 16 frames.
+   - The Steinel's events resume after the walk, as before.
+7. Note `Heap min free (internal)` after step 6, and record it.
 
 ### ESPHome version range
 
@@ -918,26 +931,6 @@ collision*. There are two candidates:
 Every query shares that path, so do not change the scheduler before the
 capture.
 
-### P2 — Network trace loses what a verb puts on the bus
-
-With `trace on`, a network session gets `[BUS]` lines between commands but
-almost none while a verb runs.
-- **The cause.** Lines raised on the DALI task wait in a 16-line buffer, and
-  only the binding's idle pass, `session_tick()`, empties it. During a verb
-  the session task is inside `dali_shell_dispatch()`, so the buffer fills
-  after 16 lines and the rest are counted as dropped.
-- **Measured on 2026-11-11:** a 2k `discover` under `trace on` delivered no
-  trace line during its 27 s walk, then reported `[trace] 925 line(s)
-  dropped`. See `project_log.md`.
-- **Why it matters.** A walk is exactly what trace is for, and the live log
-  in Part 3 depends on it.
-
-Fix. This is a software-stack change, so it waits for a go-ahead: empty the
-buffer from `aborted_cb()` as well. That runs on the session task before every
-bus wait, so the trace lines interleave with the verb's own output. A walk
-raised about 34 lines a second, and `aborted_cb()` already flushes once per
-wait.
-
 ### P2 — Small hardening items from the stack review
 
 - `dali_rb_clear()` should drain from the consumer side (`tail = head`). In
@@ -1409,10 +1402,12 @@ the HA console became a second implementation.
 - One 16-bit forward frame and its 22 Te gap take about 25 ms, so a loaded bus
   carries about 40–50 frames a second, replies included. Decoded, that is
   about 4 kB/s.
-- The deferred ring holds 16 lines of 128 B and is pumped every 250 ms
-  (`SHELL_RECV_TIMEOUT_MS`), a ceiling of about 64 lines a second. While trace
-  is on, pump it from the `select()` timeout at a shorter interval rather than
-  growing the ring, because each slot is static RAM on every board.
+- The deferred ring holds 16 lines of 128 B. Between verbs it is pumped every
+  250 ms (`SHELL_POLL_MS`), a ceiling of about 64 lines a second. During a
+  verb it is pumped before every bus wait. A 2k walk raised about 34 lines a
+  second. While trace is on, pump it from the `select()` timeout at a shorter
+  interval rather than growing the ring, because each slot is static RAM on
+  every board.
 - Dropped lines are already reported as `[trace] N line(s) dropped`.
 
 **To build:**

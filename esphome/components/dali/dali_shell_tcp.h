@@ -163,6 +163,8 @@ class DaliShellServer : public Component {
   // frame, its header written into the room kept in front of the data.
   void  send_all(const char *data, size_t len);
   void  flush_output();
+  // Trace lines deferred from the DALI task, into the output; see aborted_cb().
+  void  pump_trace();
   void  write_ws(const char *text, size_t len);
   void  send_ws_control(DaliWebWsOpcode opcode, const uint8_t *payload, size_t len);
   void  send_ws_close(DaliWebWsCloseCode code, const char *reason);
@@ -228,6 +230,9 @@ class DaliShellServer : public Component {
   static constexpr size_t OUT_BUF_SIZE = 512;
   uint8_t out_frame_[WS_HEAD_ROOM + OUT_BUF_SIZE];
   size_t  out_len_{0};
+  // The last byte written ended a line, so a pumped trace line cannot split
+  // one. Kept across flushes: a partial line may already have been sent.
+  bool    at_line_start_{true};
 
   // Web
   uint16_t       web_port_{0};

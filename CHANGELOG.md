@@ -62,8 +62,8 @@ At tagging:
   - the 503;
   - the TCP binding's send timeout and keepalive since the restructure.
 
-  Trace lines raised during a verb are lost on both network bindings; see
-  *Network trace loses what a verb puts on the bus* in `todo.md`.
+  On that build, trace lines raised during a verb were lost on both network
+  bindings; see the *Fixed* item on `trace on` below.
 
   `dali_test.yaml` compiles on 2026.10.0, and the schema refuses six bad
   blocks.
@@ -195,6 +195,18 @@ At tagging:
 
   **Unverified:** `dali_shell_tcp.cpp` type-checks against the toolchain and
   headers of an existing build tree. Not built into an image, and not flashed.
+
+- **`trace on` over the network showed nothing of a verb's own traffic.**
+  - Trace lines wait in a 16-line ring, and the bindings emptied it only
+    between verbs.
+  - On 2026-11-11 a 2k `discover` under `trace on` delivered no trace line
+    during the walk, then reported `[trace] 925 line(s) dropped`.
+
+  Both bindings now also empty the ring before each bus wait, whenever their
+  output stands at a line start. A verb's frames therefore arrive while it
+  runs, one wait behind, and never split a line it is printing.
+
+  **Unverified:** type-checked as above; not flashed.
 
 - **The component did not compile with `psram:` on an ESP32 or ESP32-S3.**
   A config with a DALI light or sensor failed with `static assertion failed:

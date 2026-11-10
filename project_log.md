@@ -36,6 +36,35 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-11-11 (trace during a verb; uncommitted on `dev` at `0330b6a`)
+
+The fix for the lost trace, measured in *Verified on 2026-11-11 on 1k and 2k
+(the web shell with bus traffic)* below. The operator approved it the same day,
+before either fix was flashed. It sits on `0330b6a`, which is the change in
+the entry below.
+
+- **What changed,** in `dali_shell_tcp.cpp` and `.h`:
+  - `aborted_cb()` now empties the deferred trace ring before it sends,
+    through a new `pump_trace()` that `session_tick()` uses too. The note
+    `[trace] N line(s) dropped` is written in both places.
+  - **Only at a line start.** `at_line_start_` records whether the last byte
+    written ended a line, across flushes. A verb can print part of a line,
+    wait on the bus, then finish it. A trace line pumped in between would
+    split the line, and the page reads lines. So those trace lines wait for
+    the next wait.
+  - `dali_shell.h` says the same in the comment on
+    `dali_shell_pump_deferred_output()`.
+- **What to expect.** Each wait carries the lines the previous wait raised, so
+  a verb's trace runs one transaction behind its own output. A single wait
+  that carries more than 16 frames, such as a long sequence, can still
+  overflow the ring. The note reports that.
+- **Type-checked, not built:** `dali_shell_tcp.cpp` and `dali_shell_web.cpp`,
+  which includes the changed header, both compile cleanly with the same flags
+  as below.
+
+Not covered: an image and a device. The procedure is *Output sent only when
+the shell waits, and trace during a verb* in Part 1 of `todo.md`.
+
 ### Verified locally on 2026-11-11 (output sent only when the shell waits; uncommitted on `dev` at `d1bd007`)
 
 The fix for `help`'s heap dip, measured in *Verified on 2026-11-11 on 1k and
