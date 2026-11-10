@@ -36,6 +36,63 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-11-10 (the web binding, step 3a; uncommitted on `dev` at `f8e3a29`)
+
+Step 3a of *A browser GUI for the shell* in `todo.md`, approved by the operator
+the same day.
+
+- **What was built.**
+  - `dali_shell_web.cpp` is the browser binding.
+  - `dali_shell_tcp.cpp` now waits in one `select()` over both listeners, the
+    session and two web slots, instead of in `accept()` and then `recv()`.
+  - The schema gains `shell: web:` with `port` (default 8080) and
+    `allowed_hosts`. `dali_test.yaml` sets both.
+  - `web/shell.html` is the page, gzipped into a `static const` array in
+    `main.cpp` at codegen.
+- **`uv run esphome compile dali_test.yaml` on 2026.10.0 succeeded with no
+  compiler warning.** RAM 142,908 B and flash 1,045,855 B, against 141,660 B
+  and 1,031,259 B in the 2026-11-09 entry below. `main.cpp` holds the
+  4,735-byte page and calls `set_web_port(8080)`,
+  `add_web_allowed_host("dali.lan")` and `set_web_page()`.
+- **The schema refuses six bad blocks,** each with its own message, through
+  `esphome config` on copies of `dali_test.yaml`:
+  - port 2323, the shell's own;
+  - port 80;
+  - 6053, held by `api`;
+  - 3232, held by `ota` (`esphome`);
+  - `dali.lan.`, with its trailing dot;
+  - `dali.lan:8080`, with a port.
+- **The page's script parses** under `node --check`. The page is 13,069 bytes,
+  4,735 gzipped. A CSS fallback for `100dvh` was added after the compile; the
+  C++ is unchanged by it.
+- **Nothing in `components/dali` changed,** so the host suites and the native
+  build were not rerun, and `dali_test_psram.yaml` was not compiled: no atomic
+  was touched.
+
+Not covered: any device, any browser, and the TCP binding's behaviour since its
+loop changed. The procedures are *The web shell* and *The TCP binding after the
+`select()` rewrite* in Part 1 of `todo.md`.
+
+### Observed 2026-11-10 on 2k (`schema` in chunks, TCP output gathered; `f8e3a29`)
+
+Reported by the operator. 2k ran the change in the entry below, committed as
+`f8e3a29`, with `Heap free (internal)` at `update_interval: 1s`.
+
+- **Opening an interactive `tools/dali-shell` session no longer dips free
+  heap.** The 28 kB drop at connect is gone. An open session holds about
+  300 B, as before.
+- **The prompt arrives at once,** consistently across repeated connections. It
+  took close to 10 s before.
+
+So the spike was the burst of one-byte segments `schema` made, not the
+connection. That answers step 1 of *A browser GUI for the shell* in `todo.md`:
+a connection costs about 300 B, and a heap floor for the web binding only needs
+to be a reserve.
+
+Not recorded: connections in the first 30 s after boot, where most of the
+priority-4 resets happened, and the order of interleaved `discover` and
+`trace on` output.
+
 ### Verified locally on 2026-11-09 (`schema` in chunks, TCP output gathered; uncommitted on `dev` at `2c32956`)
 
 The two fixes left after the priority change below.

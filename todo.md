@@ -119,31 +119,82 @@ time.sleep(60)                  # never read
    probably open. Close the first session within those 10 s and it should
    connect instead.
 
-**Opening an interactive session**
+**Opening an interactive session, soon after boot**
 
-Three changes, each checked here:
-- The shell task runs at priority 1, level with ESPHome's loop.
-- `schema` writes in 159-byte chunks.
-- The binding gathers writes into sends of a line or more.
-
-At priority 4, three interactive connections in four reset 2k through the
-task watchdog, and each took close to 10 s. At priority 1, repeated
-connections no longer reset it, but still took close to 10 s. See
-`project_log.md`, 2026-11-09.
+At priority 4, three interactive connections in four reset 2k through the task
+watchdog, most often soon after boot. With the task at priority 1, `schema` in
+chunks and output gathered, repeated connections on a node that had been up a
+while no longer dip the heap and get the prompt at once. Connections in the
+first 30 s after boot were not recorded. See `project_log.md`, 2026-11-09 and
+2026-11-10.
 
 1. Flash the node. Wait for `Boot seems successful` in the log, about a minute
    after boot, so that a crash cannot roll the image back.
 2. Reboot it. Within 30 s of boot, open an interactive `dali-shell` session.
    That runs `schema`. Close it, and repeat five times.
-3. Repeat step 2 with the node up for several minutes.
-4. **Expected:**
-   - The node never restarts. ESPHome prints `CRASH DETECTED ON PREVIOUS
-     BOOT` on the boot after a crash, and the `Reset reason` sensor names it.
-   - The prompt appears within about a second of the banner, not 10 s.
-   - `Heap free (internal)` at 1 s no longer dips by about 28 kB at each
-     connect. A few kilobytes is what one MSS-sized segment per line costs.
-5. Run `discover` and `trace on` in the same session. Each line should appear
-   as it completes, as before.
+3. **Expected:** the node never restarts. ESPHome prints `CRASH DETECTED ON
+   PREVIOUS BOOT` on the boot after a crash, and the `Reset reason` sensor
+   names it.
+4. Run `discover` and `trace on` in the same session. Each line should appear
+   as it completes, as before the binding gathered its output.
+
+**The TCP binding after the `select()` rewrite**
+
+The TCP binding no longer blocks in `accept()` and `recv()`; it waits in one
+`select()` with the web listener. Nothing a client sees should differ. Every
+check above this one was written for the old loop, so run them again on a
+build with `web:`: *HTTP refusal*, *Send timeout*, *Keepalive*, *Second
+client*, and *Opening an interactive session, soon after boot*.
+
+### The web shell
+
+Needs a node with a `web:` block under `shell:`, for example `web: { port:
+8080 }` in `_local/dali-2k.yaml`, with `Heap free (internal)` at 1 s. Below,
+`<host>` is the node's name and `<ip>` its address.
+
+**The page and a session**
+
+1. Open `http://<host>.local:8080/` in a desktop browser.
+2. **Expected:** the banner, then the status reads `ready`. The device log
+   shows `Shell session opened from <your address> (web)`.
+3. Run `help`, then `discover`. Each line should appear as it completes, and
+   the status should read `running` until the prompt returns.
+4. Run `trace on`, switch a light from Home Assistant, then `trace off`.
+   `[BUS]` lines should arrive between commands.
+5. Open `http://<ip>:8080/` too, in a second tab. It should report the shell
+   busy (1013). Close the first tab: within a second the log shows `Shell
+   session closed`, and **Reconnect** in the second tab gets a session.
+6. Read `Heap free (internal)` across a page load and an open session, and
+   record the dip. The 16 kB floor in `dali_shell_web.cpp` is a guess until
+   this is known.
+
+**Refusals.** Each should log a WARN naming the sender, and run nothing.
+
+1. `curl -i -H "Host: evil.example:8080" http://<ip>:8080/` gets `403`.
+2. `curl -i http://<ip>:8080/nothing` gets `404`, logged at INFO.
+3. In the devtools console of another page served over plain http on the LAN,
+   such as Home Assistant's own UI:
+   `new WebSocket("ws://<ip>:8080/ws")`. It fails, and the log says Origin is
+   not this device's own page.
+4. With `tools/dali-shell` connected over TCP, load the page. It should load,
+   then report the shell busy. With the page connected, `nc <ip> 2323` should
+   connect and print nothing until the tab closes, as a second TCP client does.
+
+**Waiting on a verb.** Start `discover` in the page, then load the page in
+another tab. **Expected:** the second load waits until `discover` ends, then
+reports the shell busy. That is the known limitation, not a fault.
+
+**Leaving.**
+1. Close the tab while a long verb runs. **Expected:** the verb stops at its
+   next write, within about 10 s, and the log shows the session closed.
+2. With `idle_timeout: 1min` on a test build, leave the page idle. **Expected:**
+   `idle timeout; closing session`, then `Disconnected: idle timeout (1001)`.
+
+**On the access point.** With the node's Wi-Fi unreachable so that its AP comes
+up, join it from a phone and open `http://192.168.4.1:8080/`. **Expected:** the
+page works, at phone width, with nothing fetched from the internet.
+
+**`export config`** prints the `web:` block, with `allowed_hosts`.
 
 ### ESPHome version range
 
@@ -787,8 +838,8 @@ no reset arrives to end the wait. Seen on 2026-11-09, when connecting reset 2k;
 see `project_log.md`.
 
 Fix. This is a software-stack change, so it waits for a go-ahead:
-- **Give `schema` a short deadline,** about 15 s. It now takes about a second;
-  see *Opening an interactive session* in Part 1.
+- **Give `schema` a short deadline,** about 15 s. On 2k it now returns at once;
+  see `project_log.md`, 2026-11-10.
 - **Set TCP keepalive on the client socket,** so any command notices a device
   that restarted within seconds. On Windows that is `SIO_KEEPALIVE_VALS`, and
   elsewhere `TCP_KEEPIDLE`, `TCP_KEEPINTVL` and `TCP_KEEPCNT`.
@@ -1025,7 +1076,12 @@ that is not collision-safe single-master arbitration. Say so in the README and
 
 ### Before tagging the next release
 
-Nothing yet. A `dev` change that makes a pinned comment wrong goes here.
+A `dev` change that makes a pinned comment wrong goes here.
+
+- **Decide whether `dali-starter.yaml` and the README example enable
+  `shell: web:`.** Nothing pinned is wrong without it, but a new installation
+  gets the browser shell only if the starter turns it on. Decide once *The web
+  shell* in Part 1 has run on a device.
 
 ### Every release
 
@@ -1080,8 +1136,9 @@ have a terminal, plus views built from what the verbs already report:
 - a live bus log.
 
 Commissioning would move there, and the Home Assistant console and buttons
-would go. Nothing here is approved. It is a software-stack change, so it waits
-for an explicit go-ahead.
+would go. Step 3a of *Order of work*, the binding and a terminal page, was
+approved on 2026-11-10 and is built. Nothing after it is approved: each is a
+software-stack change, so it waits for an explicit go-ahead.
 
 If adopted, this replaces *P2 — A Home Assistant commissioning workflow*.
 
@@ -1107,9 +1164,12 @@ session cost about 28 kB for seconds. The client runs `schema` at once, about
   MSS buffer, however short.
 - Under `TCP_NODELAY`, 16 one-byte segments can wait for an ACK at once.
 
-So the spike is that burst, not the connection. `schema` now writes in 159-byte
-chunks, and the TCP binding gathers writes into sends of a line or more; see
-*Opening an interactive session* in Part 1.
+So the spike was that burst, not the connection. `schema` now writes in
+159-byte chunks, and the TCP binding gathers writes into sends of a line or
+more. **Confirmed on 2k, 2026-11-10:** opening a session no longer dips free
+heap, and a session holds about 300 B; see `project_log.md`. The web binding's
+heap floor is therefore a reserve for other connections, not a budget for its
+own: 16 kB, a guess until *The web shell* in Part 1 measures a page load.
 
 **Read the right sensor.** ESPHome's debug `free`, `block` and `min_free` use
 `MALLOC_CAP_INTERNAL`. That counts about 52 kB of IRAM that takes 32-bit access
@@ -1422,47 +1482,28 @@ action, not the console back.
 
 ### Order of work
 
-1. **Measure heap on a device.** Read on 2k on 2026-11-09; see *Budget* and
-   `project_log.md`. A session holds about 300 B, and opening one costs about
-   28 kB for seconds. The binding allocates nothing at open. Still open, with
-   `Heap free (internal)` at `update_interval: 1s` (set in
-   `_local/dali-2k.yaml`, not yet flashed):
-   - **Is the spike `schema` or the connection?** One-shot mode,
-     `dali-shell --host <ip> stats`, sends no `schema`. Open a few one-shot
-     sessions, then type `schema` by hand in a raw TCP client. If only
-     `schema` dips, the connection costs about 300 B, and the floor needs
-     only a reserve.
-   - **If the connection itself dips:** does every connection cost it, and do
-     overlapping ones add up?
-     - With a session open, connect a second client to 2323. lwIP completes
-       its handshake and holds it in the backlog, and the binding never
-       accepts it. A dip there puts the cost below the shell.
-     - Open the two within a second of each other. A new min-free low near
-       50 kB means overlapping opens add up.
-   - **The floor,** from that. If the spike comes before `accept()` returns,
-     no floor check can prevent it. The bound is then how many setups can
-     overlap: the listen backlog, and the page's own connections. The page
-     names an inline icon so the browser does not fetch `/favicon.ico`. The
-     floor covers what the binding does after `accept()`: one connection's
-     worst case plus a reserve for an OTA or API connection, read on current
-     free with the caps in *Budget*.
-
-   What a page load costs on top of an open session is measured once step 3
-   exists.
-2. **The portable parser. Host-tested 2026-11-09** as `dali_web`: 59 vectors,
-   56 of 56 mutants killed. See `project_log.md`. What it does beyond the
-   sketch above:
-   - A refused head is read to its blank line before it is answered, because
-     closing with unread bytes makes lwIP send a reset, and the reset can
-     destroy the answer.
-   - One text frame is one line of printable ASCII. A CR or LF inside one
-     fails the connection rather than becoming a second command.
-   - The page head forbids framing; see *Security*.
-   - Neither binding nor browser has exercised it.
-3. **The binding and a bare page.**
-   - The `select()` loop, the `web:` schema, and `dali_test.yaml`.
-   - A page with three parts: a terminal, help from `schema` plus
-     `dali_commands.md`, and a map from `export inventory`.
+1. **The binding and a terminal page (3a). Built 2026-11-10, unverified.**
+   `dali_shell_web.cpp`, the `select()` loop in `dali_shell_tcp.cpp`, the
+   `web:` schema, `dali_test.yaml`, and `web/shell.html`. See Part 1, *The web
+   shell* and *The TCP binding after the `select()` rewrite*, and
+   `project_log.md`. What it settled beyond the sketch above:
+   - **Web connections that are not the session wait in two slots,** read
+     without blocking from the same `select()`. A head must arrive within 10 s,
+     and a third connection evicts the oldest. So a browser's idle preconnect
+     cannot hold the task.
+   - **An answered connection is shut and drained,** up to 2 s, so that
+     closing it does not reset the answer.
+   - **An upgrade with bytes after its head is refused** as malformed: a
+     client sends nothing until the handshake answers.
+   - **The heap floor is 16 kB,** a reserve; see *Budget*.
+   - **Output bytes above 0x7F go out as `?`,** so a flush that falls anywhere
+     is still a valid UTF-8 text frame. Shell output is ASCII today.
+   - **The TCP listener is not watched while any session is open,** so a
+     second TCP client waits in the backlog as before.
+2. **Views (3b).** Help from `schema` plus `dali_commands.md`, and a map from
+   `export inventory`.
+3. **Stop, in both bindings.** See *There is no cancel* under *Transport*.
+   Proposed as its own change; not yet approved.
 4. **The content.**
    - The frame decoder and the live log.
    - Parameter and vendor metadata in `schema`.

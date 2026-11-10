@@ -20,6 +20,36 @@ At tagging:
 
 ### Added
 
+- **The shell in a browser: `shell: web:`.** Step 3a of *A browser GUI for
+  the shell* in `todo.md`.
+
+  ```yaml
+  dali:
+    shell:
+      web:
+        port: 8080                # the default; 80 and the shell's port are refused
+        allowed_hosts: [dali.lan] # beyond its address, <name> and <name>.local
+  ```
+
+  - `http://<name>.local:8080/` serves a terminal page from flash, about
+    4.7 kB gzipped. It loads nothing from elsewhere, so it works on the
+    device's own access point.
+  - The page's WebSocket is a shell session, the same one the TCP port gives,
+    with the same `allow_commissioning` policy and idle timeout. There is one
+    session between the two.
+  - Only the device's own page can open it: `Host` and `Origin` are checked,
+    and framing is forbidden. A second browser is told the shell is busy.
+  - Below 16 kB of free heap the page and the session are refused with a 503.
+  - The schema refuses a web port that `api`, `ota` or `web_server` uses.
+  - `export config` prints the `web:` block.
+  - The TCP binding now waits in a `select()` shared with the web listener,
+    rather than in `accept()` and `recv()`. What a TCP client sees is
+    unchanged.
+
+  **Unverified:** `dali_test.yaml` compiles on ESPHome 2026.10.0, and the
+  schema refuses six bad blocks. Not flashed, and no browser has opened the
+  page. The TCP binding's restructure has not run on a device either.
+
 - **`dali_web`, the portable half of a browser front end to the shell.** It is
   step 2 of *A browser GUI for the shell* in `todo.md`. It holds:
   - an HTTP/1.1 request-head parser;
@@ -28,8 +58,8 @@ At tagging:
   - the WebSocket frame receiver and encoder;
   - its own SHA-1 and base64.
 
-  Nothing uses it yet: there is no binding and no YAML option. Out-of-tree
-  build systems gain one more translation unit, `dali_web.c`.
+  The `web:` binding above uses it. Out-of-tree build systems gain one more
+  translation unit, `dali_web.c`.
   **Host-tested:** 59 vectors, the published FIPS 180 and RFC 4648/6455 ones
   among them. A mutation pass killed 56 of 56 mutants. Not on a device, and
   not driven by a browser.
@@ -86,7 +116,10 @@ At tagging:
     tables.
   - **The TCP binding gathers writes in a 512 B buffer.** It sends at a line
     end, after the prompt, before each bus wait, or when the buffer is full.
-    **Unverified:** it compiles; not run on a device.
+
+  **Hardware-verified on 2k, for the last two together:** opening an
+  interactive session no longer dips free heap, and the prompt arrives at once.
+  Connections in the first 30 s after boot were not recorded.
 
 - **The component did not compile with `psram:` on an ESP32 or ESP32-S3.**
   A config with a DALI light or sensor failed with `static assertion failed:

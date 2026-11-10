@@ -29,6 +29,10 @@ struct DaliShellConfigInfo {
   uint16_t port;
   uint32_t idle_timeout_s;
   bool     allow_commissioning;
+  // The `web:` sub-block. web_port is 0 when there is none.
+  uint16_t           web_port;
+  const char *const *web_allowed_hosts;
+  uint8_t            web_allowed_host_count;
 };
 
 /*

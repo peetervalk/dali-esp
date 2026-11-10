@@ -16,6 +16,7 @@ from what the firmware accepts; this file can.
 | Surface | Reached by | Verb set |
 |---|---|---|
 | Diagnostic shell | `tools/dali-shell`, or `nc <host> 2323`, with a `shell:` block in the YAML | Full |
+| Diagnostic shell in a browser | `http://<host>.local:8080/`, with a `web:` block under `shell:` | Full — the same session as the line above, one at a time between the two |
 | Serial CLI | UART0 on a native ESP-IDF build | Full — same code as the shell |
 | Command console | ESPHome `text:` entity, usually "DALI Command" | Subset |
 
@@ -1171,8 +1172,10 @@ addresses gear.
 Over TCP, `commission` and the nine commissioning specials are refused unless the
 YAML sets `allow_commissioning: true`, because the port is unauthenticated. A
 connection that opens with an HTTP request is closed before any of its lines
-runs, so a web page cannot reach the shell through a browser. See
-`commissioning_readme.md` for the workflow.
+runs, so a web page cannot reach the shell's TCP port through a browser. The
+`web:` page takes the same policy. It reaches the shell only from the device's
+own page: its WebSocket is refused unless `Host` names the device and `Origin`
+is that same page. See `commissioning_readme.md` for the workflow.
 
 A long verb prints as it goes and holds the bus for as long as it runs.
 Cancellation or a TCP disconnect is noticed between ordinary bus steps. A client

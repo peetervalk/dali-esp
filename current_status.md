@@ -320,14 +320,16 @@ Protocol and state correctness come before broad new device support.
 
 ### Diagnostic shell
 
-- **One implementation, two bindings.**
+- **One implementation, three bindings.**
   - `components/dali/dali_shell.c` is the shell: one session owning every
     verb, the blocking transport, and the caches a workflow builds up.
   - `components/dali/dali_cli.c` is its portable core: tokenizing, the verb
     tables, argument validation and reply formatting. It has no ESP-IDF,
     FreeRTOS or bus dependency.
-  - The bindings are `main/dali_diag.c` (UART0) and
-    `esphome/components/dali/dali_shell_tcp.cpp` (TCP).
+  - The bindings are `main/dali_diag.c` (UART0),
+    `esphome/components/dali/dali_shell_tcp.cpp` (TCP) and
+    `esphome/components/dali/dali_shell_web.cpp` (a browser, through
+    `shell: web:`). The last two share one task and one session.
   - A binding moves bytes and owns a session's lifetime. A surface that must
     refuse a verb declares a `DALI_SHELL_ALLOW_*` policy.
 - **Dispatch is one table.** `dali_cli_resolve()` checks the argument count
@@ -344,7 +346,7 @@ Protocol and state correctness come before broad new device support.
 
   | Behaviour | How |
   |---|---|
-  | One session at a time | A second client waits in the listen backlog until the first ends |
+  | One session at a time | A second client waits in the listen backlog until the first ends. While any session is open, TCP or web, the TCP listener is not watched |
   | Browser requests are refused | A connection that opens with an HTTP request line is closed before any of its lines is dispatched. The device logs the sender's address at WARN. `dali_cli_peer_sniff()` decides, within the first line |
   | A client that stops reading is dropped | A send that makes no progress for 10 s (`SO_SNDTIMEO`) marks the peer lost, which ends a running workflow at its next step |
   | A vanished client is reclaimed | TCP keepalive (30 s idle, then 3 probes 5 s apart) frees it in about 45 s |
@@ -355,6 +357,22 @@ Protocol and state correctness come before broad new device support.
 
   `schema` writes its JSON in 159-byte chunks, about a hundred writes on
   every binding.
+- **The web binding,** present when `shell:` has a `web:` block. It runs on
+  the TCP binding's task, from the same `select()`:
+
+  | Behaviour | How |
+  |---|---|
+  | `GET /` serves the page | `web/shell.html`, gzipped into flash at codegen (about 4.7 kB). A terminal: a line in, the output streamed back, command history, nothing loaded from elsewhere |
+  | `GET /ws` is the session | Each client text frame is one line, fed to the shell as typed. Output goes out as text frames, gathered as on TCP. The prompt is a frame of its own, `> `, which tells the page a command has finished. A byte above 0x7F in output is sent as `?`, so every frame is valid UTF-8 |
+  | Only this device's own page connects | `Host` must be the address the connection reached, `<name>`, `<name>.local` or an `allowed_hosts` entry, on the web port. An upgrade's `Origin` must be `http://` plus that `Host`. Refusals name the sender at WARN. `dali_web_route()` decides |
+  | Framing is refused | The page head forbids it (`X-Frame-Options`, `frame-ancestors`) |
+  | One session, shared with TCP | A second upgrade gets the handshake, then a close frame with 1013 and the reason. A page request is still served while a session is open |
+  | Unanswered connections cannot hold the task | Up to two web connections wait in slots, read without blocking. A request head must arrive within 10 s. A third connection evicts the oldest |
+  | An answered connection closes cleanly | After the answer, the device shuts its side and reads until the browser closes, up to 2 s, so the close does not reset what was sent |
+  | Low heap refuses | Below 16 kB of free internal 8-bit heap, the page and the upgrade get a 503 |
+  | Same policy, same timeouts | `allow_commissioning`, `idle_timeout`, the 10 s send timeout and keepalive all apply as on TCP. Idle timeout closes with 1001 |
+  | Sockets are counted | The web listener and the two slots add three lwIP sockets |
+  | `export config` prints it | The `web:` sub-block, with `allowed_hosts` |
 
 ### ESPHome integration
 
@@ -529,6 +547,22 @@ Facts about the code as it stands. Each has its fix, decision or measurement in
 - **`load_address_backup()` reads ESPHome preferences from the shell task,**
   which races the loop's `save()`.
 
+**Web shell**
+
+- **Nothing on the web port is answered while a verb runs.** The shell holds
+  its task for the whole verb, so a page load or a second browser waits until
+  it ends: tens of seconds for a `discover`. *A browser GUI for the shell*,
+  *Transport*.
+- **A running verb cannot be stopped,** from the page or over TCP. Closing the
+  tab is noticed only when a send fails. *A browser GUI for the shell*,
+  *Transport*.
+- **Plain HTTP with no authentication.** Anyone who can reach the port on the
+  LAN can use the shell, as with the TCP port and OTA. An HTTPS dashboard
+  cannot embed the page.
+- **The 16 kB heap floor is a guard, not a measurement.** *A browser GUI for
+  the shell*, *Budget*.
+- **IPv4 only.** The listener is `AF_INET`.
+
 **Tools**
 
 - **`tools/dali-shell` waits up to 400 s** when the device restarts during a
@@ -551,8 +585,11 @@ Facts about the code as it stands. Each has its fix, decision or measurement in
 - **Static DRAM: `dali_test.yaml` links at 141,792 B of the 176.5 KiB static
   window.** The diagnostic shell is the largest single item in it.
   - `dali_shell.c` is compiled unconditionally through the
-    `proto_dali_shell.c` shim. Nothing outside `dali_shell_tcp.cpp` references
-    it, so `--gc-sections` drops all of it when a config has no `shell:` block.
+    `proto_dali_shell.c` shim. Nothing outside the shell's own front ends,
+    `dali_shell_tcp.cpp` and `dali_shell_web.cpp`, references it, so
+    `--gc-sections` drops all of it when a config has no `shell:` block.
+  - The web binding's code is compiled whenever `shell:` is. The page bytes
+    reach flash only with a `web:` block.
   - Every file-scope buffer added to the shell is paid for on each board that
     runs it.
   - The shell caches 16 devices of 32 instance records, so one byte per record
@@ -590,7 +627,7 @@ layout nobody else could use, and needed editing whenever a site changed.
 | `components/dali/` | Reusable C protocol, PHY, scheduler, transport, discovery, commissioning, memory, device types, dispatch |
 | `components/dali/dali_shell.c/.h` | The diagnostic CLI as a reusable session: every verb, the blocking transport, the workflow caches |
 | `components/dali/dali_cli.c/.h` | Portable CLI core: tokenizing, verb tables, validation, formatting, and peer classification. Shared by both front ends |
-| `components/dali/dali_web.c/.h` | The portable half of the planned browser front end: HTTP request heads, Host and Origin checks, response heads, WebSocket frames, SHA-1 and base64. No binding uses it yet |
+| `components/dali/dali_web.c/.h` | The portable half of the browser front end: HTTP request heads, Host and Origin checks, response heads, WebSocket frames, SHA-1 and base64 |
 | `components/dali/dali_commissioning.*` | Part 102 control-gear commissioning walk |
 | `components/dali/dali_device_commissioning.*` | Part 103 control-device commissioning walk |
 | `components/dali/dali_commissioning_audit.*` | The post-scan diff both walks check themselves against |
@@ -605,7 +642,9 @@ layout nobody else could use, and needed editing whenever a site changed.
 | `main/main.c` | Native ESP-IDF diagnostic application entry point |
 | `main/dali_diag.c/.h` | UART0 binding for the shell; moves bytes only |
 | `esphome/components/dali/` | Active ESPHome external component |
-| `esphome/components/dali/dali_shell_tcp.cpp` | TCP binding for the shell |
+| `esphome/components/dali/dali_shell_tcp.cpp` | TCP binding for the shell, and the `select()` loop and session both bindings share |
+| `esphome/components/dali/dali_shell_web.cpp` | Web binding for the shell: the page, refusals, and the upgrade to a session |
+| `esphome/components/dali/web/shell.html` | The page it serves; vanilla JS, nothing loaded from elsewhere |
 | `esphome/components/dali/proto_dali_*.c` | Shims that pull the vendored C in behind ESPHome's source glob |
 | `dali-starter.yaml` | Tracked starter and commissioning firmware |
 | `dali_test.yaml` | Tracked CI coverage config |

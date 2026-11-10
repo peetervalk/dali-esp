@@ -92,6 +92,12 @@ dali:
     port: 2323
     idle_timeout: 5min
     allow_commissioning: true
+    # The browser binding, so the page is gzipped into the image and the
+    # allowed_hosts loop in to_code() runs.
+    web:
+      port: 8080
+      allowed_hosts:
+        - dali.lan
 
   # Every optional text sensor, so each to_code() branch is taken.
   command_result:

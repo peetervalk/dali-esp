@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DALI shell</title>
+<!-- Inline, so the browser does not ask the device for /favicon.ico. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232f6fdb'/%3E%3Cpath d='M4 5l3 3-3 3M8.5 11H12' stroke='white' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<!--
+  The browser front end for the DALI diagnostic shell, served by the device
+  from flash (esphome/components/dali/dali_shell_web.cpp).
+
+  This page is a client, as tools/dali-shell is. It sends lines and shows what
+  comes back. It holds no knowledge of DALI: what a verb means, and whether the
+  session's policy allows it, is the shell's to say. Nothing here loads from
+  anywhere but the device, because the place it matters most is a phone on the
+  device's own access point, with no internet.
+
+  The protocol, from the device's side (dali_web.h):
+    - each text frame sent is one line: printable ASCII, at most 79 characters;
+    - output arrives as text frames, gathered a line or more at a time;
+    - a frame that is exactly "> " is the prompt: the last line has finished.
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f3;
+    --surface: #ffffff;
+    --text: #1c1c1a;
+    --muted: #6a6a64;
+    --border: #d9d9d2;
+    --accent: #2f6fdb;
+    --accent-text: #ffffff;
+    --ok: #2e7d32;
+    --run: #a86400;
+    --bad: #c0362c;
+    --cmd: #1c1c1a;
+    --bus: #5b6f86;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413;
+      --surface: #1c1c1b;
+      --text: #e6e6e1;
+      --muted: #9b9b94;
+      --border: #353533;
+      --accent: #7aa7ff;
+      --accent-text: #0d1a33;
+      --ok: #6fc276;
+      --run: #f0b35a;
+      --bad: #f0857a;
+      --cmd: #ffffff;
+      --bus: #93a8c2;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-wrap: wrap;
+  }
+  h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  #host { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .spacer { flex: 1; }
+
+  .pill {
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .pill[data-state="ready"] { color: var(--ok); }
+  .pill[data-state="running"] { color: var(--run); }
+  .pill[data-state="closed"] { color: var(--bad); }
+
+  button {
+    font: inherit;
+    font-size: 13px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--muted); }
+  button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+
+  #out {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    margin: 0;
+    padding: 10px 16px;
+    font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    white-space: pre;
+    tab-size: 8;
+  }
+  #out.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .ln { min-height: 1.45em; }
+  .ln.cmd { color: var(--cmd); font-weight: 700; }
+  .ln.bus { color: var(--bus); }
+  .ln.sys { color: var(--muted); font-style: italic; }
+
+  form {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+  }
+  form label {
+    font: 600 14px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--muted);
+  }
+  #cmd {
+    flex: 1;
+    min-width: 0;
+    font: 15px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+  }
+  #cmd:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  #hint { color: var(--bad); font-size: 13px; padding: 0 16px 8px; margin: 0; background: var(--surface); }
+  #hint:empty { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>DALI shell</h1>
+  <span id="host"></span>
+  <span class="spacer"></span>
+  <span id="state" class="pill" data-state="connecting">connecting</span>
+  <button id="wrap" type="button" aria-pressed="false" title="Wrap long lines">Wrap</button>
+  <button id="clear" type="button" title="Clear the output on this page">Clear</button>
+  <button id="reconnect" type="button" class="primary" hidden>Reconnect</button>
+</header>
+<div id="out" role="log" aria-live="polite" tabindex="0"></div>
+<form id="line" autocomplete="off">
+  <label for="cmd">&gt;</label>
+  <input id="cmd" name="cmd" maxlength="79" autocapitalize="off" autocorrect="off"
+         spellcheck="false" enterkeyhint="send" placeholder="help" aria-label="Command">
+  <button id="send" type="submit" disabled>Run</button>
+</form>
+<p id="hint" role="status"></p>
+<script>
+"use strict";
+(function () {
+  const out = document.getElementById("out");
+  const form = document.getElementById("line");
+  const cmd = document.getElementById("cmd");
+  const sendBtn = document.getElementById("send");
+  const stateEl = document.getElementById("state");
+  const reconnectBtn = document.getElementById("reconnect");
+  const clearBtn = document.getElementById("clear");
+  const wrapBtn = document.getElementById("wrap");
+  const hint = document.getElementById("hint");
+
+  const PROMPT = "> ";
+  const LINE_MAX = 79;          // DALI_SHELL_LINE_MAX - 1
+  const KEEP_LINES = 5000;      // older output is dropped from the page
+  const HISTORY_MAX = 100;
+  const HISTORY_KEY = "dali-shell-history";
+  const WRAP_KEY = "dali-shell-wrap";
+
+  document.getElementById("host").textContent = location.host;
+
+  let ws = null;
+  let ready = false;
+  let partial = null;           // the line still receiving text
+  let history = [];
+  let histPos = 0;
+  let draft = "";
+
+  // Per-viewer conveniences only; the page works without storage.
+  function load(key, fallback) {
+    try {
+      const v = localStorage.getItem(key);
+      return v === null ? fallback : JSON.parse(v);
+    } catch (e) { return fallback; }
+  }
+  function save(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* ignore */ }
+  }
+  history = load(HISTORY_KEY, []);
+  if (!Array.isArray(history)) history = [];
+  histPos = history.length;
+  setWrap(load(WRAP_KEY, false) === true);
+
+  function setWrap(on) {
+    out.classList.toggle("wrap", on);
+    wrapBtn.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+
+  function setState(state, label) {
+    stateEl.dataset.state = state;
+    stateEl.textContent = label;
+  }
+
+  function setReady(r) {
+    ready = r;
+    sendBtn.disabled = !r;
+    if (ws) setState(r ? "ready" : "running", r ? "ready" : "running");
+  }
+
+  function atBottom() {
+    return out.scrollHeight - out.scrollTop - out.clientHeight < 32;
+  }
+
+  function trim() {
+    while (out.childElementCount > KEEP_LINES) out.removeChild(out.firstElementChild);
+  }
+
+  // Presentation only: the shell's echo of a command, and bus trace lines.
+  function finishLine(el) {
+    const t = el.textContent;
+    if (t.startsWith(PROMPT)) el.classList.add("cmd");
+    else if (t.startsWith("[BUS]")) el.classList.add("bus");
+  }
+
+  function appendText(text) {
+    const stick = atBottom();
+    const parts = text.replace(/\r/g, "").split("\n");
+    for (let i = 0; i < parts.length; i++) {
+      if (partial === null) {
+        partial = document.createElement("div");
+        partial.className = "ln";
+        out.appendChild(partial);
+      }
+      if (parts[i]) partial.appendChild(document.createTextNode(parts[i]));
+      if (i < parts.length - 1) {
+        finishLine(partial);
+        partial = null;
+      }
+    }
+    // A frame that ended without a line end leaves `partial` open, so the
+    // next frame continues the same line. One that ended with a line end
+    // opened an empty line above, which is not a line yet.
+    if (partial !== null && partial.textContent === "") {
+      out.removeChild(partial);
+      partial = null;
+    }
+    trim();
+    if (stick) out.scrollTop = out.scrollHeight;
+  }
+
+  function note(text) {
+    const stick = atBottom();
+    if (partial !== null) { finishLine(partial); partial = null; }
+    const el = document.createElement("div");
+    el.className = "ln sys";
+    el.textContent = text;
+    out.appendChild(el);
+    trim();
+    if (stick) out.scrollTop = out.scrollHeight;
+  }
+
+  function closeText(code) {
+    switch (code) {
+      case 1000: return "closed";
+      case 1001: return "the device closed the session";
+      case 1006: return "the connection dropped";
+      case 1013: return "the shell is busy";
+      default: return "";
+    }
+  }
+
+  function connect() {
+    if (ws) return;
+    reconnectBtn.hidden = true;
+    setState("connecting", "connecting");
+    partial = null;
+    let sock;
+    try {
+      sock = new WebSocket("ws://" + location.host + "/ws");
+    } catch (e) {
+      note("Could not open a connection: " + e.message);
+      setState("closed", "disconnected");
+      reconnectBtn.hidden = false;
+      return;
+    }
+    ws = sock;
+    sock.onopen = function () { setReady(false); setState("connecting", "connected"); };
+    sock.onmessage = function (ev) {
+      if (typeof ev.data !== "string") return;
+      if (ev.data === PROMPT) { setReady(true); return; }
+      appendText(ev.data);
+    };
+    sock.onclose = function (ev) {
+      if (ws !== sock) return;
+      ws = null;
+      ready = false;
+      sendBtn.disabled = true;
+      const why = ev.reason || closeText(ev.code);
+      note("Disconnected" + (why ? ": " + why : "") + (ev.code ? " (" + ev.code + ")" : "") + ".");
+      setState("closed", ev.code === 1013 ? "busy" : "disconnected");
+      reconnectBtn.hidden = false;
+    };
+  }
+
+  function showHint(text) { hint.textContent = text; }
+
+  form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    const line = cmd.value;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      showHint("Not connected. Press Reconnect.");
+      return;
+    }
+    if (!ready) {
+      showHint("A command is still running. The shell takes the next one at its prompt.");
+      return;
+    }
+    // The device closes the connection on anything else; say so here instead.
+    if (!/^[\x20-\x7e]*$/.test(line)) {
+      showHint("Only plain ASCII is accepted. Check for curly quotes or dashes your keyboard substituted.");
+      return;
+    }
+    if (line.length > LINE_MAX) {
+      showHint("A line is at most " + LINE_MAX + " characters.");
+      return;
+    }
+    showHint("");
+    ws.send(line);
+    setReady(false);
+    if (line.trim() !== "" && history[history.length - 1] !== line) {
+      history.push(line);
+      if (history.length > HISTORY_MAX) history = history.slice(-HISTORY_MAX);
+      save(HISTORY_KEY, history);
+    }
+    histPos = history.length;
+    draft = "";
+    cmd.value = "";
+    out.scrollTop = out.scrollHeight;
+  });
+
+  cmd.addEventListener("keydown", function (e) {
+    if (e.key === "ArrowUp") {
+      if (histPos === 0) return;
+      if (histPos === history.length) draft = cmd.value;
+      histPos--;
+      cmd.value = history[histPos];
+      e.preventDefault();
+    } else if (e.key === "ArrowDown") {
+      if (histPos >= history.length) return;
+      histPos++;
+      cmd.value = histPos === history.length ? draft : history[histPos];
+      e.preventDefault();
+    }
+  });
+  cmd.addEventListener("input", function () { if (hint.textContent) showHint(""); });
+
+  // A click in the output goes to the input, unless it selected text to copy.
+  // Not on a touch screen, where it would raise the keyboard on every tap.
+  const coarse = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+  out.addEventListener("mouseup", function () {
+    if (coarse) return;
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) cmd.focus({ preventScroll: true });
+  });
+
+  reconnectBtn.addEventListener("click", connect);
+  clearBtn.addEventListener("click", function () {
+    out.textContent = "";
+    partial = null;
+    cmd.focus();
+  });
+  wrapBtn.addEventListener("click", function () {
+    const on = !out.classList.contains("wrap");
+    setWrap(on);
+    save(WRAP_KEY, on);
+  });
+
+  connect();
+  cmd.focus();
+})();
+</script>
+</body>
+</html>
