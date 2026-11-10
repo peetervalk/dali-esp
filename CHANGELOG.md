@@ -50,6 +50,39 @@ At tagging:
   schema refuses six bad blocks. Not flashed, and no browser has opened the
   page. The TCP binding's restructure has not run on a device either.
 
+- **The browser page gains Help and Map.** Step 3b.
+  - **Help** lists every verb from `schema`, with what the session's policy
+    refuses marked, and the named tables. Each verb links to its section of
+    `dali_commands.md`, which is now built into the page, so the help is the
+    firmware's own.
+  - **Map** draws `export inventory`: a grid for gear and one for control
+    devices, shared addresses marked, a group matrix and the switches seen.
+    Selecting an address shows its record, with Identify, Status or Instances.
+  - The page's own `schema` and `export inventory` run quietly and stay out of
+    the terminal.
+  - The page is now about 47 kB in flash, most of it the reference.
+
+  **Unverified on a device.** Driven in headless Edge against a mock of the
+  web port that serves the page as codegen builds it and answers with the real
+  `schema` output: 34 checks pass at phone and desktop widths, with no script
+  error. `dali_test.yaml` compiles.
+
+### Changed
+
+- **`export inventory` lists shared addresses, at `schema_version` 3.**
+  `contested_gear` and `undecodable_device` are new top-level lists, and a
+  listed device that answered as one unit but whose identity read collided
+  carries `identity_collision: true`. Version 2 left out every address whose
+  reply did not decode, so an address two units share appeared nowhere.
+  Existing keys are unchanged. **Host-tested** in part: the address-list
+  printer has three vectors. No vector covers the export itself; see *Host
+  vectors for the unasserted shell outputs* in `todo.md`.
+- **`schema` marks the commissioning specials.** Each `special` entry carries
+  `commissioning: true` or `false`, so a client can grey out exactly the nine
+  names the policy refuses. **Host-tested:** one new vector checks every entry
+  against `dali_cli_special_is_commissioning()`. A mutation pass over both
+  changes killed 5 of 5.
+
 - **`dali_web`, the portable half of a browser front end to the shell.** It is
   step 2 of *A browser GUI for the shell* in `todo.md`. It holds:
   - an HTTP/1.1 request-head parser;

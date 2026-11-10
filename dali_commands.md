@@ -985,7 +985,7 @@ Two classes of device, two sets of opcodes, two verbs:
 | Verb | Frames | Reads from |
 |---|---|---|
 | `memread`, `meminfo` | 16-bit Part 102 | Control gear — drivers, ballasts |
-| `devmem read` / `devmem write` | 24-bit Part 103 | Control devices — sensors, switches |
+| `devmem read` / `devmem write`, `devinfo` | 24-bit Part 103 | Control devices — sensors, switches |
 
 They are named apart rather than overloaded because picking the wrong one
 addresses a different class of device entirely. 
@@ -995,8 +995,14 @@ memread <addr> <bank> <offset> [count]      # count 1-14, default 1
 meminfo <addr>                              # Bank 0 identity; shell only
 devmem read <addr> <bank> <offset> [count]  # count 1-16, default 1
 devmem write <addr> <bank> <offset> <value> # bank 1-255; bank 0 is refused
+devinfo <addr>                              # a control device's Bank 0 identity
 dtrcheck <addr> <0|1|2> <0-255>
 ```
+
+`devinfo` is `meminfo` for a control device: GTIN, firmware, identification
+number and hardware version, read from the device's own Bank 0 in the device
+address space. A unit that is both gear and a control device has two Bank 0s,
+and on the 2k bus they report different GTINs, so read each with its own verb.
 
 For `memread`, DTR1, DTR0, and every read frame go out as one sequence. READ
 MEMORY LOCATION increments the device's offset cursor, so an interrupted and
@@ -1087,6 +1093,18 @@ quiescent on|off <addr|all>             # silence control-device events
 smoke <addr>                            # read/write/read-back check
 commission unaddressed [first] [max]    # assign short addresses
 ```
+
+`export inventory` is at `schema_version` 3. Besides `devices`, `switches` and
+`capture`, it lists the addresses more than one unit answers at:
+
+| Key | What it holds |
+|---|---|
+| `contested_gear` | Every gear address the walk found shared: replies that did not decode, which `devices` leaves out, and present addresses whose identity read collided |
+| `undecodable_device` | Control-device addresses whose replies did not decode |
+| `identity_collision` | On a `devices` entry: it answered as one unit, but its identity read collided. The address is also in `contested_gear` |
+
+`devices` lists only addresses that answered as one unit, so before version 3
+an address shared by two units appeared nowhere in the export.
 
 `commission` only ever addresses gear that has none, so it is the verb for new
 gear and never the verb for a change. Re-grouping and re-addressing are
@@ -1534,7 +1552,10 @@ reset                      # reset PHY, scheduler, and diagnostic state
 ```
 
 `help`, `list`, and `schema` are generated from the table the parser dispatches
-on, so they cannot drift from what the CLI accepts.
+on, so they cannot drift from what the CLI accepts. `schema` also reports the
+session's policy, and marks each `special` entry with `commissioning`: `true` for
+the nine names the commissioning policy refuses. The browser page greys out from
+these.
 
 ### Reading a `capture export`
 

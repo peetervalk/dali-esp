@@ -11,21 +11,28 @@
   from flash (esphome/components/dali/dali_shell_web.cpp).
 
   This page is a client, as tools/dali-shell is. It sends lines and shows what
-  comes back. It holds no knowledge of DALI: what a verb means, and whether the
-  session's policy allows it, is the shell's to say. Nothing here loads from
-  anywhere but the device, because the place it matters most is a phone on the
-  device's own access point, with no internet.
+  comes back. It holds no knowledge of DALI: what a verb means, which names a
+  table holds, and whether the session's policy allows one, all come from the
+  shell through `schema` and `export inventory`. The reference text is
+  dali_commands.md, compiled in at build time (see _build_web_page() in
+  __init__.py), so it describes the firmware it ships with. Nothing here loads
+  from anywhere but the device, because the place it matters most is a phone on
+  the device's own access point, with no internet.
 
   The protocol, from the device's side (dali_web.h):
     - each text frame sent is one line: printable ASCII, at most 79 characters;
     - output arrives as text frames, gathered a line or more at a time;
-    - a frame that is exactly "> " is the prompt: the last line has finished.
+    - a frame that is exactly "> " is the prompt: the last line has finished;
+    - the shell echoes each line it runs as "> " + the line, before its output.
+  Trace lines are pumped only between lines, so a command's output, from its
+  echo to the prompt, is never interleaved with them.
 -->
 <style>
   :root {
     color-scheme: light dark;
     --bg: #f6f6f3;
     --surface: #ffffff;
+    --sunk: #efefeb;
     --text: #1c1c1a;
     --muted: #6a6a64;
     --border: #d9d9d2;
@@ -34,6 +41,8 @@
     --ok: #2e7d32;
     --run: #a86400;
     --bad: #c0362c;
+    --warn: #b86e00;
+    --warn-bg: #fff3df;
     --cmd: #1c1c1a;
     --bus: #5b6f86;
   }
@@ -41,6 +50,7 @@
     :root {
       --bg: #141413;
       --surface: #1c1c1b;
+      --sunk: #232322;
       --text: #e6e6e1;
       --muted: #9b9b94;
       --border: #353533;
@@ -49,6 +59,8 @@
       --ok: #6fc276;
       --run: #f0b35a;
       --bad: #f0857a;
+      --warn: #f0b35a;
+      --warn-bg: #3a2c14;
       --cmd: #ffffff;
       --bus: #93a8c2;
     }
@@ -59,23 +71,32 @@
   body {
     background: var(--bg);
     color: var(--text);
-    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     display: flex;
     flex-direction: column;
     height: 100vh;
     height: 100dvh;
   }
+  code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
 
   header {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 10px 16px;
+    gap: 6px 12px;
+    padding: 8px 16px;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
     flex-wrap: wrap;
   }
   h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  nav { display: flex; gap: 2px; }
+  nav button {
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    padding: 5px 10px;
+  }
+  nav button[aria-selected="true"] { background: var(--sunk); color: var(--text); font-weight: 600; }
   #host { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .spacer { flex: 1; }
 
@@ -106,12 +127,52 @@
   button:disabled { opacity: 0.5; cursor: default; }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 
+  main { flex: 1; min-height: 0; display: flex; }
+  .view { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+  .view[hidden] { display: none; }
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .scroll { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px; }
+  .scroll[hidden] { display: none; }
+  .panes { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  @media (max-width: 519px) {
+    #host { display: none; }
+  }
+  /* Wide: verbs and reference side by side, so a Reference button shows the
+   * section without hiding the list. */
+  @media (min-width: 1100px) {
+    .panes { display: grid; grid-template-columns: minmax(380px, 460px) minmax(0, 1fr); }
+    .panes > .scroll[hidden] { display: block; }
+    .panes > #help-verbs { border-right: 1px solid var(--border); }
+    #view-help .seg { display: none; }
+    #help-filter[hidden] { display: block; }
+  }
+  .muted { color: var(--muted); font-size: 13px; }
+  .seg { display: inline-flex; }
+  .seg button { border-radius: 0; }
+  .seg button:first-child { border-radius: 6px 0 0 6px; }
+  .seg button:last-child { border-radius: 0 6px 6px 0; border-left: 0; }
+  input[type="search"] {
+    font: inherit;
+    font-size: 14px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    min-width: 0;
+    flex: 1 1 160px;
+    max-width: 320px;
+  }
+
+  /* Terminal */
   #out {
-    flex: 1;
-    min-height: 0;
-    overflow: auto;
-    margin: 0;
-    padding: 10px 16px;
     font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
     white-space: pre;
     tab-size: 8;
@@ -122,6 +183,121 @@
   .ln.bus { color: var(--bus); }
   .ln.sys { color: var(--muted); font-style: italic; }
 
+  /* Help: verbs */
+  .verb { padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .verb:first-child { padding-top: 0; }
+  .verb.refused .sig, .verb.refused .sum { opacity: 0.55; }
+  .sig code.name { font-weight: 700; }
+  .sig code.args { color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .sum { margin: 2px 0 4px; }
+  .subs { font-size: 13px; color: var(--muted); }
+  .subs code { margin-left: 4px; color: var(--text); }
+  .acts { display: flex; gap: 6px; margin-top: 6px; }
+  .acts button { font-size: 12px; padding: 2px 8px; }
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 0 6px;
+    margin-left: 6px;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+    vertical-align: 1px;
+    font-family: system-ui, sans-serif;
+    font-weight: 400;
+  }
+  .badge.warn { color: var(--warn); }
+  details.table { margin: 12px 0; }
+  details.table summary { cursor: pointer; font-weight: 600; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip {
+    font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: 2px 8px;
+    border-radius: 999px;
+  }
+  .chip.flag { border-color: var(--warn); }
+  .chip.refused { text-decoration: line-through; opacity: 0.6; }
+  .policy { margin: 0 0 12px; font-size: 13px; }
+  .policy b { font-weight: 600; }
+
+  /* Help: reference, rendered from dali_commands.md */
+  .md { max-width: 900px; font-size: 14px; }
+  .md h1 { font-size: 22px; margin: 0 0 8px; }
+  .md h2 { font-size: 18px; margin: 28px 0 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+  .md h3 { font-size: 15px; margin: 20px 0 6px; }
+  .md h4 { font-size: 14px; margin: 16px 0 4px; }
+  .md p, .md ul, .md ol { margin: 8px 0; }
+  .md ul, .md ol { padding-left: 22px; }
+  .md code { font-size: 0.92em; background: var(--sunk); padding: 0 3px; border-radius: 3px; }
+  .md pre { background: var(--sunk); padding: 8px 10px; border-radius: 6px; overflow-x: auto; font-size: 12.5px; }
+  .md pre code { background: none; padding: 0; }
+  .md table { border-collapse: collapse; display: block; overflow-x: auto; font-size: 13px; margin: 10px 0; }
+  .md th, .md td { border: 1px solid var(--border); padding: 4px 8px; vertical-align: top; text-align: left; }
+  .md th { background: var(--sunk); }
+  .md blockquote { margin: 8px 0; padding: 2px 12px; border-left: 3px solid var(--border); color: var(--muted); }
+  .md a { color: var(--accent); }
+  .md .toc { columns: 2 220px; font-size: 13px; padding-left: 18px; }
+  .md .flash { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 2px; }
+
+  /* Map */
+  .map h2 { font-size: 15px; margin: 18px 0 8px; }
+  .map h2:first-child { margin-top: 0; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+    gap: 4px;
+    max-width: 620px;
+  }
+  .cell {
+    min-height: 46px;
+    padding: 3px 5px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--muted);
+    font: 11px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    overflow: hidden;
+    cursor: default;
+  }
+  .cell.on { background: var(--surface); color: var(--text); border-color: var(--accent); cursor: pointer; }
+  .cell.warn { background: var(--warn-bg); color: var(--text); border-color: var(--warn); border-width: 2px; cursor: pointer; }
+  .cell.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .cell .addr { font-weight: 700; }
+  .cell .lvl { height: 3px; border-radius: 2px; background: var(--accent); margin-top: 2px; }
+  .cell .tag { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cell .dots { display: flex; flex-wrap: wrap; gap: 2px; }
+  .cell .dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+  /* Wide: the selected address's detail beside the grids, not below them. */
+  .map-layout { display: block; }
+  @media (min-width: 1000px) {
+    .map-layout { display: grid; grid-template-columns: minmax(0, 620px) minmax(320px, 1fr); gap: 24px; align-items: start; }
+    .map-layout .detail { margin-top: 0; position: sticky; top: 0; }
+  }
+  .matrix { border-collapse: collapse; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .matrix-wrap { overflow-x: auto; max-width: 100%; }
+  .matrix th, .matrix td { border: 1px solid var(--border); padding: 0; width: 26px; height: 22px; text-align: center; }
+  .matrix th { background: var(--sunk); font-weight: 600; padding: 0 4px; }
+  .matrix th.empty { color: var(--muted); font-weight: 400; }
+  .matrix td.in::after { content: "\25CF"; color: var(--accent); }
+  .matrix tr.warn th { color: var(--warn); }
+  .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--muted); margin: 8px 0 0; }
+  .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; border: 1px solid var(--border); }
+  .legend .l-on::before { border-color: var(--accent); background: var(--surface); }
+  .legend .l-warn::before { border-color: var(--warn); background: var(--warn-bg); border-width: 2px; }
+  .detail { margin-top: 16px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); max-width: 620px; }
+  .detail h3 { margin: 0 0 8px; font-size: 15px; }
+  .map .note { color: var(--warn); font-size: 13px; margin: 0 0 8px; }
+  .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 14px; font-size: 13px; margin: 0; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .rows { border-collapse: collapse; font-size: 12px; margin-top: 8px; display: block; overflow-x: auto; }
+  .rows th, .rows td { border: 1px solid var(--border); padding: 3px 6px; text-align: left; white-space: nowrap; }
+  .rows th { background: var(--sunk); }
+
+  /* Command line */
   form {
     display: flex;
     align-items: center;
@@ -130,10 +306,7 @@
     border-top: 1px solid var(--border);
     background: var(--surface);
   }
-  form label {
-    font: 600 14px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    color: var(--muted);
-  }
+  form label { font: 600 14px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted); }
   #cmd {
     flex: 1;
     min-width: 0;
@@ -152,14 +325,50 @@
 <body>
 <header>
   <h1>DALI shell</h1>
-  <span id="host"></span>
+  <nav role="tablist" aria-label="Views">
+    <button type="button" role="tab" data-view="terminal" aria-selected="true">Terminal</button>
+    <button type="button" role="tab" data-view="help" aria-selected="false">Help</button>
+    <button type="button" role="tab" data-view="map" aria-selected="false">Map</button>
+  </nav>
   <span class="spacer"></span>
+  <span id="host"></span>
   <span id="state" class="pill" data-state="connecting">connecting</span>
-  <button id="wrap" type="button" aria-pressed="false" title="Wrap long lines">Wrap</button>
-  <button id="clear" type="button" title="Clear the output on this page">Clear</button>
   <button id="reconnect" type="button" class="primary" hidden>Reconnect</button>
 </header>
-<div id="out" role="log" aria-live="polite" tabindex="0"></div>
+
+<main>
+  <section id="view-terminal" class="view" role="tabpanel" aria-label="Terminal">
+    <div class="toolbar">
+      <button id="wrap" type="button" aria-pressed="false" title="Wrap long lines">Wrap</button>
+      <button id="clear" type="button" title="Clear the output on this page">Clear</button>
+    </div>
+    <div id="out" class="scroll" role="log" aria-live="polite" tabindex="0"></div>
+  </section>
+
+  <section id="view-help" class="view" role="tabpanel" aria-label="Help" hidden>
+    <div class="toolbar">
+      <div class="seg" role="group" aria-label="Help section">
+        <button id="help-tab-verbs" type="button" aria-pressed="true">Verbs</button>
+        <button id="help-tab-ref" type="button" aria-pressed="false">Reference</button>
+      </div>
+      <input id="help-filter" type="search" placeholder="Filter verbs and names" aria-label="Filter verbs and names">
+    </div>
+    <div class="panes">
+      <div id="help-verbs" class="scroll"></div>
+      <div id="help-ref" class="scroll md" hidden></div>
+    </div>
+  </section>
+
+  <section id="view-map" class="view" role="tabpanel" aria-label="Map" hidden>
+    <div class="toolbar">
+      <button id="map-refresh" type="button" title="Read this session's inventory again. No bus traffic.">Refresh</button>
+      <button id="map-discover" type="button" title="Walk the bus with discover. Holds the bus while it runs.">Discover</button>
+      <span id="map-note" class="muted"></span>
+    </div>
+    <div id="map-body" class="scroll map"></div>
+  </section>
+</main>
+
 <form id="line" autocomplete="off">
   <label for="cmd">&gt;</label>
   <input id="cmd" name="cmd" maxlength="79" autocapitalize="off" autocorrect="off"
@@ -167,36 +376,61 @@
   <button id="send" type="submit" disabled>Run</button>
 </form>
 <p id="hint" role="status"></p>
+
 <script>
 "use strict";
 (function () {
-  const out = document.getElementById("out");
-  const form = document.getElementById("line");
-  const cmd = document.getElementById("cmd");
-  const sendBtn = document.getElementById("send");
-  const stateEl = document.getElementById("state");
-  const reconnectBtn = document.getElementById("reconnect");
-  const clearBtn = document.getElementById("clear");
-  const wrapBtn = document.getElementById("wrap");
-  const hint = document.getElementById("hint");
+  // Replaced at build time with dali_commands.md as a JSON string. Left as
+  // null when the page is opened from the repository.
+  const REFERENCE = /*@dali-reference@*/null;
+
+  const $ = (id) => document.getElementById(id);
+
+  /* A DOM builder. Text from the device always goes in as text, never as
+   * markup. */
+  function h(tag, props) {
+    const node = document.createElement(tag);
+    if (props) {
+      for (const key of Object.keys(props)) {
+        const value = props[key];
+        if (value === undefined || value === null || value === false) continue;
+        if (key === "class") node.className = value;
+        else if (key === "text") node.textContent = value;
+        else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+        else node.setAttribute(key, value === true ? "" : value);
+      }
+    }
+    for (let i = 2; i < arguments.length; i++) append(node, arguments[i]);
+    return node;
+  }
+  function append(node, kid) {
+    if (kid === null || kid === undefined || kid === false) return;
+    if (Array.isArray(kid)) { kid.forEach((k) => append(node, k)); return; }
+    node.append(kid instanceof Node ? kid : String(kid));
+  }
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[c]);
+  }
+
+  const out = $("out");
+  const form = $("line");
+  const cmd = $("cmd");
+  const sendBtn = $("send");
+  const stateEl = $("state");
+  const reconnectBtn = $("reconnect");
+  const hint = $("hint");
 
   const PROMPT = "> ";
   const LINE_MAX = 79;          // DALI_SHELL_LINE_MAX - 1
-  const KEEP_LINES = 5000;      // older output is dropped from the page
+  const KEEP_LINES = 5000;      // older terminal output is dropped from the page
   const HISTORY_MAX = 100;
   const HISTORY_KEY = "dali-shell-history";
   const WRAP_KEY = "dali-shell-wrap";
 
-  document.getElementById("host").textContent = location.host;
+  $("host").textContent = location.host;
 
-  let ws = null;
-  let ready = false;
-  let partial = null;           // the line still receiving text
-  let history = [];
-  let histPos = 0;
-  let draft = "";
-
-  // Per-viewer conveniences only; the page works without storage.
+  // ── Per-viewer conveniences only; the page works without storage ─────────
   function load(key, fallback) {
     try {
       const v = localStorage.getItem(key);
@@ -206,49 +440,34 @@
   function save(key, value) {
     try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* ignore */ }
   }
-  history = load(HISTORY_KEY, []);
-  if (!Array.isArray(history)) history = [];
-  histPos = history.length;
-  setWrap(load(WRAP_KEY, false) === true);
+
+  // ── Terminal output ──────────────────────────────────────────────────────
+  let partial = null;           // the line still receiving text
 
   function setWrap(on) {
     out.classList.toggle("wrap", on);
-    wrapBtn.setAttribute("aria-pressed", on ? "true" : "false");
+    $("wrap").setAttribute("aria-pressed", on ? "true" : "false");
   }
-
-  function setState(state, label) {
-    stateEl.dataset.state = state;
-    stateEl.textContent = label;
-  }
-
-  function setReady(r) {
-    ready = r;
-    sendBtn.disabled = !r;
-    if (ws) setState(r ? "ready" : "running", r ? "ready" : "running");
-  }
+  setWrap(load(WRAP_KEY, false) === true);
 
   function atBottom() {
     return out.scrollHeight - out.scrollTop - out.clientHeight < 32;
   }
-
   function trim() {
     while (out.childElementCount > KEEP_LINES) out.removeChild(out.firstElementChild);
   }
-
   // Presentation only: the shell's echo of a command, and bus trace lines.
   function finishLine(el) {
     const t = el.textContent;
     if (t.startsWith(PROMPT)) el.classList.add("cmd");
     else if (t.startsWith("[BUS]")) el.classList.add("bus");
   }
-
   function appendText(text) {
     const stick = atBottom();
     const parts = text.replace(/\r/g, "").split("\n");
     for (let i = 0; i < parts.length; i++) {
       if (partial === null) {
-        partial = document.createElement("div");
-        partial.className = "ln";
+        partial = h("div", { class: "ln" });
         out.appendChild(partial);
       }
       if (parts[i]) partial.appendChild(document.createTextNode(parts[i]));
@@ -267,16 +486,91 @@
     trim();
     if (stick) out.scrollTop = out.scrollHeight;
   }
-
   function note(text) {
     const stick = atBottom();
     if (partial !== null) { finishLine(partial); partial = null; }
-    const el = document.createElement("div");
-    el.className = "ln sys";
-    el.textContent = text;
-    out.appendChild(el);
+    out.appendChild(h("div", { class: "ln sys", text: text }));
     trim();
     if (stick) out.scrollTop = out.scrollHeight;
+  }
+
+  // ── Connection and the command queue ─────────────────────────────────────
+  /*
+   * One line runs at a time, because the shell runs one at a time. Lines the
+   * page sends for itself (`schema`, `export inventory`) are quiet: their
+   * output is collected instead of shown. Anything that arrives before a quiet
+   * line's echo is not its output, and goes to the terminal.
+   */
+  let ws = null;
+  let prompted = false;         // the shell is at its prompt
+  let current = null;           // the line running now
+  const queue = [];
+  let session = 0;              // counts connections; caches belong to one
+
+  function setState(state, label) {
+    stateEl.dataset.state = state;
+    stateEl.textContent = label;
+  }
+  function busy() { return ws === null || !prompted; }
+  function updateState() {
+    sendBtn.disabled = busy();
+    if (ws === null) return;
+    if (prompted) setState("ready", "ready");
+    else if (current) setState("running", "running");
+    else setState("connecting", "connected");
+    BusMap.stateChanged();
+  }
+
+  function runCommand(line, quiet) {
+    return new Promise(function (resolve, reject) {
+      queue.push({ line: line, quiet: !!quiet, resolve: resolve, reject: reject,
+                   pending: "", buf: "", echoed: false });
+      pump();
+    });
+  }
+  function pump() {
+    if (ws === null || ws.readyState !== WebSocket.OPEN || !prompted || current || !queue.length) return;
+    current = queue.shift();
+    prompted = false;
+    ws.send(current.line);
+    updateState();
+  }
+  function quietLine(c, line) {
+    if (!c.echoed) {
+      if (line === PROMPT + c.line) c.echoed = true;
+      else appendText(line + "\n");
+      return;
+    }
+    if (line.startsWith("[BUS]") || line.startsWith("[trace]")) {
+      appendText(line + "\n");
+      return;
+    }
+    c.buf += line + "\n";
+  }
+  function quietFeed(c, data) {
+    c.pending += data.replace(/\r/g, "");
+    let nl;
+    while ((nl = c.pending.indexOf("\n")) >= 0) {
+      const line = c.pending.slice(0, nl);
+      c.pending = c.pending.slice(nl + 1);
+      quietLine(c, line);
+    }
+  }
+  function onFrame(data) {
+    if (data === PROMPT) {
+      const done = current;
+      current = null;
+      prompted = true;
+      if (done) {
+        if (done.quiet && done.pending) quietLine(done, done.pending);
+        done.resolve(done.buf);
+      }
+      updateState();
+      pump();
+      return;
+    }
+    if (current && current.quiet) quietFeed(current, data);
+    else appendText(data);
   }
 
   function closeText(code) {
@@ -304,49 +598,56 @@
       return;
     }
     ws = sock;
-    sock.onopen = function () { setReady(false); setState("connecting", "connected"); };
+    session++;
+    prompted = false;
+    sock.onopen = function () { updateState(); };
     sock.onmessage = function (ev) {
-      if (typeof ev.data !== "string") return;
-      if (ev.data === PROMPT) { setReady(true); return; }
-      appendText(ev.data);
+      if (typeof ev.data === "string") onFrame(ev.data);
     };
     sock.onclose = function (ev) {
       if (ws !== sock) return;
       ws = null;
-      ready = false;
+      prompted = false;
+      const gone = new Error("disconnected");
+      if (current) { current.reject(gone); current = null; }
+      while (queue.length) queue.shift().reject(gone);
       sendBtn.disabled = true;
       const why = ev.reason || closeText(ev.code);
       note("Disconnected" + (why ? ": " + why : "") + (ev.code ? " (" + ev.code + ")" : "") + ".");
       setState("closed", ev.code === 1013 ? "busy" : "disconnected");
       reconnectBtn.hidden = false;
+      Help.disconnected();
+      BusMap.stateChanged();
     };
   }
 
+  // ── Command line ─────────────────────────────────────────────────────────
+  let history = load(HISTORY_KEY, []);
+  if (!Array.isArray(history)) history = [];
+  let histPos = history.length;
+  let draft = "";
+
   function showHint(text) { hint.textContent = text; }
+
+  /* What the device would refuse, said here instead: it closes the connection
+   * on a frame that is not one line of printable ASCII. */
+  function lineProblem(line) {
+    if (!/^[\x20-\x7e]*$/.test(line)) {
+      return "Only plain ASCII is accepted. Check for curly quotes or dashes your keyboard substituted.";
+    }
+    if (line.length > LINE_MAX) return "A line is at most " + LINE_MAX + " characters.";
+    return "";
+  }
 
   form.addEventListener("submit", function (e) {
     e.preventDefault();
     const line = cmd.value;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      showHint("Not connected. Press Reconnect.");
-      return;
-    }
-    if (!ready) {
-      showHint("A command is still running. The shell takes the next one at its prompt.");
-      return;
-    }
-    // The device closes the connection on anything else; say so here instead.
-    if (!/^[\x20-\x7e]*$/.test(line)) {
-      showHint("Only plain ASCII is accepted. Check for curly quotes or dashes your keyboard substituted.");
-      return;
-    }
-    if (line.length > LINE_MAX) {
-      showHint("A line is at most " + LINE_MAX + " characters.");
-      return;
-    }
+    if (ws === null) { showHint("Not connected. Press Reconnect."); return; }
+    if (busy()) { showHint("A command is still running. The shell takes the next one at its prompt."); return; }
+    const problem = lineProblem(line);
+    if (problem) { showHint(problem); return; }
     showHint("");
-    ws.send(line);
-    setReady(false);
+    runCommand(line, false).catch(function () {});
     if (line.trim() !== "" && history[history.length - 1] !== line) {
       history.push(line);
       if (history.length > HISTORY_MAX) history = history.slice(-HISTORY_MAX);
@@ -355,6 +656,7 @@
     histPos = history.length;
     draft = "";
     cmd.value = "";
+    if (activeView !== "terminal") showView("terminal");
     out.scrollTop = out.scrollHeight;
   });
 
@@ -374,6 +676,20 @@
   });
   cmd.addEventListener("input", function () { if (hint.textContent) showHint(""); });
 
+  /* Put text on the command line without running it: the operator reads it
+   * and presses Run. */
+  function useText(text, appendWord) {
+    if (appendWord) {
+      const base = cmd.value.replace(/\s+$/, "");
+      cmd.value = base ? base + " " + text : text;
+    } else {
+      cmd.value = text;
+    }
+    cmd.focus();
+    const end = cmd.value.length;
+    try { cmd.setSelectionRange(end, end); } catch (e) { /* ignore */ }
+  }
+
   // A click in the output goes to the input, unless it selected text to copy.
   // Not on a touch screen, where it would raise the keyboard on every tap.
   const coarse = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
@@ -384,16 +700,730 @@
   });
 
   reconnectBtn.addEventListener("click", connect);
-  clearBtn.addEventListener("click", function () {
+  $("clear").addEventListener("click", function () {
     out.textContent = "";
     partial = null;
     cmd.focus();
   });
-  wrapBtn.addEventListener("click", function () {
+  $("wrap").addEventListener("click", function () {
     const on = !out.classList.contains("wrap");
     setWrap(on);
     save(WRAP_KEY, on);
   });
+
+  /* The reply to a quiet command, as JSON. Anything printed before the object
+   * or after it, such as a warning, is not part of it. */
+  function parseJsonReply(text) {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start < 0 || end < start) throw new Error(text.trim() || "no reply");
+    return JSON.parse(text.slice(start, end + 1));
+  }
+
+  // ── Views ────────────────────────────────────────────────────────────────
+  let activeView = "terminal";
+  const tabs = Array.prototype.slice.call(document.querySelectorAll("nav [role=tab]"));
+  function showView(name) {
+    activeView = name;
+    tabs.forEach(function (b) { b.setAttribute("aria-selected", b.dataset.view === name ? "true" : "false"); });
+    ["terminal", "help", "map"].forEach(function (v) { $("view-" + v).hidden = v !== name; });
+    if (name === "help") Help.show();
+    if (name === "map") BusMap.show();
+  }
+  tabs.forEach(function (b) { b.addEventListener("click", function () { showView(b.dataset.view); }); });
+
+  // ── Markdown, for the compiled-in reference ──────────────────────────────
+  /*
+   * Enough of GitHub's markdown for dali_commands.md: headings with GitHub's
+   * anchor slugs, paragraphs, fenced code, tables with escaped pipes,
+   * blockquotes, flat and nested lists, rules, and inline code, bold, italic
+   * and links. Every piece of text is escaped before markup is added.
+   */
+  const Markdown = (function () {
+    function inline(src) {
+      const codes = [];
+      let s = src.replace(/`([^`]+)`/g, function (_, c) {
+        codes.push(c);
+        return "\u0000" + (codes.length - 1) + "\u0000";
+      });
+      const escaped = [];
+      s = s.replace(/\\([\\`*_{}\[\]()#+\-.!|<>])/g, function (_, c) {
+        escaped.push(c);
+        return "\u0001" + (escaped.length - 1) + "\u0001";
+      });
+      s = esc(s);
+      s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, function (all, text, href) {
+        if (href.charAt(0) === "#") return "<a href=\"" + href + "\">" + text + "</a>";
+        if (/^https?:\/\//.test(href)) {
+          return "<a href=\"" + href + "\" target=\"_blank\" rel=\"noopener noreferrer\">" + text + "</a>";
+        }
+        return text;  // a file in the repository, which the device does not serve
+      });
+      s = s.replace(/\*\*([^*]+?)\*\*/g, "<strong>$1</strong>");
+      s = s.replace(/(^|[^*\w])\*([^*\s](?:[^*]*[^*\s])?)\*(?![*\w])/g, "$1<em>$2</em>");
+      s = s.replace(/\u0001(\d+)\u0001/g, function (_, n) { return esc(escaped[+n]); });
+      return s.replace(/\u0000(\d+)\u0000/g, function (_, n) { return "<code>" + esc(codes[+n]) + "</code>"; });
+    }
+
+    function slug(text, used) {
+      const base = text.toLowerCase().replace(/`/g, "").replace(/[^\w\- ]/g, "").replace(/ /g, "-");
+      let id = base;
+      for (let n = 1; used[id]; n++) id = base + "-" + n;
+      used[id] = true;
+      return id;
+    }
+
+    function splitRow(line) {
+      let s = line.trim().replace(/\\\|/g, "\u0002");
+      if (s.charAt(0) === "|") s = s.slice(1);
+      if (s.charAt(s.length - 1) === "|") s = s.slice(0, -1);
+      return s.split("|").map(function (c) { return c.trim().replace(/\u0002/g, "|"); });
+    }
+
+    const RE_FENCE = /^(\s*)(`{3,}|~{3,})/;
+    const RE_HEADING = /^(#{1,6})\s+(.*?)\s*#*\s*$/;
+    const RE_TABLE_SEP = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
+    const RE_ITEM = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
+    const RE_RULE = /^\s*(-{3,}|\*{3,}|_{3,})\s*$/;
+
+    function startsBlock(lines, i) {
+      const l = lines[i];
+      return RE_FENCE.test(l) || RE_HEADING.test(l) || /^\s*>/.test(l) || RE_ITEM.test(l) ||
+             RE_RULE.test(l) || (/^\s*\|/.test(l) && i + 1 < lines.length && RE_TABLE_SEP.test(lines[i + 1]));
+    }
+
+    function blocks(lines, ctx) {
+      const html = [];
+      let para = [];
+      function flush() {
+        if (para.length) { html.push("<p>" + inline(para.join(" ")) + "</p>"); para = []; }
+      }
+      let i = 0;
+      while (i < lines.length) {
+        const line = lines[i];
+        if (ctx.top && ctx.section) ctx.section.text += line + "\n";
+        let m;
+        if ((m = RE_FENCE.exec(line))) {
+          flush();
+          const fence = m[2].charAt(0);
+          const indent = m[1].length;
+          const body = [];
+          i++;
+          while (i < lines.length && !new RegExp("^\\s*" + (fence === "`" ? "`" : "~") + "{3,}\\s*$").test(lines[i])) {
+            const l = lines[i];
+            if (ctx.top && ctx.section) ctx.section.text += l + "\n";
+            const lead = l.search(/\S|$/);
+            body.push(l.slice(Math.min(lead, indent)));
+            i++;
+          }
+          i++;
+          if (ctx.top && ctx.h2 && ctx.h2.firstCode === null) ctx.h2.firstCode = body.join("\n");
+          html.push("<pre><code>" + esc(body.join("\n")) + "</code></pre>");
+          continue;
+        }
+        if ((m = RE_HEADING.exec(line))) {
+          flush();
+          const level = m[1].length;
+          const id = slug(m[2], ctx.used);
+          html.push("<h" + level + " id=\"" + id + "\">" + inline(m[2]) + "</h" + level + ">");
+          if (ctx.top) {
+            if (level === 2) {
+              ctx.toc.push({ id: id, title: m[2] });
+              ctx.h2 = { id: id, title: m[2], firstCode: null };
+              ctx.h2s.push(ctx.h2);
+            }
+            if (level === 2 || level === 3) {
+              ctx.section = { id: id, title: m[2], text: "" };
+              ctx.sections.push(ctx.section);
+            }
+          }
+          i++;
+          continue;
+        }
+        if (/^\s*\|/.test(line) && i + 1 < lines.length && RE_TABLE_SEP.test(lines[i + 1])) {
+          flush();
+          const head = splitRow(line);
+          const align = splitRow(lines[i + 1]).map(function (c) {
+            return /^:-+:$/.test(c) ? "center" : /-+:$/.test(c) ? "right" : "";
+          });
+          i += 2;
+          let t = "<table><thead><tr>";
+          head.forEach(function (c, k) {
+            t += "<th" + (align[k] ? " style=\"text-align:" + align[k] + "\"" : "") + ">" + inline(c) + "</th>";
+          });
+          t += "</tr></thead><tbody>";
+          while (i < lines.length && /^\s*\|/.test(lines[i])) {
+            if (ctx.top && ctx.section) ctx.section.text += lines[i] + "\n";
+            t += "<tr>";
+            splitRow(lines[i]).forEach(function (c, k) {
+              t += "<td" + (align[k] ? " style=\"text-align:" + align[k] + "\"" : "") + ">" + inline(c) + "</td>";
+            });
+            t += "</tr>";
+            i++;
+          }
+          html.push(t + "</tbody></table>");
+          continue;
+        }
+        if (/^\s*>/.test(line)) {
+          flush();
+          const body = [];
+          while (i < lines.length && /^\s*>/.test(lines[i])) {
+            if (ctx.top && ctx.section && body.length) ctx.section.text += lines[i] + "\n";
+            body.push(lines[i].replace(/^\s*>\s?/, ""));
+            i++;
+          }
+          html.push("<blockquote>" + blocks(body, { used: ctx.used, top: false }) + "</blockquote>");
+          continue;
+        }
+        if ((m = RE_ITEM.exec(line))) {
+          flush();
+          const r = list(lines, i, ctx);
+          html.push(r.html);
+          i = r.next;
+          continue;
+        }
+        if (RE_RULE.test(line)) { flush(); html.push("<hr>"); i++; continue; }
+        if (line.trim() === "") { flush(); i++; continue; }
+        para.push(line.trim());
+        i++;
+      }
+      flush();
+      return html.join("\n");
+    }
+
+    /* A list from lines[i]: items at its indent, each item's further lines
+     * dedented and rendered as blocks of their own, so nesting comes free. */
+    function list(lines, i, ctx) {
+      const first = RE_ITEM.exec(lines[i]);
+      const indent = first[1].length;
+      const ordered = /\d/.test(first[2]);
+      const items = [];
+      while (i < lines.length) {
+        const m = RE_ITEM.exec(lines[i]);
+        if (!m || m[1].length !== indent || /\d/.test(m[2]) !== ordered) break;
+        // blocks() recorded the first item's line; the rest are recorded here.
+        if (items.length && ctx.top && ctx.section) ctx.section.text += lines[i] + "\n";
+        const contentIndent = indent + m[2].length + 1;
+        const body = [m[3]];
+        i++;
+        while (i < lines.length) {
+          const l = lines[i];
+          if (l.trim() === "") {
+            let j = i + 1;
+            while (j < lines.length && lines[j].trim() === "") j++;
+            if (j < lines.length && lines[j].search(/\S/) >= contentIndent) { body.push(""); i++; continue; }
+            break;
+          }
+          const lead = l.search(/\S/);
+          if (lead >= contentIndent || (lead > indent && RE_ITEM.test(l))) {
+            body.push(l.slice(Math.min(lead, contentIndent)));
+          } else if (!startsBlock(lines, i) && body[body.length - 1] !== "") {
+            body.push(l.trim());   // a lazy continuation of the item's paragraph
+          } else {
+            break;
+          }
+          if (ctx.top && ctx.section) ctx.section.text += l + "\n";
+          i++;
+        }
+        let inner = blocks(body, { used: ctx.used, top: false });
+        const tight = /^<p>[\s\S]*<\/p>$/.test(inner) && inner.indexOf("<p>", 1) < 0;
+        if (tight) inner = inner.slice(3, -4);
+        items.push("<li>" + inner + "</li>");
+      }
+      const tag = ordered ? "ol" : "ul";
+      return { html: "<" + tag + ">" + items.join("") + "</" + tag + ">", next: i };
+    }
+
+    function render(src) {
+      const ctx = { used: {}, toc: [], sections: [], section: null, h2s: [], h2: null, top: true };
+      const html = blocks(src.replace(/\r/g, "").split("\n"), ctx);
+      return { html: html, toc: ctx.toc, sections: ctx.sections, h2s: ctx.h2s };
+    }
+
+    return { render: render };
+  })();
+
+  // ── Help ─────────────────────────────────────────────────────────────────
+  const Help = (function () {
+    const verbsBox = $("help-verbs");
+    const refBox = $("help-ref");
+    const filter = $("help-filter");
+    const tabVerbs = $("help-tab-verbs");
+    const tabRef = $("help-tab-ref");
+    let schema = null;
+    let schemaSession = -1;
+    let loading = null;
+    let status = "";
+    let reference = null;       // { html, toc, sections } once rendered
+    let sectionFor = {};        // verb name -> section id
+
+    function loadSchema() {
+      if (schema && schemaSession === session) return Promise.resolve(schema);
+      if (loading) return loading;
+      if (ws === null) return Promise.reject(new Error("not connected"));
+      const forSession = session;
+      status = "Reading the verb list from the device…";
+      renderVerbs();
+      loading = runCommand("schema", true).then(function (text) {
+        const parsed = parseJsonReply(text);
+        if (forSession === session) { schema = parsed; schemaSession = forSession; status = ""; }
+        return parsed;
+      }, function (e) {
+        status = "Could not read the verb list: " + e.message + ".";
+        throw e;
+      }).finally(function () { loading = null; renderVerbs(); });
+      return loading;
+    }
+
+    /*
+     * Which reference section documents a verb, by how the reference is
+     * written. Each verb's own section opens with a code block giving its
+     * syntax, a line per form, so the first section whose opening block has a
+     * line starting with the verb is its home. Failing that, the section that
+     * mentions it in backticks most, a heading counting five; the earliest
+     * wins a tie.
+     */
+    function indexSections() {
+      sectionFor = {};
+      if (!schema || !reference) return;
+      schema.verbs.forEach(function (v) {
+        const name = v.name.replace(/[-]/g, "\\-");
+        const syntax = new RegExp("(^|\\| )" + name + "(?=\\s|$)", "m");
+        const home = reference.h2s.filter(function (s) { return s.firstCode !== null && syntax.test(s.firstCode); })[0];
+        if (home) { sectionFor[v.name] = home.id; return; }
+        const mention = new RegExp("`" + name + "(?=[ `])", "g");
+        let best = null;
+        let bestScore = 0;
+        reference.sections.forEach(function (s) {
+          let score = (s.text.match(mention) || []).length;
+          if ((s.title.match(mention) || []).length) score += 5;
+          if (score > bestScore) { best = s.id; bestScore = score; }
+        });
+        if (best) sectionFor[v.name] = best;
+      });
+    }
+
+    /* Rendered once, hidden or not, because the verb cards' Reference buttons
+     * need its sections. */
+    function renderReference() {
+      if (reference) return;
+      if (REFERENCE === null) {
+        if (!refBox.childElementCount) {
+          refBox.append(h("p", { class: "muted", text: "The reference is compiled into the page when the firmware is built. This copy was opened without it." }));
+        }
+        return;
+      }
+      reference = Markdown.render(REFERENCE);
+      let toc = "<ul class=\"toc\">";
+      reference.toc.forEach(function (t) {
+        toc += "<li><a href=\"#" + t.id + "\">" + esc(t.title.replace(/`/g, "")) + "</a></li>";
+      });
+      toc += "</ul>";
+      refBox.innerHTML = toc + reference.html;
+      indexSections();
+    }
+
+    // Anchors stay inside the reference pane rather than changing the URL.
+    refBox.addEventListener("click", function (e) {
+      const a = e.target.closest && e.target.closest("a[href^='#']");
+      if (!a) return;
+      e.preventDefault();
+      jump(a.getAttribute("href").slice(1));
+    });
+
+    function jump(id) {
+      const target = document.getElementById(id);
+      if (!target || !refBox.contains(target)) return;
+      refBox.scrollTop += target.getBoundingClientRect().top - refBox.getBoundingClientRect().top - 8;
+      target.classList.add("flash");
+      setTimeout(function () { target.classList.remove("flash"); }, 1200);
+    }
+
+    function setPane(ref) {
+      tabVerbs.setAttribute("aria-pressed", ref ? "false" : "true");
+      tabRef.setAttribute("aria-pressed", ref ? "true" : "false");
+      verbsBox.hidden = ref;
+      refBox.hidden = !ref;
+      filter.hidden = ref;
+      if (ref) renderReference();
+    }
+    tabVerbs.addEventListener("click", function () { setPane(false); });
+    tabRef.addEventListener("click", function () { setPane(true); });
+    filter.addEventListener("input", renderVerbs);
+
+    function showReference(id) {
+      setPane(true);
+      jump(id);
+    }
+
+    function matches(f) {
+      const texts = Array.prototype.slice.call(arguments, 1);
+      return !f || texts.some(function (t) { return t && String(t).toLowerCase().indexOf(f) >= 0; });
+    }
+
+    function renderVerbs() {
+      verbsBox.textContent = "";
+      if (!schema) {
+        verbsBox.append(h("p", { class: "muted", text: status || (ws === null ? "Connect to read the verb list from the device." : "") }));
+        return;
+      }
+      const f = filter.value.trim().toLowerCase();
+      const policy = schema.policy || {};
+      // A policy key names the verb it governs: `commission`, `reset`.
+      const refusedVerb = function (v) { return policy[v.name] === false; };
+
+      if (policy.commission === false) {
+        verbsBox.append(h("p", { class: "policy" },
+          h("b", { text: "Commissioning is refused on this device." }),
+          " Its YAML leaves allow_commissioning off, so the shell refuses ",
+          h("code", { text: "commission" }), ", the special commands marked here, and raw frames that encode them."));
+      }
+
+      let shown = 0;
+      schema.verbs.forEach(function (v) {
+        if (!matches(f, v.name, v.args, v.summary, v.subcommands)) return;
+        shown++;
+        const refused = refusedVerb(v);
+        const section = sectionFor[v.name];
+        verbsBox.append(h("div", { class: "verb" + (refused ? " refused" : "") },
+          h("div", { class: "sig" },
+            h("code", { class: "name", text: v.name }),
+            v.args ? " " : null,
+            v.args ? h("code", { class: "args", text: v.args }) : null,
+            refused ? h("span", { class: "badge warn", text: "refused on this device" }) : null),
+          h("div", { class: "sum", text: v.summary }),
+          v.subcommands ? h("div", { class: "subs" }, "subcommands:",
+            v.subcommands.split(/\s+/).map(function (s) { return h("code", { text: s }); })) : null,
+          h("div", { class: "acts" },
+            h("button", { type: "button", text: "Use", title: "Put it on the command line",
+                          onclick: function () { useText(v.name + (v.max_args > 0 ? " " : "")); } }),
+            section ? h("button", { type: "button", text: "Reference",
+                                     onclick: function () { showReference(section); } }) : null)));
+      });
+
+      // Each named table in the schema is the names one verb of the same name
+      // takes; the verb's own args say where they go.
+      ["query", "special", "config", "dt6", "dt8", "iquery", "iconfig"].forEach(function (table) {
+        const entries = (schema[table] || []).map(function (e) { return typeof e === "string" ? { name: e } : e; });
+        const hits = entries.filter(function (e) { return matches(f, e.name); });
+        if (!hits.length) return;
+        shown += hits.length;
+        const usage = (schema.verbs.filter(function (v) { return v.name === table; })[0] || {}).args;
+        const det = h("details", { class: "table" },
+          h("summary", null, h("code", { text: table }), " names (" + hits.length + ")"),
+          usage ? h("div", { class: "muted" }, table + " ", h("code", { text: usage })) : null,
+          h("div", { class: "chips" }, hits.map(function (e) {
+            const flagged = e.commissioning === true;
+            const refused = flagged && policy.commission === false;
+            return h("button", {
+              type: "button",
+              class: "chip" + (flagged ? " flag" : "") + (refused ? " refused" : ""),
+              title: (flagged ? "Commissioning command" + (refused ? ", refused on this device. " : ". ") : "") +
+                     (e.needs_param ? "Takes a parameter up to " + e.max_param + ". " : "") + "Adds it to the command line.",
+              text: e.name + (flagged ? " ⚑" : ""),
+              onclick: function () { useText(e.name, true); }
+            });
+          })));
+        if (f) det.open = true;
+        verbsBox.append(det);
+      });
+
+      if (!shown) verbsBox.append(h("p", { class: "muted", text: "Nothing matches “" + filter.value + "”." }));
+    }
+
+    /* A schema from an earlier session stays on show until this session's
+     * arrives: the firmware is the same, and only the policy could differ. */
+    function show() {
+      renderReference();
+      renderVerbs();
+      if ((!schema || schemaSession !== session) && ws !== null) {
+        loadSchema().then(function () {
+          indexSections();
+          renderVerbs();
+        }).catch(function () {});
+      }
+    }
+
+    function disconnected() {
+      if (!schema) { status = ""; renderVerbs(); }
+    }
+
+    return { show: show, disconnected: disconnected };
+  })();
+
+  // ── Map ──────────────────────────────────────────────────────────────────
+  const BusMap = (function () {
+    const body = $("map-body");
+    const noteEl = $("map-note");
+    const refreshBtn = $("map-refresh");
+    const discoverBtn = $("map-discover");
+    let inventory = null;
+    let inventorySession = -1;
+    let loading = false;
+    let discovering = false;
+    let message = "";
+    let selected = null;        // { space: "gear"|"device", addr }
+
+    function stateChanged() {
+      refreshBtn.disabled = ws === null || loading;
+      discoverBtn.disabled = ws === null || discovering;
+      if (discovering) noteEl.textContent = "discover is running; its progress is in the Terminal.";
+      else if (ws === null) noteEl.textContent = "Not connected.";
+      else noteEl.textContent = "";
+    }
+
+    function refresh() {
+      if (ws === null || loading) return;
+      loading = true;
+      message = "Reading this session's inventory…";
+      stateChanged();
+      if (!inventory) render();
+      const forSession = session;
+      runCommand("export inventory", true).then(function (text) {
+        const parsed = parseJsonReply(text);
+        if (forSession === session) { inventory = parsed; inventorySession = forSession; message = ""; }
+      }).catch(function (e) {
+        message = "Could not read the inventory: " + e.message + ".";
+      }).finally(function () {
+        loading = false;
+        stateChanged();
+        render();
+      });
+    }
+
+    function discover() {
+      if (ws === null || discovering) return;
+      discovering = true;
+      stateChanged();
+      runCommand("discover", false).then(function () {
+        discovering = false;
+        stateChanged();
+        refresh();
+      }, function () {
+        discovering = false;
+        stateChanged();
+      });
+    }
+    refreshBtn.addEventListener("click", refresh);
+    discoverBtn.addEventListener("click", discover);
+
+    function kindOf(d) { return d.kind || "unknown"; }
+    function isGear(d) { const k = kindOf(d); return k === "control_gear" || k === "hybrid" || k === "unknown"; }
+    function isDevice(d) { const k = kindOf(d); return k === "input_device" || k === "hybrid"; }
+    function bits(list) {
+      const set = {};
+      (list || []).forEach(function (a) { set[a] = true; });
+      return set;
+    }
+
+    function cell(space, addr, record, contested) {
+      const prefix = space === "gear" ? "a" : "d";
+      const isSel = selected && selected.space === space && selected.addr === addr;
+      const on = !!record;
+      const cls = "cell" + (contested ? " warn" : on ? " on" : "") + (isSel ? " sel" : "");
+      let title;
+      if (contested && !on) title = prefix + addr + ": replies did not decode. More than one unit may share this address.";
+      else if (contested) title = prefix + addr + ": answers as one unit, but its identity read collided. More than one unit shares this address.";
+      else if (on) title = prefix + addr;
+      else title = prefix + addr + ": nothing answered";
+      const kids = [h("span", { class: "addr", text: prefix + addr })];
+      if (space === "gear" && record) {
+        if (record.device_type !== undefined) kids.push(h("span", { class: "tag", text: "DT" + record.device_type }));
+        if (record.actual_level !== undefined) {
+          kids.push(h("span", { class: "lvl", style: "width:" + Math.round(Math.min(record.actual_level, 254) / 254 * 100) + "%",
+                                title: "arc power level " + record.actual_level }));
+        }
+      } else if (space === "device" && record) {
+        // One dot per instance, which fits a phone-width cell where a word
+        // does not. The title carries the number.
+        if (record.instance_count !== undefined) {
+          const n = Math.min(record.instance_count, 12);
+          const dots = h("span", { class: "dots", title: record.instance_count + " instances" });
+          for (let k = 0; k < n; k++) dots.append(h("i"));
+          kids.push(dots);
+        }
+      } else if (contested) {
+        kids.push(h("span", { class: "tag", text: "?" }));
+      }
+      // Two or more: the bus cannot say how many.
+      if (contested && on) kids.push(h("span", { class: "tag", text: "2+" }));
+      const clickable = on || contested;
+      return h(clickable ? "button" : "div", {
+        type: clickable ? "button" : null,
+        class: cls,
+        title: title,
+        "aria-label": title,
+        onclick: clickable ? function () {
+          selected = isSel ? null : { space: space, addr: addr };
+          const top = body.scrollTop;
+          render();
+          body.scrollTop = top;
+          // Narrow, the detail is below the grids, out of sight.
+          const shown = body.querySelector(".detail");
+          if (shown && !(window.matchMedia && window.matchMedia("(min-width: 1000px)").matches)) {
+            shown.scrollIntoView({ block: "nearest", behavior: "smooth" });
+          }
+        } : null
+      }, kids);
+    }
+
+    function grid(space, byAddr, contested) {
+      const g = h("div", { class: "grid" });
+      for (let a = 0; a < 64; a++) g.append(cell(space, a, byAddr[a], !!contested[a]));
+      return g;
+    }
+
+    function fmt(value) {
+      if (value === null) return "—";
+      if (Array.isArray(value)) return value.map(fmt).join(", ");
+      if (typeof value === "object") return JSON.stringify(value);
+      return String(value);
+    }
+
+    function detail(space, addr, record, contested) {
+      const prefix = space === "gear" ? "a" : "d";
+      const box = h("div", { class: "detail" });
+      box.append(h("h3", { text: (space === "gear" ? "Control gear " : "Control device ") + prefix + addr }));
+      if (contested) {
+        box.append(h("p", { class: "note", text: record
+          ? "Answers as one unit, but its identity read collided: more than one unit shares this address. Values below hold for all of them."
+          : "Replies at this address did not decode: more than one unit may share it. Nothing else is known about what is there." }));
+      }
+      if (record) {
+        const dl = h("dl", { class: "kv" });
+        Object.keys(record).forEach(function (k) {
+          if (k === "instances" || k === "address") return;
+          dl.append(h("dt", { text: k.replace(/_/g, " ") }), h("dd", { text: fmt(record[k]) }));
+        });
+        box.append(dl);
+        if (Array.isArray(record.instances) && record.instances.length) {
+          const cols = [];
+          record.instances.forEach(function (inst) {
+            Object.keys(inst).forEach(function (k) { if (cols.indexOf(k) < 0 && k !== "latest_value") cols.push(k); });
+          });
+          const hasValue = record.instances.some(function (i) { return i.latest_value; });
+          box.append(h("table", { class: "rows" },
+            h("thead", null, h("tr", null, cols.map(function (c) { return h("th", { text: c.replace(/_/g, " ") }); }),
+              hasValue ? h("th", { text: "latest raw" }) : null)),
+            h("tbody", null, record.instances.map(function (inst) {
+              return h("tr", null, cols.map(function (c) { return h("td", { text: inst[c] === undefined ? "" : fmt(inst[c]) }); }),
+                hasValue ? h("td", { text: inst.latest_value ? fmt(inst.latest_value.raw) : "" }) : null);
+            }))));
+        }
+      }
+      // Actions run as typed lines, and their output goes to the Terminal.
+      const acts = h("div", { class: "acts" });
+      if (space === "gear" && record) {
+        acts.append(h("button", { type: "button", text: "Identify", title: "Blink it, then restore its level",
+                                  onclick: function () { runCommand("identify a" + addr, false).catch(function () {}); } }));
+        acts.append(h("button", { type: "button", text: "Status", title: "QUERY STATUS, decoded, in the Terminal",
+                                  onclick: function () { runCommand("status a" + addr, false).catch(function () {}); showView("terminal"); } }));
+      }
+      if (space === "device" && record) {
+        acts.append(h("button", { type: "button", text: "Instances", title: "Read its instance types, in the Terminal",
+                                  onclick: function () { runCommand("instances " + addr, false).catch(function () {}); showView("terminal"); } }));
+      }
+      if (acts.childElementCount) box.append(acts);
+      return box;
+    }
+
+    function groupMatrix(gear) {
+      const rows = gear.filter(function (d) { return Array.isArray(d.groups); });
+      if (!rows.length) return null;
+      const used = [];
+      for (let g = 0; g < 16; g++) used[g] = rows.some(function (d) { return d.groups.indexOf(g) >= 0; });
+      const table = h("table", { class: "matrix" },
+        h("thead", null, h("tr", null, h("th", { text: "" }),
+          used.map(function (u, g) { return h("th", { class: u ? null : "empty", text: "g" + g }); }))),
+        h("tbody", null, rows.map(function (d) {
+          return h("tr", { class: d.identity_collision ? "warn" : null },
+            h("th", { text: "a" + d.address }),
+            used.map(function (_, g) {
+              const member = d.groups.indexOf(g) >= 0;
+              return h("td", { class: member ? "in" : null, title: member ? "a" + d.address + " in g" + g : null });
+            }));
+        })));
+      return h("div", { class: "matrix-wrap" }, table);
+    }
+
+    function render() {
+      body.textContent = "";
+      if (!inventory || inventorySession !== session) {
+        body.append(h("p", { class: "muted", text: message ||
+          (ws === null ? "Connect to read the inventory." : "") }));
+        return;
+      }
+      const devices = Array.isArray(inventory.devices) ? inventory.devices : [];
+      const gearBy = {};
+      const deviceBy = {};
+      devices.forEach(function (d) {
+        if (isGear(d)) gearBy[d.address] = d;
+        if (isDevice(d)) deviceBy[d.address] = d;
+      });
+      const contestedGear = bits(inventory.contested_gear);
+      const undecodableDevice = bits(inventory.undecodable_device);
+      const gearCount = Object.keys(gearBy).length;
+      const deviceCount = Object.keys(deviceBy).length;
+      const sharedCount = Object.keys(contestedGear).length + Object.keys(undecodableDevice).length;
+
+      if (message) body.append(h("p", { class: "note", text: message }));
+      if (!devices.length && !sharedCount) {
+        body.append(h("p", null, "Nothing discovered in this session yet. Each session starts empty: ",
+          h("strong", { text: "Discover" }), " walks the bus, which takes tens of seconds and holds it while it runs."));
+        return;
+      }
+      body.append(h("p", { class: "muted", text:
+        gearCount + " control gear, " + deviceCount + " control device" + (deviceCount === 1 ? "" : "s") +
+        (sharedCount ? ", " + sharedCount + " shared address" + (sharedCount === 1 ? "" : "es") : "") +
+        ". From this session's last discover." }));
+      if (inventory.schema_version !== undefined && inventory.schema_version < 3) {
+        body.append(h("p", { class: "note", text: "This firmware's export does not list shared addresses, so none are marked." }));
+      }
+
+      const grids = h("div", null, h("h2", { text: "Control gear" }), grid("gear", gearBy, contestedGear));
+      if (deviceCount || Object.keys(undecodableDevice).length) {
+        grids.append(h("h2", { text: "Control devices" }), grid("device", deviceBy, undecodableDevice));
+      }
+      grids.append(h("div", { class: "legend" },
+        h("span", { class: "l-on", text: "answers" }),
+        h("span", { class: "l-warn", text: "shared: more than one unit" }),
+        h("span", { text: "nothing answered" })));
+      const layout = h("div", { class: "map-layout" }, grids);
+      if (selected) {
+        const by = selected.space === "gear" ? gearBy : deviceBy;
+        const shared = selected.space === "gear" ? contestedGear : undecodableDevice;
+        const record = by[selected.addr];
+        if (record || shared[selected.addr]) layout.append(detail(selected.space, selected.addr, record, !!shared[selected.addr]));
+      }
+      body.append(layout);
+
+      const gearList = Object.keys(gearBy).map(function (a) { return gearBy[a]; })
+        .sort(function (x, y) { return x.address - y.address; });
+      const matrix = groupMatrix(gearList);
+      if (matrix) body.append(h("h2", { text: "Groups" }), matrix);
+
+      const switches = Array.isArray(inventory.switches) ? inventory.switches : [];
+      if (switches.length) {
+        const cols = [];
+        switches.forEach(function (s) { Object.keys(s).forEach(function (k) { if (cols.indexOf(k) < 0) cols.push(k); }); });
+        body.append(h("h2", { text: "Switches seen" }), h("table", { class: "rows" },
+          h("thead", null, h("tr", null, cols.map(function (c) { return h("th", { text: c.replace(/_/g, " ") }); }))),
+          h("tbody", null, switches.map(function (s) {
+            return h("tr", null, cols.map(function (c) { return h("td", { text: s[c] === undefined ? "" : fmt(s[c]) }); }));
+          }))));
+      }
+    }
+
+    function show() {
+      stateChanged();
+      render();
+      // Reading the inventory sends nothing on the bus, so the map is current
+      // each time it is opened.
+      if (ws !== null) refresh();
+    }
+
+    return { show: show, stateChanged: stateChanged };
+  })();
 
   connect();
   cmd.focus();

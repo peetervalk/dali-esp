@@ -1,4 +1,5 @@
 import gzip
+import json
 from pathlib import Path
 import re
 import shutil
@@ -18,7 +19,7 @@ from esphome.const import (
     CONF_OUTPUT,
     CONF_PULLDOWN,
 )
-from esphome.core import CORE
+from esphome.core import CORE, EsphomeError
 
 try:
     # ESPHome 2026.9.0+ prunes the built-in ESP-IDF component list; drivers we
@@ -354,6 +355,29 @@ _WEB_ALLOWED_HOSTS_MAX = 8
 # so it is there for a pinned build too.
 _WEB_PAGE = Path(__file__).resolve().parent / "web" / "shell.html"
 
+# The page's Help reference: the verb reference at the repository root, put
+# into the page as a JS string where it holds this marker. Built in rather than
+# fetched, so the help a device serves is the help for the firmware it runs.
+_WEB_REFERENCE = Path(__file__).resolve().parents[3] / "dali_commands.md"
+_WEB_REFERENCE_SLOT = "/*@dali-reference@*/null"
+
+
+def _build_web_page():
+    """The page, with the reference in its slot, gzipped."""
+    html = _WEB_PAGE.read_text(encoding="utf-8")
+    if html.count(_WEB_REFERENCE_SLOT) != 1:
+        raise EsphomeError(
+            f"{_WEB_PAGE} must hold {_WEB_REFERENCE_SLOT} exactly once"
+        )
+    reference = _WEB_REFERENCE.read_text(encoding="utf-8")
+    # A JSON string is a JS string. ensure_ascii escapes everything outside
+    # ASCII, U+2028 and U+2029 included, and escaping '<' means no sequence in
+    # the reference can close the <script> element it sits in.
+    literal = json.dumps(reference, ensure_ascii=True).replace("<", "\\u003c")
+    html = html.replace(_WEB_REFERENCE_SLOT, literal)
+    # mtime=0 keeps the bytes, and so the build, reproducible.
+    return gzip.compress(html.encode("utf-8"), compresslevel=9, mtime=0)
+
 # A Host name without a port, as dali_web_host_allowed() compares it: letters,
 # digits and hyphens in dot-separated labels, which an IPv4 literal also is. No
 # trailing dot, because a browser sends the name exactly as it was typed and
@@ -614,10 +638,7 @@ async def to_code(config):
             cg.add(shell.set_web_port(web_conf[CONF_WEB_PORT]))
             for host in web_conf[CONF_ALLOWED_HOSTS]:
                 cg.add(shell.add_web_allowed_host(host))
-            # mtime=0 keeps the bytes, and so the build, reproducible.
-            page = gzip.compress(
-                _WEB_PAGE.read_bytes(), compresslevel=9, mtime=0
-            )
+            page = _build_web_page()
             page_name = "dali_shell_web_page_gz"
             page_bytes = ", ".join(str(b) for b in page)
             cg.add_global(cg.RawStatement(

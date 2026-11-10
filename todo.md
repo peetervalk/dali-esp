@@ -180,6 +180,25 @@ Needs a node with a `web:` block under `shell:`, for example `web: { port:
    then report the shell busy. With the page connected, `nc <ip> 2323` should
    connect and print nothing until the tab closes, as a second TCP client does.
 
+**Help.**
+1. Open **Help**. **Expected:** the verb list fills within a second or two,
+   and the terminal shows no `schema` output.
+2. On a node with `allow_commissioning: true`, nothing is marked refused. With
+   it off, `commission` is marked, nine `special` names are struck through, and
+   a note at the top says why.
+3. **Reference** on `address`, `restore` and `dt6` each opens that verb's own
+   section.
+
+**Map.**
+1. Open **Map** on a fresh session. **Expected:** it says nothing has been
+   discovered yet. Press **Discover**: the walk's progress appears in the
+   Terminal, and the map fills when it ends.
+2. **Expected on 2k:** the gear and devices `discover` reports, a0 to a5 in
+   group 0, and the Steinel's four instances under its device address.
+3. If a3 still holds two lamps, it should be marked shared, and its record
+   should say the identity read collided. If it no longer does, record which.
+4. **Identify** on a gear address blinks that lamp.
+
 **Waiting on a verb.** Start `discover` in the page, then load the page in
 another tab. **Expected:** the second load waits until `discover` ends, then
 reports the shell busy. That is the known limitation, not a fault.
@@ -1201,8 +1220,8 @@ build `MALLOC_CAP_8BIT` alone counts the PSRAM. Measure with
 
 | Item | Heap | Flash |
 |---|---|---|
-| Page, JS and CSS, gzipped | 0 | 30–60 KB, estimated |
-| `dali_commands.md`, `commissioning_readme.md`, `steinel_bank2_reference.md` as built-in help | 0 | 57,071 B with `gzip -9` (29,371 + 25,110 + 4,886 apart) |
+| The page with `dali_commands.md` built in, gzipped, as of 3b | 0 | 46,964 B. The reference is most of it |
+| `commissioning_readme.md`, `steinel_bank2_reference.md` as further built-in help | 0 | 29,996 B with `gzip -9` (25,110 + 4,886 apart), not built in |
 | Serving the page: one short connection | the send buffer while it streams, then 0 | — |
 | A WebSocket session | about what a TCP session costs now; one replaces the other | about 8 KB of code |
 | Flash headroom on the `dali_test.yaml` build | | 798,624 B: a 1,036,384 B image in a 1,835,008 B app slot |
@@ -1500,8 +1519,27 @@ action, not the console back.
      is still a valid UTF-8 text frame. Shell output is ASCII today.
    - **The TCP listener is not watched while any session is open,** so a
      second TCP client waits in the backlog as before.
-2. **Views (3b).** Help from `schema` plus `dali_commands.md`, and a map from
-   `export inventory`.
+2. **Views (3b). Built 2026-11-10, unverified on a device.** Help from
+   `schema` plus `dali_commands.md`, and a map from `export inventory`. See
+   Part 1, *The web shell*, and `project_log.md`. What it settled:
+   - **Two small C additions, approved with it.** `schema` flags each special
+     `commissioning`, and `export inventory` (version 3) lists
+     `contested_gear` and `undecodable_device`, with `identity_collision` on
+     an entry. Version 2 left every undecodable address out, so a map built on
+     it would have shown a shared address as free.
+   - **The page runs its own lines quietly** through the same one-at-a-time
+     queue as typed ones. A quiet line's output is what follows its echo, so a
+     trace line pumped between lines still reaches the terminal.
+   - **The reference is built into the page,** as a JS string, not served
+     from a second path. `dali_web` stays two routes, and the help is the
+     firmware's own. The cost is a 47 kB page on every load.
+   - **A verb's Reference button finds its section** by the reference's own
+     convention: the first `##` section whose opening code block has a line
+     starting with the verb. Every verb but `devinfo` resolved, and
+     `devinfo` is now documented.
+   - **Actions on the map run as typed lines.** Identify, Status and Instances
+     send `identify aN`, `status aN` and `instances N`. Use and the table names
+     only fill the command line.
 3. **Stop, in both bindings.** See *There is no cancel* under *Transport*.
    Proposed as its own change; not yet approved.
 4. **The content.**

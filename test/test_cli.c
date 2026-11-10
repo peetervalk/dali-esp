@@ -433,6 +433,82 @@ static void test_schema_reports_policy(void)
                                 "\"policy\": {\"commission\": true, \"reset\": false}\n}\r\n"));
 }
 
+/*
+ * Each `special` entry says whether the commissioning policy covers it, and the
+ * flags are exactly dali_cli_special_is_commissioning()'s. That is what lets a
+ * client grey out the nine names a session refuses and nothing else. The other
+ * two gear tables carry no flag.
+ */
+static void test_schema_marks_commissioning_specials(void)
+{
+    schema_capture(false, true);
+    const char *json = s_schema.text;
+
+    char     needle[256];
+    unsigned marked = 0u;
+    for (uint8_t i = 0u; i < dali_cli_special_count(); i++) {
+        const DaliCliGearCommand *cmd = dali_cli_special_at(i);
+        bool commissioning = dali_cli_special_is_commissioning(cmd->id);
+        if (commissioning) {
+            marked++;
+        }
+        snprintf(needle, sizeof(needle),
+                 "{\"name\": \"%s\", \"needs_param\": %s, \"max_param\": %u, "
+                 "\"commissioning\": %s}",
+                 cmd->name, cmd->needs_param ? "true" : "false",
+                 (unsigned)cmd->max_param, commissioning ? "true" : "false");
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(json, needle), cmd->name);
+    }
+    TEST_ASSERT_EQUAL_UINT(9u, marked);
+    TEST_ASSERT_EQUAL_UINT(marked, count_occurrences(json, "\"commissioning\": true"));
+    TEST_ASSERT_EQUAL_UINT(dali_cli_special_count(),
+                           count_occurrences(json, "\"commissioning\": "));
+}
+
+/* ---------------------------------------------------------------------------
+ * JSON address lists (`export inventory`)
+ * --------------------------------------------------------------------------*/
+
+static const char *address_list(const char *key, uint64_t mask)
+{
+    memset(&s_schema, 0, sizeof(s_schema));
+    s_schema.shortest_before_last = SIZE_MAX;
+    DaliCliOut out = { .write = schema_capture_write, .ctx = &s_schema };
+    dali_cli_print_json_address_list(&out, key, mask);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1u, s_schema.writes, "an address list is one write");
+    return s_schema.text;
+}
+
+static void test_address_list_empty(void)
+{
+    TEST_ASSERT_EQUAL_STRING("\"contested_gear\": []", address_list("contested_gear", 0u));
+}
+
+/* Ascending, both ends of the range, and the bit that a 32-bit shift would
+ * lose. */
+static void test_address_list_ascending(void)
+{
+    uint64_t mask = ((uint64_t)1u << 63) | ((uint64_t)1u << 32) |
+                    ((uint64_t)1u << 5) | (uint64_t)1u;
+    TEST_ASSERT_EQUAL_STRING("\"k\": [0, 5, 32, 63]", address_list("k", mask));
+}
+
+/* Every address with the longest key the header allows still fits, so the
+ * list is never clipped into something that does not parse. */
+static void test_address_list_full_with_longest_key(void)
+{
+    const char *key = "abcdefghijklmnopqrstuvwxyz012345";  /* 32 characters */
+    const char *json = address_list(key, UINT64_MAX);
+
+    char expected_start[64];
+    snprintf(expected_start, sizeof(expected_start), "\"%s\": [0, 1, 2, ", key);
+    TEST_ASSERT_EQUAL_INT(0, strncmp(json, expected_start, strlen(expected_start)));
+    size_t len = strlen(json);
+    TEST_ASSERT_EQUAL_STRING(", 62, 63]", json + len - 9u);
+    TEST_ASSERT_EQUAL_UINT(63u, count_occurrences(json, ", "));
+    TEST_ASSERT_LESS_THAN_size_t(DALI_CLI_ADDRESS_LIST_MAX, len + 1u);
+}
+
 /* ---------------------------------------------------------------------------
  * Resolve: verb lookup plus argument count
  * --------------------------------------------------------------------------*/
@@ -2080,6 +2156,10 @@ int main(void)
     RUN_TEST(test_schema_is_well_formed);
     RUN_TEST(test_schema_lists_every_table);
     RUN_TEST(test_schema_reports_policy);
+    RUN_TEST(test_schema_marks_commissioning_specials);
+    RUN_TEST(test_address_list_empty);
+    RUN_TEST(test_address_list_ascending);
+    RUN_TEST(test_address_list_full_with_longest_key);
 
     RUN_TEST(test_resolve_accepts_exact_arity);
     RUN_TEST(test_resolve_reports_empty_line);

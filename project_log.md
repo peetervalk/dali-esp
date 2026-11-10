@@ -36,6 +36,56 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-11-10 (Help and Map, step 3b; uncommitted on `dev` at `f8e3a29`)
+
+Step 3b of *A browser GUI for the shell* in `todo.md`. The operator approved
+it, and the two C additions below with it, the same day.
+
+- **The C additions.**
+  - `dali_cli_print_schema()` flags each `special` entry `commissioning`.
+  - `dali_cli_print_json_address_list()` is new.
+  - `cmd_export_inventory()` is at `schema_version` 3, with `contested_gear`,
+    `undecodable_device` and `identity_collision`.
+- **Host suites pass, 35 of 35.** `test_cli` gains four vectors, 105 tests in
+  all: every special's flag against `dali_cli_special_is_commissioning()`,
+  nine of them true; and the address list empty, ascending across bit 32, and
+  full with a 32-character key.
+- **Mutation pass: 5 mutants, 5 killed.** A 32-bit shift, swapped separators,
+  the flag always false, the flag on the query table too, and the list buffer
+  cut to 256. The objects were deleted before each build, for the reason in
+  the 2026-11-09 entry below.
+- **No vector covers `cmd_export_inventory()` itself.** `dali_shell.c` has no
+  host harness. Only the address-list printer it calls is covered.
+- **The page in a browser.** In scratch, not the repository: a Python stand-in
+  for the web port, and headless Edge driven over the DevTools protocol.
+  - The stand-in served the page through `_build_web_page()` from
+    `__init__.py`. Its `schema` reply was the real output, from a host
+    program linking `dali_cli.c`; the inventory was hand-written in the
+    printer's format, modelled on 2k.
+  - **34 checks passed at 390 px and 1280 px, with no script or console
+    error.** Among them: quiet lines stay out of the terminal; a trace line
+    sent before `schema`'s echo still reaches it; `commission` and nine
+    struck-through specials under a refusing policy; 62 of 63 verbs link to
+    a section; no stray markdown; the map's 128 cells, with three shared;
+    the detail in view on a phone and beside the grids on a desktop; Discover
+    and Identify sent as lines.
+  - **Screenshots were read for layout.** That led to dots for instance counts
+    and `2+` for a shared address, both of which had been clipped at phone
+    width.
+  - **The first section-matching rule sent six verbs elsewhere,** among them
+    `special` to *Encoded short addresses* and `dt6` to *Recipes*. The rule
+    now looks for the code block that opens each `##` section. Every verb
+    then resolved to its own section, except `devinfo`, which
+    `dali_commands.md` did not mention. It now does.
+- **Device builds, no compiler warning.**
+  - `uv run esphome compile dali_test.yaml` on 2026.10.0: RAM 142,908 B,
+    unchanged, and flash 1,088,519 B, +42,664 over 3a. The page is
+    46,964 B.
+  - `idf.py build` on IDF 6.0.1: `dali_esp.bin` is `0x4a3f0` bytes.
+
+Not covered: any device, and any browser against the real binding. The checks
+are in *The web shell*, Part 1 of `todo.md`.
+
 ### Verified locally on 2026-11-10 (the web binding, step 3a; uncommitted on `dev` at `f8e3a29`)
 
 Step 3a of *A browser GUI for the shell* in `todo.md`, approved by the operator

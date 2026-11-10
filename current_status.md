@@ -357,12 +357,23 @@ Protocol and state correctness come before broad new device support.
 
   `schema` writes its JSON in 159-byte chunks, about a hundred writes on
   every binding.
+- **Structured output a client can grey out and map from.**
+  - `schema` reports the session policy, and flags each `special` entry
+    `commissioning: true|false` by `dali_cli_special_is_commissioning()`.
+  - `export inventory` is `schema_version` 3. It lists shared addresses, which
+    `devices` leaves out: `contested_gear` by
+    `dali_discovery_gear_address_contested()`, `undecodable_device`, and
+    `identity_collision` on a listed entry. See `dali_commands.md`.
 - **The web binding,** present when `shell:` has a `web:` block. It runs on
   the TCP binding's task, from the same `select()`:
 
   | Behaviour | How |
   |---|---|
-  | `GET /` serves the page | `web/shell.html`, gzipped into flash at codegen (about 4.7 kB). A terminal: a line in, the output streamed back, command history, nothing loaded from elsewhere |
+  | `GET /` serves the page | `web/shell.html`, with `dali_commands.md` built in, gzipped into flash at codegen: about 47 kB. Nothing on it loads from elsewhere. Three views, and the command line under all of them |
+  | Terminal | A line in, the output streamed back, command history, trace lines set apart |
+  | Help | Every verb from `schema`, with its arguments, summary and subcommands, and the named tables. What the session policy refuses is marked: `commission`, `reset`, and the specials `schema` flags as commissioning. **Use** puts a verb or name on the command line without running it. **Reference** opens the verb's section of `dali_commands.md` |
+  | Map | From `export inventory`: a 64-cell grid for gear and one for control devices, shared addresses marked, a group matrix, and the switches seen. Selecting an address shows its record. Gear offers **Identify** and **Status**, a control device **Instances**. **Discover** runs `discover`. The map is this session's inventory, so a new session starts empty |
+  | The page's own lines | `schema` and `export inventory` run as quiet lines: their output fills the views, not the terminal. They take their turn like any other line. Neither touches the bus |
   | `GET /ws` is the session | Each client text frame is one line, fed to the shell as typed. Output goes out as text frames, gathered as on TCP. The prompt is a frame of its own, `> `, which tells the page a command has finished. A byte above 0x7F in output is sent as `?`, so every frame is valid UTF-8 |
   | Only this device's own page connects | `Host` must be the address the connection reached, `<name>`, `<name>.local` or an `allowed_hosts` entry, on the web port. An upgrade's `Origin` must be `http://` plus that `Host`. Refusals name the sender at WARN. `dali_web_route()` decides |
   | Framing is refused | The page head forbids it (`X-Frame-Options`, `frame-ancestors`) |

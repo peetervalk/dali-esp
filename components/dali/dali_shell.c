@@ -4920,8 +4920,12 @@ static void cmd_export_inventory(void)
     shell_printf("{\r\n");
     /* 2 adds the Bank 0 identity block, level window, dimming curve and scene
      * levels — the fields a restore needs. A version-1 consumer sees only new
-     * optional keys, but a restore reading a version-1 export has no anchor. */
-    shell_printf("  \"schema_version\": 2,\r\n");
+     * optional keys, but a restore reading a version-1 export has no anchor.
+     * 3 adds the addresses more than one unit answers at: `contested_gear`,
+     * `undecodable_device`, and `identity_collision` on a listed device. A
+     * version-2 export left out every address whose reply did not decode, so
+     * it read a shared address as a free one. */
+    shell_printf("  \"schema_version\": 3,\r\n");
     shell_printf("  \"devices\": [\r\n");
     bool first_device = true;
     if (has_inventory) {
@@ -4942,6 +4946,11 @@ static void cmd_export_inventory(void)
 
             shell_printf("    { \"address\": %u, \"present\": true",
                    (unsigned)addr);
+            /* It answered as one unit, but its identity read collided: more
+             * than one unit is on this address. Also in contested_gear. */
+            if (entry->has_identity_collision) {
+                shell_printf(", \"identity_collision\": true");
+            }
             if (entry->has_status) {
                 shell_printf(", \"status\": %u, \"status_hex\": \"0x%02X\"",
                        (unsigned)entry->status,
@@ -5160,6 +5169,36 @@ static void cmd_export_inventory(void)
         }
     }
     shell_printf("\r\n  ],\r\n");
+
+    /*
+     * Shared addresses, in each space. `devices` lists only addresses that
+     * answered as one unit, so an address whose reply did not decode appears
+     * nowhere else. contested_gear is dali_discovery_gear_address_contested(),
+     * the one test every consumer that reserves a gear address uses: it holds
+     * the undecodable addresses and the identity collisions both.
+     */
+    uint64_t contested_gear = 0u;
+    uint64_t undecodable_device = 0u;
+    if (has_inventory) {
+        for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+            const DaliDiscoveryDeviceInfo *entry =
+                dali_discovery_inventory_get(inventory, addr);
+            if (entry == NULL) {
+                continue;
+            }
+            if (dali_discovery_gear_address_contested(entry)) {
+                contested_gear |= (uint64_t)1u << addr;
+            }
+            if (entry->has_undecodable_device_activity) {
+                undecodable_device |= (uint64_t)1u << addr;
+            }
+        }
+    }
+    shell_printf("  ");
+    dali_cli_print_json_address_list(&s_out, "contested_gear", contested_gear);
+    shell_printf(",\r\n  ");
+    dali_cli_print_json_address_list(&s_out, "undecodable_device", undecodable_device);
+    shell_printf(",\r\n");
 
     shell_printf("  \"switches\": [\r\n");
     for (uint8_t i = 0u; i < mapping_count; i++) {

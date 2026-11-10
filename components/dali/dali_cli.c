@@ -1591,10 +1591,17 @@ static void cli_chunk_json_string(DaliCliChunk *chunk, const char *text)
     }
 }
 
+/*
+ * `commissioning` is set for the special table only. Each of its entries then
+ * says whether dali_cli_special_is_commissioning() marks it, so a client can
+ * grey out exactly the names the session policy refuses rather than the whole
+ * verb.
+ */
 static void cli_schema_gear_table(DaliCliChunk *chunk,
                                   const char   *label,
                                   uint8_t       count,
-                                  const DaliCliGearCommand *(*at)(uint8_t))
+                                  const DaliCliGearCommand *(*at)(uint8_t),
+                                  bool          commissioning)
 {
     cli_chunk_printf(chunk, "  \"%s\": [", label);
     for (uint8_t i = 0u; i < count; i++) {
@@ -1604,9 +1611,14 @@ static void cli_schema_gear_table(DaliCliChunk *chunk,
         }
         cli_chunk_printf(chunk, "%s\n    {\"name\": \"", i == 0u ? "" : ",");
         cli_chunk_json_string(chunk, cmd->name);
-        cli_chunk_printf(chunk, "\", \"needs_param\": %s, \"max_param\": %u}",
+        cli_chunk_printf(chunk, "\", \"needs_param\": %s, \"max_param\": %u",
                          cmd->needs_param ? "true" : "false",
                          (unsigned)cmd->max_param);
+        if (commissioning) {
+            cli_chunk_printf(chunk, ", \"commissioning\": %s",
+                             dali_cli_special_is_commissioning(cmd->id) ? "true" : "false");
+        }
+        cli_chunk_putc(chunk, '}');
     }
     cli_chunk_puts(chunk, "\n  ],\n");
 }
@@ -1684,9 +1696,9 @@ void dali_cli_print_schema(const DaliCliOut *out,
     }
     cli_chunk_puts(&chunk, "\n  ],\n");
 
-    cli_schema_gear_table(&chunk, "query", dali_cli_query_count(), dali_cli_query_at);
-    cli_schema_gear_table(&chunk, "special", dali_cli_special_count(), dali_cli_special_at);
-    cli_schema_gear_table(&chunk, "config", dali_cli_config_count(), dali_cli_config_at);
+    cli_schema_gear_table(&chunk, "query", dali_cli_query_count(), dali_cli_query_at, false);
+    cli_schema_gear_table(&chunk, "special", dali_cli_special_count(), dali_cli_special_at, true);
+    cli_schema_gear_table(&chunk, "config", dali_cli_config_count(), dali_cli_config_at, false);
 
     /* DT6/DT8 and the instance tables carry different fields, so they are
      * emitted by name only: a completer needs the spelling, and anything more
@@ -1752,6 +1764,29 @@ static size_t cli_append(char *buf, size_t cap, size_t len, const char *fmt, ...
         return cap - 1u;  /* vsnprintf terminated at the boundary */
     }
     return len + (size_t)written;
+}
+
+void dali_cli_print_json_address_list(const DaliCliOut *out,
+                                      const char       *key,
+                                      uint64_t          mask)
+{
+    if (key == NULL) {
+        return;
+    }
+    /* Built whole and written once: 64 addresses at most, each two digits and
+     * a separator, fit DALI_CLI_ADDRESS_LIST_MAX with a key of up to 32. */
+    char   line[DALI_CLI_ADDRESS_LIST_MAX];
+    size_t len   = cli_append(line, sizeof(line), 0u, "\"%s\": [", key);
+    bool   first = true;
+    for (uint8_t addr = 0u; addr < 64u; addr++) {
+        if ((mask & ((uint64_t)1u << addr)) == 0u) {
+            continue;
+        }
+        len   = cli_append(line, sizeof(line), len, first ? "%u" : ", %u", (unsigned)addr);
+        first = false;
+    }
+    cli_append(line, sizeof(line), len, "]");
+    dali_cli_write(out, line);
 }
 
 size_t dali_cli_format_status(char *buf, size_t cap, uint8_t raw)
