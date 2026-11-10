@@ -222,9 +222,6 @@ void DaliShellServer::write_ws(const char *text, size_t len)
         text += take;
         len -= take;
     }
-    if (out_len_ > 0u && out_data()[out_len_ - 1u] == '\n') {
-        flush_output();
-    }
 }
 
 void DaliShellServer::send_ws_control(DaliWebWsOpcode opcode, const uint8_t *payload,
@@ -259,14 +256,23 @@ void DaliShellServer::send_ws_close(DaliWebWsCloseCode code, const char *reason)
  * several calls. Sent as written, under TCP_NODELAY each piece is a segment of
  * its own, and ESP-IDF's lwIP gives every segment a full-MSS buffer until it is
  * acknowledged. A verb that wrote a character at a time once held about 28 kB
- * that way. So writes are gathered and sent:
- * - when a write ends a line;
- * - before the shell waits on the bus, from aborted_cb();
+ * that way, and `help`, sent a line at a time, about 20 kB. So writes are
+ * gathered and sent only when the shell is about to wait, or has finished:
+ * - before every bus wait, from aborted_cb();
+ * - before the bus claim that starts a walk, from bus_claim_cb(), because a
+ *   claim can wait seconds for queued traffic to drain;
  * - after the prompt, once per pass of the session loop in session_tick();
  * - when the next write would not fit.
- * An operator sees each line as soon as it is complete, and a partial line no
- * later than the bus wait that follows it. A WebSocket session gathers the
- * same way, and each send is one text frame.
+ *
+ * A line end is not a reason to send. The lines printed between two waits are
+ * produced microseconds apart, so sending them together costs the operator
+ * nothing, and a verb that prints a hundred lines without waiting goes out in a
+ * few full segments instead of a hundred short ones. A line printed just before
+ * a wait still goes out at that wait. The only waits that pass through neither
+ * hook are short: the walks' settle delays, 100 ms at most, and a PHY reset,
+ * under 1 s.
+ *
+ * A WebSocket session gathers the same way, and each send is one text frame.
  */
 void DaliShellServer::write_cb(void *ctx, const char *text)
 {
@@ -293,14 +299,11 @@ void DaliShellServer::write_cb(void *ctx, const char *text)
     }
     memcpy(self->out_data() + self->out_len_, text, len);
     self->out_len_ += len;
-    if (text[len - 1u] == '\n') {
-        self->flush_output();
-    }
 }
 
 /*
- * The shell asks this before every wait on the bus, so it is where a partial
- * line goes out rather than being held through the wait. A send that fails
+ * The shell asks this before every wait on the bus, so it is where gathered
+ * output goes out rather than being held through the wait. A send that fails
  * here also finds a dead peer before the wait instead of after it.
  */
 bool DaliShellServer::aborted_cb(void *ctx)
@@ -319,6 +322,9 @@ bool DaliShellServer::bus_claim_cb(void *ctx, const char *what)
     if (self == nullptr || self->parent_ == nullptr) {
         return false;
     }
+    /* A claim waits up to 5 s for queued traffic to drain, so what the verb has
+     * printed so far goes out first. */
+    self->flush_output();
     return self->parent_->try_claim_bus(what);
 }
 
@@ -853,8 +859,8 @@ void DaliShellServer::session_tick()
             end_session(SessionEnd::IDLE, DALI_WEB_WS_CLOSE_GOING_AWAY, "idle timeout");
         }
 
-        /* The prompt has no line end, so it goes out here, as does any partial
-         * line, before select() waits again. */
+        /* Whatever is gathered, the prompt and pumped trace lines included,
+         * goes out here before select() waits again. */
         flush_output();
     }
 

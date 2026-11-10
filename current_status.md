@@ -352,7 +352,7 @@ Protocol and state correctness come before broad new device support.
   | A vanished client is reclaimed | TCP keepalive (30 s idle, then 3 probes 5 s apart) frees it in about 45 s |
   | An unused terminal is closed | after `idle_timeout` |
   | Sockets are counted | The listener and its one client are registered with ESPHome's socket count, adding two lwIP sockets |
-  | Output goes out a line or more per send | Writes gather in a 512 B buffer, sent at a line end, after the prompt, before each bus wait, or when full. Under `TCP_NODELAY`, ESP-IDF's lwIP holds a full-MSS buffer per unacknowledged segment, however short |
+  | Output goes out when the shell waits | Writes gather in a 512 B buffer, sent before each bus wait, before the bus claim that starts a walk, after the prompt, or when full; never merely at a line end. Under `TCP_NODELAY`, ESP-IDF's lwIP holds a full-MSS buffer per unacknowledged segment, however short, so a verb that prints a hundred lines at once goes out in a few full segments |
   | The session shares the loop's core and priority | The task runs at priority 1 on core 1 beside ESPHome's loop, so FreeRTOS time-slices the two. Bus timing stays with the DALI task (10) |
 
   `schema` writes its JSON in 159-byte chunks, about a hundred writes on
@@ -564,14 +564,16 @@ Facts about the code as it stands. Each has its fix, decision or measurement in
   its task for the whole verb, so a page load or a second browser waits until
   it ends: tens of seconds for a `discover`. *A browser GUI for the shell*,
   *Transport*.
-- **A running verb cannot be stopped,** from the page or over TCP. Closing the
-  tab is noticed only when a send fails. *A browser GUI for the shell*,
-  *Transport*.
+- **A running verb cannot be stopped,** from the page or over TCP. A dropped
+  connection is noticed at the verb's next write. A WebSocket close frame is
+  not read until the verb ends, so a browser that closes a tab politely and
+  waits leaves the verb running. *A browser GUI for the shell*, *Transport*.
+- **Trace lines raised during a verb are lost,** on both network bindings,
+  all but the last 16. The rest are reported as `[trace] N line(s) dropped`
+  at the prompt. *P2 — Network trace loses what a verb puts on the bus*.
 - **Plain HTTP with no authentication.** Anyone who can reach the port on the
   LAN can use the shell, as with the TCP port and OTA. An HTTPS dashboard
   cannot embed the page.
-- **The 16 kB heap floor is a guard, not a measurement.** *A browser GUI for
-  the shell*, *Budget*.
 - **IPv4 only.** The listener is `AF_INET`.
 
 **Tools**

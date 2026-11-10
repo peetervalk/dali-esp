@@ -36,6 +36,219 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-11-11 (output sent only when the shell waits; uncommitted on `dev` at `d1bd007`)
+
+The fix for `help`'s heap dip, measured in *Verified on 2026-11-11 on 1k and
+2k (the web shell on a device)* below. The operator approved it the same day.
+
+- **What changed,** in `dali_shell_tcp.cpp` only:
+  - `write_cb()` and `write_ws()` no longer send at a line end.
+  - `bus_claim_cb()` sends what is gathered before it claims the bus, because
+    a claim waits up to 5 s (`BUS_CLAIM_DRAIN_WAIT_MS`) for queued traffic to
+    drain.
+  - Output still goes out from `aborted_cb()` before every bus wait, from
+    `session_tick()` after the prompt, and when the 512 B buffer is full.
+- **Every wait in the shell was checked first.**
+  - Each transaction and each sequence calls the abort hook before it waits:
+    `shell_sched_sync_impl()` and `shell_sched_sequence_sync()`.
+  - So does the listening loop in `find switches`, every 50 ms.
+  - Two waits pass through neither hook, and both are short: the walks'
+    settle delays, through `shell_discovery_delay_ms()` (40 ms quiescent, 100 ms
+    randomise), and `shell_reset_sync()`, under 1 s.
+  - The cleanup frames that release a bracket do not call the hook. A walk's
+    last lines can wait behind them, for a few frames.
+- **Type-checked, not built.** The edited `dali_shell_tcp.cpp` and the
+  committed one both compile cleanly with `-fsyntax-only`, with no warning,
+  using the flags and toolchain of `_local/.esphome/build/dali-2k`. That tree
+  dates from August, before `dali_web`, so its ESPHome headers are old. A
+  planted typo failed as expected, which shows the check sees the file.
+- **Nothing in `components/dali` changed,** so the host suites and the native
+  build were not rerun.
+
+Not covered: an image, a device, and the heap reading the fix is for. The
+procedure is *Output sent only when the shell waits* in Part 1 of `todo.md`.
+
+### Verified on 2026-11-11 on 1k and 2k (the web shell with bus traffic; `d1bd007`, ESPHome 2026.10.2)
+
+The bus half of *The web shell* in `todo.md`, run with the operator's go-ahead
+by the same Python client as the entry below. The operator excluded `identify`
+on 2k and allowed it on 1k a0. Leaving mid-walk was run on 1k only. 1k has no
+control devices, so its walk's quiescence bracket has nothing to leave
+quiesced.
+
+- **From the operator, in a browser:** Help and Map look right, and so does
+  phone width. The operator also reports that the Casambi CBU-DCS is no
+  longer on 2k.
+- **`discover` streams.** On 1k each address line arrived as the walk
+  finished that address, about 2.15 s apart: 20 frames over 44.7 s, the prompt
+  last. 2k was the same, over 27 s.
+- **What the Map draws,** from `export inventory` in the same session as the
+  walk:
+  - **1k:** 16 LED gear at a0–a15, in groups 0 and 2–7 as recorded. Nothing
+    contested or undecodable.
+  - **2k:** a0–a4, all in g0, with the Steinel's four instances at address 0.
+    `contested_gear` is empty, so a3 no longer holds two lamps. Nothing
+    answered at d1, where the Casambi was, or at a5.
+  - A new session starts with an empty inventory, as *Map* step 1 expects.
+- **`identify a0` on 1k** blinked a0 between min and max for 10 s, then
+  switched it off again. The operator saw it. `status a0` then read the lamp
+  off.
+- **Waiting on a verb, on 1k.** With `discover` running, a `GET /` on a second
+  connection waited 41.7 s. It was served as the walk ended, and the upgrade
+  after it got 1013.
+- **Leaving mid-walk, on 1k.**
+  - **Closing the connection** 8 s into `discover` ended the session 2.6 s
+    later, at the walk's next write. When the client process exited mid-walk,
+    the session ended 2 s later in the same way.
+  - **A close frame, with the connection kept open, did not stop it.** The
+    walk ran its full 44.7 s, and only then did the device answer with 1000.
+    The binding reads nothing while a verb runs.
+  - So whether closing a tab stops a verb depends on the browser: whether it
+    drops the connection or waits for the closing handshake. No browser has
+    been observed yet.
+- **Trace, on 2k.**
+  - **Between commands,** `[BUS]` lines arrived as they happened: the
+    integration's own Steinel polls and their replies, and the Steinel's
+    events, `RX 0x008001` about every 3 s and `RX 0x00840C`.
+  - **During `discover`, none arrived.** At the prompt the device reported
+    `[trace] 926 line(s) dropped`, and 925 on the second walk. Filed as *P2 —
+    Network trace loses what a verb puts on the bus*.
+  - **Every RX that follows any TX carries the time since it,** so an event
+    9.9 s after a poll reads `9923.9 ms after TX`. Noted against the frame
+    decoder in Part 3 of `todo.md`.
+- **The quiescence bracket released after both 2k walks.** The Steinel's
+  events resumed within a second of each walk ending. The device log shows
+  `Bus claimed by scan` and nothing about the release.
+
+Not covered:
+
+- a second browser tab;
+- closing a real browser tab mid-verb;
+- Help under a refusing policy;
+- the access point;
+- trace during a verb on the TCP binding. It drains the same buffer in the
+  same place, so the same loss is expected.
+
+### Verified on 2026-11-11 on 1k and 2k (the web shell on a device; `d1bd007`, ESPHome 2026.10.2)
+
+Steps 3a and 3b of *A browser GUI for the shell* in `todo.md`, on a device for
+the first time. Nothing here put a frame on the bus.
+
+- **The build.** The operator flashed both nodes from `ref: dev` at `d1bd007`,
+  first on the evening of 2026-11-10 and again at 00:14 on 2026-11-11 to add a
+  `restart` button to `_local/dali-1k.yaml` and `_local/dali-2k.yaml`. The
+  devices report ESPHome 2026.10.2, compiled at 00:14, not the 2026.10.0 pin in
+  `pyproject.toml`. `Reset reason` read `Reboot request from esphome.ota`.
+- **The evening before,** the operator opened the page in a browser on both
+  nodes and reports that it works and that heap use is small. Which views and
+  verbs were used was not recorded. Home Assistant shows the low-water mark
+  falling in the minute after each boot: on 2k from 92,780 B to 78,944 B, on
+  1k from 80,344 B to 74,692 B. No 10 s free-heap sample caught either dip.
+- **The client for everything below** was a Python script on the workstation
+  (192.168.1.246), not a browser. It sends what the page sends: the same
+  handshake, `Origin` as `http://` plus `Host`, and one masked text frame per
+  line. Each refusal came from a request made by hand. The 2k device log was
+  streamed with `uv run esphome logs` for the refusal checks.
+
+**Heap, one step every 30 s from a fresh boot.** `Heap min free (internal)`
+latches, so each step was spaced to land in its own 10 s sample. Nothing used
+the shell between the boot and the first step.
+
+| Step | 2k, min free after | 1k, min free after |
+|---|---|---|
+| Boot, settled | 94,432 B | 78,568 B |
+| Page load, 46,964 B in 0.10–0.13 s | 92,896 B (−1,536) | 77,568 B (−1,000) |
+| Second page load | 92,728 B (−168) | 77,408 B (−160) |
+| Session opened, idle | unchanged | unchanged |
+| `schema`: 15,971 B in 36 frames | unchanged | unchanged |
+| `export inventory`: 260 B, nothing discovered since boot | 92,696 B (−32) | unchanged |
+| `help`: 4,405 B in 116 frames, in 0.25 s | **83,304 B (−9,392)** | **72,784 B (−4,624)** |
+| Session closed | unchanged | unchanged |
+
+- **An open session holds 300–500 B.** Free heap read 105,772–106,116 B on 2k
+  with the session open, and 106,300 B before and after. On 1k it was
+  90,440–90,784 B open, against 91,148 B before.
+- **The sensor shows only the part of a dip below the previous floor.** It sums
+  each region's own low-water mark. Most free RAM is one region here, with the
+  largest block 98,304 B of 106,472 B on 2k. So a dip's depth is about the
+  drop plus the gap between free heap and the floor at that moment, which was
+  12–13 kB on both nodes. On that reading:
+  - **A page load costs about 13.5 kB on both nodes.** That is about the
+    5,760 B send buffer held twice, once by lwIP and once by the Wi-Fi driver.
+    The 16 kB floor in `dali_shell_web.cpp` is enough to serve one.
+  - **`help` costs about 23 kB on 2k and 18 kB on 1k.**
+  - Opening a session, `schema` and `export inventory` stayed within the gap,
+    so each cost less than about 12 kB.
+- **`help` is the many-small-segments burst again.** Both bindings flush at
+  every line end, so `help` goes out as 116 frames, one per line, where
+  `schema` makes 36 of 512 B. Under `TCP_NODELAY` up to 16 segments wait for
+  an ACK, each in a full-MSS buffer: the mechanism of the 2026-11-09 `schema`
+  spike, a line at a time instead of a byte at a time. Filed in `todo.md` as
+  *P2 — A fast multi-line verb goes out one segment per line*.
+
+**The page and its refusals, on 2k.** Each answer and log line was as
+specified:
+
+| Request | Answer | Device log |
+|---|---|---|
+| `GET /` with `Host` `dali-2k.local:8080`, `192.168.1.216:8080`, `dali-2k:8080` or `DALI-2K.Local:8080` | 200, gzip, `X-Frame-Options: DENY`, `frame-ancestors 'none'` | D, served |
+| `Host` `evil.example:8080`, `dali-2k.local` (no port, so 80), or `dali-2k.local:8081` | 403 | W, naming the sender and `Host` |
+| `/nothing`, `/index.html` | 404 | I |
+| `/ws` without upgrade headers | 426, with `Upgrade: websocket` and `Sec-WebSocket-Version: 13` | I |
+| `/?q=1` | 200 | D |
+| Upgrade with `Origin` `http://homeassistant.local:8123` | 403 | W |
+| Upgrade with no `Origin` | 403 | W |
+| `Origin` with a trailing slash, with `https://`, or naming `.local` while `Host` is the IP | 403 | W |
+| `Origin` matching `Host` in other letter case | 101 | I, session opened |
+| Upgrade with a byte after the head | 400 | I |
+| `Sec-WebSocket-Version: 8` | 426 | I |
+| `Host` and `Origin` both `evil.example:8080`, as DNS rebinding sends them | 403, on `Host` | W |
+| A request line with spaces in its target | 400 | I |
+
+The last row was an accident: Git Bash rewrites an argument that starts with
+`/` into a Windows path before a native program sees it, so `/nothing` went
+out as `C:/Program Files/Git/nothing`. Set `MSYS_NO_PATHCONV=1`, or use
+PowerShell, for this kind of test.
+
+**The session, on 2k.**
+
+- **A second upgrade during a web session** got 101 and then close 1013,
+  `DALI shell busy: another session is connected.`, logged at W.
+- **During a TCP session,** `GET /` was served and an upgrade got 1013.
+- **During a web session,** a TCP client connected and received nothing for
+  4 s. Its banner arrived 10 ms after the web session closed.
+- **Ping** got a pong with the same payload, and a line after it ran.
+- **Malformed frames** each closed the session with the RFC's code and the
+  reason the page shows, logged at W: binary 1003, a LF inside a text frame
+  1007, an unmasked frame 1002, and a frame with FIN clear 1009.
+- **Close:** ours with 1000 was answered with 1000, then the device closed the
+  connection. No frame from the device was masked or fragmented, across every
+  session.
+- **HTTP to the TCP port,** as `curl --http0.9 --data-binary $'x\r\nhelp\r\n'`,
+  got the banner, the prompt and `HTTP request refused: this port is the DALI
+  shell, not a web server.`, with no `help` output. The W line named the
+  sender. curl then reports a reset, because the TCP binding closes without
+  reading the rest of the request, as it did before the `select()` rewrite.
+- **`export config`** printed `web:` with `port: 8080` under `shell:`. Neither
+  node sets `allowed_hosts`, and the printer writes the list only when there
+  is one, so those lines were not exercised.
+- **The idle timeout, on 1k at `idle_timeout: 10min`.** A web session that
+  sent nothing was closed after 600.2 s with 1001, `idle timeout`. The log
+  read `Shell session closed on idle timeout`.
+
+Not covered:
+
+- **Anything that needs a browser:** the Help and Map views, the status line,
+  phone width, and the access point. The cross-origin check was made with a
+  hand-written `Origin`, which exercises the device's decision. That a browser
+  sends its real `Origin` is the browser's part.
+- **Anything that needs bus traffic:** `discover` streaming into the page,
+  trace lines, Identify, a page load waiting on a verb, and closing a tab
+  mid-verb.
+- **The 503 below the heap floor.**
+- **The other TCP checks after the rewrite:** the send timeout, keepalive, a
+  second TCP client and `--list`, and connections in the first 30 s after boot.
+
 ### Verified locally on 2026-11-10 (Help and Map, step 3b; uncommitted on `dev` at `f8e3a29`)
 
 Step 3b of *A browser GUI for the shell* in `todo.md`. The operator approved

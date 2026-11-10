@@ -46,9 +46,27 @@ At tagging:
     rather than in `accept()` and `recv()`. What a TCP client sees is
     unchanged.
 
-  **Unverified:** `dali_test.yaml` compiles on ESPHome 2026.10.0, and the
-  schema refuses six bad blocks. Not flashed, and no browser has opened the
-  page. The TCP binding's restructure has not run on a device either.
+  **Hardware-verified on 1k and 2k, in part,** on ESPHome 2026.10.2. A test
+  client that speaks to the device as the page does passed:
+  - every `Host` and `Origin` refusal, and the 404 and 426 answers;
+  - the busy close, 1013, and the RFC close codes for bad frames;
+  - the TCP port's HTTP refusal, after the restructure;
+  - the hand-over between a web and a TCP session;
+  - with bus traffic: `discover` arriving a line at a time, a page load
+    waiting for a running verb and then served, and a dropped connection
+    ending a walk at its next write.
+
+  A page load costs about 13.5 kB of heap while it streams. The operator has
+  used the page in a browser on both nodes. Not yet checked on a device:
+  - a second tab, closing a tab mid-verb, and the access point;
+  - the 503;
+  - the TCP binding's send timeout and keepalive since the restructure.
+
+  Trace lines raised during a verb are lost on both network bindings; see
+  *Network trace loses what a verb puts on the bus* in `todo.md`.
+
+  `dali_test.yaml` compiles on 2026.10.0, and the schema refuses six bad
+  blocks.
 
 - **The browser page gains Help and Map.** Step 3b.
   - **Help** lists every verb from `schema`, with what the session's policy
@@ -62,10 +80,17 @@ At tagging:
     the terminal.
   - The page is now about 47 kB in flash, most of it the reference.
 
-  **Unverified on a device.** Driven in headless Edge against a mock of the
-  web port that serves the page as codegen builds it and answers with the real
-  `schema` output: 34 checks pass at phone and desktop widths, with no script
-  error. `dali_test.yaml` compiles.
+  **Hardware-verified on 1k and 2k, in part.**
+  - The operator found Help and Map working in a browser, at phone width too.
+  - The inventory the Map draws matched both buses after a `discover`.
+  - On 1k, `identify a0`, the line Identify sends, blinked a0 and switched it
+    off again.
+
+  Not checked: Help under a refusing policy. Before the device, the page was
+  driven in headless Edge against a mock of the web port that serves the page
+  as codegen builds it and answers with the real `schema` output: 34 checks
+  pass at phone and desktop widths, with no script error. `dali_test.yaml`
+  compiles.
 
 ### Changed
 
@@ -147,12 +172,29 @@ At tagging:
     the old output under both policies, and four new `test_cli` vectors. A
     mutation pass killed 9 of 10 mutants; the tenth is equivalent on today's
     tables.
-  - **The TCP binding gathers writes in a 512 B buffer.** It sends at a line
-    end, after the prompt, before each bus wait, or when the buffer is full.
+  - **The TCP binding gathers writes in a 512 B buffer.** It sends after the
+    prompt, before each bus wait, or when the buffer is full. It also sent at
+    every line end until the next item.
 
   **Hardware-verified on 2k, for the last two together:** opening an
   interactive session no longer dips free heap, and the prompt arrives at once.
   Connections in the first 30 s after boot were not recorded.
+
+- **A verb that printed many lines at once still briefly took about 20 kB of
+  heap,** on both network shells.
+  - **Both bindings also sent at every line end.** So `help`, 116 short lines
+    in 0.25 s, went out as 116 segments, each holding a full-MSS buffer until
+    acknowledged. That is the `schema` mechanism above, a line at a time.
+  - **Measured on 2026-11-11:** `help` lowered the min-free floor by 9.4 kB on
+    2k and 4.6 kB on 1k, an estimated dip of 23 kB and 18 kB.
+
+  Both bindings now send only before the shell waits, after the prompt, or
+  when the 512 B buffer is full. The waits are each bus wait and the bus claim
+  that starts a walk. A line printed before a wait still goes out at that
+  wait, so what an operator sees is unchanged.
+
+  **Unverified:** `dali_shell_tcp.cpp` type-checks against the toolchain and
+  headers of an existing build tree. Not built into an image, and not flashed.
 
 - **The component did not compile with `psram:` on an ESP32 or ESP32-S3.**
   A config with a DALI light or sensor failed with `static assertion failed:

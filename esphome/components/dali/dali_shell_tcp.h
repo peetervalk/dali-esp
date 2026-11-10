@@ -157,7 +157,8 @@ class DaliShellServer : public Component {
   void end_session(SessionEnd why, DaliWebWsCloseCode code = DALI_WEB_WS_CLOSE_NORMAL,
                    const char *reason = nullptr);
 
-  // Output is gathered and sent a line or more at a time; see the note above
+  // Output is gathered and sent before the shell waits, after the prompt, or
+  // when the buffer is full, never merely at a line end; see the note above
   // write_cb() in the .cpp. A WebSocket session sends each flush as one text
   // frame, its header written into the room kept in front of the data.
   void  send_all(const char *data, size_t len);
