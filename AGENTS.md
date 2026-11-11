@@ -289,4 +289,4 @@ Four workflows in `.github/workflows/`:
     Home Assistant builds with. A tag can pass one and fail the other.
 - The two builds compile the same `components/dali` C with different
   toolchains. ESPHome builds with the IDF its version recommends: 5.5.6 at the
-  2026.10.0 pin. The native build pins IDF 6.0.1.
+  2026.10.2 pin. The native build pins IDF 6.0.1.

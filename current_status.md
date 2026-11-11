@@ -19,7 +19,7 @@ constraints, the documentation rules, and the build, test and CI notes.
 
 | | |
 |---|---|
-| Latest tag | `v3.0.0`. `main` is the tag, and the tagged tree pins it |
+| Latest tag | `v3.1.0`. `main` is the tag, and the tagged tree pins it |
 | Next release | Not planned. What `dev` changes after the tag collects in `CHANGELOG.md` under *Unreleased* |
 | `dev` vs `main` | `dev` carries everything since the tag |
 
@@ -346,14 +346,14 @@ Protocol and state correctness come before broad new device support.
 
   | Behaviour | How |
   |---|---|
-  | One session at a time | A second client waits in the listen backlog until the first ends. While any session is open, TCP or web, the TCP listener is not watched |
+  | One session at a time | A second client waits in the listen backlog until the first ends. While any session is open, TCP or web, the TCP listener is not watched. The backlog holds two, and a waiting client that closes politely keeps its place until the session ends, so after two such a further connect times out unanswered. `tools/dali-shell`'s probes close that way |
   | Browser requests are refused | A connection that opens with an HTTP request line is closed before any of its lines is dispatched. The device logs the sender's address at WARN. `dali_cli_peer_sniff()` decides, within the first line |
-  | A client that stops reading is dropped | A send that makes no progress for 10 s (`SO_SNDTIMEO`) marks the peer lost, which ends a running workflow at its next step |
+  | A client that stops reading is dropped | A send that makes no progress for 10 s (`SO_SNDTIMEO`) marks the peer lost, which ends a running workflow at its next step. A send that moved part of its bytes before timing out is retried, so a client that stops reading is dropped 10–20 s later. The log then reads only `Shell session closed` |
   | A vanished client is reclaimed | TCP keepalive (30 s idle, then 3 probes 5 s apart) frees it in about 45 s |
   | An unused terminal is closed | after `idle_timeout` |
   | Sockets are counted | The listener and its one client are registered with ESPHome's socket count, adding two lwIP sockets |
   | Output goes out when the shell waits | Writes gather in a 512 B buffer, sent before each bus wait, before the bus claim that starts a walk, after the prompt, or when full; never merely at a line end. Under `TCP_NODELAY`, ESP-IDF's lwIP holds a full-MSS buffer per unacknowledged segment, however short, so a verb that prints a hundred lines at once goes out in a few full segments |
-  | Trace arrives during a verb | `trace on` lines raised on the DALI task wait in a 16-line ring. It is emptied between verbs, and before each bus wait while the output stands at a line start, so a verb's own traffic interleaves with its output, one wait behind. Lines that overflow the ring are reported as `[trace] N line(s) dropped` |
+  | Trace arrives during a verb | `trace on` lines raised on the DALI task wait in a 16-line ring. It is emptied between verbs, and before each bus wait while the output stands at a line start, so a verb's own traffic interleaves with its output, one wait behind. Lines that overflow the ring are reported as `[trace] N line(s) dropped`. Lines pumped after the prompt follow it: over TCP on the prompt's own line, as `> [BUS] TX ...`, while the web binding sends the prompt in a frame of its own. These are lines raised between commands, and those of the frames that close a walk |
   | The session shares the loop's core and priority | The task runs at priority 1 on core 1 beside ESPHome's loop, so FreeRTOS time-slices the two. Bus timing stays with the DALI task (10) |
 
   `schema` writes its JSON in 159-byte chunks, about a hundred writes on

@@ -9,14 +9,22 @@ Dated evidence for every claim here is in [project_log.md](project_log.md).
 
 ## Unreleased
 
-Everything on `dev` since `v3.0.0`. New changes are added here as they land.
+Everything on `dev` since `v3.1.0`. New changes are added here as they land.
 
 At tagging:
 
-- check each claim against the tree (`git grep <symbol> v3.0.0` settles most
+- check each claim against the tree (`git grep <symbol> v3.1.0` settles most
   of them in seconds)
 - re-check each label against `project_log.md` and `todo.md`
 - rename this heading to the version
+
+Nothing yet.
+
+## v3.1.0
+
+The diagnostic shell in a browser, and fixes to the network shell's heap use
+and to `trace on`. Nothing breaks: `export inventory` moves to
+`schema_version` 3 by adding keys, and keeps every existing one.
 
 ### Added
 
@@ -57,16 +65,19 @@ At tagging:
     ending a walk at its next write.
 
   A page load costs about 13.5 kB of heap while it streams. The operator has
-  used the page in a browser on both nodes. Not yet checked on a device:
-  - a second tab, closing a tab mid-verb, and the access point;
+  used the page in a browser on both nodes. In Chrome, a second tab is told
+  the shell is busy, and closing a tab mid-`discover` ends the walk. Since the
+  restructure, a TCP client that stops reading is dropped in about 20 s, and
+  a second TCP client waits for the first. Not yet checked on a device:
+  - other browsers, and the access point;
   - the 503;
-  - the TCP binding's send timeout and keepalive since the restructure.
+  - the TCP binding's keepalive since the restructure.
 
   On that build, trace lines raised during a verb were lost on both network
   bindings; see the *Fixed* item on `trace on` below.
 
-  `dali_test.yaml` compiles on 2026.10.0, and the schema refuses six bad
-  blocks.
+  `dali_test.yaml` compiles on 2026.10.0 and 2026.10.2, and the schema
+  refuses six bad blocks.
 
 - **The browser page gains Help and Map.** Step 3b.
   - **Help** lists every verb from `schema`, with what the session's policy
@@ -101,7 +112,9 @@ At tagging:
   reply did not decode, so an address two units share appeared nowhere.
   Existing keys are unchanged. **Host-tested** in part: the address-list
   printer has three vectors. No vector covers the export itself; see *Host
-  vectors for the unasserted shell outputs* in `todo.md`.
+  vectors for the unasserted shell outputs* in `todo.md`. On 1k and 2k the
+  export ran at version 3 with both new lists empty, as neither bus has a
+  shared address. No bus has produced a non-empty one.
 - **`schema` marks the commissioning specials.** Each `special` entry carries
   `commissioning: true` or `false`, so a client can grey out exactly the nine
   names the policy refuses. **Host-tested:** one new vector checks every entry
@@ -119,11 +132,17 @@ At tagging:
   The `web:` binding above uses it. Out-of-tree build systems gain one more
   translation unit, `dali_web.c`.
   **Host-tested:** 59 vectors, the published FIPS 180 and RFC 4648/6455 ones
-  among them. A mutation pass killed 56 of 56 mutants. Not on a device, and
-  not driven by a browser.
+  among them. A mutation pass killed 56 of 56 mutants. On a device it runs
+  under the `web:` binding above, which a test client and Chrome have
+  driven.
 
 ### Changed — `dali-starter.yaml`
 
+- **The browser shell is on,** at `http://dali-starter.local:8080/`, with the
+  same session, policy and idle timeout as the TCP port. The README's example
+  configuration turns it on too. **Unverified** in these files: a copy of the
+  starter pointing at the working tree validates on ESPHome 2026.10.2. The
+  same `web:` block runs on 1k and 2k.
 - **No OTA password.** ESPHome warns that one wastes flash and RAM next to an
   API encryption key. The `ota_password` secret is no longer read.
   **Unverified:** validates and compiles on ESPHome 2026.10.0; not flashed.
@@ -136,7 +155,7 @@ At tagging:
 ### Changed — development
 
 - **ESPHome is pinned for development and CI.**
-  - `pyproject.toml` and `uv.lock` pin ESPHome 2026.10.0, and `uv run esphome`
+  - `pyproject.toml` and `uv.lock` pin ESPHome 2026.10.2, and `uv run esphome`
     builds with it.
   - `esphome-build.yml` installs from the same lock. Before, it took whatever
     `pip install esphome` resolved to on the day.
@@ -193,8 +212,9 @@ At tagging:
   that starts a walk. A line printed before a wait still goes out at that
   wait, so what an operator sees is unchanged.
 
-  **Unverified:** `dali_shell_tcp.cpp` type-checks against the toolchain and
-  headers of an existing build tree. Not built into an image, and not flashed.
+  **Hardware-verified on 1k and 2k:** `help` now goes out as 9 frames. After a
+  page load it lowered the floor by at most 748 B on 2k, and not at all on 1k.
+  `discover` still streams line by line.
 
 - **`trace on` over the network showed nothing of a verb's own traffic.**
   - Trace lines wait in a 16-line ring, and the bindings emptied it only
@@ -206,7 +226,9 @@ At tagging:
   output stands at a line start. A verb's frames therefore arrive while it
   runs, one wait behind, and never split a line it is printing.
 
-  **Unverified:** type-checked as above; not flashed.
+  **Hardware-verified:** a traced `discover` delivered 938 trace lines during
+  the walk on 2k over the web, and 2,086 on 1k over TCP. Neither dropped a
+  line or split one.
 
 - **The component did not compile with `psram:` on an ESP32 or ESP32-S3.**
   A config with a DALI light or sensor failed with `static assertion failed:

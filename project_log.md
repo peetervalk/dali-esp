@@ -36,6 +36,261 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-11-11 (`v3.1.0` release prep, code at `7512686`)
+
+The checks `todo.md` lists for a release. The code is `7512686`, the `dev`
+head that both nodes run and on which CI's Host Tests, ESP-IDF Build and
+ESPHome Build last passed. The release-prep change touches only
+documentation, the two pinned configs and the ESPHome pin. Nothing here
+touched a device or a bus.
+
+- **The ESPHome pin moved to 2026.10.2,** the newest release on PyPI, where
+  2026.11.0 is still in beta. It is also the version both nodes were built
+  with. `uv lock` changed only `esphome`. ESP-IDF stays at 5.5.6.
+- **`dali_test.yaml` compiles on 2026.10.2 with no warning.** It was built
+  as two throwaway copies with their own build directories, so as not to
+  touch the operator's: one as it is, and one without its `shell:` block.
+- **35/35 host suites build and pass** with MSYS2 UCRT64.
+- **The native firmware** was not built locally. CI's ESP-IDF Build passed on
+  `7512686`.
+- **`dali-starter.yaml` with `web:`.** The operator chose to turn the browser
+  shell on in the starter and in the README example. A copy of the starter
+  pointing at the working tree validates on 2026.10.2. Its pin to `v3.1.0`
+  fails `esphome config` until the tag exists.
+
+**Static DRAM and the shell's share, re-measured.** The README table is
+updated from this. `dali_test.yaml` has `web:` on, so the shell column
+includes the browser binding and its page.
+
+| Segment | With `shell:` | Without | Region |
+|---|---|---|---|
+| Static DRAM | 142,908 B (79.1%) | 71,428 B (39.5%) | 180,736 B (`dram0_0_seg`) |
+| ↳ `.bss` | 126,920 B | 55,472 B | |
+| ↳ `.data` | 15,828 B | 15,796 B | |
+| ↳ `.noinit` | 160 B | 160 B | |
+| IRAM (`.text` + `.vectors`) | 78,939 B (60.2%) | 78,939 B (60.2%) | 131,072 B |
+| App image | 1,088,688 B (59.3%) | 938,656 B (51.2%) | 1,835,008 B |
+| lwIP sockets | 17 | 12 | |
+
+- **The shell costs 71,480 B of RAM and 150,032 B of flash.** At `v3.0.0` it
+  cost 69,720 B and 92,652 B.
+- **`proto_dali_shell.c.obj` holds 69,588 B of static data, exactly as at
+  `v3.0.0`.** Every cache is the size it was. The 1,760 B more RAM is
+  outside it, presumably in the bindings. Not itemised.
+- **Of the 57,380 B more flash, 46,964 B is the gzipped page,**
+  `dali_shell_web_page_gz`, which sits in flash rodata.
+- **The web binding adds three lwIP sockets:** 17 with the shell, against 14
+  at `v3.0.0`.
+
+**`CHANGELOG.md` against the tree.**
+
+- **Every symbol the v3.1.0 section names as new is in `HEAD` and absent at
+  `v3.0.0`:** the `dali_web_*` functions, `dali_cli_print_schema()`,
+  `WEB_HEAP_FLOOR_BYTES`, `pump_trace()` and `at_line_start_`, and the
+  `contested_gear` and `identity_collision` keys. The lock-free assertions are
+  gone: `is_always_lock_free` was in three files at `v3.0.0` and is in none
+  now.
+- **The constants hold their stated values:**
+  - the heap floor, 16,384 B;
+  - the web port, 8080 by default, with 80 refused;
+  - the session task, priority 1;
+  - `DALI_CLI_FORMAT_MAX`, 160, so `schema` goes out in 159-byte chunks;
+  - the output buffer, 512 B;
+  - the inventory, `schema_version` 3.
+- **Labels brought up to date:**
+  - The two *Fixed* network-shell items are now hardware-verified, from the
+    entry below this one.
+  - Step 3a now covers Chrome, the send timeout and a second client.
+  - `dali_web` now notes that it runs on a device and has been driven by a
+    browser.
+  - `export inventory` version 3 notes that it ran on both buses, with both
+    new lists empty.
+- **One item added:** the starter's `web:` block, under *Changed —
+  `dali-starter.yaml`*, labelled unverified in that file.
+
+Not covered: a flashed `v3.1.0` build. The nodes run `7512686`, and the tag
+adds only documentation and configs on top. CI and `release-packaging.yml`
+run on the tag only once it is pushed.
+
+### Verified on 2026-11-11 on 1k (the web shell in Chrome; the TCP send timeout and a second client; `7512686`, ESPHome 2026.10.2)
+
+Part of *The web shell* and *TCP shell hardening* in `todo.md`, on the build
+of the entry below. The operator did the browser steps in Chrome. The TCP
+steps were run with the operator's go-ahead, from the workstation, with the 1k
+device log streamed.
+
+**In Chrome, by the operator.**
+
+- **A second tab** reported the shell busy. **Reconnect** got a session once
+  the first tab was closed.
+- **Closing a tab mid-`discover` stops it.** The device log read `Bus claimed
+  by scan` at 01:54:12.415 and `Shell session closed` at 01:54:22.980. The
+  walk ended 10.6 s in, where a full 1k walk takes 44.7 s.
+  - So Chrome drops the connection when a tab closes, and the walk ends at
+    its next write. A browser that sent a close frame and waited would have
+    let it run to the end.
+  - When the tab closed was not recorded, so the delay after it is unknown.
+- **The `fetch()` to port 2323 from the Home Assistant page's devtools
+  console** did not complete: the operator reports devtools refused it. The
+  reason was not recorded, and the device logged no refusal.
+
+**The send timeout, from WSL Ubuntu.** The client set `SO_RCVBUF` to 1024
+before connecting (Linux reports 2,304), sent `schema` five times and never
+read.
+
+- **The session closed 20.5 s after it opened,** where `todo.md` expected
+  10–12 s. A client connecting 25 s in got the banner and prompt in 0.10 s.
+- **20 s is two timeouts.** `send_all()` retries a send that moved some bytes
+  before its 10 s `SO_SNDTIMEO` expired, and marks the peer lost only when one
+  moves nothing. The first send ran into the full window part way, and the
+  retry moved nothing. So a client that stops reading is dropped 10–20 s
+  later, and a client that trickles a few bytes per 10 s can hold it longer.
+- **The device log gives no reason.** It reads `Shell session closed`, where
+  the idle timeout reads `Shell session closed on idle timeout`.
+- **While stalled, the session held about 7.9 kB:** free heap fell from
+  89,492 B to 81,592 B, and came back when the session closed. Min free went
+  from 76,736 B to 73,548 B.
+
+**A second client, from the workstation.** The procedure asks for second and
+third machines. The device sees only connections, so one machine was used.
+
+- **A raw second connection while a session was open** connected and received
+  nothing for 5 s. Its banner and prompt arrived 0.10 s after the first
+  session closed.
+- **`dali-shell --list`** read `dali-1k  192.168.1.103  DALI shell on 2323, in
+  use`, and 2k as free. It printed the one-session note on stderr.
+- **`dali-shell` with no `--host`,** stdin not a terminal, listed both nodes
+  with 1k marked `(in use)`. It then failed with `no node chosen; pass --host
+  to skip the question`, as designed: Windows reports the NUL device as a
+  terminal.
+- **`dali-shell --host 192.168.1.103 help`, with the session still held,**
+  exited after 10.2 s with `cannot reach 192.168.1.103:2323: timed out`. The
+  procedure expected `sent no greeting in 10s: another session is probably
+  open`.
+- **With the session released 4 s in,** the same command connected and printed
+  `help` 4.1 s after it started.
+
+**Why the connect timed out: closed probes fill the backlog.**
+
+- The TCP listen backlog is 2 (`open_listener(port_, 2)`).
+- **A connection that closes politely keeps its place.** The `--list` probe
+  and the no-`--host` probe each connected, read silence and closed with a
+  FIN. Both stayed queued until the session ended, and then the device
+  accepted and closed each at once. So the third connection was never
+  answered.
+- **Reproduced by hand,** with a session held:
+  - Two probes closing with a FIN: a third connect timed out after 8 s.
+  - Two probes closing with a reset (`SO_LINGER` 0): a third connect was
+    accepted in 0.05 s, and got its banner as soon as the session ended.
+- **Even reset, the dead connections stay in the socket layer's queue.** When
+  the session ended, the device accepted each, logged `Shell session opened
+  from unknown`, and closed it within 8 ms. Only their place in the TCP
+  backlog was freed early. That is enough.
+- None of these steps moved min free.
+- Filed in `todo.md` as *P2 — Closed probes fill a busy shell's queue*.
+
+Not covered: keepalive; the HTTP refusal from a browser; a second browser; the
+access point; Help under a refusing policy; `allowed_hosts`; the 503.
+
+### Verified on 2026-11-11 on 1k and 2k (output sent only when the shell waits, and trace during a verb; `7512686`, ESPHome 2026.10.2)
+
+*Output sent only when the shell waits, and trace during a verb* in Part 1 of
+`todo.md`, run with the operator's go-ahead. The two *Verified locally*
+entries below describe the fixes, which are `0330b6a` and `7512686`. This
+entry also covers trace during a verb on the TCP binding, which *the web shell
+with bus traffic* below left open.
+
+- **The build.** The operator flashed both nodes from `ref: dev` at `7512686`,
+  at 01:29–01:30. The devices report ESPHome 2026.10.2.
+- **The method.** Restarts were made with the `Restart` button through Home
+  Assistant. Web sessions used the Python client of the entries below.
+  - TCP sessions used `tools/dali-shell` one-shot, and a raw socket for trace.
+  - Both device logs were streamed with `uv run esphome logs`, which logs
+    `Heap min free (internal)` every 10 s.
+  - Neither log showed a W or E line throughout.
+
+**Heap.** Two runs, each from a restart and 2 minutes idle. Each cell is the
+`Heap min free (internal)` sample after the step.
+
+| Step | 2k | 1k |
+|---|---|---|
+| **Run 1:** restart, 2 min idle | 94,432 B | 80,300 B |
+| Page load | 92,156 B (−2,276) | 76,788 B (−3,512, page load and `help` in one sample) |
+| Web `help` | 91,708 B (−448) | (as above) |
+| Web `help` again, no page load | unchanged | unchanged |
+| **Run 2:** restart, 2 min idle | 94,648 B | 80,292 B |
+| `help` over TCP | unchanged | 79,632 B (−660) |
+| Page load | 92,180 B (−2,468) | 76,796 B (−2,836) |
+| Web `help` | 91,432 B (−748) | unchanged |
+| `discover`, untraced and traced, on web and TCP | unchanged | unchanged |
+
+- **`help` went out as 9 text frames,** 4,405 B with the largest 512 B, on
+  both nodes. Before, it went out as 116.
+- **After a page load, web `help` lowered the floor by 448 B and 748 B on 2k,**
+  and by nothing on 1k. Before, the same sequence lowered it by 9,392 B and
+  4,624 B.
+  - In absolute terms, the floor after `help` is now 91.4–91.7 kB on 2k,
+    against 83.3 kB, and 76.8 kB on 1k, against 72.8 kB.
+  - Read as the entry *the web shell on a device* below reads a dip, `help`
+    now costs about 14 kB on 2k, against 23 kB before, and less than the
+    13.2 kB gap on 1k.
+  - Its nine 512 B frames still leave in about 20 ms, so they are still nine
+    segments in flight at once.
+- **`help` over TCP** was not measured before the fix. After it, 2k did not
+  move and 1k moved 660 B.
+- **A page load reaches the same floor as before.** Its delta varies with
+  where the floor stood, but the bottom it reached matches the earlier
+  entry: 92.2–92.9 kB on 2k and 76.8–77.6 kB on 1k. The page did not
+  change.
+- **The traced walks did not move either floor,** though the web one sent 317
+  frames in 27.5 s.
+
+**`discover` streams, web, 1k.** The 16 address lines arrived 2.07–2.16 s
+apart: 20 frames in 44.6 s, with the prompt in the same moment as the last
+line. That matches before the fix.
+
+**Trace during a verb, web, 2k.** The client ran `trace on`, idled 30 s, ran
+`discover`, idled 30 s, and ran `trace off`. It recorded every frame.
+
+- **Between commands, before the walk:** 21 `[BUS]` lines. Among them were
+  the Steinel's `RX 0x008001` about every 3 s, one `0x00840C`, and the
+  integration's own polls with their replies.
+- **During the walk:** 938 `[BUS]` lines in 317 frames.
+  - The first came 0.1 s after the command. They ran through to the prompt:
+    91–109 per 2 s while the address lines ran, and 36–54 per 2 s through the
+    instance enumeration after them.
+  - 631 TX and 307 RX. Every RX arrived 13–16 ms after its TX, inside the
+    reply window.
+  - The trace of an address's last transaction came just after its line, one
+    wait behind. After `00: present`, for example, came a0's `TX 0xC106`,
+    `TX 0x01F0` and `RX 0x83`, and then a1's first query, `0x0390`.
+  - **No trace line split an output line,** and no `[trace] N line(s)
+    dropped` came at all, against 925 before. No single wait raised more than
+    16 lines.
+  - The five address lines arrived 2.2 s apart. The walk took 27.5 s, as
+    before.
+- **Afterwards:** no Steinel event during the walk. They resumed 1.3 s after
+  the prompt, and 12 arrived in the 30 s that followed.
+
+**Trace during a verb, TCP, 1k.** A raw socket sent `trace on`, then
+`discover`.
+
+- **2,086 `[BUS]` lines over the 45.7 s walk,** about 52 a second while the
+  address lines ran. No output line was split, and no drop note came.
+- **The address lines arrived 2.13–2.22 s apart.** So the walk took about 1 s
+  longer than the untraced one above.
+- **The prompt and a trace line can share a line.** The walk's last frames
+  release its bracket: `0x7FFE35` and `0xFFFE1E`, each sent twice. They do not
+  call the abort hook, so their trace lines are pumped after the prompt, as
+  every trace line between commands always has been. Over TCP the stream
+  read `> [BUS] TX 0x7FFE35 (24-bit)`. The page is unaffected, because it
+  sends the prompt in a frame of its own.
+
+Not covered:
+
+- a browser; every session here was a script;
+- the interactive `dali-shell` client under `trace on`.
+
 ### Verified locally on 2026-11-11 (trace during a verb; uncommitted on `dev` at `0330b6a`)
 
 The fix for the lost trace, measured in *Verified on 2026-11-11 on 1k and 2k
