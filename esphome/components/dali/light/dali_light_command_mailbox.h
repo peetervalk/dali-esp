@@ -15,6 +15,12 @@ namespace dali {
  * self-describing rather than relying on that invariant: take() reports how many
  * completions it is acknowledging and whether any of them failed, so a dropped
  * outcome can never be mistaken for a success.
+ *
+ * Both sides are tasks, so the word need not be lock-free, and on an ESP32 or
+ * ESP32-S3 with PSRAM it is not: IDF builds with -mdisable-hardware-atomics,
+ * and the compare-exchange and exchange become calls that take a spinlock when
+ * the word is in PSRAM. Every write here goes through one of them, so they
+ * serialize; the plain load in publish() is only the loop's first guess.
  */
 class DaliLightCommandMailbox {
  public:
@@ -44,8 +50,6 @@ class DaliLightCommandMailbox {
   static constexpr uint32_t COUNT_MASK = 0x7FFFFFFFu;
   static constexpr uint32_t FAILED_BIT = 1u << 31u;
 
-  static_assert(std::atomic<uint32_t>::is_always_lock_free,
-                "light-command mailbox requires lock-free 32-bit atomics");
   std::atomic<uint32_t> value_{0u};
 };
 

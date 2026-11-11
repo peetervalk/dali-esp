@@ -32,7 +32,8 @@ verb-parity work has still not been exercised verb by verb on a bus.
 
 The ESPHome column names the surface: `console` is the `text:` command entity,
 `light`/`button`/`sensor` are entities, `scan` is the discovery workflow, and
-`shell` is the TCP diagnostic shell. Neither "console" nor "shell" implies
+`shell` is the diagnostic shell, over TCP or in a browser through `shell:
+web:`. Both reach the same session. Neither "console" nor "shell" implies
 real-bus verification.
 
 `shell` differs in kind from the others. The rest of the column describes code

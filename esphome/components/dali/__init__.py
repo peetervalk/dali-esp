@@ -1,8 +1,12 @@
+import gzip
+import json
 from pathlib import Path
+import re
 import shutil
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
+import esphome.final_validate as fv
 import esphome.pins as pins
 from esphome.components import text_sensor
 from esphome.components.esp32 import add_idf_sdkconfig_option
@@ -15,7 +19,7 @@ from esphome.const import (
     CONF_OUTPUT,
     CONF_PULLDOWN,
 )
-from esphome.core import CORE
+from esphome.core import CORE, EsphomeError
 
 try:
     # ESPHome 2026.9.0+ prunes the built-in ESP-IDF component list; drivers we
@@ -45,6 +49,9 @@ CONF_SHELL              = "shell"
 CONF_SHELL_PORT         = "port"
 CONF_SHELL_IDLE_TIMEOUT = "idle_timeout"
 CONF_ALLOW_COMMISSIONING = "allow_commissioning"
+CONF_SHELL_WEB          = "web"
+CONF_WEB_PORT           = "port"
+CONF_ALLOWED_HOSTS      = "allowed_hosts"
 
 dali_ns = cg.esphome_ns.namespace("dali")
 DaliComponent = dali_ns.class_("DaliComponent", cg.Component)
@@ -338,20 +345,118 @@ def _validate_distinct_pins(config):
 # dali_cli_special_is_commissioning() marks can readdress an entire bus from one
 # typed line, and RANDOMISE cannot be undone.
 
+# Must match DaliShellServer::WEB_SLOTS and WEB_ALLOWED_HOSTS_MAX in
+# dali_shell_tcp.h.
+_WEB_SLOTS = 2
+_WEB_ALLOWED_HOSTS_MAX = 8
+
+# The page the web binding serves, gzipped into flash at codegen time. It sits
+# beside the binding that serves it; `type: git` clones the whole repository,
+# so it is there for a pinned build too.
+_WEB_PAGE = Path(__file__).resolve().parent / "web" / "shell.html"
+
+# The page's Help reference: the verb reference at the repository root, put
+# into the page as a JS string where it holds this marker. Built in rather than
+# fetched, so the help a device serves is the help for the firmware it runs.
+_WEB_REFERENCE = Path(__file__).resolve().parents[3] / "dali_commands.md"
+_WEB_REFERENCE_SLOT = "/*@dali-reference@*/null"
+
+
+def _build_web_page():
+    """The page, with the reference in its slot, gzipped."""
+    html = _WEB_PAGE.read_text(encoding="utf-8")
+    if html.count(_WEB_REFERENCE_SLOT) != 1:
+        raise EsphomeError(
+            f"{_WEB_PAGE} must hold {_WEB_REFERENCE_SLOT} exactly once"
+        )
+    reference = _WEB_REFERENCE.read_text(encoding="utf-8")
+    # A JSON string is a JS string. ensure_ascii escapes everything outside
+    # ASCII, U+2028 and U+2029 included, and escaping '<' means no sequence in
+    # the reference can close the <script> element it sits in.
+    literal = json.dumps(reference, ensure_ascii=True).replace("<", "\\u003c")
+    html = html.replace(_WEB_REFERENCE_SLOT, literal)
+    # mtime=0 keeps the bytes, and so the build, reproducible.
+    return gzip.compress(html.encode("utf-8"), compresslevel=9, mtime=0)
+
+# A Host name without a port, as dali_web_host_allowed() compares it: letters,
+# digits and hyphens in dot-separated labels, which an IPv4 literal also is. No
+# trailing dot, because a browser sends the name exactly as it was typed and
+# "dali.lan." is not "dali.lan". At most 89 characters, so that a ":65535"
+# still fits DALI_WEB_HOST_MAX (95).
+_WEB_HOST_RE = re.compile(
+    r"^(?=.{1,89}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$"
+)
+
+
+def _web_host(value):
+    value = cv.string_strict(value).strip().lower()
+    if not _WEB_HOST_RE.match(value):
+        raise cv.Invalid(
+            f"'{value}' is not a host name or IPv4 address. Give the name a "
+            "browser shows in its address bar, without a port or a trailing dot."
+        )
+    return value
+
+
 def _consume_shell_sockets(config):
     """Count the shell's sockets in lwIP's pool.
 
     ESPHome sizes CONFIG_LWIP_MAX_SOCKETS to the sum of what components
     register, and the shell opens its own: one listener, and one client at a
     time, because a session is served to completion before the next accept.
-    Unregistered, those two are borrowed from components that counted on them,
-    and the pool runs out exactly when everything is busy at once.
+    The web binding adds its listener and the connections it holds while they
+    are answered. Unregistered, those are borrowed from components that counted
+    on them, and the pool runs out exactly when everything is busy at once.
     """
     from esphome.components import socket
 
     socket.consume_sockets(1, "dali.shell")(config)
     socket.consume_sockets(1, "dali.shell", socket.SocketType.TCP_LISTEN)(config)
+    if CONF_SHELL_WEB in config:
+        socket.consume_sockets(_WEB_SLOTS, "dali.shell.web")(config)
+        socket.consume_sockets(
+            1, "dali.shell.web", socket.SocketType.TCP_LISTEN
+        )(config)
     return config
+
+
+def _validate_web_port(config):
+    """The web port cannot be the shell's own, nor 80.
+
+    80 is the captive portal's whenever the AP is up, and `web_server:`'s for
+    good, and the AP is where this page matters most: a phone commissioning a
+    site that has no network yet.
+    """
+    web = config.get(CONF_SHELL_WEB)
+    if web is None:
+        return config
+    port = web[CONF_WEB_PORT]
+    if port == config[CONF_SHELL_PORT]:
+        raise cv.Invalid(
+            f"web port {port} is the shell's own TCP port; give it another",
+            path=[CONF_SHELL_WEB, CONF_WEB_PORT],
+        )
+    if port == 80:
+        raise cv.Invalid(
+            "port 80 belongs to captive_portal and web_server; use another, "
+            "such as 8080",
+            path=[CONF_SHELL_WEB, CONF_WEB_PORT],
+        )
+    return config
+
+
+_WEB_SCHEMA = cv.Schema(
+    {
+        cv.Optional(CONF_WEB_PORT, default=8080): cv.port,
+        # Names a browser may use for the device besides its IP address,
+        # <name> and <name>.local, which are always allowed. A name the
+        # router's DNS gives it, for example.
+        cv.Optional(CONF_ALLOWED_HOSTS, default=[]): cv.All(
+            cv.ensure_list(_web_host),
+            cv.Length(max=_WEB_ALLOWED_HOSTS_MAX),
+        ),
+    }
+)
 
 
 _SHELL_SCHEMA = cv.All(
@@ -366,11 +471,46 @@ _SHELL_SCHEMA = cv.All(
                 cv.positive_time_period_seconds,
                 cv.Range(max=cv.TimePeriod(seconds=86400)),
             ),
+            # One policy for both bindings.
             cv.Optional(CONF_ALLOW_COMMISSIONING, default=False): cv.boolean,
+            # A browser front end: a page on this port, and a WebSocket from it
+            # that carries the same session. Absent = no web listener.
+            cv.Optional(CONF_SHELL_WEB): _WEB_SCHEMA,
         }
     ).extend(cv.COMPONENT_SCHEMA),
+    _validate_web_port,
     _consume_shell_sockets,
 )
+
+
+def _final_validate(config):
+    """Refuse a web port another component in this config listens on."""
+    shell = config.get(CONF_SHELL)
+    if shell is None or CONF_SHELL_WEB not in shell:
+        return config
+    port = shell[CONF_SHELL_WEB][CONF_WEB_PORT]
+    full = fv.full_config.get()
+
+    holders = []
+    api = full.get("api")
+    if isinstance(api, dict) and api.get("port") == port:
+        holders.append("api")
+    ota = full.get("ota")
+    for entry in ota if isinstance(ota, list) else []:
+        if isinstance(entry, dict) and entry.get("port") == port:
+            holders.append(f"ota ({entry.get('platform')})")
+    web_server = full.get("web_server")
+    if isinstance(web_server, dict) and web_server.get("port") == port:
+        holders.append("web_server")
+    if holders:
+        raise cv.Invalid(
+            f"web port {port} is already used by {', '.join(holders)}",
+            path=[CONF_SHELL, CONF_SHELL_WEB, CONF_WEB_PORT],
+        )
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _final_validate
 
 
 CONFIG_SCHEMA = cv.All(
@@ -492,3 +632,16 @@ async def to_code(config):
         cg.add(shell.set_allow_commissioning(
             shell_conf[CONF_ALLOW_COMMISSIONING]
         ))
+
+        web_conf = shell_conf.get(CONF_SHELL_WEB)
+        if web_conf is not None:
+            cg.add(shell.set_web_port(web_conf[CONF_WEB_PORT]))
+            for host in web_conf[CONF_ALLOWED_HOSTS]:
+                cg.add(shell.add_web_allowed_host(host))
+            page = _build_web_page()
+            page_name = "dali_shell_web_page_gz"
+            page_bytes = ", ".join(str(b) for b in page)
+            cg.add_global(cg.RawStatement(
+                f"static const uint8_t {page_name}[{len(page)}] = {{{page_bytes}}};"
+            ))
+            cg.add(shell.set_web_page(cg.RawExpression(page_name), len(page)))

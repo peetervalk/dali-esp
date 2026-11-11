@@ -9,17 +9,140 @@ Dated evidence for every claim here is in [project_log.md](project_log.md).
 
 ## Unreleased
 
-Everything on `dev` since `v3.0.0`. New changes are added here as they land.
+Everything on `dev` since `v3.1.0`. New changes are added here as they land.
 
 At tagging:
 
-- check each claim against the tree (`git grep <symbol> v3.0.0` settles most
+- check each claim against the tree (`git grep <symbol> v3.1.0` settles most
   of them in seconds)
 - re-check each label against `project_log.md` and `todo.md`
 - rename this heading to the version
 
+Nothing yet.
+
+## v3.1.0
+
+The diagnostic shell in a browser, and fixes to the network shell's heap use
+and to `trace on`. Nothing breaks: `export inventory` moves to
+`schema_version` 3 by adding keys, and keeps every existing one.
+
+### Added
+
+- **The shell in a browser: `shell: web:`.** Step 3a of *A browser GUI for
+  the shell* in `todo.md`.
+
+  ```yaml
+  dali:
+    shell:
+      web:
+        port: 8080                # the default; 80 and the shell's port are refused
+        allowed_hosts: [dali.lan] # beyond its address, <name> and <name>.local
+  ```
+
+  - `http://<name>.local:8080/` serves a terminal page from flash, about
+    4.7 kB gzipped. It loads nothing from elsewhere, so it works on the
+    device's own access point.
+  - The page's WebSocket is a shell session, the same one the TCP port gives,
+    with the same `allow_commissioning` policy and idle timeout. There is one
+    session between the two.
+  - Only the device's own page can open it: `Host` and `Origin` are checked,
+    and framing is forbidden. A second browser is told the shell is busy.
+  - Below 16 kB of free heap the page and the session are refused with a 503.
+  - The schema refuses a web port that `api`, `ota` or `web_server` uses.
+  - `export config` prints the `web:` block.
+  - The TCP binding now waits in a `select()` shared with the web listener,
+    rather than in `accept()` and `recv()`. What a TCP client sees is
+    unchanged.
+
+  **Hardware-verified on 1k and 2k, in part,** on ESPHome 2026.10.2. A test
+  client that speaks to the device as the page does passed:
+  - every `Host` and `Origin` refusal, and the 404 and 426 answers;
+  - the busy close, 1013, and the RFC close codes for bad frames;
+  - the TCP port's HTTP refusal, after the restructure;
+  - the hand-over between a web and a TCP session;
+  - with bus traffic: `discover` arriving a line at a time, a page load
+    waiting for a running verb and then served, and a dropped connection
+    ending a walk at its next write.
+
+  A page load costs about 13.5 kB of heap while it streams. The operator has
+  used the page in a browser on both nodes. In Chrome, a second tab is told
+  the shell is busy, and closing a tab mid-`discover` ends the walk. Since the
+  restructure, a TCP client that stops reading is dropped in about 20 s, and
+  a second TCP client waits for the first. Not yet checked on a device:
+  - other browsers, and the access point;
+  - the 503;
+  - the TCP binding's keepalive since the restructure.
+
+  On that build, trace lines raised during a verb were lost on both network
+  bindings; see the *Fixed* item on `trace on` below.
+
+  `dali_test.yaml` compiles on 2026.10.0 and 2026.10.2, and the schema
+  refuses six bad blocks.
+
+- **The browser page gains Help and Map.** Step 3b.
+  - **Help** lists every verb from `schema`, with what the session's policy
+    refuses marked, and the named tables. Each verb links to its section of
+    `dali_commands.md`, which is now built into the page, so the help is the
+    firmware's own.
+  - **Map** draws `export inventory`: a grid for gear and one for control
+    devices, shared addresses marked, a group matrix and the switches seen.
+    Selecting an address shows its record, with Identify, Status or Instances.
+  - The page's own `schema` and `export inventory` run quietly and stay out of
+    the terminal.
+  - The page is now about 47 kB in flash, most of it the reference.
+
+  **Hardware-verified on 1k and 2k, in part.**
+  - The operator found Help and Map working in a browser, at phone width too.
+  - The inventory the Map draws matched both buses after a `discover`.
+  - On 1k, `identify a0`, the line Identify sends, blinked a0 and switched it
+    off again.
+
+  Not checked: Help under a refusing policy. Before the device, the page was
+  driven in headless Edge against a mock of the web port that serves the page
+  as codegen builds it and answers with the real `schema` output: 34 checks
+  pass at phone and desktop widths, with no script error. `dali_test.yaml`
+  compiles.
+
+### Changed
+
+- **`export inventory` lists shared addresses, at `schema_version` 3.**
+  `contested_gear` and `undecodable_device` are new top-level lists, and a
+  listed device that answered as one unit but whose identity read collided
+  carries `identity_collision: true`. Version 2 left out every address whose
+  reply did not decode, so an address two units share appeared nowhere.
+  Existing keys are unchanged. **Host-tested** in part: the address-list
+  printer has three vectors. No vector covers the export itself; see *Host
+  vectors for the unasserted shell outputs* in `todo.md`. On 1k and 2k the
+  export ran at version 3 with both new lists empty, as neither bus has a
+  shared address. No bus has produced a non-empty one.
+- **`schema` marks the commissioning specials.** Each `special` entry carries
+  `commissioning: true` or `false`, so a client can grey out exactly the nine
+  names the policy refuses. **Host-tested:** one new vector checks every entry
+  against `dali_cli_special_is_commissioning()`. A mutation pass over both
+  changes killed 5 of 5.
+
+- **`dali_web`, the portable half of a browser front end to the shell.** It is
+  step 2 of *A browser GUI for the shell* in `todo.md`. It holds:
+  - an HTTP/1.1 request-head parser;
+  - routing, with the Host and Origin checks that keep other web pages out;
+  - the page, handshake and refusal response heads;
+  - the WebSocket frame receiver and encoder;
+  - its own SHA-1 and base64.
+
+  The `web:` binding above uses it. Out-of-tree build systems gain one more
+  translation unit, `dali_web.c`.
+  **Host-tested:** 59 vectors, the published FIPS 180 and RFC 4648/6455 ones
+  among them. A mutation pass killed 56 of 56 mutants. On a device it runs
+  under the `web:` binding above, which a test client and Chrome have
+  driven.
+
 ### Changed — `dali-starter.yaml`
 
+- **The browser shell is on,** at `http://dali-starter.local:8080/`, with the
+  same session, policy and idle timeout as the TCP port. The README's example
+  configuration turns it on too. **Unverified** in these files: a copy of the
+  starter pointing at the working tree validates on ESPHome 2026.10.2. The
+  same `web:` block runs on 1k and 2k.
 - **No OTA password.** ESPHome warns that one wastes flash and RAM next to an
   API encryption key. The `ota_password` secret is no longer read.
   **Unverified:** validates and compiles on ESPHome 2026.10.0; not flashed.
@@ -32,13 +155,98 @@ At tagging:
 ### Changed — development
 
 - **ESPHome is pinned for development and CI.**
-  - `pyproject.toml` and `uv.lock` pin ESPHome 2026.10.0, and `uv run esphome`
+  - `pyproject.toml` and `uv.lock` pin ESPHome 2026.10.2, and `uv run esphome`
     builds with it.
   - `esphome-build.yml` installs from the same lock. Before, it took whatever
     `pip install esphome` resolved to on the day.
   - `release-packaging.yml` still builds on the latest ESPHome, as a user's
     machine would.
   - A user's own build is unaffected.
+- **CI compiles a PSRAM build.** `dali_test_psram.yaml` builds the same tree
+  with `psram:` on. That changes how atomics compile, which nothing tracked
+  covered; see *Fixed*.
+
+### Fixed
+
+- **Opening a TCP shell session could reboot the device, and took close to
+  10 s.** An interactive `tools/dali-shell` session opens with `schema`.
+  - **`schema` wrote one character per write:** 6,660 writes for 15.5 kB. Under
+    `TCP_NODELAY` each became a segment, and ESP-IDF's lwIP holds a full-MSS
+    buffer per unacknowledged segment, about 28 kB at the peak.
+  - **The session task ran at priority 4, above ESPHome's loop on the same
+    core.** With lwIP core locking, each send runs the TCP/IP and Wi-Fi
+    transmit path on that task.
+  - **On 2k the loop then missed the 5 s task watchdog.** Three connections in
+    four did this, most often soon after boot. An OTA image that crashed in
+    its first minute was rolled back.
+
+  Three changes:
+  - **The session task runs at priority 1,** level with the loop, so FreeRTOS
+    time-slices the two. It stays below the DALI and scan tasks.
+    **Hardware-verified on 2k:** repeated interactive connections no longer
+    reset it. Connections in the first minute after boot were not recorded.
+  - **`schema` writes its JSON in 159-byte chunks:** 98 writes, and the same
+    bytes as before. The JSON is now built by `dali_cli_print_schema()` in
+    `dali_cli.c`, so every binding gains it. **Host-tested:** byte-identical to
+    the old output under both policies, and four new `test_cli` vectors. A
+    mutation pass killed 9 of 10 mutants; the tenth is equivalent on today's
+    tables.
+  - **The TCP binding gathers writes in a 512 B buffer.** It sends after the
+    prompt, before each bus wait, or when the buffer is full. It also sent at
+    every line end until the next item.
+
+  **Hardware-verified on 2k, for the last two together:** opening an
+  interactive session no longer dips free heap, and the prompt arrives at once.
+  Connections in the first 30 s after boot were not recorded.
+
+- **A verb that printed many lines at once still briefly took about 20 kB of
+  heap,** on both network shells.
+  - **Both bindings also sent at every line end.** So `help`, 116 short lines
+    in 0.25 s, went out as 116 segments, each holding a full-MSS buffer until
+    acknowledged. That is the `schema` mechanism above, a line at a time.
+  - **Measured on 2026-11-11:** `help` lowered the min-free floor by 9.4 kB on
+    2k and 4.6 kB on 1k, an estimated dip of 23 kB and 18 kB.
+
+  Both bindings now send only before the shell waits, after the prompt, or
+  when the 512 B buffer is full. The waits are each bus wait and the bus claim
+  that starts a walk. A line printed before a wait still goes out at that
+  wait, so what an operator sees is unchanged.
+
+  **Hardware-verified on 1k and 2k:** `help` now goes out as 9 frames. After a
+  page load it lowered the floor by at most 748 B on 2k, and not at all on 1k.
+  `discover` still streams line by line.
+
+- **`trace on` over the network showed nothing of a verb's own traffic.**
+  - Trace lines wait in a 16-line ring, and the bindings emptied it only
+    between verbs.
+  - On 2026-11-11 a 2k `discover` under `trace on` delivered no trace line
+    during the walk, then reported `[trace] 925 line(s) dropped`.
+
+  Both bindings now also empty the ring before each bus wait, whenever their
+  output stands at a line start. A verb's frames therefore arrive while it
+  runs, one wait behind, and never split a line it is printing.
+
+  **Hardware-verified:** a traced `discover` delivered 938 trace lines during
+  the walk on 2k over the web, and 2,086 on 1k over TCP. Neither dropped a
+  line or split one.
+
+- **The component did not compile with `psram:` on an ESP32 or ESP32-S3.**
+  A config with a DALI light or sensor failed with `static assertion failed:
+  ... requires lock-free 32-bit atomics`.
+  - With PSRAM, ESP-IDF builds those chips with `-mdisable-hardware-atomics`,
+    because their atomic instruction does not work on PSRAM addresses. No YAML
+    option turns it off.
+  - Three mailbox headers asserted lock-free atomics they do not need: both
+    sides of each are tasks. The assertions are gone.
+  - The light-state and input-value mailboxes now publish with an exchange
+    rather than a store. If one were ever placed in PSRAM, a store could land
+    inside the reader's emulated exchange and be lost.
+  - On `v3.0.0`, remove `psram:` to build. Nothing in this component uses
+    PSRAM.
+
+  **Unverified:** the ESP32 build compiles on ESPHome 2026.10.0, and the host
+  suites pass; not flashed. The ESP32-S3 gets the same flag but was not
+  compiled.
 
 ## v3.0.0
 

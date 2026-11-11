@@ -123,6 +123,13 @@ add_dali_test(test_group_map  test_group_map.c)
 add_dali_test(test_dim_curve  test_dim_curve.c)
 add_dali_cli_test(test_cli    test_cli.c)
 
+# The browser front end's portable half. It depends on nothing else in the
+# stack, so its suite links it alone.
+add_executable(test_web test_web.c ${CMAKE_CURRENT_SOURCE_DIR}/../components/dali/dali_web.c)
+target_include_directories(test_web PRIVATE ${DALI_INC})
+target_link_libraries(test_web PRIVATE unity)
+add_test(NAME test_web COMMAND test_web)
+
 add_executable(test_light_state_mailbox test_light_state_mailbox.cpp)
 target_link_libraries(test_light_state_mailbox PRIVATE unity)
 add_test(NAME test_light_state_mailbox COMMAND test_light_state_mailbox)

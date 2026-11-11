@@ -17,6 +17,8 @@
 #include "dali_cli.h"
 #include "dali_commissioning.h"
 
+#include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 void setUp(void) {}
@@ -256,6 +258,255 @@ static void test_usage_line_matches_table(void)
     out = capture_begin();
     dali_cli_print_usage(&out, dali_cli_command_for_id(DALI_CLI_CMD_STATS));
     TEST_ASSERT_EQUAL_STRING("usage: stats\r\n", s_capture);
+}
+
+/* ---------------------------------------------------------------------------
+ * schema
+ * --------------------------------------------------------------------------*/
+
+/*
+ * A sink that keeps every byte and counts the writes. `schema` is about 15.5 kB,
+ * more than the shared capture holds, and how it is split into writes is half
+ * of what these tests are about: a write per character once made each
+ * interactive TCP session open with 6,660 sends.
+ */
+typedef struct {
+    char     text[32768];
+    size_t   len;
+    unsigned writes;
+    size_t   longest;
+    size_t   shortest_before_last;
+    size_t   last;
+    bool     overflowed;
+} SchemaCapture;
+
+static SchemaCapture s_schema;
+
+static void schema_capture_write(void *ctx, const char *text)
+{
+    SchemaCapture *cap = (SchemaCapture *)ctx;
+    size_t len = strlen(text);
+
+    if (cap->writes > 0u && cap->last < cap->shortest_before_last) {
+        cap->shortest_before_last = cap->last;
+    }
+    cap->writes++;
+    cap->last = len;
+    if (len > cap->longest) {
+        cap->longest = len;
+    }
+    if (cap->len + len >= sizeof(cap->text)) {
+        cap->overflowed = true;
+        return;
+    }
+    memcpy(cap->text + cap->len, text, len);
+    cap->len += len;
+    cap->text[cap->len] = '\0';
+}
+
+static void schema_capture(bool allow_commission, bool allow_reset)
+{
+    memset(&s_schema, 0, sizeof(s_schema));
+    s_schema.shortest_before_last = SIZE_MAX;
+    DaliCliOut out = { .write = schema_capture_write, .ctx = &s_schema };
+    dali_cli_print_schema(&out, allow_commission, allow_reset);
+    TEST_ASSERT_FALSE_MESSAGE(s_schema.overflowed, "schema overflowed the capture");
+}
+
+static unsigned count_occurrences(const char *haystack, const char *needle)
+{
+    unsigned count = 0u;
+    size_t   step  = strlen(needle);
+    for (const char *p = strstr(haystack, needle); p != NULL; p = strstr(p + step, needle)) {
+        count++;
+    }
+    return count;
+}
+
+/* Every write but the last is a full chunk. That pins the property that matters
+ * on a socket, a bounded number of sends, without pinning the byte count of
+ * tables that grow. */
+static void test_schema_writes_full_chunks(void)
+{
+    const size_t chunk = DALI_CLI_FORMAT_MAX - 1u;
+    schema_capture(true, true);
+
+    TEST_ASSERT_GREATER_THAN_UINT(1u, s_schema.writes);
+    TEST_ASSERT_EQUAL_size_t(chunk, s_schema.longest);
+    TEST_ASSERT_EQUAL_size_t(chunk, s_schema.shortest_before_last);
+    TEST_ASSERT_TRUE(s_schema.last >= 1u && s_schema.last <= chunk);
+    TEST_ASSERT_EQUAL_UINT((unsigned)((s_schema.len + chunk - 1u) / chunk), s_schema.writes);
+}
+
+/*
+ * Structure, checked without a JSON library: brackets balance outside strings,
+ * every escape is one the escaper writes, and no control character sits inside
+ * a string. A chunk boundary that split or doubled a byte, or an unescaped
+ * quote in a table, fails here.
+ */
+static void test_schema_is_well_formed(void)
+{
+    schema_capture(false, true);
+    const char *json = s_schema.text;
+
+    TEST_ASSERT_EQUAL_INT(0, strncmp(json, "{\n  \"verbs\": [", 14));
+    TEST_ASSERT_EQUAL_STRING("}\r\n", json + s_schema.len - 3u);
+
+    int  depth     = 0;
+    bool in_string = false;
+    for (size_t i = 0u; i < s_schema.len; i++) {
+        char c = json[i];
+        if (in_string) {
+            TEST_ASSERT_TRUE_MESSAGE((unsigned char)c >= 0x20u, "control character in a string");
+            if (c == '\\') {
+                i++;
+                TEST_ASSERT_TRUE_MESSAGE(json[i] == '"' || json[i] == '\\', "unexpected escape");
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+        } else if (c == '{' || c == '[') {
+            depth++;
+        } else if (c == '}' || c == ']') {
+            depth--;
+            TEST_ASSERT_TRUE_MESSAGE(depth >= 0, "closing bracket without an opener");
+        }
+    }
+    TEST_ASSERT_FALSE_MESSAGE(in_string, "unterminated string");
+    TEST_ASSERT_EQUAL_INT(0, depth);
+}
+
+static void test_schema_lists_every_table(void)
+{
+    schema_capture(true, true);
+    const char *json = s_schema.text;
+
+    unsigned objects = (unsigned)dali_cli_command_count() + dali_cli_query_count() +
+                       dali_cli_special_count() + dali_cli_config_count();
+    TEST_ASSERT_EQUAL_UINT(objects, count_occurrences(json, "{\"name\": \""));
+
+    char     needle[256];
+    unsigned with_subcommands = 0u;
+    for (uint8_t i = 0u; i < dali_cli_command_count(); i++) {
+        const DaliCliCommandSpec *spec = dali_cli_command_at(i);
+        snprintf(needle, sizeof(needle), "{\"name\": \"%s\", \"args\": ", spec->name);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(json, needle), "verb missing from schema");
+        if (spec->subcommands != NULL) {
+            with_subcommands++;
+            snprintf(needle, sizeof(needle), "\"max_args\": %u, \"subcommands\": \"%s\"}",
+                     (unsigned)spec->max_args, spec->subcommands);
+            TEST_ASSERT_NOT_NULL_MESSAGE(strstr(json, needle), "subcommands missing");
+        }
+    }
+    TEST_ASSERT_GREATER_THAN_UINT(0u, with_subcommands);
+    TEST_ASSERT_EQUAL_UINT(with_subcommands, count_occurrences(json, "\"subcommands\": \""));
+    const char *lists[] = { "\"query\": [", "\"special\": [", "\"config\": [",
+                            "\"dt6\": [", "\"dt8\": [", "\"iquery\": [",
+                            "\"iconfig\": [" };
+    for (size_t i = 0u; i < sizeof(lists) / sizeof(lists[0]); i++) {
+        TEST_ASSERT_EQUAL_UINT_MESSAGE(1u, count_occurrences(json, lists[i]), lists[i]);
+    }
+    /* The separators the bracket check cannot see. */
+    snprintf(needle, sizeof(needle), "\"dt6\": [\"%s\", \"%s\"",
+             dali_cli_dt6_at(0u)->name, dali_cli_dt6_at(1u)->name);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(json, needle), "dt6 list malformed");
+    snprintf(needle, sizeof(needle), "\"iconfig\": [\"%s\", \"%s\"",
+             dali_cli_iconfig_at(0u)->name, dali_cli_iconfig_at(1u)->name);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(json, needle), "iconfig list malformed");
+    snprintf(needle, sizeof(needle), "\"query\": [\n    {\"name\": \"%s\", \"needs_param\": ",
+             dali_cli_query_at(0u)->name);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(json, needle), "query table malformed");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(json, "},\n    {\"name\": \""), "entries not comma-separated");
+}
+
+static void test_schema_reports_policy(void)
+{
+    schema_capture(false, true);
+    TEST_ASSERT_NOT_NULL(strstr(s_schema.text,
+                                "\"policy\": {\"commission\": false, \"reset\": true}\n}\r\n"));
+
+    schema_capture(true, false);
+    TEST_ASSERT_NOT_NULL(strstr(s_schema.text,
+                                "\"policy\": {\"commission\": true, \"reset\": false}\n}\r\n"));
+}
+
+/*
+ * Each `special` entry says whether the commissioning policy covers it, and the
+ * flags are exactly dali_cli_special_is_commissioning()'s. That is what lets a
+ * client grey out the nine names a session refuses and nothing else. The other
+ * two gear tables carry no flag.
+ */
+static void test_schema_marks_commissioning_specials(void)
+{
+    schema_capture(false, true);
+    const char *json = s_schema.text;
+
+    char     needle[256];
+    unsigned marked = 0u;
+    for (uint8_t i = 0u; i < dali_cli_special_count(); i++) {
+        const DaliCliGearCommand *cmd = dali_cli_special_at(i);
+        bool commissioning = dali_cli_special_is_commissioning(cmd->id);
+        if (commissioning) {
+            marked++;
+        }
+        snprintf(needle, sizeof(needle),
+                 "{\"name\": \"%s\", \"needs_param\": %s, \"max_param\": %u, "
+                 "\"commissioning\": %s}",
+                 cmd->name, cmd->needs_param ? "true" : "false",
+                 (unsigned)cmd->max_param, commissioning ? "true" : "false");
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(json, needle), cmd->name);
+    }
+    TEST_ASSERT_EQUAL_UINT(9u, marked);
+    TEST_ASSERT_EQUAL_UINT(marked, count_occurrences(json, "\"commissioning\": true"));
+    TEST_ASSERT_EQUAL_UINT(dali_cli_special_count(),
+                           count_occurrences(json, "\"commissioning\": "));
+}
+
+/* ---------------------------------------------------------------------------
+ * JSON address lists (`export inventory`)
+ * --------------------------------------------------------------------------*/
+
+static const char *address_list(const char *key, uint64_t mask)
+{
+    memset(&s_schema, 0, sizeof(s_schema));
+    s_schema.shortest_before_last = SIZE_MAX;
+    DaliCliOut out = { .write = schema_capture_write, .ctx = &s_schema };
+    dali_cli_print_json_address_list(&out, key, mask);
+    TEST_ASSERT_EQUAL_UINT_MESSAGE(1u, s_schema.writes, "an address list is one write");
+    return s_schema.text;
+}
+
+static void test_address_list_empty(void)
+{
+    TEST_ASSERT_EQUAL_STRING("\"contested_gear\": []", address_list("contested_gear", 0u));
+}
+
+/* Ascending, both ends of the range, and the bit that a 32-bit shift would
+ * lose. */
+static void test_address_list_ascending(void)
+{
+    uint64_t mask = ((uint64_t)1u << 63) | ((uint64_t)1u << 32) |
+                    ((uint64_t)1u << 5) | (uint64_t)1u;
+    TEST_ASSERT_EQUAL_STRING("\"k\": [0, 5, 32, 63]", address_list("k", mask));
+}
+
+/* Every address with the longest key the header allows still fits, so the
+ * list is never clipped into something that does not parse. */
+static void test_address_list_full_with_longest_key(void)
+{
+    const char *key = "abcdefghijklmnopqrstuvwxyz012345";  /* 32 characters */
+    const char *json = address_list(key, UINT64_MAX);
+
+    char expected_start[64];
+    snprintf(expected_start, sizeof(expected_start), "\"%s\": [0, 1, 2, ", key);
+    TEST_ASSERT_EQUAL_INT(0, strncmp(json, expected_start, strlen(expected_start)));
+    size_t len = strlen(json);
+    TEST_ASSERT_EQUAL_STRING(", 62, 63]", json + len - 9u);
+    TEST_ASSERT_EQUAL_UINT(63u, count_occurrences(json, ", "));
+    TEST_ASSERT_LESS_THAN_size_t(DALI_CLI_ADDRESS_LIST_MAX, len + 1u);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1901,6 +2152,14 @@ int main(void)
     RUN_TEST(test_has_subcommand_rejects_non_members);
     RUN_TEST(test_help_lists_every_verb);
     RUN_TEST(test_usage_line_matches_table);
+    RUN_TEST(test_schema_writes_full_chunks);
+    RUN_TEST(test_schema_is_well_formed);
+    RUN_TEST(test_schema_lists_every_table);
+    RUN_TEST(test_schema_reports_policy);
+    RUN_TEST(test_schema_marks_commissioning_specials);
+    RUN_TEST(test_address_list_empty);
+    RUN_TEST(test_address_list_ascending);
+    RUN_TEST(test_address_list_full_with_longest_key);
 
     RUN_TEST(test_resolve_accepts_exact_arity);
     RUN_TEST(test_resolve_reports_empty_line);

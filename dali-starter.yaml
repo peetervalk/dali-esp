@@ -17,7 +17,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/peetervalk/dali-esp.git
-      ref: v3.0.0
+      ref: v3.1.0
     components: [dali]
     refresh: 0s
 
@@ -56,6 +56,12 @@ dali:
     # commissioning is what this firmware is for — set it false on anything
     # left flashed on a shared network. RANDOMISE cannot be undone.
     allow_commissioning: true
+    # The same shell in a browser, at http://dali-starter.local:8080/. It is
+    # the session the TCP port gives, with the same policy and idle timeout,
+    # so one of the two is connected at a time. Only the device's own page can
+    # open it. Omit `web:` and the page is not built in.
+    web:
+      port: 8080
 
   # Text sensors belong to the button/console path, not the shell. They are the
   # only place a result persists in HA.

@@ -1,0 +1,70 @@
+# CI coverage config — not a deployable firmware.
+#
+# The same component as dali_test.yaml, built with PSRAM enabled. Everything
+# below is fictitious, as it is there.
+#
+# Why a second config: with PSRAM on an ESP32 or ESP32-S3, ESP-IDF compiles
+# every file with -mdisable-hardware-atomics, because the chip's atomic
+# instruction does not work on PSRAM addresses. std::atomic is then no longer
+# lock-free, and atomic read-modify-writes become library calls. v3.0.0 did not
+# compile under that flag, and no tracked config had PSRAM to show it. No YAML
+# option can turn the flag off: IDF sets it from a Kconfig symbol with no
+# prompt.
+#
+# The flag changes code generation, not the schema, so this config only needs
+# to compile every file that uses an atomic: the component itself, a light and
+# a sensor. dali_test.yaml remains the config that covers every option; do not
+# grow this one into a copy of it.
+
+esphome:
+  name: dali-test-psram
+  friendly_name: "DALI CI Test PSRAM"
+
+esp32:
+  variant: esp32
+  framework:
+    type: esp-idf
+
+# Quad is the only mode the classic ESP32 supports. The flag is set for any
+# PSRAM on this chip, so nothing else here matters to the build.
+psram:
+  mode: quad
+
+external_components:
+  - source:
+      type: local
+      path: esphome/components
+    components: [dali]
+
+wifi:
+  ssid: "DUMMY_COMPILE_ONLY_NETWORK"
+  password: "DUMMY-COMPILE-ONLY"
+
+# Compile-only and public on purpose, like the one in dali_test.yaml.
+api:
+  encryption:
+    key: "bT9Whs/I1mSjJqr41YsIM/kItVuhonh5ByVUygeCDl0="
+
+logger:
+
+dali:
+  id: dali_bus
+  tx_pin: 18
+  rx_pin: 19
+
+# The light-state and light-command mailboxes.
+light:
+  - platform: dali
+    dali_id: dali_bus
+    name: "Test Group 0"
+    target_type: group
+    target_address: 0
+
+# The input-value mailbox.
+sensor:
+  - platform: dali
+    dali_id: dali_bus
+    name: "Test Lux"
+    address: 0
+    instance: 0
+    value_bytes: 2

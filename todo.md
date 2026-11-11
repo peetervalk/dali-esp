@@ -36,9 +36,9 @@ a released section stays as it shipped: record the result under *Unreleased*,
   a0. That is conformant, but close to the edge.
 - **2k**: 5 LED gear at a0–a4, one product, all in g0. d0 is the Steinel
   HF 360 II, with 4 instances: 0 lux, 1 occupancy, 2 temperature, 3 humidity.
-  Only 0 and 1 emit events. d1 is the Casambi CBU-DCS, with 1 instance. A spare
-  LED driver, the one that contested a4 on 2026-09-03, is normally
-  disconnected.
+  Only 0 and 1 emit events. The Casambi CBU-DCS that sat at d1 has been
+  removed, and nothing answered there on 2026-11-11. A spare LED driver, the
+  one that contested a4 on 2026-09-03, is normally disconnected.
 
 **Every session:**
 
@@ -62,39 +62,12 @@ a released section stays as it shipped: record the result under *Unreleased*,
 These can be checked on any node with a `shell:` block, and need nothing on
 the DALI wire.
 
-**HTTP refusal**
-
-1. From another machine:
-   `curl --http0.9 -m 5 --data-binary $'x\r\nhelp\r\n' http://<host>:2323/`
-2. Expected on the terminal: the banner, a `> ` prompt, then `HTTP request
-   refused: this port is the DALI shell, not a web server.`, and no `help`
-   output.
-3. Expected in the device log, at WARN: `Closed a connection from <your
-   address> that opened with an HTTP request; nothing it sent was run`, then
-   `Shell session closed`.
-4. **Browser.** Open the devtools console on a page served over plain http on
-   the LAN, such as Home Assistant's own UI, and run:
-   `fetch("http://<host>:2323/", {method: "POST", mode: "no-cors", body: "help\n"})`.
-   The fetch reports a network error; that is expected. The device log should
-   show the same WARN line, naming the browser's machine.
-
-**Send timeout.** The device has to block on a send, so the client must not
-read and must not offer a large receive buffer. A desktop client's default
-buffer swallows the whole reply and never makes the device wait. Run this from
-Linux, for example the Home Assistant SSH add-on or WSL:
-
-```python
-import socket, time
-s = socket.socket()
-s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)   # before connect()
-s.connect(("<host>", 2323))
-s.sendall(b"schema\r\n" * 5)    # far more output than both buffers hold
-time.sleep(60)                  # never read
-```
-
-- **Expected:** `Shell session opened`, then `Shell session closed` about 10–12 s
-  after the script starts, not minutes later. A client that connects right
-  after that gets the banner at once.
+**HTTP refusal, from a browser.** Open the devtools console on a page served
+over plain http on the LAN, such as Home Assistant's own UI, and run:
+`fetch("http://<host>:2323/", {method: "POST", mode: "no-cors", body: "help\n"})`.
+The fetch reports a network error; that is expected. The device log should
+show, at WARN, `Closed a connection from <address> that opened with an HTTP
+request; nothing it sent was run`, naming the browser's machine.
 
 **Keepalive**
 
@@ -106,18 +79,62 @@ time.sleep(60)                  # never read
    `idle_timeout: 10min`, keepalive is what closed the session.
 4. Connect from another machine. The banner should come at once.
 
-**Second client**
+**Opening an interactive session, soon after boot**
 
-1. With one session open, run `nc <host> 2323` from a second machine.
-2. **Expected:** it connects and prints nothing. The banner arrives once the
-   first session ends.
-3. Still with the first session open, run `python3 dali-shell --list` from a
-   third machine. **Expected:** the node reads `DALI shell on 2323, in use`,
-   followed by the one-session note.
-4. Run `python3 dali-shell` with no `--host` from that machine. **Expected:** it
-   reports the node's shell in use, waits 10 s, then says another session is
-   probably open. Close the first session within those 10 s and it should
-   connect instead.
+At priority 4, three interactive connections in four reset 2k through the task
+watchdog, most often soon after boot. With the task at priority 1, `schema` in
+chunks and output gathered, repeated connections on a node that had been up a
+while no longer dip the heap and get the prompt at once. Connections in the
+first 30 s after boot were not recorded. See `project_log.md`, 2026-11-09 and
+2026-11-10.
+
+1. Flash the node. Wait for `Boot seems successful` in the log, about a minute
+   after boot, so that a crash cannot roll the image back.
+2. Reboot it. Within 30 s of boot, open an interactive `dali-shell` session.
+   That runs `schema`. Close it, and repeat five times.
+3. **Expected:** the node never restarts. ESPHome prints `CRASH DETECTED ON
+   PREVIOUS BOOT` on the boot after a crash, and the `Reset reason` sensor
+   names it.
+4. Run `discover` and `trace on` in the same session. Each `discover` line
+   should appear as it completes, as before the binding gathered its output.
+   The walk's trace lines should arrive during it, one bus wait behind, as
+   they did on 2026-11-11; see `project_log.md`.
+
+**The TCP binding after the `select()` rewrite**
+
+The TCP binding no longer blocks in `accept()` and `recv()`; it waits in one
+`select()` with the web listener. Nothing a client sees should differ. The
+two checks above were written for the old loop, so run them on a build with
+`web:`: *Keepalive* and *Opening an interactive session, soon after boot*.
+The send timeout and a second client passed on 1k on 2026-11-11; see
+`project_log.md`.
+
+### The web shell
+
+Needs a node with a `web:` block under `shell:`; both `_local` configs have
+one. What is left needs a browser. Below, `<host>` is the node's name.
+
+**Help under a refusing policy.** On a node with `allow_commissioning: false`,
+`commission` is marked refused, nine `special` names are struck through, and a
+note at the top says why.
+
+**Leaving, in other browsers.** Close the tab while `discover` runs on 1k,
+and note when the device log shows `Shell session closed`. Chrome drops the
+connection, so the walk ends at its next write; see `project_log.md`,
+2026-11-11. A browser that sends a close frame and waits lets the walk run
+to its end. Record Firefox and a phone's browser.
+
+**On the access point.** With the node's Wi-Fi unreachable so that its AP comes
+up, join it from a phone and open `http://192.168.4.1:8080/`. **Expected:** the
+page works, at phone width, with nothing fetched from the internet.
+
+**`export config` with `allowed_hosts`.** On a node that lists names under
+`web: allowed_hosts:`, `export config` prints them there.
+
+**The 503 below the heap floor.** Normal use does not reach it: both nodes keep
+70 kB or more free. On a test build with `WEB_HEAP_FLOOR_BYTES` in
+`dali_shell_web.cpp` raised above the node's free heap, both the page and an
+upgrade should get `503`, with a WARN that gives the free heap and the floor.
 
 ### ESPHome version range
 
@@ -753,6 +770,20 @@ A 1k `restore apply` move lost a frame right after another unit's reply. That
 fits, but one miss does not establish it. Measure first: *Bus timing with a
 logic analyzer*, step 3, and the second-load counts.
 
+### P1 — `tools/dali-shell` waits up to 400 s for a device that restarted
+
+Every command, `schema` included, waits with the 400 s command timeout. A
+device that restarted sends nothing, and neither does the waiting client, so
+no reset arrives to end the wait. Seen on 2026-11-09, when connecting reset 2k;
+see `project_log.md`.
+
+Fix. This is a software-stack change, so it waits for a go-ahead:
+- **Give `schema` a short deadline,** about 15 s. On 2k it now returns at once;
+  see `project_log.md`, 2026-11-10.
+- **Set TCP keepalive on the client socket,** so any command notices a device
+  that restarted within seconds. On Windows that is `SIO_KEEPALIVE_VALS`, and
+  elsewhere `TCP_KEEPIDLE`, `TCP_KEEPINTVL` and `TCP_KEEPCNT`.
+
 ### P1 — The DALI PHY can break every other GPIO interrupt
 
 `dali_phy_init()` installs the shared GPIO ISR service with flags `0`, and
@@ -830,6 +861,31 @@ collision*. There are two candidates:
 Every query shares that path, so do not change the scheduler before the
 capture.
 
+### P2 — Closed probes fill a busy shell's queue
+
+While a session is open, a TCP client waits in the listen backlog, which
+holds two. A connection that closes politely keeps its place until the
+session ends. `dali-shell --list`, and `dali-shell` without `--host`, probe
+every node and close politely. So after two of them, the next client's
+connect is never answered: `dali-shell --host` reports `cannot reach
+<ip>:2323: timed out`, not that the shell is busy. Seen on 1k on 2026-11-11;
+see `project_log.md`.
+
+A probe that closes with a reset frees its place at once. Measured the same
+day: after two reset probes, a third connect was accepted in 0.05 s.
+
+Fix, in `tools/dali-shell`. A software-stack change, so it waits for a
+go-ahead:
+- **Close a silent probe with a reset** (`SO_LINGER` 0) in `probe_shell()`.
+  Keep the orderly close for a probe that got a greeting, which ends its
+  session cleanly.
+- **Name both causes when a connect times out:** the device is unreachable,
+  or its shell is busy with two clients already queued.
+
+Then repeat *Second client* from `project_log.md`, 2026-11-11: `--list`, then
+`dali-shell` with no `--host`, then `--host`, all while one session is held.
+The last should report the shell in use after 10 s.
+
 ### P2 — Small hardening items from the stack review
 
 - `dali_rb_clear()` should drain from the consumer side (`tail = head`). In
@@ -841,6 +897,9 @@ capture.
 - Give `backup import` blobs a checksum.
 - Stop native `trace on` writing to the UART from the DALI task. It blocks
   once the TX buffer fills.
+- Log why a network session closed when the peer stopped reading or went
+  away, as the idle timeout already does. Today the log reads only `Shell
+  session closed`.
 
 ## Build
 
@@ -1040,8 +1099,9 @@ have a terminal, plus views built from what the verbs already report:
 - a live bus log.
 
 Commissioning would move there, and the Home Assistant console and buttons
-would go. Nothing here is approved. It is a software-stack change, so it waits
-for an explicit go-ahead.
+would go. Step 3a of *Order of work*, the binding and a terminal page, was
+approved on 2026-11-10 and is built. Nothing after it is approved: each is a
+software-stack change, so it waits for an explicit go-ahead.
 
 If adopted, this replaces *P2 — A Home Assistant commissioning workflow*.
 
@@ -1049,6 +1109,40 @@ If adopted, this replaces *P2 — A Home Assistant commissioning workflow*.
 
 **Heap, as observed on a device:** about 80 kB free from boot to the first
 shell use, and about 60 kB with a shell session open.
+
+**Measured on 2k, 2026-11-09,** with the caps below:
+- **Opening a TCP shell session** moved the low-water mark from 99,828 B, the
+  low since boot, to 76,612 B.
+- **For the session,** the largest block fell from above about 106 kB to
+  77,824 B.
+- **`discover` and `trace on`** set no new low.
+- **Closing the session** gave the block back.
+- **Free heap** fell from about 108 kB to about 80 kB at open. About 7 s later
+  it was back to within about 300 B, and those 300 B returned at close.
+
+So a session holds about 300 B. Opening an interactive `tools/dali-shell`
+session cost about 28 kB for seconds. The client runs `schema` at once, about
+6,500 one-character sends.
+- ESP-IDF's `LWIP_NETIF_TX_SINGLE_PBUF` gives each segment a full 1,440 B
+  MSS buffer, however short.
+- Under `TCP_NODELAY`, 16 one-byte segments can wait for an ACK at once.
+
+So the spike was that burst, not the connection. `schema` now writes in
+159-byte chunks, and the TCP binding gathers writes into sends of a line or
+more. **Confirmed on 2k, 2026-11-10:** opening a session no longer dips free
+heap, and a session holds about 300 B; see `project_log.md`. The web binding's
+heap floor is therefore a reserve for other connections, not a budget for its
+own: 16 kB. **Measured on 2026-11-11,** a page load costs about 13.5 kB for
+the 0.1 s it streams, on both nodes, so the floor covers one. `help` cost
+about 20 kB until the bindings stopped sending at every line end, and about
+14 kB on 2k since; see `project_log.md`, 2026-11-11.
+
+**Read the right sensor.** ESPHome's debug `free`, `block` and `min_free` use
+`MALLOC_CAP_INTERNAL`. That counts about 52 kB of IRAM that takes 32-bit access
+only, so 1k's `free` reads about 147 kB while about 94 kB is usable. On a PSRAM
+build `MALLOC_CAP_8BIT` alone counts the PSRAM. Measure with
+`MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`, as `_local/dali-2k.yaml` now does. See
+`project_log.md`, 2026-11-09.
 
 - **The shell is not the 20 kB.**
   - Its caches, about 62 KiB, are static `.bss` inside the 141,792 B of static
@@ -1064,16 +1158,17 @@ shell use, and about 60 kB with a shell session open.
   - The Wi-Fi driver allocates up to 32 dynamic RX buffers and 32 dynamic TX
     buffers, about 1.6 kB each, as traffic flows.
 
-  20 kB is still more than one idle connection should need. Measure it before
-  building anything; see *Order of work*.
+  An idle connection measured about 300 B. The 20 kB was the spike at open,
+  caught by a sensor, and the `schema` the client runs then is the likely
+  cause.
 - **Enrichment costs flash, not heap.** The browser renders. The device serves
   a constant blob from flash and streams verb output through `shell_printf()`,
   as it already does.
 
 | Item | Heap | Flash |
 |---|---|---|
-| Page, JS and CSS, gzipped | 0 | 30–60 KB, estimated |
-| `dali_commands.md`, `commissioning_readme.md`, `steinel_bank2_reference.md` as built-in help | 0 | 57,071 B with `gzip -9` (29,371 + 25,110 + 4,886 apart) |
+| The page with `dali_commands.md` built in, gzipped, as of 3b | 0 | 46,964 B. The reference is most of it |
+| `commissioning_readme.md`, `steinel_bank2_reference.md` as further built-in help | 0 | 29,996 B with `gzip -9` (25,110 + 4,886 apart), not built in |
 | Serving the page: one short connection | the send buffer while it streams, then 0 | — |
 | A WebSocket session | about what a TCP session costs now; one replaces the other | about 8 KB of code |
 | Flash headroom on the `dali_test.yaml` build | | 798,624 B: a 1,036,384 B image in a 1,835,008 B app slot |
@@ -1086,13 +1181,19 @@ shell use, and about 60 kB with a shell session open.
 - `GET /` serves the gzipped page from flash.
 - `GET /ws` upgrades to a WebSocket, and that connection *is* the shell
   session:
-  - `write_cb` sends each write as a text frame.
+  - `write_cb` gathers writes as the TCP binding does, and sends one text
+    frame per flush: before a bus wait, after the prompt, or when full. A
+    frame per write would make even a line printed in pieces several frames,
+    and a frame per line made `help` 116 of them.
   - Each client text frame is one command line, fed to
     `dali_shell_feed_byte()`.
   - The prompt goes in a frame of its own, so the page knows a command has
     finished. That is framing, and it stays within what a binding may do.
-- **No new task and no new stack.** SHA-1 for the handshake is already in the
-  image (`CONFIG_MBEDTLS_SHA1_C=y`), and so is mbedTLS's base64.
+- **No new task and no new stack.**
+- **SHA-1 and base64 are `dali_web`'s own, about 1 KB of flash.** mbedTLS has
+  both in the image (`CONFIG_MBEDTLS_SHA1_C=y`), but using them would give
+  `components/dali` an IDF dependency and leave the handshake untestable on the
+  host. The local copies are checked against the FIPS 180 and RFC 6455 vectors.
 - **Frames.**
   - Client frames must be masked, unfragmented and no longer than 125 bytes.
     A command line is at most `DALI_SHELL_LINE_MAX`, 80 characters.
@@ -1105,6 +1206,15 @@ shell use, and about 60 kB with a shell session open.
   accepts. A page request is served. A second upgrade gets a close frame that
   says the shell is busy, so it does not wait unanswered in the backlog, as a
   second TCP client does today.
+  - **Only between verbs.** `dali_shell_dispatch()` holds the task for the
+    whole verb, and a `discover` takes tens of seconds. While it runs, nothing
+    is accepted, and a page load waits for the verb to end. Either accept that,
+    or serve the page from somewhere that does not wait on the shell.
+- **There is no cancel.** The session's `aborted` hook fires only when a send
+  fails. A page will want a Stop button. The binding's `aborted` could peek
+  the socket without blocking and treat a close frame, or an agreed cancel
+  line, as the stop. The TCP shell has the same gap, so fix it in both
+  bindings.
 
 **Rejected:**
 - **ESPHome `web_server:`.** It is an entity UI, and it loads its JS from a
@@ -1156,6 +1266,16 @@ upgrade is refused unless both checks pass, and both have host vectors:
 
 `GET /` checks `Host` as well. The page holds nothing secret, but the check
 keeps the two paths identical.
+
+A `Host` that names a port must name the listener's. One that names none
+means port 80, because a browser omits only the default.
+
+**Framing is forbidden** (`X-Frame-Options: DENY`, `frame-ancestors 'none'`).
+A page elsewhere could otherwise show the device's own page in an invisible
+frame, where its socket passes both checks, and steer the operator's clicks
+into it: clickjacking onto `commission`. The rest of the page's
+`Content-Security-Policy` waits for the page. Whether `connect-src 'self'`
+covers `ws:` needs checking in each browser first.
 
 The session takes the same `DALI_SHELL_ALLOW_*` policy as the TCP binding. The
 page greys out what the policy refuses. It never decides that itself.
@@ -1228,6 +1348,9 @@ the HA console became a second implementation.
   Each has a µs timestamp and, for a reply, the time since our TX.
 - Lines start with `[BUS]`, so the page can route them out of the terminal
   pane.
+- **The prompt can share a line with trace.** A trace line pumped between
+  commands follows the prompt, so a TCP client reads `> [BUS] TX ...`. The
+  page is unaffected, because the prompt has a frame of its own.
 - With `defer_foreign_task_output` they already pass through the deferred ring.
   They never block the DALI task, as the native UART trace can.
 
@@ -1235,9 +1358,11 @@ the HA console became a second implementation.
 - One 16-bit forward frame and its 22 Te gap take about 25 ms, so a loaded bus
   carries about 40–50 frames a second, replies included. Decoded, that is
   about 4 kB/s.
-- The deferred ring holds 16 lines of 128 B and is pumped every 250 ms
-  (`SHELL_RECV_TIMEOUT_MS`), a ceiling of about 64 lines a second. While trace
-  is on, pump it from the `select()` timeout at a shorter interval rather than
+- The deferred ring holds 16 lines of 128 B. Between verbs it is pumped every
+  250 ms (`SHELL_POLL_MS`), a ceiling of about 64 lines a second. During a
+  verb it is pumped before every bus wait. A 2k walk raised about 34 lines a
+  second and a 1k walk about 46, and none was dropped. While trace is on,
+  pump it from the `select()` timeout at a shorter interval rather than
   growing the ring, because each slot is static RAM on every board.
 - Dropped lines are already reported as `[trace] N line(s) dropped`.
 
@@ -1247,8 +1372,15 @@ the HA console became a second implementation.
   through `dali_event_parse_frame()`.
   The aim is `a3 QUERY ACTUAL LEVEL -> 254` and `d5 i1 occupied`, not
   `0x47A0 (16-bit)`. The serial `trace` gains it too.
+  - **Call an RX a reply only inside the reply window.** Today every RX that
+    follows any TX carries the time since it, so a Steinel event 9.9 s after
+    a poll reads `RX 0x008001 (24-bit, 9923.9 ms after TX)`.
 - **History on connect.** If `capture` is running, the page pulls
   `capture export` when it connects, to show the last 128 records.
+- **The idle timeout.** It counts input only, and a page cannot send a
+  WebSocket ping from script. A page that only watches `trace on` is
+  therefore closed after `idle_timeout`, 10 minutes on both nodes. Either
+  count output as activity while trace is on, or have the page send a line.
 
 **What it cannot show today:**
 - Anything from before the session opened, except the capture ring.
@@ -1320,32 +1452,71 @@ so the cut is clean.
   platforms, so this is a breaking change for a major tag: a migration note in
   `CHANGELOG.md`, and new pinned configs at that tag.
 
-**Open question: does any automation write to the DALI Command text
-entity?** For example, `scene g1 3`. Light entities are brightness-only, so
-the console is today the only way an HA script reaches scenes or raw frames.
-If one does, that need is runtime, not commissioning. It wants a small ESPHome
-action in place of the console, not a reason to keep it.
+**Answered 2026-11-09: no automation writes to the DALI Command text
+entity.** Neither installation exposes the console, a DALI button or the
+Target Address number. The two automations that touch DALI use a light and the
+occupancy sensor. See `project_log.md`. A later need for scenes or raw frames
+from an HA script is runtime, not commissioning. It wants a small ESPHome
+action, not the console back.
 
 ### Order of work
 
-1. **Measure heap on a device.** This needs a hardware go-ahead. Add the
-   `debug:` sensors for free heap, minimum free and largest block, and read
-   them:
-   - idle,
-   - with a TCP shell session open,
-   - during `discover`,
-   - with `trace on` while events flow,
-   - after the session closes.
-
-   This explains the 20 kB, and sets a heap floor below which the web binding
-   refuses a new page or upgrade.
-2. **The portable parser.** Request line, headers, the `Host` and `Origin`
-   checks, the handshake and frames, with host vectors and a mutation pass, as
-   the peer sniffer had.
-3. **The binding and a bare page.**
-   - The `select()` loop, the `web:` schema, and `dali_test.yaml`.
-   - A page with three parts: a terminal, help from `schema` plus
-     `dali_commands.md`, and a map from `export inventory`.
+1. **The binding and a terminal page (3a). Built 2026-11-10.** What a client
+   other than a browser can check passed on 1k and 2k on 2026-11-11.
+   `dali_shell_web.cpp`, the `select()` loop in `dali_shell_tcp.cpp`, the
+   `web:` schema, `dali_test.yaml`, and `web/shell.html`. See Part 1, *The web
+   shell* and *The TCP binding after the `select()` rewrite*, and
+   `project_log.md`. What it settled beyond the sketch above:
+   - **Web connections that are not the session wait in two slots,** read
+     without blocking from the same `select()`. A head must arrive within 10 s,
+     and a third connection evicts the oldest. So a browser's idle preconnect
+     cannot hold the task.
+   - **An answered connection is shut and drained,** up to 2 s, so that
+     closing it does not reset the answer.
+   - **An upgrade with bytes after its head is refused** as malformed: a
+     client sends nothing until the handshake answers.
+   - **The heap floor is 16 kB,** a reserve; see *Budget*.
+   - **Output bytes above 0x7F go out as `?`,** so a flush that falls anywhere
+     is still a valid UTF-8 text frame. Shell output is ASCII today.
+   - **The TCP listener is not watched while any session is open,** so a
+     second TCP client waits in the backlog as before.
+2. **Views (3b). Built 2026-11-10.** On 2026-11-11 the operator found Help
+   and Map working on both nodes, and the Map's data matched both buses.
+   Help from
+   `schema` plus `dali_commands.md`, and a map from `export inventory`. See
+   Part 1, *The web shell*, and `project_log.md`. What it settled:
+   - **Two small C additions, approved with it.** `schema` flags each special
+     `commissioning`, and `export inventory` (version 3) lists
+     `contested_gear` and `undecodable_device`, with `identity_collision` on
+     an entry. Version 2 left every undecodable address out, so a map built on
+     it would have shown a shared address as free.
+   - **The page runs its own lines quietly** through the same one-at-a-time
+     queue as typed ones. A quiet line's output is what follows its echo, so a
+     trace line pumped between lines still reaches the terminal.
+   - **The reference is built into the page,** as a JS string, not served
+     from a second path. `dali_web` stays two routes, and the help is the
+     firmware's own. The cost is a 47 kB page on every load.
+   - **A verb's Reference button finds its section** by the reference's own
+     convention: the first `##` section whose opening code block has a line
+     starting with the verb. Every verb but `devinfo` resolved, and
+     `devinfo` is now documented.
+   - **Actions on the map run as typed lines.** Identify, Status and Instances
+     send `identify aN`, `status aN` and `instances N`. Use and the table names
+     only fill the command line.
+3. **Stop, in both bindings.** See *There is no cancel* under *Transport*.
+   Proposed as its own change; not yet approved.
+   - **Settle the signal first.** Over TCP it can be 0x03, which
+     `tools/dali-shell` would send on Ctrl-C. A WebSocket text frame must be
+     printable ASCII and a page cannot send a ping, so the web binding needs
+     a reserved frame.
+   - **Fold in a forgotten tab.** A tab left open holds the one session
+     until `idle_timeout`, and meanwhile a TCP client waits unanswered in the
+     backlog. The page could give the session back once its tab has been
+     hidden for a minute, and reconnect when it is shown again.
+   - **Treat a close frame as a stop too.** The binding reads nothing while a
+     verb runs. On 2026-11-11 a close frame sent 8 s into a 1k `discover`
+     waited until the walk had run its full 44.7 s. The same peek that reads
+     the stop signal should act on a close frame.
 4. **The content.**
    - The frame decoder and the live log.
    - Parameter and vendor metadata in `schema`.

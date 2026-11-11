@@ -31,8 +31,9 @@
 #
 # Adding an option to the schema without adding it here is how that option
 # stops being compiled. Any dali*.yaml in this repo is picked up by
-# .github/workflows/esphome-build.yml automatically; this is the one that is
-# also compiled, because it is the one that builds this checkout.
+# .github/workflows/esphome-build.yml automatically, and the ones that build
+# this checkout are also compiled. dali_test_psram.yaml is the other one: it
+# covers the PSRAM build's code generation, not options, so options go here.
 
 esphome:
   name: dali-test
@@ -91,6 +92,12 @@ dali:
     port: 2323
     idle_timeout: 5min
     allow_commissioning: true
+    # The browser binding, so the page is gzipped into the image and the
+    # allowed_hosts loop in to_code() runs.
+    web:
+      port: 8080
+      allowed_hosts:
+        - dali.lan
 
   # Every optional text sensor, so each to_code() branch is taken.
   command_result:

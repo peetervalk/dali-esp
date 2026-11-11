@@ -275,6 +275,29 @@ const DaliCliCommandSpec *dali_cli_command_for_id(DaliCliCommandId id);
 void dali_cli_print_help(const DaliCliOut *out);
 void dali_cli_print_usage(const DaliCliOut *out, const DaliCliCommandSpec *spec);
 
+/*
+ * One JSON object member listing the short addresses set in `mask`, bit N for
+ * address N, in ascending order: `"key": [3, 17, 63]`, or `"key": []`. No
+ * separator or line end is written; the caller places it. One write. `key` is
+ * at most 32 characters and needs no escaping.
+ */
+#define DALI_CLI_ADDRESS_LIST_MAX 320u
+void dali_cli_print_json_address_list(const DaliCliOut *out,
+                                      const char       *key,
+                                      uint64_t          mask);
+
+/*
+ * `schema`: every verb and every named command table as JSON, then the session
+ * policy a client should grey out against. Each `special` entry also says
+ * whether dali_cli_special_is_commissioning() marks it, which is what the
+ * commissioning policy refuses. Written in chunks of DALI_CLI_FORMAT_MAX - 1
+ * bytes and a shorter last one, never a write per character: on a socket each
+ * write can become a TCP segment.
+ */
+void dali_cli_print_schema(const DaliCliOut *out,
+                           bool              allow_commission,
+                           bool              allow_reset);
+
 typedef enum {
     DALI_CLI_RESOLVE_OK = 0,
     DALI_CLI_RESOLVE_EMPTY,      /* blank line; produce no output             */

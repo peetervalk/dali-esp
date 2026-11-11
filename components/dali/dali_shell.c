@@ -4920,8 +4920,12 @@ static void cmd_export_inventory(void)
     shell_printf("{\r\n");
     /* 2 adds the Bank 0 identity block, level window, dimming curve and scene
      * levels — the fields a restore needs. A version-1 consumer sees only new
-     * optional keys, but a restore reading a version-1 export has no anchor. */
-    shell_printf("  \"schema_version\": 2,\r\n");
+     * optional keys, but a restore reading a version-1 export has no anchor.
+     * 3 adds the addresses more than one unit answers at: `contested_gear`,
+     * `undecodable_device`, and `identity_collision` on a listed device. A
+     * version-2 export left out every address whose reply did not decode, so
+     * it read a shared address as a free one. */
+    shell_printf("  \"schema_version\": 3,\r\n");
     shell_printf("  \"devices\": [\r\n");
     bool first_device = true;
     if (has_inventory) {
@@ -4942,6 +4946,11 @@ static void cmd_export_inventory(void)
 
             shell_printf("    { \"address\": %u, \"present\": true",
                    (unsigned)addr);
+            /* It answered as one unit, but its identity read collided: more
+             * than one unit is on this address. Also in contested_gear. */
+            if (entry->has_identity_collision) {
+                shell_printf(", \"identity_collision\": true");
+            }
             if (entry->has_status) {
                 shell_printf(", \"status\": %u, \"status_hex\": \"0x%02X\"",
                        (unsigned)entry->status,
@@ -5160,6 +5169,36 @@ static void cmd_export_inventory(void)
         }
     }
     shell_printf("\r\n  ],\r\n");
+
+    /*
+     * Shared addresses, in each space. `devices` lists only addresses that
+     * answered as one unit, so an address whose reply did not decode appears
+     * nowhere else. contested_gear is dali_discovery_gear_address_contested(),
+     * the one test every consumer that reserves a gear address uses: it holds
+     * the undecodable addresses and the identity collisions both.
+     */
+    uint64_t contested_gear = 0u;
+    uint64_t undecodable_device = 0u;
+    if (has_inventory) {
+        for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+            const DaliDiscoveryDeviceInfo *entry =
+                dali_discovery_inventory_get(inventory, addr);
+            if (entry == NULL) {
+                continue;
+            }
+            if (dali_discovery_gear_address_contested(entry)) {
+                contested_gear |= (uint64_t)1u << addr;
+            }
+            if (entry->has_undecodable_device_activity) {
+                undecodable_device |= (uint64_t)1u << addr;
+            }
+        }
+    }
+    shell_printf("  ");
+    dali_cli_print_json_address_list(&s_out, "contested_gear", contested_gear);
+    shell_printf(",\r\n  ");
+    dali_cli_print_json_address_list(&s_out, "undecodable_device", undecodable_device);
+    shell_printf(",\r\n");
 
     shell_printf("  \"switches\": [\r\n");
     for (uint8_t i = 0u; i < mapping_count; i++) {
@@ -5478,122 +5517,14 @@ static void cmd_list(const DaliCliTokens *t)
  * the firmware what it accepts means the client is wrong only when the
  * firmware is.
  *
- * Printed as one line per entry rather than assembled in a buffer: the full
- * dump is several kilobytes, which no single fixed buffer here should hold.
+ * The JSON is written by dali_cli_print_schema(), in full chunks: a write per
+ * character made every interactive TCP session open with 6,660 sends.
  */
-static void shell_json_escape_print(const char *text)
-{
-    /* The tables hold verb names, argument sketches, and summaries; only the
-     * quote and backslash can occur in practice, but both must be escaped for
-     * the output to parse at all. */
-    for (const char *c = text; *c != '\0'; c++) {
-        if (*c == '"' || *c == '\\') {
-            shell_printf("\\%c", *c);
-        } else {
-            shell_printf("%c", *c);
-        }
-    }
-}
-
-static void shell_print_gear_table_json(const char *label,
-                                        uint8_t count,
-                                        const DaliCliGearCommand *(*at)(uint8_t))
-{
-    shell_printf("  \"%s\": [", label);
-    for (uint8_t i = 0u; i < count; i++) {
-        const DaliCliGearCommand *cmd = at(i);
-        if (cmd == NULL) {
-            continue;
-        }
-        shell_printf("%s\n    {\"name\": \"", i == 0u ? "" : ",");
-        shell_json_escape_print(cmd->name);
-        shell_printf("\", \"needs_param\": %s, \"max_param\": %u}",
-                     cmd->needs_param ? "true" : "false",
-                     (unsigned)cmd->max_param);
-    }
-    shell_printf("\n  ],\n");
-}
-
 static void cmd_schema(void)
 {
-    shell_printf("{\n  \"verbs\": [");
-
-    uint8_t verb_count = dali_cli_command_count();
-    for (uint8_t i = 0u; i < verb_count; i++) {
-        const DaliCliCommandSpec *spec = dali_cli_command_at(i);
-        if (spec == NULL) {
-            continue;
-        }
-        shell_printf("%s\n    {\"name\": \"", i == 0u ? "" : ",");
-        shell_json_escape_print(spec->name);
-        shell_printf("\", \"args\": \"");
-        shell_json_escape_print(spec->args);
-        shell_printf("\", \"summary\": \"");
-        shell_json_escape_print(spec->summary);
-        shell_printf("\", \"min_args\": %u, \"max_args\": %u",
-                     (unsigned)spec->min_args, (unsigned)spec->max_args);
-        if (spec->subcommands != NULL) {
-            shell_printf(", \"subcommands\": \"");
-            shell_json_escape_print(spec->subcommands);
-            shell_printf("\"");
-        }
-        shell_printf("}");
-    }
-    shell_printf("\n  ],\n");
-
-    shell_print_gear_table_json("query", dali_cli_query_count(), dali_cli_query_at);
-    shell_print_gear_table_json("special", dali_cli_special_count(), dali_cli_special_at);
-    shell_print_gear_table_json("config", dali_cli_config_count(), dali_cli_config_at);
-
-    /* DT6/DT8 and the instance tables carry different fields, so they are
-     * emitted by name only: a completer needs the spelling, and anything more
-     * detailed is already in `list <table>` for a human to read. */
-    shell_printf("  \"dt6\": [");
-    for (uint8_t i = 0u; i < dali_cli_dt6_count(); i++) {
-        const DaliCliDtCommand *cmd = dali_cli_dt6_at(i);
-        if (cmd == NULL) {
-            continue;
-        }
-        shell_printf("%s\"", i == 0u ? "" : ", ");
-        shell_json_escape_print(cmd->name);
-        shell_printf("\"");
-    }
-    shell_printf("],\n  \"dt8\": [");
-    for (uint8_t i = 0u; i < dali_cli_dt8_count(); i++) {
-        const DaliCliDtCommand *cmd = dali_cli_dt8_at(i);
-        if (cmd == NULL) {
-            continue;
-        }
-        shell_printf("%s\"", i == 0u ? "" : ", ");
-        shell_json_escape_print(cmd->name);
-        shell_printf("\"");
-    }
-    shell_printf("],\n  \"iquery\": [");
-    for (uint8_t i = 0u; i < dali_cli_iquery_count(); i++) {
-        const DaliCliInstanceQuery *cmd = dali_cli_iquery_at(i);
-        if (cmd == NULL) {
-            continue;
-        }
-        shell_printf("%s\"", i == 0u ? "" : ", ");
-        shell_json_escape_print(cmd->name);
-        shell_printf("\"");
-    }
-    shell_printf("],\n  \"iconfig\": [");
-    for (uint8_t i = 0u; i < dali_cli_iconfig_count(); i++) {
-        const DaliCliInstanceConfig *cmd = dali_cli_iconfig_at(i);
-        if (cmd == NULL) {
-            continue;
-        }
-        shell_printf("%s\"", i == 0u ? "" : ", ");
-        shell_json_escape_print(cmd->name);
-        shell_printf("\"");
-    }
-
-    /* What this session will actually run, so a client can grey out what it
-     * cannot use rather than letting the operator discover it by refusal. */
-    shell_printf("],\n  \"policy\": {\"commission\": %s, \"reset\": %s}\n}\r\n",
-                 (s_session.policy & DALI_SHELL_ALLOW_COMMISSION) != 0u ? "true" : "false",
-                 (s_session.policy & DALI_SHELL_ALLOW_RESET) != 0u ? "true" : "false");
+    dali_cli_print_schema(&s_out,
+                          (s_session.policy & DALI_SHELL_ALLOW_COMMISSION) != 0u,
+                          (s_session.policy & DALI_SHELL_ALLOW_RESET) != 0u);
 }
 
 /* ---------------------------------------------------------------------------

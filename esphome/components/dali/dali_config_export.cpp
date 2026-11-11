@@ -762,6 +762,16 @@ void DaliComponent::export_config_yaml(const DaliCliOut *out,
                         (unsigned) shell->idle_timeout_s);
         dali_cli_printf(out, "    allow_commissioning: %s\r\n",
                         shell->allow_commissioning ? "true" : "false");
+        if (shell->web_port != 0u) {
+            dali_cli_write(out, "    web:\r\n");
+            dali_cli_printf(out, "      port: %u\r\n", (unsigned) shell->web_port);
+            if (shell->web_allowed_host_count > 0u && shell->web_allowed_hosts != nullptr) {
+                dali_cli_write(out, "      allowed_hosts:\r\n");
+                for (uint8_t i = 0u; i < shell->web_allowed_host_count; i++) {
+                    dali_cli_printf(out, "        - %s\r\n", shell->web_allowed_hosts[i]);
+                }
+            }
+        }
     }
 
     uint8_t dispatch_count = dali_registry_dispatch_count();

@@ -348,6 +348,10 @@ void dali_shell_write_prompt(void);
  * defer_foreign_task_output was set. Call from the session's own task,
  * regularly — a front end blocked in recv() should use a receive timeout and
  * pump on each expiry, so live trace still arrives while nothing is typed.
+ * Pump from the `aborted` hook too, which the shell calls before every bus
+ * wait, or a verb's own traffic overflows the ring while the verb runs. There,
+ * pump only when the output stands at a line start, so that a trace line never
+ * splits a line the verb is still printing.
  *
  * Returns the number of lines dropped since the last call because the ring was
  * full, so a front end can tell the operator that the trace has gaps rather

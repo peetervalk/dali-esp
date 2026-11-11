@@ -48,7 +48,8 @@ PHY stack, plus `dali_shell.c` — the diagnostic CLI as a session, owning every
 verb, the blocking transport, and the caches a workflow accumulates.
 `main/main.c` is the native ESP-IDF entry point and `main/dali_diag.c/.h` is now
 only the UART0 binding for that shell. The active ESPHome component is
-`esphome/components/dali`, whose `dali_shell_tcp.cpp` is the second binding.
+`esphome/components/dali`, whose `dali_shell_tcp.cpp` and `dali_shell_web.cpp`
+are the second and third bindings. They share one task and one session.
 
 A front end moves bytes and owns a session's lifetime. It must not implement,
 gate, or reword a verb: that is what keeps the Home Assistant shell identical to
@@ -67,9 +68,11 @@ the control/protocol APIs.
 | `dali_mapping` | `components/dali` | Generic enough to stay; move to `main/` if the component is published separately |
 | `dali_dispatch` | `components/dali` | Headless dispatch engine; pure C, no ESPHome dependency |
 | `headless_dispatch` rules | YAML, per site | Installation-specific dispatch table; no source file. Schema and codegen in `esphome/components/dali/__init__.py`, loaded through `DaliComponent::add_dispatch_entry()`; active when the list is non-empty |
-| `dali_shell` | `components/dali` | Every CLI verb, the blocking transport, and session caches; one implementation both front ends run |
+| `dali_shell` | `components/dali` | Every CLI verb, the blocking transport, and session caches; one implementation every front end runs |
+| `dali_web` | `components/dali` | HTTP and WebSocket parsing for a browser binding; pure functions, no socket, host-tested |
 | `dali_diag` | `main/` | UART0 binding for the shell; moves bytes only |
-| `dali_shell_tcp` | `esphome/components/dali` | TCP binding for the shell: one session, idle timeout, policy from YAML. Refuses a peer that opens with an HTTP request |
+| `dali_shell_tcp` | `esphome/components/dali` | TCP binding for the shell: one session, idle timeout, policy from YAML. Refuses a peer that opens with an HTTP request. Owns the `select()` loop and the session both network bindings share |
+| `dali_shell_web` | `esphome/components/dali` | Browser binding for the shell, from `shell: web:`: serves `web/shell.html` from flash, upgrades `/ws` to the session. Moves bytes; `dali_web` decides what they mean |
 | `main.c` | `main/` | App entry point |
 
 ### Device Type Coverage
@@ -240,6 +243,12 @@ tree by construction. It also declares every platform and every optional block
 on purpose. An option added to the schema but not to `dali_test.yaml` is an
 option nothing compiles, so extend that file in the same change.
 
+**`dali_test_psram.yaml` is the same tree with PSRAM on.** There ESP-IDF
+compiles the ESP32 and ESP32-S3 with `-mdisable-hardware-atomics`, so
+`std::atomic` is not lock-free and read-modify-writes become library calls.
+Compile it too when a change touches an atomic. It covers code generation, not
+options, so keep it small.
+
 ### CI
 
 Four workflows in `.github/workflows/`:
@@ -280,4 +289,4 @@ Four workflows in `.github/workflows/`:
     Home Assistant builds with. A tag can pass one and fail the other.
 - The two builds compile the same `components/dali` C with different
   toolchains. ESPHome builds with the IDF its version recommends: 5.5.6 at the
-  2026.10.0 pin. The native build pins IDF 6.0.1.
+  2026.10.2 pin. The native build pins IDF 6.0.1.
