@@ -36,6 +36,184 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-11-12, third batch (a refresh no longer resends a reading; uncommitted on `dev` at `cdd4bcd`)
+
+The fix for *A refresh can send a bus reading back as a command*, in
+*Investigations*. Nothing here touched a device or a bus.
+
+- **The two decisions moved into `dali_light_profile.h`,** where the host
+  suite reaches them:
+  - `dali_light_profile_changed()` decides whether a refreshed profile
+    invalidates the cache;
+  - `DaliLightEcho`, with `dali_light_echo_record()` and
+    `dali_light_echo_take()`, recognizes the echo of a reading.
+
+  `DaliLightOutput` calls them. It keeps a `profile_known_` flag, which the
+  first profile sets and nothing clears. `begin_level_profile_update()` no
+  longer clears the echo.
+- **35/35 host suites build and pass.** `test_light_profile` has 22 tests, up
+  from 14:
+  - the first profile and each field's change count as changed, and an
+    unchanged refresh does not;
+  - an echo matches its own reading once;
+  - an echo of OFF matches OFF only;
+  - a different write consumes the echo;
+  - an echo survives a profile change that would map its brightness to
+    another level;
+  - the 2k sequence replayed through `dali_light_write`: a reading of OFF,
+    an unchanged refresh, then the echo. The echo is recognized, and the same
+    OFF taken as a command is suppressed.
+- **`dali_light_output.cpp` passes a syntax-only check** with the flags of the
+  `dali_light_output.cpp` entry in `_local/.esphome/build/dali-2k`'s
+  `compile_commands.json`, with no warning. A deliberate error in a probe
+  file was reported, so the check was live.
+  - That tree is from 2026-08-13: ESP-IDF 5.5.5, with that day's ESPHome
+    headers.
+  - No other source includes the two changed headers.
+- **Not covered:** a compile of `dali_test.yaml`, the native build, which does
+  not build the ESPHome layer, and a bus. The bus check is in `todo.md`, *A
+  refresh no longer resends a bus reading*.
+
+### Verified on 2026-11-12 on 1k and 2k (received-frame spacing, the close reasons, a busy shell; `cdd4bcd`, ESPHome 2026.10.2)
+
+Part 1 of `todo.md`, run with the operator's go-ahead, without `identify`.
+
+**The method:**
+
+- **The build.** The operator flashed both nodes from `ref: dev`. They report
+  ESPHome 2026.10.2, compiled at 17:11 (1k) and 17:13 (2k), after `cdd4bcd`
+  reached `origin/dev` at 16:27. The ref was inferred from those times, not
+  read from a device.
+- **Sessions.** Everything ran from the workstation over the LAN: 1k at
+  192.168.1.103 and 2k at 192.168.1.216.
+  - `tools/dali-shell` took a piped script, so each run was one session, with
+    `sleep` in the script to pace lines.
+  - Raw sockets were used where a client had to misbehave.
+- **Logs.** Both device logs were streamed with `uv run esphome logs`, 1k at
+  INFO and 2k at DEBUG. Neither showed a W or E line except the HTTP refusal
+  below.
+- **Bus traffic.** All of it was queries, three `discover` walks on 2k, and
+  45 `quiescent off all` broadcasts, which change nothing on a device that is
+  not quiescent. Lamp state did not change, but one walk was followed by an
+  OFF the firmware sent itself; see *A refresh can send a bus reading back as
+  a command*, in *Investigations*.
+
+**1k, no bus traffic but the restore scan.**
+
+- **`exit` by end of input.** The log read `Shell session closed: the client
+  closed it`.
+- **A client that stops reading.** A raw socket set `SO_RCVBUF` to 256, sent
+  `help`, `schema`, `help`, `schema` and never read.
+  - The log read `Shell session closed: the client stopped reading (errno 11)`
+    10.6 s after the session opened.
+  - Per *Why a session closed*, step 2, `find switches 120` was the trigger.
+    It writes only when an event arrives, too little to fill the send buffer
+    of a client that has stopped reading, so it would not have triggered it.
+- **`restore` after the update's reboot.** `backup status` read `16 entries and
+  0 instance setting(s), loaded from storage`. `restore plan` read `16
+  matched, 16 already correct, 0 move(s)`. Its scan took 49 s. The step that
+  saves a new backup was not run, to leave the stored one alone.
+- **A busy shell stays reachable.** A session was held for 50 s. During it:
+  - `--list` read `dali-1k  192.168.1.103  DALI shell on 2323, in use`, in
+    4.3 s.
+  - `dali-shell` with no `--host`, stdin a pipe, listed 1k as `(in use)` and
+    stopped with `Pass --host to choose one`.
+  - `--host 192.168.1.103` reported `accepted the connection but sent no
+    greeting in 10s: another session is probably open` after 10.4 s. On
+    2026-11-11 the same step read `timed out`.
+  - When the held session ended, the device accepted the two probes from its
+    backlog. Each logged `Shell session opened from unknown` and then `Shell
+    session closed: the client reset the connection (errno 104)`, in the same
+    millisecond. The `--host` attempt closed in order.
+- **HTTP refusal, by curl rather than a browser.** A POST to port 2323 logged
+  `Closed a connection from 192.168.1.246 that opened with an HTTP request;
+  nothing it sent was run` at WARN, then `Shell session closed: it opened with
+  an HTTP request`. curl reported `Received HTTP/0.9`, so the device sent no
+  bytes before closing.
+
+**2k, received-frame spacing.** The Steinel's lux instance emitted
+`0x008002` every 3.000 s and the occupancy instance `0x00840C` every 30 s. On
+2026-11-11 the lux event read `0x008001`.
+
+- **Six captures of 25 `query a0 status` each, back to back:** 150 replies
+  and no event at all.
+  - The two events of that interval came late: 0.82 s and 0.17 s after their
+    3 s marks.
+  - Mapped onto the capture clock through the node's own sensor polls, they
+    fall at about the gaps between captures, when capture was off. That
+    mapping is good to about 0.15 s.
+  - So while queries ran back to back, about 10.7–12 ms apart, the Steinel did
+    not transmit. It needs 13.5 ms or more of idle.
+- **One capture of 50 queries, 200 ms apart:** five events were captured, on
+  their 3 s marks.
+- **Gaps measured,** from an `rx` record to the next `tx`, less the forward
+  frame's 17 or 25 bit periods:
+
+  | After | n | Least `timestamp_us` difference | Required | Least gap |
+  |---|---:|---:|---:|---:|
+  | A reply to our query | 195 | 24,870 | 23,752 | 10.7 ms |
+  | An event, before a 16-bit frame | 2 | 30,414 | 29,244 | 16.2 ms |
+  | An event, before a 24-bit frame (the poll the occupancy event requests) | 1 | 37,172 | 35,908 | 16.3 ms |
+
+  Before the change these read about 17,000 and 15,900 for a 16-bit frame.
+- **`since_tx_us` held steady:** 16,038–16,082 over a0's 200 replies, and
+  14,144–15,392 over the Steinel's 9 replies to the node's own polls.
+- **One query in 200 got no reply.** It went out 26,196 µs after the previous
+  reply's last edge, a 12.0 ms gap. Nothing followed it: no RX activity and
+  nothing malformed. The scheduler resent it 54,680 µs later and a0
+  answered.
+  - Across all of that, `Bus idle fails` stayed 0.
+  - Since the update's reboot, a little over two hours earlier, `Reply
+    timeouts` had reached 5 in 1,701 admitted frames by the time the walks
+    began.
+- **`TX deferred (RX)`** read 1,365 at the start, rose to 1,431 by the paced
+  run's `stats`, a few minutes later, and then did not move again. The
+  scheduler adds one each time the PHY declines a pass, so one frame held
+  behind an event can add several.
+
+**2k, three `discover` walks,** with `stats` before and after each.
+
+- **Every walk found a0–a4 in g0** (LED, v2.0, level 0), and d0 with
+  `4 input instance(s) enumerated`. No enumeration failure was printed.
+- **The walks took about 28.5, 28.5 and 28.0 s,** from each `Bus claimed by
+  scan` to the next.
+- **Each walk added exactly 128 `TX retries` and 256 `Reply timeouts`.** The
+  quiesced walk of 2026-09-04 added 132 and 264, with the Casambi still at
+  d1.
+- **`TX deferred (RX)` and `RX events routed` did not move** in any walk. The
+  quiescence bracket silences the Steinel, so nothing arrives to defer behind.
+  *Spacing from received frames*, step 4, expected deferrals above zero.
+- **The bracket released.** The lux events stopped after 19:43:59.622 and
+  resumed at 19:45:27.408, 1.9 s after the last walk. The occupancy heartbeat
+  resumed at 19:45:53.316, on its 30 s period.
+
+**2k, the send-twice pair.** 45 `quiescent off all` were sent 200 ms apart
+under one capture: 90 frames `0xFFFE1E`, one poll and its reply, and no event.
+
+- **The halves were 32,130–33,068 µs apart,** release to release. Less the 25
+  bit periods of the second, that is an 11.3–12.2 ms gap.
+- **The Steinel emitted nothing during the run.** Its last lux event came at
+  19:42:49.066, 0.4 s before the session opened. The next came at
+  19:43:02.611, 3.0 s after the last broadcast, and every one after that is
+  on the new phase. The 30 s occupancy heartbeat also skipped: 19:42:33.029,
+  then 19:43:29.671.
+- **So STOP QUIESCENT MODE restarts the Steinel's report timers,** even when it
+  was not quiescent, and a train of them silences it. The procedure that used
+  it to make a split likely cannot produce one. In any case the 11.3–12.2 ms
+  between our halves is shorter than the 13.5 ms a DALI-2 device waits before
+  transmitting, so a conforming device should never split our pair.
+
+Not covered:
+
+- every check that needs `identify`, a restart, a browser or a second
+  machine;
+- *A Home Assistant scan holds the bus against the shell*: neither site config
+  declares the scan button;
+- *`devmem write` needs the commissioning policy*: both nodes allow
+  commissioning;
+- the idle timeout, keepalive, and anything that writes an address, a group or
+  an instance setting.
+
 ### Verified locally on 2026-11-12, second batch (`dev` at `f0a9236` plus uncommitted changes)
 
 The P1 and P2 items that need no bus: the split send-twice pair, the PHY's
@@ -3323,6 +3501,88 @@ cleared by the 2026-08-14 entry above):
 ---
 
 # Investigations
+
+## A refresh can send a bus reading back as a command — found 2026-11-12
+
+Supersedes nothing. Seen on 2k during the bus session of the same date; see
+*Verified on 2026-11-12 on 1k and 2k* above.
+
+**What was seen.** The third of three back-to-back `discover` walks ended at
+19:45:25.5, and the 2k log then read:
+
+```text
+19:45:25.504 query level profile: light target type=1 addr=0 via short 0
+19:45:26.079 query actual level: light target type=1 addr=0 via short 0
+19:45:26.406 query level profile: light target type=1 addr=0 via short 0
+19:45:26.413 query actual level reply: light target type=1 addr=0 level=0
+19:45:26.508 'DALI Group 0' >> OFF
+19:45:26.793 query actual level: light target type=1 addr=0 via short 0
+19:45:26.841 tx off to group 0
+```
+
+- Two refresh passes ran back to back for the one light. The refresh cursor
+  holds one pending request, and two had arrived.
+- Nobody asked for the OFF. Home Assistant's history shows the light off and
+  the occupancy sensor `Unoccupied` throughout. Neither automation that
+  targets `light.dali_2k_dali_group_0` ran after 16:13 UTC.
+- The lamps were already at level 0, so nothing visible happened.
+
+**Two facts in `dali_light_output.cpp`, both since `6c4569e` (2026-08-12):**
+
+1. **The deduplication cache is dropped on every refresh.**
+   - `begin_level_profile_update()` sets `profile_ready_ = false`.
+   - `set_level_profile()` then computes `changed = !profile_ready_ || ...`.
+   - So `changed` is always true after a refresh, and
+     `dali_light_write_invalidate()` always runs.
+   - The comment on `begin_level_profile_update()` says the opposite is
+     intended: "if the profile comes back unchanged ... the cached level still
+     means what it meant. Dropping it every refresh would make every repeat
+     command retransmit."
+2. **A refresh forgets a pending echo.**
+   - `apply_bus_state()` pushes a reading into ESPHome with
+     `LightCall::perform()`, and records it so that `write_state()` can
+     recognise the echo.
+   - ESPHome calls `write_state()` from the light's own loop, later.
+   - `begin_level_profile_update()` clears `echo_valid_`. A refresh that
+     starts in between turns the echo into what looks like an operator
+     command.
+
+**The likely sequence:**
+
+1. The first pass reads level 0. `dali_light_write_observe()` records OFF as
+   known, and `perform()` schedules the echo.
+2. The second pass starts and clears the echo.
+3. `write_state()` arrives and is taken as a command for OFF.
+4. The second pass's profile lands, and fact 1 invalidates the cache that
+   would have suppressed it.
+5. `pump_write_()` sends OFF.
+
+Device log lines from different tasks reach the stream in a shared buffer, so
+their order above is approximate. The sequence fits the log, but it has not
+been reproduced.
+
+**Either fact alone needs the other.** Without fact 1 the arbiter would have
+matched the OFF to the known state and suppressed it. Without fact 2 the echo
+would have been recognised. So fixing fact 1 alone stops this case. A profile
+that has genuinely changed still invalidates the cache, as it should, so fact
+2 stays open for that case.
+
+**Why it matters beyond a no-op OFF:**
+
+- A group light reads its level from one member, its `query_address`.
+- If the members disagree, the resent echo is a group DAPC at that member's
+  level, and it moves every other member. That would be visible.
+- Two passes coincide whenever two refresh requests arrive close together:
+  - a walk's completion together with the deferred level query;
+  - walks run back to back;
+  - a periodic poll landing beside either of those.
+- Fact 1 is narrower than it reads. Each pass reads the actual level last,
+  and `dali_light_write_observe()` refills the cache from that reading. So the
+  cache is empty only from the profile reply to the level reply. Here the OFF
+  went out at 26.841, after the second pass queued its level query at 26.793
+  and before any reply was logged.
+
+Filed in `todo.md` as *P1 — A refresh can resend a bus reading as a command*.
 
 ## The four P0 items, and spacing from received frames — decided 2026-11-12
 

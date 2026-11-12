@@ -114,7 +114,11 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   // from transmitting a queued raw level calculated from an obsolete profile.
   DaliLevelProfile  profile_{DALI_DIM_CURVE_STANDARD, 1u, 254u};
   uint32_t          profile_generation_{0u};
+  // profile_ready_ is false while a refresh is in progress; profile_known_ is
+  // set by the first profile and never cleared, so a refresh that comes back
+  // unchanged can be told from a first profile.
   bool              profile_ready_{false};
+  bool              profile_known_{false};
   bool              logical_pending_{false};
   bool              logical_is_on_{false};
   float             logical_brightness_{0.0f};
@@ -135,14 +139,12 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   // operator's intent. See the comment on write_state().
   //
   // suppress_initial_write_ covers ESPHome's one restore/default write at
-  // setup. The echo_* trio is the exact state apply_bus_state() last pushed
-  // into ESPHome, so the write it schedules is recognized by its value rather
-  // than by a one-shot flag that the wrong call could consume.
+  // setup. echo_ is the exact state apply_bus_state() last pushed into
+  // ESPHome, with the profile it was mapped under, so the write it schedules
+  // is recognized by its value rather than by a one-shot flag that the wrong
+  // call could consume, and still recognized if a refresh lands first.
   bool              suppress_initial_write_{true};
-  bool              echo_valid_{false};
-  bool              echo_is_on_{false};
-  uint8_t           echo_level_{0};
-  uint32_t          echo_profile_generation_{0u};
+  DaliLightEcho     echo_{};
   light::LightState *state_{nullptr};
 
   static void clear_unused_color_fields_(light::LightColorValues &values);

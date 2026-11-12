@@ -91,7 +91,7 @@ cached level profile and triggers a refresh.
 | Commission unaddressed | `dali_commissioning_commission_unaddressed` | `commission unaddressed` | yes | partial | shell, opt-in |
 | Commission control devices | `dali_device_commissioning_commission_unaddressed` | `commission devices` | yes | yes (2k, 2026-09-29) | shell, opt-in |
 | Post-scan verification | `dali_commissioning_audit` | automatic in both `commission` walks | yes | partial (clean post-scans on 2k and 1k, gear and devices, 2026-09-03 to 2026-09-30; the contested and unrecorded classes have not met a bus) | shell |
-| Address backup | `dali_snapshot_from_inventory` | `backup save`, `backup status` | yes | partial (2k and 1k, 2026-09-03 to 2026-09-30, in format v1; the unaddressed-gear warning on 1k, 2026-09-29; format v2 not yet) | shell; persisted to flash |
+| Address backup | `dali_snapshot_from_inventory` | `backup save`, `backup status` | yes | partial (2k and 1k, 2026-09-03 to 2026-09-30, in format v1; the unaddressed-gear warning on 1k, 2026-09-29; 1k, 2026-11-12: a 16-entry backup loaded from flash after a reboot and `restore plan` planned from it) | shell; persisted to flash |
 | Backup blob round trip | `dali_snapshot_encode` / `_decode` | `backup export`, `backup import` | yes | n/a — no bus traffic; round-tripped on the 2k node, 2026-09-29, in format v1; v2 refuses v1 blobs | shell |
 | Restore planning | `dali_restore_plan` | `restore plan` | yes | partial (2k, 2026-09-29: dependency order, a swap in each space, and moving aside a unit the backup never saw; 2026-09-30: no move onto a shared address it read as one unidentified unit; a contested target is host-only) | shell |
 | Restore spare avoids a missing unit's recorded address | `dali_restore_plan` | `restore plan` | yes | no | shell |
@@ -265,10 +265,10 @@ read back on a bus: SET EVENT SCHEME, on two Steinel instances on 2k on
 
 | Capability | Shared API | Native CLI verb | Host vector | Real bus | ESPHome |
 |---|---|---|---|---|---|
-| Spacing from received frames: 22 Te after a reply, 13.5 ms after the stop condition of anything else | scheduler, `DALI_AFTER_*_GAP_US` | every verb | yes | no | yes |
-| TX declined while another master's frame is unreported | `dali_phy_tx` → `DALI_ERR_BUS_ACTIVE` | `stats` (`TX deferred (RX)`) | yes | no | yes |
-| Pre-TX idle check from the RX edge stamp | `dali_phy_tx` | every verb | yes | no | yes |
-| Send-twice pair sent again when another frame splits it | scheduler `send_twice` | `raw2`, every send-twice verb | yes | no | yes |
+| Spacing from received frames: 22 Te after a reply, 13.5 ms after the stop condition of anything else | scheduler, `DALI_AFTER_*_GAP_US` | every verb | yes | yes (2k, 2026-11-12, from `capture` timestamps: at least 10.7 ms after 195 replies and 16.2 ms after 3 events; not yet with a logic analyzer) | yes |
+| TX declined while another master's frame is unreported | `dali_phy_tx` → `DALI_ERR_BUS_ACTIVE` | `stats` (`TX deferred (RX)`, which counts declined passes) | yes | partial (2k, 2026-11-12: the counter rises with event traffic and the gaps after events hold; no single decline was matched to a frame) | yes |
+| Pre-TX idle check from the RX edge stamp | `dali_phy_tx` | every verb | yes | partial (2k, 2026-11-12: `Bus idle fails` 0 through event traffic; the stuck-bus path needs a bench) | yes |
+| Send-twice pair sent again when another frame splits it | scheduler `send_twice` | `raw2`, every send-twice verb | yes | no (no device on site can split a pair; needs a bench) | yes |
 | Priority, randomisation, collision detection | none | n/a | no | no | no |
 
 ## CLI infrastructure

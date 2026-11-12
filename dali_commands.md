@@ -1555,11 +1555,13 @@ rxdebug                    # last malformed RX timing snapshot
 reset                      # reset PHY, scheduler, and diagnostic state
 ```
 
-`stats` includes `TX deferred (RX)`: how often the PHY declined to transmit
-because another master's frame was still arriving, or had just ended and was
-not yet decoded. Each one used to go out about 1.7 ms after that frame. Now it
-waits until the scheduler has spaced it; see *Bus Timing* in
-`dali_protocol.md`.
+`stats` includes `TX deferred (RX)`: how many times the PHY declined to
+transmit because another master's frame was still arriving, or had just ended
+and was not yet decoded. Such a frame used to go out about 1.7 ms after the
+other one. Now it waits until the scheduler has spaced it; see *Bus Timing* in
+`dali_protocol.md`. The count is of declined attempts, not frames. The
+scheduler retries on every pass of the DALI task, so one frame held behind a
+24-bit event can add several.
 
 While a scan started from Home Assistant holds the bus, a network session's
 verbs are refused with `busy` rather than interleaved into the walk. A verb
@@ -1578,6 +1580,19 @@ can never be captured — only its tail, with `dropped` naming what was lost.
 **Capture narrowly**: `capture start`, one command, `capture export`. Six
 records that answer the question beat 128 that happen to be the end of
 something else.
+
+**To catch another device's frames, leave room for them.** Queries sent back
+to back leave 9.6 ms after each reply, shorter than any DALI-2 device waits.
+So an event source stays silent until the run ends, and a capture of the run
+holds no events. From `tools/dali-shell`, pace the lines with a script, such
+as `{ echo "capture start"; for i in $(seq 50); do echo "query a0 status";
+sleep 0.2; done; echo "capture export"; } | dali-shell --host <node>`. Each event then
+appears twice: as an `rx` record, stamped at its last edge, and as an `event`
+record, stamped when the task handled it.
+
+Do not use `quiescent off` as the filler, at least not with the Steinel.
+STOP QUIESCENT MODE restarts its report timers, so a run of them stops its
+events.
 
 | Field | Meaning |
 |---|---|

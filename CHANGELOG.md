@@ -31,14 +31,18 @@ At tagging:
 - **The network shell's close log names the reason:** `Shell session closed:`
   then `the client closed it`, `the client stopped reading`, `idle timeout`,
   or the errno of a failed send or receive. The idle timeout no longer logs a
-  line of its own as well. **Unverified:** compiles.
+  line of its own as well. **Hardware-verified** on 1k for a client that
+  closes, one that stops reading, and one that reset before it was accepted.
+  The idle timeout's line is not yet verified.
 - **`tools/dali-shell`** gives `schema` 15 s instead of the 400 s command
   timeout, and sets TCP keepalive on its session, so a device that restarted
   is noticed in tens of seconds. A probe that met a busy shell now closes with
   a reset, so `--list` no longer fills the device's two-place backlog. A
   connect that times out names both causes: unreachable, or busy with two
-  clients waiting. **Unverified** on a device. Checked on Windows against
-  local fake servers, eight checks; the Linux keepalive branch did not run.
+  clients waiting. **Hardware-verified** from Windows against 1k for a busy
+  shell: `--list` and the pick list mark it in use, and `--host` reports it
+  busy after 10 s, where it read `timed out`. Keepalive after a restart is
+  unverified, and the Linux keepalive branch did not run.
 - `dali_shell.h` no longer defines `DALI_SHELL_CAPTURE_MAX`,
   `DALI_SHELL_SWITCH_MAPPING_MAX`, `DALI_SHELL_INPUT_CACHE_MAX` or
   `DALI_SHELL_SENSOR_CACHE_MAX`. Nothing used them, and two disagreed with
@@ -46,6 +50,24 @@ At tagging:
 
 ### Fixed
 
+- **A light no longer sends back a level it has just read.** When two profile
+  refreshes ran back to back, the reading of the first could reach the bus as
+  a command. On a group light that is a DAPC at one member's level, sent to
+  every member. Seen on 2k after three walks in a row, as an OFF to lamps that
+  were already off. Two faults:
+  - A refresh dropped the light's deduplication cache every time, because
+    the profile test read a flag that the refresh had just cleared. It now
+    keeps the cache unless the curve, MIN or MAX changed.
+  - A refresh forgot the pending echo of a reading. The echo now records the
+    profile it was mapped under and is matched under that profile, so a
+    refresh that lands before ESPHome's write leaves it recognizable.
+
+  API: `dali_light_profile.h` gains `dali_light_profile_changed()`,
+  `DaliLightEcho`, `dali_light_echo_record()` and `dali_light_echo_take()`.
+  **Host-tested:** eight vectors, one of them replaying the 2k sequence
+  through the write arbiter. `dali_light_output.cpp` passes a syntax-only
+  check with ESPHome's build flags; `dali_test.yaml` not yet compiled. Not
+  yet on a bus.
 - **A send-twice pair split by another master's frame is sent again.** The
   halves must reach a receiver as consecutive frames. Before, a frame between
   them was routed as an event and the second half went out regardless, so the
@@ -53,13 +75,17 @@ At tagging:
   scheduler sends the whole pair once more, counted in `TX retries`, and a
   second split reports `intervened`. Send-twice commands are idempotent in
   practice, so a pair the receiver did accept costs nothing.
-  **Host-tested:** five vectors. Not yet on a bus.
+  **Host-tested:** five vectors. Not yet on a bus, and no device on site can
+  split a pair; see *A send-twice pair split by another master's frame* in
+  `todo.md`.
 - **The PHY no longer polls 1.67 ms of idle before every frame.** It reads
   the RX ISR's stamp of the last edge from another master. With the line high
   and no edge for two bit periods it transmits at once, and a line low past
   the 33 ms timeout is reported stuck at once. It polls as before only when
   the stamp cannot decide. That poll ran on the core ESPHome's loop shares.
   **Host-tested:** four vectors for the verdict; the loop around it compiles.
+  On 2k, `Bus idle fails` stayed 0 through event traffic. The stuck-bus
+  path is not yet on a bus.
 - **`dali_rb_clear()` drains from the consumer side.** It reset `head`, the
   producer's index, which raced a push from the ISR on the other core in the
   native build. **Host-tested:** one vector.
@@ -79,9 +105,10 @@ At tagging:
 
   The PHY declines to transmit while a frame is still arriving, so a frame
   queued during an event is spaced too. `stats` counts those declines as `TX
-  deferred (RX)`. Each frame that follows a reply now takes about 6.7 ms
-  longer, so a walk over present gear is somewhat slower. This is spacing, not
-  arbitration: no priority, randomisation or collision handling yet.
+  deferred (RX)`, once per declined pass. Each frame that follows a reply now
+  takes about 6.7 ms longer, which did not measurably lengthen a 2k walk. This
+  is spacing, not arbitration: no priority, randomisation or collision
+  handling yet.
 
   API: `DaliError` gains `DALI_ERR_BUS_ACTIVE` (14), which `dali_phy_tx()`
   returns having sent nothing, and the scheduler absorbs. `dali_stats_t` gains
@@ -89,7 +116,9 @@ At tagging:
   and `DALI_AFTER_FOREIGN_FRAME_GAP_US`.
 
   **Host-tested:** seven scheduler vectors and six PHY vectors. Both builds
-  compile. Not yet on a bus; see *Spacing from received frames* in `todo.md`.
+  compile. **Hardware-verified** on 2k from `capture` timestamps: our frame
+  followed 195 replies by at least 10.7 ms, and 3 events by at least 16.2 ms.
+  Not yet measured with a logic analyzer, or on 1k.
 
 - **Headless dispatch acts on transmission, not admission.** A rule that
   transmits used to flip its toggle and tell the light entities the new state
@@ -123,8 +152,9 @@ At tagging:
 
 - **`restore` no longer reads ESPHome preferences from the shell task.** That
   read raced the loop task's saves. The stored backup is loaded once in
-  `setup()`, and `restore` reads that copy. **Unverified:** compiles, with no
-  host vector reaching the ESPHome layer.
+  `setup()`, and `restore` reads that copy. **Hardware-verified** on 1k after
+  a reboot: `restore plan` planned from the stored backup. A save followed at
+  once by a plan is not yet verified.
 
 - **A Home Assistant scan holds the bus against the network shell.** On the
   TCP and web bindings, a frame a verb sends without a claim of its own is

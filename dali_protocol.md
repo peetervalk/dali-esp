@@ -758,7 +758,13 @@ invisible to the scheduler, so the PHY covers it. `dali_phy_tx()` sends nothing
 and returns `DALI_ERR_BUS_ACTIVE` while the ring holds edges, or a frame is
 half-assembled, and the newest edge is under 15.083 ms old. The scheduler keeps
 the step without spending a retry, and the next pass of the DALI task decodes
-the frame and arms its gap. `stats` counts these as `TX deferred (RX)`.
+the frame and arms its gap. `stats` counts each declined pass as `TX deferred
+(RX)`. A frame held for the whole of a 24-bit event is declined on several
+passes, so the counter reads higher than the number of frames held.
+
+After a reply to our own query the gap is 22 Te, shorter than any DALI-2
+device's wait. So queries sent back to back hold event sources off until the
+run ends. On 2k, 150 in a row delayed two Steinel events by up to 0.82 s.
 
 This is spacing, not arbitration. Our frame still goes out at the shortest
 DALI-2 gap, with no priority of its own, no randomisation within the range, and

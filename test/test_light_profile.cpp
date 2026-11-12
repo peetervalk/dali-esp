@@ -6,6 +6,10 @@
 using esphome::dali::dali_light_brightness_to_level;
 using esphome::dali::dali_light_level_to_brightness;
 using esphome::dali::dali_light_observed_level_to_brightness;
+using esphome::dali::dali_light_profile_changed;
+using esphome::dali::DaliLightEcho;
+using esphome::dali::dali_light_echo_record;
+using esphome::dali::dali_light_echo_take;
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -364,6 +368,129 @@ void test_profile_change_remaps_pending_logical_brightness(void) {
   TEST_ASSERT_EQUAL_UINT8(after_level, queued_level);
 }
 
+/* ── Refreshes and the echo of a reading ─────────────────────────────────── */
+
+void test_first_profile_counts_as_changed(void) {
+  const DaliLevelProfile profile = {DALI_DIM_CURVE_STANDARD, 1u, 254u};
+
+  TEST_ASSERT_TRUE(dali_light_profile_changed(false, &profile, &profile));
+  TEST_ASSERT_TRUE(dali_light_profile_changed(true, NULL, &profile));
+  TEST_ASSERT_TRUE(dali_light_profile_changed(true, &profile, NULL));
+}
+
+void test_unchanged_refresh_is_not_a_change(void) {
+  const DaliLevelProfile before = {DALI_DIM_CURVE_LINEAR, 20u, 200u};
+  const DaliLevelProfile after = {DALI_DIM_CURVE_LINEAR, 20u, 200u};
+
+  TEST_ASSERT_FALSE(dali_light_profile_changed(true, &before, &after));
+}
+
+void test_each_profile_field_counts_as_a_change(void) {
+  const DaliLevelProfile before = {DALI_DIM_CURVE_LINEAR, 20u, 200u};
+  const DaliLevelProfile curve = {DALI_DIM_CURVE_STANDARD, 20u, 200u};
+  const DaliLevelProfile min_level = {DALI_DIM_CURVE_LINEAR, 21u, 200u};
+  const DaliLevelProfile max_level = {DALI_DIM_CURVE_LINEAR, 20u, 199u};
+
+  TEST_ASSERT_TRUE(dali_light_profile_changed(true, &before, &curve));
+  TEST_ASSERT_TRUE(dali_light_profile_changed(true, &before, &min_level));
+  TEST_ASSERT_TRUE(dali_light_profile_changed(true, &before, &max_level));
+}
+
+void test_echo_matches_its_own_reading_once(void) {
+  const DaliLevelProfile profile = {DALI_DIM_CURVE_STANDARD, 1u, 254u};
+  float brightness = 0.0f;
+  TEST_ASSERT_EQUAL(DALI_OK,
+                    dali_light_level_to_brightness(&profile, 170u, &brightness));
+  DaliLightEcho echo = {};
+
+  TEST_ASSERT_TRUE(dali_light_echo_record(&echo, &profile, true, brightness));
+  TEST_ASSERT_TRUE(dali_light_echo_take(&echo, true, brightness));
+  /* Consumed: the same value a second time is a command. */
+  TEST_ASSERT_FALSE(dali_light_echo_take(&echo, true, brightness));
+}
+
+void test_echo_of_off_matches_off_only(void) {
+  const DaliLevelProfile profile = {DALI_DIM_CURVE_STANDARD, 1u, 254u};
+  DaliLightEcho echo = {};
+
+  TEST_ASSERT_TRUE(dali_light_echo_record(&echo, &profile, false, 0.0f));
+  TEST_ASSERT_FALSE(dali_light_echo_take(&echo, true, ha_brightness(128u)));
+
+  TEST_ASSERT_TRUE(dali_light_echo_record(&echo, &profile, false, 0.0f));
+  TEST_ASSERT_TRUE(dali_light_echo_take(&echo, false, 0.0f));
+}
+
+void test_a_different_write_consumes_the_echo(void) {
+  const DaliLevelProfile profile = {DALI_DIM_CURVE_STANDARD, 1u, 254u};
+  float reading = 0.0f;
+  float command = 0.0f;
+  TEST_ASSERT_EQUAL(DALI_OK,
+                    dali_light_level_to_brightness(&profile, 170u, &reading));
+  TEST_ASSERT_EQUAL(DALI_OK,
+                    dali_light_level_to_brightness(&profile, 200u, &command));
+  DaliLightEcho echo = {};
+
+  TEST_ASSERT_TRUE(dali_light_echo_record(&echo, &profile, true, reading));
+  TEST_ASSERT_FALSE(dali_light_echo_take(&echo, true, command));
+  /* The echo's own write, arriving after a real command, is not swallowed
+   * either: one write consumes the echo, matched or not. */
+  TEST_ASSERT_FALSE(dali_light_echo_take(&echo, true, reading));
+}
+
+/* A refresh that changes the profile between the push and the write must not
+ * turn the reading into a command: the echo is matched under the profile it
+ * was recorded with, and under the new one it would read as another level. */
+void test_echo_survives_a_profile_change(void) {
+  const DaliLevelProfile recorded = {DALI_DIM_CURVE_STANDARD, 1u, 254u};
+  const DaliLevelProfile refreshed = {DALI_DIM_CURVE_LINEAR, 20u, 200u};
+  float brightness = 0.0f;
+  TEST_ASSERT_EQUAL(DALI_OK,
+                    dali_light_level_to_brightness(&recorded, 170u, &brightness));
+  uint8_t under_recorded = 0u;
+  uint8_t under_refreshed = 0u;
+  TEST_ASSERT_EQUAL(DALI_OK, dali_light_brightness_to_level(
+                                 &recorded, brightness, &under_recorded));
+  TEST_ASSERT_EQUAL(DALI_OK, dali_light_brightness_to_level(
+                                 &refreshed, brightness, &under_refreshed));
+  TEST_ASSERT_NOT_EQUAL(under_recorded, under_refreshed);
+  DaliLightEcho echo = {};
+
+  TEST_ASSERT_TRUE(dali_light_echo_record(&echo, &recorded, true, brightness));
+  TEST_ASSERT_TRUE(dali_light_echo_take(&echo, true, brightness));
+}
+
+/*
+ * The 2k sequence of 2026-11-12, driven through the arbiter the light uses.
+ *
+ * A refresh reads OFF and pushes it. A second refresh starts and its profile
+ * comes back unchanged before ESPHome writes the echo. The echo must still be
+ * recognized; and had it not been, the cache the unchanged refresh keeps must
+ * still suppress an OFF that only repeats the reading.
+ */
+void test_reading_echoed_across_an_unchanged_refresh_is_not_sent(void) {
+  DaliLevelProfile profile = {DALI_DIM_CURVE_STANDARD, 1u, 254u};
+  const DaliLevelProfile refreshed = profile;
+  DaliLightWrite write = {};
+  DaliLightEcho echo = {};
+
+  /* First pass: the reading. */
+  TEST_ASSERT_TRUE(dali_light_write_observe(&write, false, 0u));
+  TEST_ASSERT_TRUE(dali_light_echo_record(&echo, &profile, false, 0.0f));
+
+  /* Second pass: begin, then the profile lands unchanged. */
+  if (dali_light_profile_changed(true, &profile, &refreshed)) {
+    dali_light_write_invalidate(&write);
+  }
+  profile = refreshed;
+
+  /* ESPHome's write of the echo. */
+  TEST_ASSERT_TRUE(dali_light_echo_take(&echo, false, 0.0f));
+
+  /* Belt and braces: the same OFF taken as a command is suppressed. */
+  dali_light_write_request(&write, false, 0u);
+  TEST_ASSERT_EQUAL(DALI_LIGHT_WRITE_SUPPRESS, dali_light_write_next(&write, NULL));
+}
+
 int main(void) {
   UNITY_BEGIN();
 
@@ -381,6 +508,14 @@ int main(void) {
   RUN_TEST(test_group_union_falls_back_to_standard_on_mixed_curves);
   RUN_TEST(test_group_union_rejects_invalid_members);
   RUN_TEST(test_profile_change_remaps_pending_logical_brightness);
+  RUN_TEST(test_first_profile_counts_as_changed);
+  RUN_TEST(test_unchanged_refresh_is_not_a_change);
+  RUN_TEST(test_each_profile_field_counts_as_a_change);
+  RUN_TEST(test_echo_matches_its_own_reading_once);
+  RUN_TEST(test_echo_of_off_matches_off_only);
+  RUN_TEST(test_a_different_write_consumes_the_echo);
+  RUN_TEST(test_echo_survives_a_profile_change);
+  RUN_TEST(test_reading_echoed_across_an_unchanged_refresh_is_not_sent);
 
   return UNITY_END();
 }

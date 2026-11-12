@@ -130,7 +130,10 @@ Protocol and state correctness come before broad new device support.
     `dali_phy_tx()` sends nothing and returns `DALI_ERR_BUS_ACTIVE` while
     undecoded edges are younger than 15.1 ms. The scheduler keeps the step,
     spends no retry, and spaces it once the decoder reports the frame. `stats`
-    counts these as `TX deferred (RX)`.
+    counts each declined pass as `TX deferred (RX)`, so a frame held through a
+    whole event can add several.
+  - 9.6 ms after a reply is shorter than any DALI-2 device's wait, so a run of
+    queries back to back holds event sources off until it ends.
   - This is spacing, not arbitration: no priority, no randomisation, no
     collision detection.
 - **The idle check before each frame** reads the RX ISR's stamp of the last
@@ -251,10 +254,11 @@ Protocol and state correctness come before broad new device support.
 - **The event note.** A walk names the events that arrived during it as
   expected traffic on a bus with sensors, not as a timing fault.
 - **Duration.** A walk costs about 0.34 s per empty address and 1.79 s per
-  present gear, so walk length depends on what is on the bus: about 45 s for
-  16 gear and 29 s for 5. Those figures predate the received-frame spacing,
-  which holds each frame that follows a reply about 6.7 ms longer, so a
-  present gear now costs somewhat more.
+  present gear, so walk length depends on what is on the bus. 2k, with 5 gear
+  and one 4-instance control device, takes about 28.5 s. 1k, with 16 gear,
+  takes about 45 s, a figure from before the received-frame spacing. The
+  spacing holds each frame that follows a reply about 6.7 ms longer, which did
+  not lengthen the 2k walk measurably.
 
 ### Commissioning
 
@@ -464,7 +468,11 @@ Protocol and state correctness come before broad new device support.
     transmitted, not acknowledged by the device.
   - ESPHome's restore write is told apart by being the first `write_state()`
     after `setup()`. A bus reading pushed back is told apart by matching the
-    exact `(is_on, level)` pair sent. There is no startup time window.
+    exact `(is_on, level)` pair sent, under the profile it was mapped with, so
+    a profile refresh that lands first does not turn it into a command. There
+    is no startup time window.
+  - A profile refresh keeps the light's cache unless the curve, MIN or MAX
+    came back different.
 - **Cross-task state.** Light state and sensor values cross from the DALI task
   in one packed mailbox each. Pending observations coalesce to the latest.
 - **Sensors.**
