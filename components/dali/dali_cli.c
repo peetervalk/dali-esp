@@ -869,6 +869,11 @@ bool dali_cli_config_is_commissioning(DaliCommandId id)
 
 /* First byte of every IEC 62386-103 special command. */
 #define CLI_RAW_DEVICE_SPECIAL_ADDRESS 0xC1u
+/* The Part 103 WRITE MEMORY LOCATION specials, with and without reply, as
+ * dali_cmd_control_device_write_memory_location*() build them. The command
+ * table does not carry them, so they are matched by their middle byte. */
+#define CLI_RAW_DEVICE_WRITE_MEMORY          0x20u
+#define CLI_RAW_DEVICE_WRITE_MEMORY_NO_REPLY 0x21u
 /* Last group address byte with the selector bit set: 16 gear groups end at
  * 0x9F, 32 control-device groups at 0xBF. */
 #define CLI_RAW_LAST_GEAR_GROUP_BYTE   0x9Fu
@@ -934,6 +939,12 @@ bool dali_cli_raw_frame_is_commissioning(const DaliFrame *frame)
 
         /* Part 103 specials carry their opcode in the middle byte. */
         if (addr_byte == CLI_RAW_DEVICE_SPECIAL_ADDRESS) {
+            /* A memory write, gated as `devmem write` and the Part 102
+             * WRITE MEMORY LOCATION specials are. */
+            if (middle == CLI_RAW_DEVICE_WRITE_MEMORY ||
+                middle == CLI_RAW_DEVICE_WRITE_MEMORY_NO_REPLY) {
+                return true;
+            }
             const DaliCommandInfo *special =
                 dali_command_lookup_opcode(DALI_CMD_FRAME_24BIT_SPECIAL, middle);
             return special != NULL &&

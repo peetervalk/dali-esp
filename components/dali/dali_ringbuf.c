@@ -81,9 +81,18 @@ bool dali_rb_empty(const DaliRingBuf *rb)
     return tail == head;
 }
 
+/*
+ * Task-context drain.
+ *
+ * Moves `tail` up to `head` rather than resetting both, so the consumer still
+ * writes only `tail`. Resetting `head` from here raced a push: in the native
+ * build the ISR runs on the other core, and a push between the two stores would
+ * be overwritten, or would leave `head` behind `tail` and the buffer looking
+ * full. An element pushed after the load survives the clear, which is the
+ * same as one pushed just after it.
+ */
 void dali_rb_clear(DaliRingBuf *rb)
 {
-    /* Task context only.  Reset both indices; no ISR call must be in flight. */
-    __atomic_store_n(&rb->tail, 0u, __ATOMIC_RELAXED);
-    __atomic_store_n(&rb->head, 0u, __ATOMIC_RELEASE);
+    uint32_t head = __atomic_load_n(&rb->head, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&rb->tail, head, __ATOMIC_RELEASE);
 }

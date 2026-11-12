@@ -154,6 +154,21 @@ SHELL_IN_USE = "in use"
 # that another session holds stays silent until that session ends.
 GREETING_TIMEOUT = 10.0
 
+# `schema` returns at once on a working device. Waiting the 400 s command
+# timeout for it is what made a device that restarted mid-connect look like a
+# hang: the restart sends nothing, so nothing ended the wait.
+SCHEMA_TIMEOUT = 15.0
+
+# TCP keepalive on the session, so any command notices a device that restarted
+# or left the network: probes start after this much silence, one every
+# KEEPALIVE_INTERVAL_S, and the connection is dropped after KEEPALIVE_COUNT go
+# unanswered. A restarted device answers the first probe with a reset. A long
+# verb that prints nothing is unaffected: the device's TCP stack answers the
+# probes while the verb runs.
+KEEPALIVE_IDLE_S = 10
+KEEPALIVE_INTERVAL_S = 3
+KEEPALIVE_COUNT = 3
+
 _TYPE_A, _TYPE_PTR, _TYPE_SRV = 1, 12, 33
 
 
@@ -333,6 +348,38 @@ def browse_esphome(seconds=BROWSE_SECONDS):
     return found
 
 
+def _set_close_with_reset(sock):
+    """Make close() send a reset rather than a FIN: SO_LINGER on, timeout 0."""
+    # struct linger is two u_shorts on Windows and two ints elsewhere.
+    fmt = "HH" if os.name == "nt" else "ii"
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack(fmt, 1, 0))
+    except OSError:
+        pass  # an orderly close is still correct, only slower to free the slot
+
+
+def _enable_keepalive(sock):
+    """Turn on TCP keepalive with KEEPALIVE_* timing, where the OS allows it."""
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, "SIO_KEEPALIVE_VALS"):
+            # Windows takes idle and interval in milliseconds, and its own
+            # probe count: 10 since Vista. Interval times count bounds it.
+            sock.ioctl(socket.SIO_KEEPALIVE_VALS,
+                       (1, KEEPALIVE_IDLE_S * 1000, KEEPALIVE_INTERVAL_S * 1000))
+            return
+        idle = getattr(socket, "TCP_KEEPIDLE", None)
+        if idle is None:
+            idle = getattr(socket, "TCP_KEEPALIVE", None)  # macOS
+        for option, value in ((idle, KEEPALIVE_IDLE_S),
+                              (getattr(socket, "TCP_KEEPINTVL", None), KEEPALIVE_INTERVAL_S),
+                              (getattr(socket, "TCP_KEEPCNT", None), KEEPALIVE_COUNT)):
+            if option is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, option, value)
+    except OSError:
+        pass  # without keepalive a restart is noticed at the command deadline
+
+
 def probe_shell(address, port, timeout=PROBE_TIMEOUT):
     """
     SHELL_READY or SHELL_IN_USE for a DALI shell at this address, else None.
@@ -348,6 +395,11 @@ def probe_shell(address, port, timeout=PROBE_TIMEOUT):
     Closing immediately is what keeps the probe harmless: the device treats an
     orderly close as the end of the session and releases it, rather than
     holding it for the YAML's idle timeout.
+
+    A probe that met silence closes with a reset instead. It is waiting in the
+    device's listen backlog, which holds two, and a politely closed connection
+    keeps its place there until the session ends. Two such probes filled it,
+    and the next client's connect then went unanswered.
     """
     try:
         sock = socket.create_connection((address, port), timeout=timeout)
@@ -358,6 +410,7 @@ def probe_shell(address, port, timeout=PROBE_TIMEOUT):
         try:
             greeting = sock.recv(256).decode("utf-8", "replace").lower()
         except socket.timeout:
+            _set_close_with_reset(sock)
             return SHELL_IN_USE
         except OSError:
             return None
@@ -450,8 +503,19 @@ class DaliShell:
     def connect(self):
         try:
             self.sock = socket.create_connection((self.host, self.port), timeout=10)
+        except socket.timeout as exc:
+            # Both causes look alike from here. A busy shell leaves a further
+            # client waiting in a backlog that holds two; once two wait, the
+            # device stops answering connects at all.
+            raise ShellError(
+                f"cannot reach {self.host}:{self.port}: timed out.\n"
+                "Either the device is not reachable, or its shell is in use "
+                "and two more clients are already waiting for it.\n"
+                f"{IN_USE_HELP}"
+            ) from exc
         except OSError as exc:
             raise ShellError(f"cannot reach {self.host}:{self.port}: {exc}") from exc
+        _enable_keepalive(self.sock)
         self.sock.settimeout(SOCKET_POLL_TIMEOUT)
 
         # The device greets with a banner and a prompt; consume both so the
@@ -488,13 +552,14 @@ class DaliShell:
 
     # ── command / reply ─────────────────────────────────────────────────────
 
-    def run(self, line, echo_to=sys.stdout):
+    def run(self, line, echo_to=sys.stdout, deadline_s=None):
         """
         Send one line and stream the reply.
 
         Output is written as it arrives rather than collected and returned at
         the end: a discover prints for tens of seconds and a find for minutes,
-        and watching it work is most of its value.
+        and watching it work is most of its value. deadline_s overrides the
+        command timeout for a verb known to be quick.
         """
         if self.sock is None:
             raise ShellError("not connected")
@@ -502,7 +567,8 @@ class DaliShell:
         # CRLF is what a network client should send; the device swallows the LF
         # of the pair rather than reading it as a second, empty line.
         self.sock.sendall((line + "\r\n").encode("utf-8", "replace"))
-        return self._read_until_prompt(echo_to=echo_to, suppress_echo_of=line)
+        return self._read_until_prompt(echo_to=echo_to, suppress_echo_of=line,
+                                       deadline_s=deadline_s)
 
     def _read_until_prompt(self, echo_to, suppress_echo_of=None, deadline_s=None):
         """
@@ -582,7 +648,7 @@ class DaliShell:
         client is stale only when the firmware is.
         """
         try:
-            raw = self.run("schema", echo_to=None)
+            raw = self.run("schema", echo_to=None, deadline_s=SCHEMA_TIMEOUT)
             return json.loads(raw)
         except (ShellError, json.JSONDecodeError):
             # An older firmware has no `schema` verb. History and editing still

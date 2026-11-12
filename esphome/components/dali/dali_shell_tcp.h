@@ -219,6 +219,12 @@ class DaliShellServer : public Component {
   // Set when a send() fails or the peer closes; read by aborted_cb() so an
   // in-flight workflow stops instead of writing into a dead socket.
   bool peer_lost_{false};
+  // Why the peer was lost, for the close log: the errno of the first failed
+  // send or receive, and which it was. 0 when no call failed.
+  int  lost_errno_{0};
+  bool lost_on_send_{false};
+  void mark_peer_lost(int err, bool on_send);
+  const char *session_end_text(SessionEnd why) const;
 
   // Per-session input state: one or the other, by client_kind_.
   DaliCliPeerSniffer sniffer_{};

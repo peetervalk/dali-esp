@@ -5718,6 +5718,15 @@ static void cmd_devmem(const DaliCliTokens *t)
             shell_printf("usage: devmem write <addr> <bank> <offset> <value>\r\n");
             return;
         }
+        /*
+         * Gated as the Part 102 memory writes are: WRITE MEMORY LOCATION is
+         * among the specials a session without DALI_SHELL_ALLOW_COMMISSION is
+         * refused. A control device's memory holds its configuration, and a
+         * wrong byte in a vendor bank is not something a read can undo.
+         */
+        if (!shell_policy_allows(DALI_SHELL_ALLOW_COMMISSION, "devmem write")) {
+            return;
+        }
         err = dali_memory_build_control_device_write_sequence(addr, bank, offset,
                                                              value, &seq);
         if (err != DALI_OK) {

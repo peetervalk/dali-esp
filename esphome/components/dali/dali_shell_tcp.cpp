@@ -166,8 +166,49 @@ void DaliShellServer::send_all(const char *data, size_t len)
         if (sent < 0 && errno == EINTR) {
             continue;
         }
-        peer_lost_ = true;
+        mark_peer_lost(sent < 0 ? errno : 0, true);
         return;
+    }
+}
+
+/* Only the first failure is kept: it is the cause, and later ones follow it. */
+void DaliShellServer::mark_peer_lost(int err, bool on_send)
+{
+    if (!peer_lost_) {
+        lost_errno_ = err;
+        lost_on_send_ = on_send;
+    }
+    peer_lost_ = true;
+}
+
+/*
+ * The reason the close log gives. Before, a session that ended because the
+ * client stopped reading, or went away, logged only `Shell session closed`,
+ * which said nothing the idle timeout's own line did not.
+ */
+const char *DaliShellServer::session_end_text(SessionEnd why) const
+{
+    switch (why) {
+    case SessionEnd::PEER_CLOSED:
+        return "the client closed it";
+    case SessionEnd::IDLE:
+        return "idle timeout";
+    case SessionEnd::HTTP_PEER:
+        return "it opened with an HTTP request";
+    case SessionEnd::WS_FAILED:
+        return "WebSocket protocol error";
+    case SessionEnd::PEER_LOST:
+        if (lost_on_send_ && (lost_errno_ == EAGAIN || lost_errno_ == EWOULDBLOCK)) {
+            /* SO_SNDTIMEO expired with nothing taken. */
+            return "the client stopped reading";
+        }
+        if (lost_errno_ == ECONNRESET) {
+            return "the client reset the connection";
+        }
+        return lost_on_send_ ? "a send failed" : "a receive failed";
+    case SessionEnd::NONE:
+    default:
+        return "unknown";
     }
 }
 
@@ -191,7 +232,7 @@ void DaliShellServer::flush_output()
     size_t head_len = dali_web_ws_frame_header(DALI_WEB_WS_OP_TEXT, (uint32_t) len,
                                                head, sizeof(head));
     if (head_len == 0u) {
-        peer_lost_ = true;
+        mark_peer_lost(0, true);
         return;
     }
     memcpy(data - head_len, head, head_len);
@@ -678,6 +719,8 @@ bool DaliShellServer::begin_session(int fd, ClientKind kind)
     ws_close_code_ = DALI_WEB_WS_CLOSE_NORMAL;
     ws_close_reason_ = nullptr;
     peer_lost_ = false;
+    lost_errno_ = 0;
+    lost_on_send_ = false;
     out_len_ = 0u;
     at_line_start_ = true;
 
@@ -770,7 +813,7 @@ void DaliShellServer::session_read()
     } else if (received == 0) {
         end_session(SessionEnd::PEER_CLOSED);  /* orderly close */
     } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-        peer_lost_ = true;
+        mark_peer_lost(errno, false);
         end_session(SessionEnd::PEER_LOST);
     }
 }
@@ -887,7 +930,6 @@ void DaliShellServer::session_tick()
         if (idle_timeout_s_ > 0u &&
             (millis() - last_activity_ms_) >= idle_timeout_s_ * 1000u) {
             write_cb(this, "\r\nidle timeout; closing session\r\n");
-            ESP_LOGI(TAG, "Shell session closed on idle timeout");
             end_session(SessionEnd::IDLE, DALI_WEB_WS_CLOSE_GOING_AWAY, "idle timeout");
         }
 
@@ -907,6 +949,9 @@ void DaliShellServer::session_tick()
 void DaliShellServer::close_session()
 {
     flush_output();
+    /* Taken before anything below can change them. */
+    const char *why = session_end_text(session_end_);
+    const int   lost_errno = session_end_ == SessionEnd::PEER_LOST ? lost_errno_ : 0;
     ClientKind kind = client_kind_;
     if (kind == ClientKind::WEBSOCKET && !peer_lost_) {
         send_ws_close(ws_close_code_, ws_close_reason_);
@@ -925,7 +970,11 @@ void DaliShellServer::close_session()
     } else {
         ::close(fd);
     }
-    ESP_LOGI(TAG, "Shell session closed");
+    if (lost_errno != 0) {
+        ESP_LOGI(TAG, "Shell session closed: %s (errno %d)", why, lost_errno);
+    } else {
+        ESP_LOGI(TAG, "Shell session closed: %s", why);
+    }
 }
 
 }  // namespace dali

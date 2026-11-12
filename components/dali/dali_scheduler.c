@@ -58,6 +58,10 @@ static uint32_t        s_q_rejected_busy;
 static volatile DaliSchedState s_state;
 static DaliTransaction s_active;          /* copy of the current transaction */
 static uint8_t         s_send_count;      /* 1 = first TX done, 2 = both done */
+/* Something reached the bus between the halves of the active send-twice pair. */
+static bool            s_pair_intervened;
+/* The active step has already sent its pair again once. */
+static bool            s_pair_restarted;
 static uint32_t        s_state_entered_ms;
 static bool            s_active_is_sequence;
 static DaliSequence    s_active_sequence;
@@ -369,6 +373,7 @@ static bool sched_retry_active_step(void)
     g_dali_stats.tx_retries++;
     sched_arm_tx_gap(sched_now_us(), DALI_REPLY_TIMEOUT_BACKOFF_US);
     s_send_count = 0u;
+    s_pair_intervened = false;
     s_send_twice_first_started_us = 0u;
     s_send_twice_first_started_ms = 0u;
     return true;
@@ -439,6 +444,8 @@ static bool sched_finish_active_step(DaliError result, const DaliFrame *reply)
 
     sched_load_sequence_step(s_active_sequence_step);
     s_send_count = 0u;
+    s_pair_intervened = false;
+    s_pair_restarted = false;
     s_send_twice_first_started_us = 0u;
     s_send_twice_first_started_ms = 0u;
     s_reply_received = false;
@@ -717,6 +724,8 @@ static void sched_clear_active_for_reset(void)
     memset(&s_reply_frame, 0, sizeof(s_reply_frame));
     s_state = SCHED_IDLE;
     s_send_count = 0u;
+    s_pair_intervened = false;
+    s_pair_restarted = false;
     s_send_twice_first_started_us = 0u;
     s_send_twice_first_started_ms = 0u;
     s_state_entered_ms = 0u;
@@ -840,6 +849,40 @@ static bool sched_apply_reset_if_requested(void)
     return true;
 }
 
+/*
+ * A send-twice pair must reach a receiver as two consecutive frames. Before,
+ * another master's frame between our halves was routed as an event and the
+ * second half went out regardless, so the command reported success while the
+ * receiver had discarded the pair.
+ *
+ * Counted: a decoded forward frame, and undecodable activity, which may have
+ * been one. Resending a pair costs one more pair; missing a void one loses the
+ * command. Not counted: a decoded backward frame, which no receiver takes for
+ * a command, and anything whose last edge came before our first half ended,
+ * which was on the wire before the pair began and was only decoded late. Our
+ * own first half never arrives here, because the PHY drops RX through its own
+ * frame and the settle after it.
+ *
+ * The PHY's DALI_ERR_BUS_ACTIVE makes the note reliable. A frame on the wire
+ * when the second half is due makes the PHY decline, so the frame is decoded,
+ * and noted here, before that half can go out.
+ */
+static void sched_note_pair_intervention(const DaliPhyRxObservation *observation)
+{
+    if (!s_active.send_twice || s_send_count != 1u) {
+        return;
+    }
+    if (observation->result == DALI_OK &&
+        observation->frame.bit_length == DALI_BACKWARD_FRAME_BITS) {
+        return;
+    }
+    if (observation->has_timestamps && s_have_last_tx_us &&
+        (int32_t)(observation->last_edge_us - s_last_tx_us) <= 0) {
+        return;
+    }
+    s_pair_intervened = true;
+}
+
 /* ---------------------------------------------------------------------------
  * PHY RX callback — registered with PHY during init
  * --------------------------------------------------------------------------*/
@@ -870,6 +913,8 @@ DaliError dali_sched_init(const DaliSchedOps *ops)
     s_q_rejected_busy = 0u;
     s_state       = SCHED_IDLE;
     s_send_count  = 0u;
+    s_pair_intervened = false;
+    s_pair_restarted  = false;
     s_reply_received = false;
     s_reply_intervened = false;
     s_reply_error = DALI_OK;
@@ -970,6 +1015,8 @@ next:
                 s_active_step_started = false;
             }
             s_send_count = 0u;
+            s_pair_intervened = false;
+            s_pair_restarted = false;
             s_send_twice_first_started_us = 0u;
             s_send_twice_first_started_ms = 0u;
             s_reply_received = false;
@@ -981,6 +1028,34 @@ next:
 
         case SCHED_TX: {
             uint32_t now_us = sched_now_us();
+            if (s_active.send_twice && s_send_count == 1u && s_pair_intervened) {
+                s_pair_intervened = false;
+                if (s_pair_restarted) {
+                    ESP_LOGE(TAG, "send-twice pair split twice");
+                    if (sched_finish_active_step(DALI_SCHED_INTERVENED_ERROR,
+                                                 NULL)) {
+                        s_state = SCHED_TX;
+                    } else {
+                        s_state = SCHED_IDLE;
+                    }
+                    goto next;
+                }
+                /*
+                 * Send the whole pair again, once. Send-twice commands are
+                 * idempotent in practice: repeating SET MAX LEVEL, ADD TO
+                 * GROUP, RESET, INITIALISE or quiescent START does no harm,
+                 * and RANDOMISE only draws a new number before any search. So
+                 * a pair the receiver did accept after all costs nothing. Most
+                 * callers queue these fire-and-forget and could not resend one
+                 * themselves. The gap the intervening frame armed still holds
+                 * the first half.
+                 */
+                s_pair_restarted = true;
+                s_send_count = 0u;
+                s_send_twice_first_started_us = 0u;
+                s_send_twice_first_started_ms = 0u;
+                g_dali_stats.tx_retries++;
+            }
             if (s_active.send_twice && s_send_count == 1u &&
                 sched_send_twice_window_missed(now_us, true)) {
                 ESP_LOGE(TAG, "send-twice window missed");
@@ -1182,6 +1257,8 @@ void dali_sched_notify_rx_observation(
     if (!s_initialized || observation == NULL) {
         return;
     }
+
+    sched_note_pair_intervention(observation);
 
     if (observation->result != DALI_OK) {
         /* Undecodable activity keeps the standard's open edge: this is the

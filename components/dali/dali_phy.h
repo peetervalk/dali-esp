@@ -208,4 +208,14 @@ DaliError dali_phy_test_feed_rx_edge(uint32_t timestamp_us, uint8_t level);
  * reported and that are younger than DALI_AFTER_FOREIGN_FRAME_GAP_US?
  */
 bool dali_phy_test_rx_activity_unreported(uint32_t now_us);
+
+/*
+ * The pre-TX idle check's verdict from the bus level now and the RX ISR's last
+ * edge: transmit at once, the bus is stuck, or poll as before.
+ */
+#define DALI_PHY_TEST_IDLE_UNKNOWN 0
+#define DALI_PHY_TEST_IDLE_READY   1
+#define DALI_PHY_TEST_IDLE_STUCK   2
+int dali_phy_test_idle_verdict(bool level_idle, uint32_t now_us,
+                               bool edge_valid, uint32_t edge_us);
 #endif

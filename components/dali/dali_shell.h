@@ -49,12 +49,9 @@
 #include "dali_scheduler.h"
 #include "dali_transport.h"
 
-/* Session capacities. These keep the values they had as DIAG_* in dali_diag.c. */
+/* The longest line a session accepts, terminator included. The caches' sizes
+ * are the SHELL_*_MAX macros in dali_shell.c, private to it. */
 #define DALI_SHELL_LINE_MAX            80u
-#define DALI_SHELL_CAPTURE_MAX         64u
-#define DALI_SHELL_SWITCH_MAPPING_MAX  16u
-#define DALI_SHELL_INPUT_CACHE_MAX     16u
-#define DALI_SHELL_SENSOR_CACHE_MAX    16u
 
 /* ---------------------------------------------------------------------------
  * Policy

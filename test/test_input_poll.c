@@ -52,7 +52,8 @@ static DaliError mock_transact_sequence(const DaliSequence *seq,
     for (uint8_t i = 0u; i < seq->step_count; i++) {
         TEST_ASSERT_TRUE(seq->steps[i].needs_reply);
         TEST_ASSERT_FALSE(seq->steps[i].send_twice);
-        TEST_ASSERT_EQUAL_UINT8(0u, seq->steps[i].retries_left);
+        /* Only the latching first read may be asked again. */
+        TEST_ASSERT_EQUAL_UINT8(i == 0u ? 1u : 0u, seq->steps[i].retries_left);
         result_out->steps_run = (uint8_t)(i + 1u);
 
         if (mock->fail_error != DALI_OK && i == mock->fail_step) {
@@ -209,11 +210,14 @@ void test_build_value_sequence_latches_then_reads_remaining_bytes(void)
     TEST_ASSERT_EQUAL_UINT8(DALI_EXTENDED_FRAME_BITS, seq.steps[0].frame.bit_length);
     TEST_ASSERT_TRUE(seq.steps[0].needs_reply);
     TEST_ASSERT_FALSE(seq.steps[0].send_twice);
-    TEST_ASSERT_EQUAL_UINT8(0u, seq.steps[0].retries_left);
+    /* QUERY INPUT VALUE latches a fresh reading, so asking again is safe. */
+    TEST_ASSERT_EQUAL_UINT8(1u, seq.steps[0].retries_left);
 
     TEST_ASSERT_EQUAL_HEX32(POLL_SEQ_FRAME_LATCH, seq.steps[1].frame.data);
     TEST_ASSERT_EQUAL_UINT8(DALI_EXTENDED_FRAME_BITS, seq.steps[1].frame.bit_length);
     TEST_ASSERT_TRUE(seq.steps[1].needs_reply);
+    /* Each LATCH read moves the device on a byte: never asked twice. */
+    TEST_ASSERT_EQUAL_UINT8(0u, seq.steps[1].retries_left);
 
     /* A one-byte instance needs the latching query only. */
     TEST_ASSERT_EQUAL(DALI_OK,

@@ -332,6 +332,57 @@ void test_phy_reset_forgets_unreported_activity(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * The pre-TX idle check, read from the last RX edge instead of polled
+ * --------------------------------------------------------------------------*/
+
+void test_idle_bus_with_no_recent_edge_is_ready_at_once(void)
+{
+    TEST_ASSERT_EQUAL_INT(DALI_PHY_TEST_IDLE_READY,
+                          dali_phy_test_idle_verdict(true, 50000u, true,
+                                                     50000u - DALI_BUS_IDLE_GUARD_US));
+    /* Nothing ever received: idle since boot. */
+    TEST_ASSERT_EQUAL_INT(DALI_PHY_TEST_IDLE_READY,
+                          dali_phy_test_idle_verdict(true, 50000u, false, 0u));
+}
+
+void test_idle_bus_with_a_recent_edge_is_polled(void)
+{
+    /* High now, but inside a frame's high half-bit is high too. */
+    TEST_ASSERT_EQUAL_INT(DALI_PHY_TEST_IDLE_UNKNOWN,
+                          dali_phy_test_idle_verdict(true, 50000u, true,
+                                                     50000u - DALI_BUS_IDLE_GUARD_US + 1u));
+    /* An edge stamped after the clock was read. */
+    TEST_ASSERT_EQUAL_INT(DALI_PHY_TEST_IDLE_UNKNOWN,
+                          dali_phy_test_idle_verdict(true, 50000u, true, 50010u));
+}
+
+void test_bus_low_past_the_timeout_is_stuck_at_once(void)
+{
+    TEST_ASSERT_EQUAL_INT(DALI_PHY_TEST_IDLE_STUCK,
+                          dali_phy_test_idle_verdict(false, 90000u, true,
+                                                     90000u - DALI_BUS_IDLE_TIMEOUT_US));
+    /* Low for less than that is a frame, or a stuck bus not yet shown. */
+    TEST_ASSERT_EQUAL_INT(DALI_PHY_TEST_IDLE_UNKNOWN,
+                          dali_phy_test_idle_verdict(false, 90000u, true,
+                                                     90000u - DALI_BUS_IDLE_TIMEOUT_US + 1u));
+    /* Low with no edge ever recorded: low since before boot. Poll for it. */
+    TEST_ASSERT_EQUAL_INT(DALI_PHY_TEST_IDLE_UNKNOWN,
+                          dali_phy_test_idle_verdict(false, 90000u, false, 0u));
+}
+
+void test_a_stamp_older_than_half_the_clock_falls_back_to_polling(void)
+{
+    /* After about 35 quiet minutes the 32-bit age wraps negative. Polling
+     * must decide then, never a verdict of stuck. */
+    const uint32_t edge_us = 1000u;
+    const uint32_t now_us  = edge_us + 0x80000000u + 5u;
+    TEST_ASSERT_EQUAL_INT(DALI_PHY_TEST_IDLE_UNKNOWN,
+                          dali_phy_test_idle_verdict(true, now_us, true, edge_us));
+    TEST_ASSERT_EQUAL_INT(DALI_PHY_TEST_IDLE_UNKNOWN,
+                          dali_phy_test_idle_verdict(false, now_us, true, edge_us));
+}
+
+/* ---------------------------------------------------------------------------
  * Round-trip decode tests — 8-bit backward / response frames
  * --------------------------------------------------------------------------*/
 
@@ -386,6 +437,10 @@ int main(void)
     RUN_TEST(test_dropped_glitch_does_not_hold_tx);
     RUN_TEST(test_edge_stamped_after_now_counts_as_recent);
     RUN_TEST(test_phy_reset_forgets_unreported_activity);
+    RUN_TEST(test_idle_bus_with_no_recent_edge_is_ready_at_once);
+    RUN_TEST(test_idle_bus_with_a_recent_edge_is_polled);
+    RUN_TEST(test_bus_low_past_the_timeout_is_stuck_at_once);
+    RUN_TEST(test_a_stamp_older_than_half_the_clock_falls_back_to_polling);
     RUN_TEST(test_decode_lunatone_broadcast_off_capture);
 
     RUN_TEST(test_decode_8bit_all_zeros);

@@ -1012,7 +1012,9 @@ multi-byte read is not reduced to its last value. The same holds for
 `devmem read`.
 
 `devmem write` unlocks the bank by writing `0x55` to lock byte offset `0x02`,
-then writes the requested byte. Its seven logical steps are one queue entry and
+then writes the requested byte. A shell session refuses it without
+`allow_commissioning: true`, as it refuses `special write-memory`; the console
+still sends it. Its seven logical steps are one queue entry and
 run contiguously relative to other traffic from this controller. The no-reply
 write does not acknowledge or verify that the device committed the byte, and an
 external bus master is not excluded. **No write path reads its value back.**
@@ -1057,7 +1059,9 @@ because spelling a command in hex should not reach what spelling it by name
 cannot. The set is exactly what `special` and `config` hold back: `INITIALISE`,
 `RANDOMISE`, `WITHDRAW`, the `SEARCHADDR` loads, `PROGRAM SHORT ADDRESS` and the
 gear memory writes; `SET SHORT ADDRESS` to a short address, group or broadcast;
-and the 24-bit control-device forms of the addressing commands. `TERMINATE`,
+the 24-bit control-device forms of the addressing commands; and the
+control-device WRITE MEMORY LOCATION specials, `C120xx` and `C121xx`, which are
+`devmem write`'s. `TERMINATE`,
 `COMPARE` and the verify and query specials only end or observe a window, and
 pass. A shell session refuses a gated frame without `allow_commissioning: true`
 (`raw (commissioning frame): refused by session policy`), and the console

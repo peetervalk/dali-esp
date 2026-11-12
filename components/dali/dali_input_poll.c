@@ -48,6 +48,15 @@ DaliError dali_input_poll_build_value_sequence(uint8_t addr,
         out->steps[i].needs_reply = true;
     }
 
+    /*
+     * One retry for QUERY INPUT VALUE, which latches a new reading: asking
+     * again only latches a fresher one. The LATCH reads after it get none,
+     * because each moves the device on to the next byte, so a repeat would
+     * return a different byte than the one lost.
+     */
+    out->steps[0].retries_left =
+        dali_command_response_retry_safe(DALI_CMD_QUERY_INPUT_VALUE) ? 1u : 0u;
+
     out->step_count = expected_bytes;
     return DALI_OK;
 }

@@ -133,6 +133,19 @@ Protocol and state correctness come before broad new device support.
     counts these as `TX deferred (RX)`.
   - This is spacing, not arbitration: no priority, no randomisation, no
     collision detection.
+- **The idle check before each frame** reads the RX ISR's stamp of the last
+  edge from another master. High now and no edge for two bit periods
+  transmits at once. Low for longer than any frame allows reports a stuck bus
+  at once. Only a recent edge, a bus low since before boot, or a stamp too old
+  to compare (35 quiet minutes) falls back to polling, up to 33 ms. The DALI
+  task shares core 1 with ESPHome's loop, so that poll used to cost the loop
+  1.67 ms per frame.
+- **A send-twice pair split by another master's frame is sent again.** The
+  halves must reach a receiver as consecutive frames. A decoded forward frame,
+  or undecodable activity, between our halves has the scheduler send the whole
+  pair once more, counted in `TX retries`. A second split ends the step with
+  `intervened`. A backward frame between them is not counted, and neither is
+  a frame that ended before the pair began.
 - **Events.** Unsolicited event frames reach their subscribers in every
   scheduler state. An event that lands inside a reply window aborts that
   transaction with `DALI_ERR_INTERVENED`.
@@ -366,7 +379,10 @@ Protocol and state correctness come before broad new device support.
 - **`raw` and `raw2`** send one arbitrary 16- or 24-bit frame, once or as a
   send-twice pair. A frame that is itself a commissioning command needs the
   commissioning policy, as the named verbs do. `dali_cli_raw_frame_is_commissioning()`
-  decides which frames those are.
+  decides which frames those are; the control-device memory writes are among
+  them.
+- **`devmem write`** needs the commissioning policy on a shell session, as the
+  Part 102 memory writes do. The console still sends it.
 - **Bus claim.** A multi-frame workflow claims the bus through
   `try_claim_bus()`. That raises the scan gate, then waits up to 5 s for queued
   work to drain. A claim that cannot drain is refused.
@@ -381,7 +397,8 @@ Protocol and state correctness come before broad new device support.
   |---|---|
   | One session at a time | A second client waits in the listen backlog until the first ends. While any session is open, TCP or web, the TCP listener is not watched. The backlog holds two, and a waiting client that closes politely keeps its place until the session ends, so after two such a further connect times out unanswered. `tools/dali-shell`'s probes close that way |
   | Browser requests are refused | A connection that opens with an HTTP request line is closed before any of its lines is dispatched. The device logs the sender's address at WARN. `dali_cli_peer_sniff()` decides, within the first line |
-  | A client that stops reading is dropped | A send that makes no progress for 10 s (`SO_SNDTIMEO`) marks the peer lost, which ends a running workflow at its next step. A send that moved part of its bytes before timing out is retried, so a client that stops reading is dropped 10–20 s later. The log then reads only `Shell session closed` |
+  | A client that stops reading is dropped | A send that makes no progress for 10 s (`SO_SNDTIMEO`) marks the peer lost, which ends a running workflow at its next step. A send that moved part of its bytes before timing out is retried, so a client that stops reading is dropped 10–20 s later. The log then reads `Shell session closed: the client stopped reading` |
+  | The close log names the reason | `Shell session closed:` then `the client closed it`, `the client stopped reading`, `the client reset the connection`, `a send failed` or `a receive failed` with the errno, `idle timeout`, `it opened with an HTTP request`, or `WebSocket protocol error` |
   | A vanished client is reclaimed | TCP keepalive (30 s idle, then 3 probes 5 s apart) frees it in about 45 s |
   | An unused terminal is closed | after `idle_timeout` |
   | Sockets are counted | The listener and its one client are registered with ESPHome's socket count, adding two lwIP sockets |
@@ -451,7 +468,9 @@ Protocol and state correctness come before broad new device support.
 - **Cross-task state.** Light state and sensor values cross from the DALI task
   in one packed mailbox each. Pending observations coalesce to the latest.
 - **Sensors.**
-  - Polling is authoritative, and each reading is one sequence.
+  - Polling is authoritative, and each reading is one sequence. Its first
+    query, QUERY INPUT VALUE, which latches a fresh reading, is retried once;
+    the latch reads after it are not, because each moves to the next byte.
   - An event that could be the sensor's own requests an immediate poll.
     Device/Instance events match exactly; other schemes match by inference
     through `dali_event_source`, logged as `event poll requested (inferred)`.
@@ -522,17 +541,9 @@ Facts about the code as it stands. Each has its fix, decision or measurement in
   randomisation within the range, no backoff. Direct-control couplers transmit
   too, so simultaneous traffic remains a risk. *Priority, collisions and the
   send-twice pair*.
-- **A send-twice pair is not checked for an intervening frame.** Another
-  master's frame between our two halves breaks the pair at the receiver, but
-  the second half still goes out and the command reports success. *Priority,
-  collisions and the send-twice pair*.
 - **The RX edge interrupt is not IRAM-safe.** A frame that arrives during an
   NVS commit (light state, the group map, a backup) can be lost or garbled.
   *The RX edge interrupt is not IRAM-safe*.
-- **ESPHome's loop shares core 1 with the DALI tasks.** The PHY's pre-TX idle
-  check busy-waits there: 1.67 ms per frame, 33 ms per attempt on a stuck bus.
-  A frame already on the wire no longer holds it, since the PHY declines
-  instead. *The PHY busy-waits on the loop's core*.
 
 **Scheduling and scans**
 
@@ -619,9 +630,6 @@ Facts about the code as it stands. Each has its fix, decision or measurement in
 
 **Tools**
 
-- **`tools/dali-shell` waits up to 400 s** when the device restarts during a
-  command, `schema` included, before it reports the connection lost.
-  *`tools/dali-shell` waits up to 400 s for a device that restarted*.
 - **Native `trace on` can block the DALI task** once the UART TX buffer fills.
 - **Find Couplers prints one summary,** truncated with a count.
 

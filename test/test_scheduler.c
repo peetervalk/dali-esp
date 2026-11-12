@@ -3587,6 +3587,151 @@ void test_bus_active_on_send_twice_repeat_still_answers_to_the_window(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * A send-twice pair split by another master's frame
+ *
+ * The halves must reach a receiver as consecutive frames. A frame between them
+ * used to be routed as an event while the second half went out regardless.
+ * Now the pair is sent again once, and a second split is reported.
+ * --------------------------------------------------------------------------*/
+
+#define PAIR_FIRST_US 100000u
+
+static void send_first_half_of_pair(uint32_t data)
+{
+    static DaliTransaction txn;
+    txn = (DaliTransaction){
+        .frame       = { .data = data, .bit_length = 16u },
+        .send_twice  = true,
+        .on_complete = on_complete,
+    };
+    g_mock_time_us = PAIR_FIRST_US;
+    g_mock_tick_ms = PAIR_FIRST_US / 1000u;
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_TX, dali_sched_state());
+}
+
+static void observe_between_halves(DaliError result, uint8_t bits,
+                                   uint32_t last_edge_us)
+{
+    deliver_after(last_edge_us);
+    DaliPhyRxObservation observation = {
+        .result         = result,
+        .frame          = { .data = result == DALI_OK ? 0x8B05u : 0u,
+                            .bit_length = result == DALI_OK ? bits : 0u },
+        .first_edge_us  = last_edge_us - 3000u,
+        .last_edge_us   = last_edge_us,
+        .edge_count     = 20u,
+        .has_timestamps = true,
+    };
+    inject_phy_observation(&observation);
+}
+
+void test_frame_between_send_twice_halves_sends_the_pair_again(void)
+{
+    send_first_half_of_pair(0x0120u);
+    const uint32_t last_edge_us = PAIR_FIRST_US + 6000u;
+    observe_between_halves(DALI_OK, 16u, last_edge_us);
+
+    /* Not the second half: the first again, once the frame's gap has passed. */
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    g_mock_time_us = last_edge_us + DALI_AFTER_FOREIGN_FRAME_GAP_US;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.tx_retries);
+
+    advance_past_settle();
+    dali_sched_run();
+    advance_to_next_forward();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(3, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x0120u, g_mock_last_tx.data);
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+}
+
+void test_send_twice_pair_split_twice_reports_intervened(void)
+{
+    send_first_half_of_pair(0x0120u);
+    uint32_t last_edge_us = PAIR_FIRST_US + 6000u;
+    observe_between_halves(DALI_OK, 16u, last_edge_us);
+    g_mock_time_us = last_edge_us + DALI_AFTER_FOREIGN_FRAME_GAP_US;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+
+    /* The resent pair is split as well. */
+    const uint32_t resent_us = g_mock_time_us;
+    advance_past_settle();
+    dali_sched_run();
+    last_edge_us = resent_us + 6000u;
+    observe_between_halves(DALI_OK, 24u, last_edge_us);
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_INTERVENED, g_cb_result);
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+}
+
+void test_undecodable_activity_between_halves_sends_the_pair_again(void)
+{
+    send_first_half_of_pair(0x0120u);
+    const uint32_t last_edge_us = PAIR_FIRST_US + 6000u;
+    observe_between_halves(DALI_ERR_MALFORMED, 0u, last_edge_us);
+
+    g_mock_time_us = last_edge_us + DALI_AFTER_FOREIGN_FRAME_GAP_US;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.tx_retries);
+}
+
+/* No receiver takes a backward frame for a command, so the pair stands. */
+void test_backward_frame_between_halves_leaves_the_pair_alone(void)
+{
+    send_first_half_of_pair(0x0120u);
+    const uint32_t last_edge_us = PAIR_FIRST_US + 6000u;
+    observe_between_halves(DALI_OK, 8u, last_edge_us);
+
+    g_mock_time_us = last_edge_us + DALI_AFTER_FOREIGN_FRAME_GAP_US;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.tx_retries);
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+}
+
+/* A frame that ended before the pair began, decoded only after the first
+ * half, is not between the halves. */
+void test_frame_from_before_the_pair_leaves_it_alone(void)
+{
+    send_first_half_of_pair(0x0120u);
+    const uint32_t last_edge_us = PAIR_FIRST_US - 1000u;
+    deliver_after(PAIR_FIRST_US + 2000u);   /* time stays past the settle */
+    DaliPhyRxObservation late = {
+        .result         = DALI_OK,
+        .frame          = { .data = 0x8B05u, .bit_length = 16u },
+        .first_edge_us  = last_edge_us - 13000u,
+        .last_edge_us   = last_edge_us,
+        .edge_count     = 32u,
+        .has_timestamps = true,
+    };
+    inject_phy_observation(&late);
+
+    g_mock_time_us = last_edge_us + DALI_AFTER_FOREIGN_FRAME_GAP_US;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.tx_retries);
+}
+
+/* ---------------------------------------------------------------------------
  * Main
  * --------------------------------------------------------------------------*/
 int main(void)
@@ -3687,6 +3832,11 @@ int main(void)
     RUN_TEST(test_received_frame_never_shortens_the_armed_guard);
     RUN_TEST(test_phy_bus_active_keeps_the_step_and_spends_no_retry);
     RUN_TEST(test_bus_active_on_send_twice_repeat_still_answers_to_the_window);
+    RUN_TEST(test_frame_between_send_twice_halves_sends_the_pair_again);
+    RUN_TEST(test_send_twice_pair_split_twice_reports_intervened);
+    RUN_TEST(test_undecodable_activity_between_halves_sends_the_pair_again);
+    RUN_TEST(test_backward_frame_between_halves_leaves_the_pair_alone);
+    RUN_TEST(test_frame_from_before_the_pair_leaves_it_alone);
 
     return UNITY_END();
 }

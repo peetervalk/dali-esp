@@ -267,6 +267,8 @@ read back on a bus: SET EVENT SCHEME, on two Steinel instances on 2k on
 |---|---|---|---|---|---|
 | Spacing from received frames: 22 Te after a reply, 13.5 ms after the stop condition of anything else | scheduler, `DALI_AFTER_*_GAP_US` | every verb | yes | no | yes |
 | TX declined while another master's frame is unreported | `dali_phy_tx` → `DALI_ERR_BUS_ACTIVE` | `stats` (`TX deferred (RX)`) | yes | no | yes |
+| Pre-TX idle check from the RX edge stamp | `dali_phy_tx` | every verb | yes | no | yes |
+| Send-twice pair sent again when another frame splits it | scheduler `send_twice` | `raw2`, every send-twice verb | yes | no | yes |
 | Priority, randomisation, collision detection | none | n/a | no | no | no |
 
 ## CLI infrastructure

@@ -18,7 +18,54 @@ At tagging:
 - re-check each label against `project_log.md` and `todo.md`
 - rename this heading to the version
 
+### Changed
+
+- **`devmem write` needs the commissioning policy on a shell session,** as
+  `special write-memory` already did. Without `allow_commissioning: true` it is
+  refused with `devmem write: refused by session policy`. The control-device
+  WRITE MEMORY LOCATION specials, `C120xx` and `C121xx`, join the frames `raw`
+  and `raw2` refuse, so the hex spelling cannot get round the verb; the
+  console's `raw` refuses them too. The console's own `devmem write` is
+  unchanged. **Host-tested** for the frame classifier, with two vectors
+  turned from open to gated; the shell's refusal compiles, unverified.
+- **The network shell's close log names the reason:** `Shell session closed:`
+  then `the client closed it`, `the client stopped reading`, `idle timeout`,
+  or the errno of a failed send or receive. The idle timeout no longer logs a
+  line of its own as well. **Unverified:** compiles.
+- **`tools/dali-shell`** gives `schema` 15 s instead of the 400 s command
+  timeout, and sets TCP keepalive on its session, so a device that restarted
+  is noticed in tens of seconds. A probe that met a busy shell now closes with
+  a reset, so `--list` no longer fills the device's two-place backlog. A
+  connect that times out names both causes: unreachable, or busy with two
+  clients waiting. **Unverified** on a device. Checked on Windows against
+  local fake servers, eight checks; the Linux keepalive branch did not run.
+- `dali_shell.h` no longer defines `DALI_SHELL_CAPTURE_MAX`,
+  `DALI_SHELL_SWITCH_MAPPING_MAX`, `DALI_SHELL_INPUT_CACHE_MAX` or
+  `DALI_SHELL_SENSOR_CACHE_MAX`. Nothing used them, and two disagreed with
+  the sizes the shell really uses.
+
 ### Fixed
+
+- **A send-twice pair split by another master's frame is sent again.** The
+  halves must reach a receiver as consecutive frames. Before, a frame between
+  them was routed as an event and the second half went out regardless, so the
+  command reported success while the receiver had discarded the pair. Now the
+  scheduler sends the whole pair once more, counted in `TX retries`, and a
+  second split reports `intervened`. Send-twice commands are idempotent in
+  practice, so a pair the receiver did accept costs nothing.
+  **Host-tested:** five vectors. Not yet on a bus.
+- **The PHY no longer polls 1.67 ms of idle before every frame.** It reads
+  the RX ISR's stamp of the last edge from another master. With the line high
+  and no edge for two bit periods it transmits at once, and a line low past
+  the 33 ms timeout is reported stuck at once. It polls as before only when
+  the stamp cannot decide. That poll ran on the core ESPHome's loop shares.
+  **Host-tested:** four vectors for the verdict; the loop around it compiles.
+- **`dali_rb_clear()` drains from the consumer side.** It reset `head`, the
+  producer's index, which raced a push from the ISR on the other core in the
+  native build. **Host-tested:** one vector.
+- **A sensor poll asks QUERY INPUT VALUE once more** when it fails. That
+  query latches a fresh reading, so repeating it is safe; the latch reads
+  after it still get no retry. **Host-tested:** the poll vectors now pin both.
 
 - **Our forward frames are spaced from received ones.** Before, ours followed
   a reply by about 2.9 ms and an event by as little as 1.7 ms. That is under

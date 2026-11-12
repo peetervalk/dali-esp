@@ -67,12 +67,20 @@ Two separately typed commands cannot meet this window, which is why `raw2`
 exists and why every multi-frame helper runs as one scheduler sequence rather
 than as lines a user is expected to type quickly.
 
-All locally generated forward frames share the same rounded 22 Te minimum gap.
-This is not DALI-2 priority/backoff or multi-master arbitration: the scheduler
-cannot prove that an external command did not intervene. The PHY now exports the
-precise ISR timestamp at which its own transmission released the bus, but the
-scheduler does not yet derive backward/external-frame gaps or full arbitration
-state from externally received frames.
+All locally generated forward frames share the same rounded 22 Te minimum gap
+from each other. Received frames add their own gaps; see *Bus Timing*.
+
+The halves of a pair must reach a receiver as consecutive frames. When a
+decoded forward frame, or undecodable activity, arrives between ours, the
+scheduler sends the whole pair again, once, and counts it in `tx_retries`; a
+second split ends the step with `DALI_ERR_INTERVENED`. A backward frame between
+the halves is not counted, and neither is a frame whose last edge came before
+our first half ended. The PHY makes the check reliable: a frame on the wire
+when the second half is due makes `dali_phy_tx()` decline, so the frame is
+decoded before that half can go out. That the halves must be consecutive is
+this project's reading; the standard's text has not been checked on it.
+
+None of this is DALI-2 priority, backoff or multi-master arbitration.
 
 ### Timestamped RX observations and reply outcomes
 
@@ -701,7 +709,8 @@ Steinel HF 360 II memory-bank layout and its tuning workflow are in
 | Gap after a reply to our own query | 22 Te from its end, counted as its last edge plus one half-bit: 9.591 ms from the last edge (`DALI_AFTER_REPLY_GAP_US`) |
 | Gap after any other received frame | 13.5 ms from its stop condition, 2 ms after its last falling edge: 15.083 ms from the last edge (`DALI_AFTER_FOREIGN_FRAME_GAP_US`) |
 | TX declined while RX is unreported | `DALI_ERR_BUS_ACTIVE` while undecoded edges are under 15.083 ms old |
-| Idle required before transmitting | 2 bit periods (1.666 ms), counted from when the PHY starts polling |
+| Idle required before transmitting | 2 bit periods (1.666 ms) since the RX ISR's last edge, with the line high now; polled only when the stamp cannot decide |
+| Stuck bus, before transmitting | Low and no edge for 40 bit periods (33.3 ms): reported at once, or after polling that long |
 | RX frame end | 1.25 ms (1.5 bit periods) without an edge |
 | Send-twice window | 100 ms |
 | Post-RANDOMISE settle, before the first COMPARE | 100 ms |

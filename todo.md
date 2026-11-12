@@ -74,9 +74,11 @@ request; nothing it sent was run`, naming the browser's machine.
 1. Connect from a laptop on Wi-Fi with `python3 dali-shell` and leave it at the
    prompt.
 2. Turn the laptop's Wi-Fi off without closing the client.
-3. **Expected:** `Shell session closed` in the device log about 45 s after the
-   last traffic: 30 s idle, then 3 probes 5 s apart. With the starter's
-   `idle_timeout: 10min`, keepalive is what closed the session.
+3. **Expected:** `Shell session closed: a receive failed (errno N)` in the
+   device log about 45 s after the last traffic: 30 s idle, then 3 probes 5 s
+   apart. With the starter's `idle_timeout: 10min`, keepalive is what closed
+   the session. Record N: it is what lwIP reports for a keepalive that went
+   unanswered, and the close log could name it.
 4. Connect from another machine. The banner should come at once.
 
 **Opening an interactive session, soon after boot**
@@ -166,6 +168,49 @@ Reproduce it before fixing it.
    attach in the boot log, and a binary sensor that never changes.
 4. Add `use_interrupt: false` to the sensor. It should now follow the pin.
 
+### Why a session closed
+
+The close log now names the reason. Either node, no bus traffic.
+
+1. Open a session and close it with `exit` or Ctrl-D. **Expected:** `Shell
+   session closed: the client closed it`.
+2. Run `find switches 120`, and stop the client from reading: suspend it with
+   Ctrl-Z, or pause a `dali-shell ... | less`. **Expected,** 10–20 s later:
+   `Shell session closed: the client stopped reading`.
+3. Leave a session at the prompt past `idle_timeout`. **Expected:** `Shell
+   session closed: idle timeout`, once, where the idle timeout used to log a
+   line of its own and then the bare one.
+
+### `tools/dali-shell` with a busy or restarted device
+
+The client now closes a silent probe with a reset, names both causes when a
+connect times out, gives `schema` 15 s, and sets TCP keepalive. Checked on
+Windows against local fake servers only; see `project_log.md`, 2026-11-12.
+
+1. **A busy shell stays reachable.** Repeat *Second client* from
+   `project_log.md`, 2026-11-11, while one session is held: `--list`, then
+   `dali-shell` with no `--host`, then `--host`. **Expected:** the last
+   reports the shell in use after 10 s, not `timed out`.
+2. **A restart mid-command.** Run `find switches 300`, and restart the node
+   from Home Assistant. **Expected:** `connection lost` within about 20 s on
+   Linux and 40 s on Windows, which sends more keepalive probes, not after
+   400 s.
+3. **A restart mid-connect.** Restart the node and connect at once, before it
+   is up. **Expected:** either a refusal, or `completion disabled` within 15 s.
+4. Run each step from the Home Assistant add-on too: its Linux keepalive
+   options are the branch the Windows check did not reach.
+
+### `devmem write` needs the commissioning policy
+
+Refused, so nothing reaches the bus. On a node with `allow_commissioning:
+false`:
+
+1. `devmem write 0 2 4 128`. **Expected:** `devmem write: refused by session
+   policy`.
+2. `raw C12180 len=24`, the same unlock write in hex. **Expected:** refused as
+   a commissioning frame.
+3. `devmem read 0 2 4` still answers.
+
 ### A Home Assistant scan holds the bus against the shell
 
 Read-only: the scan only queries. Either node.
@@ -214,6 +259,33 @@ are the frames that used to be followed after 1.7 ms. Host-tested only.
 5. On 1k, repeat the `restore apply` that lost a frame after another unit's
    reply, if a swap is due anyway, and count `DTR0 needed a second load`
    lines; see *Bus timing with a logic analyzer*, step 3.
+
+### A send-twice pair split by another master's frame
+
+Another master's frame between our two halves now has the pair sent again,
+once; a second split reports `intervened`. It cannot be provoked on demand,
+only made likely. Host-tested only.
+
+1. Walk under the Steinel so it emits, `capture start`, then `quiescent off
+   all` twenty times: a send-twice broadcast that changes nothing.
+2. `capture export`. **Expected:** wherever an `rx` falls between the two
+   `tx` of a pair, the next records are that pair again, whole. `stats` counts
+   each under `TX retries`.
+
+### The pre-TX idle check reads the RX edge stamp
+
+The PHY used to poll 1.67 ms of idle before every frame. It now transmits at
+once when the RX ISR has stamped no edge for that long, and reports a stuck
+bus at once when the line has been low past the 33 ms timeout. Host-tested
+only.
+
+1. Any walk on 2k with the Steinel emitting. **Expected:** `Bus idle fails`
+   stays 0, and the gaps in *Spacing from received frames* hold.
+2. With a logic analyzer, *Bus timing with a logic analyzer*: no frame of ours
+   starts within 1.67 ms of another master's last edge.
+3. On a bench bus, hold the line low. **Expected:** `bus_fault` reports
+   `Bus stuck`, and each queued frame fails at once rather than after a
+   33 ms poll.
 
 ### Headless dispatch acts on transmission
 
@@ -836,33 +908,16 @@ priority 1's 13.5 ms. Still missing:
   it sent, stops on a mismatch, breaks for 1.3 ms, and retries after 4.3 ms.
   The PHY suppresses RX through its own TX, so it cannot see a collision at
   all.
-- **A send-twice pair split by another master's frame.** The halves must
-  arrive as consecutive frames, as recalled from the standard; this is not
-  checked against the text or TI's source. The scheduler sends the second half
-  anyway and reports success. Fix: when a forward frame is routed between the
-  halves, end the step with `DALI_ERR_INTERVENED` and let the caller resend
-  the pair.
 - **A deadline-aware PHY call** for when a repeat would cross the 100 ms
   send-twice limit.
+
+A send-twice pair split by another master's frame is now sent again; see Part
+1, *A send-twice pair split by another master's frame*.
 
 TI's SDK is a compact reference for the settle table and for collision
 detection, avoidance and recovery. Its receiver accepts a send-twice pair whose
 stop conditions are up to 94 ms apart, which is looser than the scheduler's own
 bracket.
-
-### P1 — `tools/dali-shell` waits up to 400 s for a device that restarted
-
-Every command, `schema` included, waits with the 400 s command timeout. A
-device that restarted sends nothing, and neither does the waiting client, so
-no reset arrives to end the wait. Seen on 2026-11-09, when connecting reset 2k;
-see `project_log.md`.
-
-Fix. This is a software-stack change, so it waits for a go-ahead:
-- **Give `schema` a short deadline,** about 15 s. On 2k it now returns at once;
-  see `project_log.md`, 2026-11-10.
-- **Set TCP keepalive on the client socket,** so any command notices a device
-  that restarted within seconds. On Windows that is `SIO_KEEPALIVE_VALS`, and
-  elsewhere `TCP_KEEPIDLE`, `TCP_KEEPINTVL` and `TCP_KEEPCNT`.
 
 ### P1 — The DALI PHY can break every other GPIO interrupt
 
@@ -894,19 +949,6 @@ The 33rd light, 17th sensor and 33rd dispatch rule are dropped with only a
 boot-time log line. An unregistered light never gets a profile and can never
 transmit. Fix: reject over-limit configs in the schema, and size the light
 registry for 64 + 16 + 1.
-
-### P1 — The PHY busy-waits on the loop's core
-
-ESPHome 2026.9 pins `loopTask` to core 1, the core `dali_worker_core()` also
-gives the DALI, scan and shell tasks. Synchronization is unaffected, and the
-comments in the component say which task owns what rather than which core.
-But the PHY's pre-TX busy-wait runs on that shared core: 1.67 ms per frame, and
-33 ms per attempt on a stuck bus.
-
-A frame already on the wire no longer holds it: the PHY declines with
-`DALI_ERR_BUS_ACTIVE` instead. The RX ISR now records its last accepted edge,
-`s_rx_last_isr_edge_us`, which is the edge time this fix wants: the idle check
-can read how long the bus has been quiet instead of polling it for 1.67 ms.
 
 ### P1 — Record an address a walk cannot read
 
@@ -961,45 +1003,16 @@ admission, and neither publishes a state it has not read:
   A read that then fails is retried only on the next pass. Advancing from the
   reply instead would retry it at once.
 
-### P2 — Closed probes fill a busy shell's queue
-
-While a session is open, a TCP client waits in the listen backlog, which
-holds two. A connection that closes politely keeps its place until the
-session ends. `dali-shell --list`, and `dali-shell` without `--host`, probe
-every node and close politely. So after two of them, the next client's
-connect is never answered: `dali-shell --host` reports `cannot reach
-<ip>:2323: timed out`, not that the shell is busy. Seen on 1k on 2026-11-11;
-see `project_log.md`.
-
-A probe that closes with a reset frees its place at once. Measured the same
-day: after two reset probes, a third connect was accepted in 0.05 s.
-
-Fix, in `tools/dali-shell`. A software-stack change, so it waits for a
-go-ahead:
-- **Close a silent probe with a reset** (`SO_LINGER` 0) in `probe_shell()`.
-  Keep the orderly close for a probe that got a greeting, which ends its
-  session cleanly.
-- **Name both causes when a connect times out:** the device is unreachable,
-  or its shell is busy with two clients already queued.
-
-Then repeat *Second client* from `project_log.md`, 2026-11-11: `--list`, then
-`dali-shell` with no `--host`, then `--host`, all while one session is held.
-The last should report the shell in use after 10 s.
-
 ### P2 — Small hardening items from the stack review
 
-- `dali_rb_clear()` should drain from the consumer side (`tail = head`). In
-  the native build, the ISRs and the DALI task run on different cores.
-- Delete the stale `DALI_SHELL_*_MAX` macros in `dali_shell.h`; `dali_shell.c`
-  does not use them.
-- Policy-gate `devmem write`, as the Part 102 memory writes are.
-- Give the retry-safe QUERY INPUT VALUE step in sensor polls one retry.
 - Give `backup import` blobs a checksum.
 - Stop native `trace on` writing to the UART from the DALI task. It blocks
   once the TX buffer fills.
-- Log why a network session closed when the peer stopped reading or went
-  away, as the idle timeout already does. Today the log reads only `Shell
-  session closed`.
+- The console's `devmem write` is not gated. The shell's now needs the
+  commissioning policy, as `special write-memory` does, and the console
+  refuses `special write-memory` outright. The console sits behind Home
+  Assistant's login, and Steinel Bank 2 tuning may be done from it, so
+  whether to refuse it there too is a decision for the operator.
 
 ## Build
 

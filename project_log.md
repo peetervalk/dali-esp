@@ -36,6 +36,45 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-11-12, second batch (`dev` at `f0a9236` plus uncommitted changes)
+
+The P1 and P2 items that need no bus: the split send-twice pair, the PHY's
+idle check, five of the stack review's hardening items, and the two
+`tools/dali-shell` items. Nothing here touched a device or a bus.
+
+- **35/35 host suites build and pass.** New or changed vectors:
+  - `test_scheduler`, 99: five for the split pair, including a backward
+    frame and a frame from before the pair, neither of which may split it.
+  - `test_phy_decode`, 38: four for the idle verdict, including a stamp old
+    enough that the 32-bit age wraps, which must fall back to polling rather
+    than read as stuck.
+  - `test_ringbuf`, 8: the clear leaves `head` alone and keeps full capacity.
+  - `test_cli`: the two device memory-write frames turned from open to gated.
+  - `test_input_poll`: step 0 has one retry, the latch reads none.
+- **The native firmware builds** on ESP-IDF 6.0.1, with no warning.
+- **`dali_test.yaml` compiles on ESPHome 2026.10.2** with no warning. RAM is
+  143,612 B, 8 B over the first batch. The new log strings are in the ELF.
+- **`tools/dali-shell` against local fake servers,** on Windows with the
+  repo's Python 3.12, 8/8:
+  - a silent probe reads in use and closes with a reset, which the server
+    saw as `ConnectionResetError`;
+  - a greeted probe reads ready and closes in order;
+  - the session socket has `SO_KEEPALIVE` on;
+  - `schema` parses, and one that never answers gives up at its deadline,
+    shortened to 1.5 s for the check, not the 400 s command timeout.
+
+  The script is not in the repo. The Linux keepalive options did not run.
+- **Not covered:** a bus, either node, a device's TCP stack, and every
+  ESPHome-layer change, which no host suite reaches.
+
+**The send-twice pair, decided.** `todo.md` had said to end the step with
+`DALI_ERR_INTERVENED` and let the caller resend. Most send-twice commands are
+queued fire-and-forget, though, from the console, the integration and config
+verbs, and nothing would resend them. They are idempotent in practice, so the
+scheduler resends the whole pair once itself. Undecodable activity between the
+halves counts as a split, because a second pair costs little and a voided one
+loses the command.
+
 ### Verified locally on 2026-11-12 (`dev` at `3931557` plus uncommitted changes)
 
 The four P0 items in `todo.md`, worked on in the order of *Which P0 first* in

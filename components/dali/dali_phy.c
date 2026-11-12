@@ -157,6 +157,55 @@ static portMUX_TYPE s_rx_debug_mux = portMUX_INITIALIZER_UNLOCKED;
 #define RX_DEBUG_EXIT()  ((void)0)
 #endif
 
+/*
+ * Whether the bus has been idle long enough to transmit, read from the RX
+ * ISR's last edge rather than polled for. Pure, so the host can test it.
+ *
+ * The pre-TX idle check used to busy-wait DALI_BUS_IDLE_GUARD_US before every
+ * frame, 1.67 ms on the core ESPHome's loop also runs on. Nearly always it only
+ * confirmed what the stamp already says. The ISR stamps every edge past its
+ * suppressions, and those cover only our own frame and the 2 ms after it.
+ * The scheduler never sends within 22 Te of our own frame, so by then any
+ * other frame on the wire has stamped an edge, at least one per bit period.
+ * Level high and no stamp for the guard period therefore means idle.
+ *
+ * READY:   high now, and no edge in the guard period, or none ever recorded.
+ * STUCK:   low now, and the last edge, the one that took it low, was longer
+ *          ago than any frame can hold the line low.
+ * UNKNOWN: anything else. The caller polls, as before. That also covers a
+ *          stamp too old to compare: the 32-bit clock wraps, so after about
+ *          35 quiet minutes the age reads as negative.
+ *
+ * Edges lost while the flash cache is off are no hole here. The interrupt
+ * stays pending, and fires with a fresh stamp before the task can ask.
+ */
+typedef enum {
+    PHY_IDLE_UNKNOWN = 0,
+    PHY_IDLE_READY,
+    PHY_IDLE_STUCK,
+} PhyIdleVerdict;
+
+static PhyIdleVerdict phy_idle_verdict(bool     level_idle,
+                                       uint32_t now_us,
+                                       bool     edge_valid,
+                                       uint32_t edge_us)
+{
+    if (!edge_valid) {
+        return level_idle ? PHY_IDLE_READY : PHY_IDLE_UNKNOWN;
+    }
+    /* Signed: an edge stamped after now_us was taken is as recent as it gets. */
+    const int32_t age_us = (int32_t)(now_us - edge_us);
+    if (age_us < 0) {
+        return PHY_IDLE_UNKNOWN;
+    }
+    if (level_idle) {
+        return (uint32_t)age_us >= DALI_BUS_IDLE_GUARD_US ? PHY_IDLE_READY
+                                                          : PHY_IDLE_UNKNOWN;
+    }
+    return (uint32_t)age_us >= DALI_BUS_IDLE_TIMEOUT_US ? PHY_IDLE_STUCK
+                                                        : PHY_IDLE_UNKNOWN;
+}
+
 #ifndef DALI_HOST_BUILD
 static bool IRAM_ATTR rx_ts_not_after(uint32_t now_us, uint32_t deadline_us)
 {
@@ -189,8 +238,21 @@ static DaliError wait_for_bus_idle_before_tx(void)
     int64_t idle_since_us = -1;
 
     while (esp_timer_get_time() < deadline_us) {
-        uint8_t level = rx_bus_level_from_pin();
         int64_t now_us = esp_timer_get_time();
+        uint8_t level = rx_bus_level_from_pin();
+
+        /* The stamp is read after the clock, so an edge in between reads as
+         * newer than now and the verdict falls back to polling. */
+        const bool     edge_valid = s_rx_last_isr_edge_valid != 0u;
+        const uint32_t edge_us    = s_rx_last_isr_edge_us;
+        const PhyIdleVerdict verdict =
+            phy_idle_verdict(level != 0u, (uint32_t)now_us, edge_valid, edge_us);
+        if (verdict == PHY_IDLE_READY) {
+            return DALI_OK;
+        }
+        if (verdict == PHY_IDLE_STUCK) {
+            break;
+        }
 
         if (level != 0u) {
             if (idle_since_us < 0) {
@@ -1084,6 +1146,16 @@ DaliError dali_phy_test_feed_rx_edge(uint32_t timestamp_us, uint8_t level)
 bool dali_phy_test_rx_activity_unreported(uint32_t now_us)
 {
     return rx_activity_unreported(now_us);
+}
+
+int dali_phy_test_idle_verdict(bool level_idle, uint32_t now_us,
+                               bool edge_valid, uint32_t edge_us)
+{
+    switch (phy_idle_verdict(level_idle, now_us, edge_valid, edge_us)) {
+        case PHY_IDLE_READY: return DALI_PHY_TEST_IDLE_READY;
+        case PHY_IDLE_STUCK: return DALI_PHY_TEST_IDLE_STUCK;
+        default:             return DALI_PHY_TEST_IDLE_UNKNOWN;
+    }
 }
 #endif
 
