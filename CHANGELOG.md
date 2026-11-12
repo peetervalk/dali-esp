@@ -65,9 +65,10 @@ At tagging:
   API: `dali_light_profile.h` gains `dali_light_profile_changed()`,
   `DaliLightEcho`, `dali_light_echo_record()` and `dali_light_echo_take()`.
   **Host-tested:** eight vectors, one of them replaying the 2k sequence
-  through the write arbiter. `dali_light_output.cpp` passes a syntax-only
-  check with ESPHome's build flags; `dali_test.yaml` not yet compiled. Not
-  yet on a bus.
+  through the write arbiter. `dali_test.yaml` compiles with no warning.
+  **Hardware-verified** on 2k: in two sessions of three walks, the double
+  refresh recurred after the last walk and the light sent nothing, where it
+  had sent an OFF before the fix. Not run on 1k.
 - **A send-twice pair split by another master's frame is sent again.** The
   halves must reach a receiver as consecutive frames. Before, a frame between
   them was routed as an event and the second half went out regardless, so the

@@ -36,6 +36,53 @@ supersedes.
 
 # Verification history
 
+### Verified on 2026-11-12 on 2k (a refresh no longer resends a reading; `5b88772`, ESPHome 2026.10.2)
+
+*A refresh no longer resends a bus reading* in `todo.md`, run with the
+operator's go-ahead, and the compile the local entry below left open.
+
+**The build.**
+
+- The operator pushed `5b88772` at 20:53:11 and flashed both nodes from `ref:
+  dev`, with `refresh: 0s`. 1k reports a build at 20:53:28, 2k at 20:53:51.
+- ESPHome rewrites that stamp only when the sources or the config change.
+  `5b88772` is the only change on `dev` since the 17:1x builds. So both nodes
+  run it, unless a config change alone set the stamp. The commit was not read
+  from either device.
+- **`dali_test.yaml` compiles on ESPHome 2026.10.2** from the working tree at
+  `5b88772`, in a fresh build directory, with no warning. RAM is 143,636 B,
+  24 B over the second batch: each light's echo now carries its profile, and
+  each light holds `profile_known_`.
+
+**2k, two sessions of three `discover` walks back to back,** the same session
+that sent `tx off to group 0` at 19:45. The 2k log streamed at DEBUG.
+
+- **Every walk found a0–a4 in g0, and d0 with 4 instances.** The lamps were
+  on at level 85 this time, so a resent echo would have read `tx level 85 to
+  group 0`.
+- **The race recurred after the third walk of each session.** Two refresh
+  passes ran back to back, the second starting as the first pass's reading
+  arrived:
+
+  | Session | Second pass's `query level profile` | First pass's reply, level 85 | `'DALI Group 0' >> ON` | Second pass's `query actual level` |
+  |---|---|---|---|---|
+  | 1 | 20:57:15.380 | 20:57:15.386 | 20:57:15.486 | 20:57:15.765 |
+  | 2 | 20:59:24.355 | 20:59:24.363 | 20:59:24.473 | 20:59:24.817 |
+
+  At 19:45 the same order ended in `tx off to group 0`, 48 ms after the second
+  pass's level query.
+- **No `dali.light` line appeared at all in either session,** and no W or E
+  line.
+- **The quiescence bracket released each time.** The Steinel's lux events
+  resumed at 20:59:24.453. Their event information alternates between 1 and
+  2.
+- Someone was in the corridor during the second session, with occupancy
+  reading `Present + Moving`. No further walks were run.
+
+Not covered: 1k, where the group lights' members could disagree and a resend
+would be visible; and a profile that changes between the push and the write,
+which only the host vector reaches.
+
 ### Verified locally on 2026-11-12, third batch (a refresh no longer resends a reading; uncommitted on `dev` at `cdd4bcd`)
 
 The fix for *A refresh can send a bus reading back as a command*, in

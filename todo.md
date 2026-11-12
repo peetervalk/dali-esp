@@ -247,22 +247,6 @@ on a Steinel event or a push button. Host-tested only.
 3. The failure path, a frame that is not sent, cannot be provoked on a working
    bus without disturbing it. It stays host-tested.
 
-### A refresh no longer resends a bus reading
-
-On 2026-11-12, after three back-to-back walks on 2k, the light sent `tx off to
-group 0` on its own; see `project_log.md`, *A refresh can send a bus reading
-back as a command*. A refresh now keeps the deduplication cache when the
-profile comes back unchanged, and the echo of a reading survives a refresh.
-Host-tested only.
-
-1. On 2k, with the logger at DEBUG, run `discover` three times in one session,
-   back to back, as on 2026-11-12.
-2. **Expected:** after the last walk, the refresh logs `query level profile`
-   and `query actual level` lines, and no `tx off to` or `tx level` line
-   follows them.
-3. The race needs two refresh passes in a row, so one clean run is weak
-   evidence. Watch for those lines after any walk, and record any.
-
 ### A failed instance enumeration is reported
 
 Seen on hardware before: a device line claiming N instances, then nothing.
