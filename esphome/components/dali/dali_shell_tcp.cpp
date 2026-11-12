@@ -363,6 +363,16 @@ void DaliShellServer::bus_release_cb(void *ctx)
     }
 }
 
+/* The gate a claim raises is the one a Home Assistant scan raises too. The
+ * shell asks only while it holds no claim of its own, so a set gate is then
+ * someone else's walk. */
+bool DaliShellServer::bus_held_elsewhere_cb(void *ctx)
+{
+    auto *self = static_cast<DaliShellServer *>(ctx);
+    return self != nullptr && self->parent_ != nullptr &&
+           self->parent_->is_scan_running();
+}
+
 bool DaliShellServer::snapshot_save_cb(void *ctx, const uint8_t *buf, uint32_t len)
 {
     auto *self = static_cast<DaliShellServer *>(ctx);
@@ -677,6 +687,7 @@ bool DaliShellServer::begin_session(int fd, ClientKind kind)
     session.transport = *dali_shell_device_transport();
     session.hooks.bus_claim = bus_claim_cb;
     session.hooks.bus_release = bus_release_cb;
+    session.hooks.bus_held_elsewhere = bus_held_elsewhere_cb;
     session.hooks.inventory_changed = inventory_changed_cb;
     session.hooks.config_applied = config_applied_cb;
     session.hooks.short_address_moved = short_address_moved_cb;

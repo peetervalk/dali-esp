@@ -305,6 +305,47 @@ static void sched_arm_tx_gap(uint32_t frame_done_us, uint32_t gap_us)
 }
 
 /*
+ * Hold our next forward frame until gap_us after a received observation's last
+ * edge. This only ever extends the guard. A reply that ends inside the 22 Te
+ * our own frame armed still pushes it out, and an old frame decoded late
+ * cannot pull an armed guard in.
+ *
+ * The guard is re-armed from now with whatever remains, rather than from the
+ * edge, so the millisecond ceiling in sched_tx_guard_active() is counted from
+ * the same moment as the microsecond span. An edge that the clock says is
+ * still to come is clamped to the full gap.
+ *
+ * Without timestamps the observation is taken to have ended now, which only
+ * the host's synthesised dali_sched_notify_rx() does.
+ */
+static void sched_hold_tx_after_rx(const DaliPhyRxObservation *observation,
+                                   uint32_t gap_us)
+{
+    uint32_t now_us = sched_now_us();
+    uint32_t remaining_us = gap_us;
+
+    if (observation->has_timestamps) {
+        int32_t left_us =
+            (int32_t)((observation->last_edge_us + gap_us) - now_us);
+        if (left_us <= 0) {
+            return;
+        }
+        if ((uint32_t)left_us < remaining_us) {
+            remaining_us = (uint32_t)left_us;
+        }
+    }
+
+    if (sched_tx_guard_active(now_us)) {
+        uint32_t armed_left_us =
+            s_tx_guard_duration_us - (now_us - s_tx_guard_started_us);
+        if (armed_left_us >= remaining_us) {
+            return;
+        }
+    }
+    sched_arm_tx_gap(now_us, remaining_us);
+}
+
+/*
  * Spend one retry on the active step and go back to TX, or report that the
  * budget is gone.
  *
@@ -571,11 +612,13 @@ static SchedIgnoreReason sched_classify_ignored(
  *
  * This used to admit only SCHED_IDLE and SCHED_WAIT_REPLY, and everything else
  * was counted rx_event_unroutable and dropped. That lost real events, and not
- * only during walks: when a frame is queued while a control device's event is
- * on the wire, dali_phy_tx() waits for the event to end and then transmits, and
- * the RX decode that completes the event runs only after that, with the
+ * only during walks: when a frame was queued while a control device's event was
+ * on the wire, dali_phy_tx() waited for the event to end and then transmitted,
+ * and the RX decode that completed the event ran only after that, with the
  * scheduler in WAIT_SETTLE. Every event overlapping the start of a queued frame
  * went nowhere -- for headless dispatch, a button press that did nothing.
+ * dali_phy_tx() now declines with DALI_ERR_BUS_ACTIVE instead, but an event
+ * can still finish decoding during SCHED_TX's guard or a settle wait.
  *
  * Nothing here needs the gate. Our own frames never reach this point (the PHY
  * drops RX through TX and the settle after it), so a decoded 16/24-bit frame is
@@ -959,8 +1002,25 @@ next:
                 s_send_twice_first_started_ms = s_ops.get_tick_ms();
             }
 
+            const bool step_was_started = s_active_step_started;
             s_active_step_started = true;
             DaliError err = s_ops.tx(&s_active.frame);
+            if (err == DALI_ERR_BUS_ACTIVE) {
+                /*
+                 * Nothing went out. Another master's frame is ending, or is
+                 * still on the wire, and the RX decoder has not yet reported
+                 * it, so nothing here knows which gap it calls for. Keep the
+                 * step and return. The task loop runs dali_phy_rx_process()
+                 * before the next pass, the frame is reported, and
+                 * sched_hold_tx_after_rx() arms its gap. Not a retry: no
+                 * budget is spent, and a send-twice repeat still answers to its
+                 * 100 ms window, checked at the top of the next pass. A first
+                 * send re-anchors that window when it really goes out.
+                 */
+                s_active_step_started = step_was_started;
+                g_dali_stats.tx_deferred_rx++;
+                return;
+            }
             if (err != DALI_OK) {
                 ESP_LOGE(TAG, "phy_tx failed: %d", (int)err);
                 /* An error may follow a partial waveform. Delay the next attempt
@@ -1139,8 +1199,12 @@ void dali_sched_notify_rx_observation(
              * therefore COMPARE=YES); lesser ambiguity and overflow abort.
              */
             sched_latch_reply_error(reply_error);
+            /* Several gear answering COMPARE at once is still a reply. */
+            sched_hold_tx_after_rx(observation, DALI_AFTER_REPLY_GAP_US);
             return;
         }
+        /* Something else was on the wire, and its shape is unknown. */
+        sched_hold_tx_after_rx(observation, DALI_AFTER_FOREIGN_FRAME_GAP_US);
         sched_count_ignored(SCHED_IGNORE_UNDECODABLE);
         return;
     }
@@ -1162,6 +1226,7 @@ void dali_sched_notify_rx_observation(
         s_reply_received = false;
         s_reply_error = DALI_OK;
         s_reply_intervened = true;
+        sched_hold_tx_after_rx(observation, DALI_AFTER_FOREIGN_FRAME_GAP_US);
         sched_route_unsolicited_or_ignore(observation);
         return;
     }
@@ -1178,9 +1243,17 @@ void dali_sched_notify_rx_observation(
         sched_observation_in_reply_window(observation, decoded_backward)) {
         s_reply_frame    = *frame;
         s_reply_received = true;
+        sched_hold_tx_after_rx(observation, DALI_AFTER_REPLY_GAP_US);
         return;
     }
 
+    /*
+     * An event, another master's command, or a backward frame answering
+     * someone else. The device that sent it, and any device waiting to send at
+     * a DALI-2 priority, is owed the multi-master settling time before our
+     * next frame starts.
+     */
+    sched_hold_tx_after_rx(observation, DALI_AFTER_FOREIGN_FRAME_GAP_US);
     sched_route_unsolicited_or_ignore(observation);
 }
 

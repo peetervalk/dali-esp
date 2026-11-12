@@ -81,6 +81,7 @@ cached level profile and triggers a refresh.
 | Capability | Shared API | Native CLI verb | Host vector | Real bus | ESPHome |
 |---|---|---|---|---|---|
 | Short-address scan | `dali_discovery_scan` | `scan`, `discover` | yes | yes | yes (scan, shell) |
+| Scan asks again after an intervening frame or RX overflow | `dali_discovery_scan` | `scan`, `discover` | yes | no | yes (scan, shell) |
 | Device-type enumeration | `dali_discovery_build_device_types_sequence` | via `discover` | yes | no | yes (scan, shell) |
 | Group membership query | `dali_discovery_build_groups_sequence` | via `discover` | yes | yes | yes (scan, shell) |
 | Bank 0 identity read | `dali_memory_read_bank0_identity` | `meminfo` | yes | partial | via scan; `meminfo` via shell |
@@ -93,6 +94,7 @@ cached level profile and triggers a refresh.
 | Address backup | `dali_snapshot_from_inventory` | `backup save`, `backup status` | yes | partial (2k and 1k, 2026-09-03 to 2026-09-30, in format v1; the unaddressed-gear warning on 1k, 2026-09-29; format v2 not yet) | shell; persisted to flash |
 | Backup blob round trip | `dali_snapshot_encode` / `_decode` | `backup export`, `backup import` | yes | n/a — no bus traffic; round-tripped on the 2k node, 2026-09-29, in format v1; v2 refuses v1 blobs | shell |
 | Restore planning | `dali_restore_plan` | `restore plan` | yes | partial (2k, 2026-09-29: dependency order, a swap in each space, and moving aside a unit the backup never saw; 2026-09-30: no move onto a shared address it read as one unidentified unit; a contested target is host-only) | shell |
+| Restore spare avoids a missing unit's recorded address | `dali_restore_plan` | `restore plan` | yes | no | shell |
 | Restore execution | `dali_restore_write_short_address` per move (DTR0 read back before the pair), each confirmed by `dali_restore_confirm_move` | `restore apply` | partial (move frames, the checked write and confirmation; not the apply loop) | partial (2k and 1k, 2026-09-29: gear and device moves, staging hops and a move-aside included, each confirmed; 1k stopped after a move that did not land. The DTR0 read-back has not met a bus) | shell, opt-in |
 | Group restore planning | `dali_restore_plan_groups` | `restore groups` | yes | no | shell; control gear only |
 | Group restore execution | n/a — `ADD TO GROUP` / `REMOVE FROM GROUP` per bit | `restore groups apply` | no | no | shell, opt-in; read back per gear |
@@ -236,6 +238,7 @@ a gap.
 | Multi-byte input polling | `dali_input_poll_build_value_sequence` | `sensor poll` | yes | yes | yes |
 | Event decode | `dali_event_*` | `events`, `capture`, `find switches` | yes | yes | yes |
 | Event dispatch rules | `dali_dispatch_*` | n/a | yes | yes | yes |
+| Dispatch state from transmission, not admission | `dali_dispatch_cb` | n/a | yes | no | yes |
 | Dispatch on instance group vs device group, and on instance type | `DaliDispatchKey.group_kind`, `match_instance_type` | n/a | yes | no | yes (YAML `instance_group`, `device_group`, `instance_type`) |
 | Event-source matching for sensor polls (every scheme) | `dali_event_source_*` | n/a | yes | no | yes |
 | Quiescent mode | `dali_input_build_quiescent_mode[_broadcast]` | `quiescent on\|off <addr\|all>` | yes | yes (2k, 2026-09-03: `on all` silenced events through a walk, `off all` released them; no read-back exists) | yes (console) |
@@ -257,6 +260,14 @@ read back on a bus: SET EVENT SCHEME, on two Steinel instances on 2k on
 | Lunatone sensor queries (7) | `dali_lunatone_build_instance_command` | `vendor lunatone` | yes | no | yes (console) |
 | Steinel HF 360 II instance profile | `dali_steinel_hf360_instance_lookup` | `vendor steinel` | yes | yes | yes (YAML, console) |
 | Steinel value conversions | `dali_steinel_temperature_*`, `_humidity_*` | `vendor steinel` | yes | yes | yes |
+
+## Bus layer
+
+| Capability | Shared API | Native CLI verb | Host vector | Real bus | ESPHome |
+|---|---|---|---|---|---|
+| Spacing from received frames: 22 Te after a reply, 13.5 ms after the stop condition of anything else | scheduler, `DALI_AFTER_*_GAP_US` | every verb | yes | no | yes |
+| TX declined while another master's frame is unreported | `dali_phy_tx` → `DALI_ERR_BUS_ACTIVE` | `stats` (`TX deferred (RX)`) | yes | no | yes |
+| Priority, randomisation, collision detection | none | n/a | no | no | no |
 
 ## CLI infrastructure
 

@@ -268,6 +268,20 @@ static void advance_to_next_forward(void)
     g_mock_time_us += DALI_FORWARD_INTERFRAME_US;
 }
 
+/* Past the hold a reply to our own query arms, counted from when it arrived. */
+static void advance_past_reply_gap(void)
+{
+    g_mock_tick_ms += (DALI_AFTER_REPLY_GAP_US + 999u) / 1000u;
+    g_mock_time_us += DALI_AFTER_REPLY_GAP_US;
+}
+
+/* Past the hold any other received frame arms, counted from when it arrived. */
+static void advance_past_foreign_gap(void)
+{
+    g_mock_tick_ms += (DALI_AFTER_FOREIGN_FRAME_GAP_US + 999u) / 1000u;
+    g_mock_time_us += DALI_AFTER_FOREIGN_FRAME_GAP_US;
+}
+
 /* Past the hold-off a reply timeout arms before the frame may be retransmitted. */
 static void advance_past_retry_backoff(void)
 {
@@ -1096,7 +1110,43 @@ void test_precise_phy_tx_end_is_preferred_over_delayed_task_clock(void)
  * the call returns. The reply window hangs off the stamp; the inter-frame
  * guard still hangs off the return, so moving the reference did not shorten
  * the spacing between forward frames.
+ *
+ * A reply holds the next frame for longer than that guard, so the guard's own
+ * reference is pinned after a frame that wants none.
  */
+void test_guard_after_own_frame_uses_tx_return(void)
+{
+    const uint32_t frame_end_us = 10000u;
+    const uint32_t tx_return_us = frame_end_us + DALI_TX_STOP_BITS_US;
+    g_mock_time_us = tx_return_us;
+    g_mock_tick_ms = tx_return_us / 1000u;
+    g_mock_last_tx_end_us = frame_end_us;
+    g_mock_last_tx_end_result = DALI_OK;
+
+    DaliTransaction first = {
+        .frame = { .data = 0x0100u, .bit_length = 16u },
+    };
+    DaliTransaction second = {
+        .frame = { .data = 0x0300u, .bit_length = 16u },
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&first));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&second));
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    g_mock_time_us = tx_return_us + DALI_FORWARD_INTERFRAME_US - 1u;
+    g_mock_tick_ms = (tx_return_us + DALI_FORWARD_INTERFRAME_US - 1u) / 1000u;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    g_mock_time_us = tx_return_us + DALI_FORWARD_INTERFRAME_US;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x0300u, g_mock_last_tx.data);
+}
+
 void test_window_uses_frame_end_and_guard_uses_tx_return(void)
 {
     const uint32_t frame_end_us = 10000u;
@@ -1118,18 +1168,24 @@ void test_window_uses_frame_end_and_guard_uses_tx_return(void)
 
     /* Undecodable activity exactly at the standard's minimum after the frame
      * end: 3.836 ms after the return, which the old reference refused. */
+    const uint32_t activity_last_edge_us = frame_end_us +
+                                           DALI_REPLY_WINDOW_OPEN_US +
+                                           DALI_BACKWARD_ACTIVITY_MIN_SPAN_US;
+    /* Delivered as the PHY delivers it: once 1.5 bit periods pass silent. */
+    g_mock_time_us = activity_last_edge_us + (DALI_BIT_US * 3u) / 2u;
+    g_mock_tick_ms = g_mock_time_us / 1000u;
     inject_rx_activity(frame_end_us + DALI_REPLY_WINDOW_OPEN_US,
-                       frame_end_us + DALI_REPLY_WINDOW_OPEN_US +
-                           DALI_BACKWARD_ACTIVITY_MIN_SPAN_US,
+                       activity_last_edge_us,
                        16u,
                        DALI_ERR_MALFORMED);
     dali_sched_run();
     TEST_ASSERT_EQUAL(1, g_cb_count);
     TEST_ASSERT_EQUAL(DALI_ERR_RX_ACTIVITY, g_cb_result);
 
-    /* The next forward frame waits the full guard from the return time. */
-    g_mock_time_us = tx_return_us + DALI_FORWARD_INTERFRAME_US - 1u;
-    g_mock_tick_ms = (tx_return_us + DALI_FORWARD_INTERFRAME_US - 1u) / 1000u;
+    /* By delivery, the 22 Te from the return has run out, but the activity
+     * was a reply and holds the next frame for the reply gap from its last
+     * edge. */
+    TEST_ASSERT_TRUE(g_mock_time_us >= tx_return_us + DALI_FORWARD_INTERFRAME_US);
     DaliTransaction command = {
         .frame = { .data = 0x0100u, .bit_length = 16u },
     };
@@ -1137,7 +1193,11 @@ void test_window_uses_frame_end_and_guard_uses_tx_return(void)
     dali_sched_run();
     TEST_ASSERT_EQUAL(1, g_mock_tx_count);
 
-    g_mock_time_us = tx_return_us + DALI_FORWARD_INTERFRAME_US;
+    g_mock_time_us = activity_last_edge_us + DALI_AFTER_REPLY_GAP_US - 1u;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    g_mock_time_us = activity_last_edge_us + DALI_AFTER_REPLY_GAP_US;
     dali_sched_run();
     TEST_ASSERT_EQUAL(2, g_mock_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0x0100u, g_mock_last_tx.data);
@@ -1273,7 +1333,15 @@ void test_stray_rx_while_idle_is_ignored(void)
     };
     TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
 
+    /* A backward frame that answered someone else is another master's
+     * transaction: the query waits out the multi-master gap after it. */
     dali_sched_run();
+    TEST_ASSERT_EQUAL(0, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(SCHED_TX, dali_sched_state());
+    advance_past_foreign_gap();
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
     advance_past_settle();
     dali_sched_run();
     TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
@@ -1782,6 +1850,7 @@ void test_event_during_tx_guard_is_routed(void)
     TEST_ASSERT_EQUAL(SCHED_TX, dali_sched_state());
     TEST_ASSERT_EQUAL(1, g_mock_tx_count);
 
+    const uint32_t event_us = g_mock_time_us;
     inject_legacy_event(0x8B10u);
 
     TEST_ASSERT_EQUAL(1, g_event_count);
@@ -1789,7 +1858,16 @@ void test_event_during_tx_guard_is_routed(void)
     TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.unsolicited_events_routed);
     TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.rx_ignored_outside_reply);
 
+    /* Our own 22 Te has run out; the event's multi-master gap has not. */
     advance_to_next_forward();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    g_mock_time_us = event_us + DALI_AFTER_FOREIGN_FRAME_GAP_US - 1u;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    g_mock_time_us++;
     dali_sched_run();
     TEST_ASSERT_EQUAL(2, g_mock_tx_count);
 }
@@ -2868,7 +2946,7 @@ void test_sequence_keeps_last_reply_for_completion_callback(void)
     TEST_ASSERT_EQUAL(1, g_mock_tx_count);
     TEST_ASSERT_EQUAL(SCHED_TX, dali_sched_state());
 
-    advance_to_next_forward();
+    advance_past_reply_gap();
     dali_sched_run();
     TEST_ASSERT_EQUAL(2, g_mock_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0xA312u, g_mock_last_tx.data);
@@ -2913,7 +2991,7 @@ void test_sequence_captures_a_reply_per_step(void)
     inject_reply(0xAAu, 8u);
     dali_sched_run();
 
-    advance_to_next_forward();
+    advance_past_reply_gap();
     dali_sched_run();                 /* step 1 transmitted, wants no reply */
     TEST_ASSERT_EQUAL_HEX32(0xA312u, g_mock_last_tx.data);
     advance_past_settle();
@@ -2979,7 +3057,7 @@ void test_sequence_keeps_earlier_replies_when_a_later_step_fails(void)
     inject_reply(0x77u, 8u);
     dali_sched_run();
 
-    advance_to_next_forward();
+    advance_past_reply_gap();
     dali_sched_run();                 /* step 1 transmit fails */
 
     TEST_ASSERT_EQUAL(1, g_seq_count);
@@ -3238,6 +3316,277 @@ void test_quiescent_reports_active_queued_and_drained_work(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * Spacing from received frames
+ *
+ * Our 22 Te guard counts from our own transmissions. A received frame holds
+ * the next one too, counted from its last edge: DALI_AFTER_REPLY_GAP_US after
+ * a reply to our own query, DALI_AFTER_FOREIGN_FRAME_GAP_US after anything
+ * else. Before, ours followed a reply by about 2.9 ms and an event by as
+ * little as 1.7 ms.
+ * --------------------------------------------------------------------------*/
+
+/* Delivered as the PHY delivers it: once 1.5 bit periods pass silent. */
+static void deliver_after(uint32_t last_edge_us)
+{
+    g_mock_time_us = last_edge_us + (DALI_BIT_US * 3u) / 2u;
+    g_mock_tick_ms = g_mock_time_us / 1000u;
+}
+
+void test_reply_holds_next_frame_for_reply_gap_from_its_last_edge(void)
+{
+    const uint32_t tx_return_us = 50000u;
+    g_mock_time_us = tx_return_us;
+    g_mock_tick_ms = tx_return_us / 1000u;
+
+    DaliTransaction query = {
+        .frame       = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply = true,
+        .on_complete = on_complete,
+    };
+    DaliTransaction command = {
+        .frame = { .data = 0x0100u, .bit_length = 16u },
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&query));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&command));
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(SCHED_WAIT_REPLY, dali_sched_state());
+
+    const uint32_t reply_first_edge_us = tx_return_us + 7000u;
+    const uint32_t reply_last_edge_us  = reply_first_edge_us + 9u * DALI_BIT_US;
+    deliver_after(reply_last_edge_us);
+    DaliPhyRxObservation reply = {
+        .result         = DALI_OK,
+        .frame          = { .data = 0x42u, .bit_length = 8u },
+        .first_edge_us  = reply_first_edge_us,
+        .last_edge_us   = reply_last_edge_us,
+        .edge_count     = 16u,
+        .has_timestamps = true,
+    };
+    inject_phy_observation(&reply);
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+    TEST_ASSERT_EQUAL_HEX32(0x42u, g_cb_reply.data);
+
+    /* Our own 22 Te ran out during the reply; the reply's gap has not. */
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    g_mock_time_us = reply_last_edge_us + DALI_AFTER_REPLY_GAP_US - 1u;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    g_mock_time_us++;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x0100u, g_mock_last_tx.data);
+}
+
+void test_event_holds_next_frame_for_multi_master_gap(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_set_event_callback(on_event, &g_event_marker));
+
+    const uint32_t event_last_edge_us = 80000u;
+    deliver_after(event_last_edge_us);
+    DaliPhyRxObservation event = {
+        .result         = DALI_OK,
+        .frame          = { .data = 0x8B0102u, .bit_length = 24u },
+        .first_edge_us  = event_last_edge_us - 25u * DALI_BIT_US,
+        .last_edge_us   = event_last_edge_us,
+        .edge_count     = 40u,
+        .has_timestamps = true,
+    };
+    inject_phy_observation(&event);
+    TEST_ASSERT_EQUAL(1, g_event_count);
+
+    DaliTransaction command = {
+        .frame = { .data = 0x0100u, .bit_length = 16u },
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&command));
+
+    /* Where the old spacing sent it, and where a reply's gap would. */
+    g_mock_time_us = event_last_edge_us + 1700u;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(0, g_mock_tx_count);
+    g_mock_time_us = event_last_edge_us + DALI_AFTER_REPLY_GAP_US;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(0, g_mock_tx_count);
+
+    g_mock_time_us = event_last_edge_us + DALI_AFTER_FOREIGN_FRAME_GAP_US - 1u;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(0, g_mock_tx_count);
+
+    g_mock_time_us++;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x0100u, g_mock_last_tx.data);
+}
+
+void test_undecodable_activity_outside_a_window_holds_for_multi_master_gap(void)
+{
+    const uint32_t last_edge_us = 60000u;
+    deliver_after(last_edge_us);
+    inject_rx_activity(last_edge_us - 3000u, last_edge_us, 6u,
+                       DALI_ERR_MALFORMED);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.rx_undecodable_ignored);
+
+    DaliTransaction command = {
+        .frame = { .data = 0x0100u, .bit_length = 16u },
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&command));
+
+    g_mock_time_us = last_edge_us + DALI_AFTER_FOREIGN_FRAME_GAP_US - 1u;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(0, g_mock_tx_count);
+
+    g_mock_time_us++;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+}
+
+/*
+ * A received frame only ever extends the hold. An event decoded late, whose
+ * own gap ends before our 22 Te does, must not pull our guard in.
+ */
+void test_received_frame_never_shortens_the_armed_guard(void)
+{
+    const uint32_t tx_return_us = 100000u;
+    g_mock_time_us = tx_return_us;
+    g_mock_tick_ms = tx_return_us / 1000u;
+
+    DaliTransaction first = {
+        .frame = { .data = 0x0100u, .bit_length = 16u },
+    };
+    DaliTransaction second = {
+        .frame = { .data = 0x0300u, .bit_length = 16u },
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&first));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&second));
+    dali_sched_run();
+    advance_past_settle();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    /* Its gap ends at tx_return_us - 10000 + 15083: before our 22 Te does. */
+    DaliPhyRxObservation old_event = {
+        .result         = DALI_OK,
+        .frame          = { .data = 0x8B0102u, .bit_length = 24u },
+        .first_edge_us  = tx_return_us - 30000u,
+        .last_edge_us   = tx_return_us - 10000u,
+        .edge_count     = 40u,
+        .has_timestamps = true,
+    };
+    inject_phy_observation(&old_event);
+
+    g_mock_time_us = tx_return_us + DALI_FORWARD_INTERFRAME_US - 1u;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    g_mock_time_us++;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x0300u, g_mock_last_tx.data);
+}
+
+/*
+ * The PHY declines while another master's frame is unreported. Nothing went
+ * out, so the step is kept and no retry is spent; the decode that follows
+ * reports the frame, and the step goes out after that frame's gap.
+ */
+void test_phy_bus_active_keeps_the_step_and_spends_no_retry(void)
+{
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_sched_set_event_callback(on_event, &g_event_marker));
+    g_mock_tx_fail_on_count = 1;
+    g_mock_tx_result = DALI_ERR_BUS_ACTIVE;
+    g_mock_time_us = 20000u;
+    g_mock_tick_ms = 20u;
+
+    DaliTransaction query = {
+        .frame        = { .data = 0x0B90u, .bit_length = 16u },
+        .needs_reply  = true,
+        .retries_left = 1u,
+        .on_complete  = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&query));
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);   /* the attempt the PHY declined */
+    TEST_ASSERT_EQUAL(SCHED_TX, dali_sched_state());
+    TEST_ASSERT_EQUAL(0, g_cb_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.tx_deferred_rx);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.tx_retries);
+    TEST_ASSERT_FALSE(dali_sched_is_quiescent());
+
+    /* The event the PHY saw, reported by the decode before the next pass. */
+    const uint32_t event_last_edge_us = 20500u;
+    deliver_after(event_last_edge_us);
+    DaliPhyRxObservation event = {
+        .result         = DALI_OK,
+        .frame          = { .data = 0x8B0102u, .bit_length = 24u },
+        .first_edge_us  = event_last_edge_us - 20400u,
+        .last_edge_us   = event_last_edge_us,
+        .edge_count     = 40u,
+        .has_timestamps = true,
+    };
+    inject_phy_observation(&event);
+    TEST_ASSERT_EQUAL(1, g_event_count);
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+
+    g_mock_time_us = event_last_edge_us + DALI_AFTER_FOREIGN_FRAME_GAP_US;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x0B90u, g_mock_last_tx.data);
+    TEST_ASSERT_EQUAL(SCHED_WAIT_SETTLE, dali_sched_state());
+
+    advance_past_settle();
+    dali_sched_run();
+    inject_reply(0x42u, 8u);
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_OK, g_cb_result);
+    TEST_ASSERT_EQUAL_HEX32(0x42u, g_cb_reply.data);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_dali_stats.tx_retries);
+}
+
+/* A repeat the PHY keeps declining still answers to the 100 ms window. */
+void test_bus_active_on_send_twice_repeat_still_answers_to_the_window(void)
+{
+    const uint32_t first_started_us = 5000u;
+    g_mock_time_us = first_started_us;
+    g_mock_tick_ms = first_started_us / 1000u;
+
+    DaliTransaction txn = {
+        .frame       = { .data = 0x0120u, .bit_length = 16u },
+        .send_twice  = true,
+        .on_complete = on_complete,
+    };
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&txn));
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(1, g_mock_tx_count);
+    advance_past_settle();
+    dali_sched_run();
+
+    g_mock_tx_result = DALI_ERR_BUS_ACTIVE;
+    advance_to_next_forward();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(0, g_cb_count);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_dali_stats.tx_deferred_rx);
+
+    g_mock_time_us = first_started_us + DALI_SEND_TWICE_WINDOW_US;
+    g_mock_tick_ms = (first_started_us / 1000u) + DALI_SEND_TWICE_WINDOW_MS;
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(2, g_mock_tx_count);
+    TEST_ASSERT_EQUAL(1, g_cb_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_TIMING, g_cb_result);
+    TEST_ASSERT_EQUAL(SCHED_IDLE, dali_sched_state());
+}
+
+/* ---------------------------------------------------------------------------
  * Main
  * --------------------------------------------------------------------------*/
 int main(void)
@@ -3282,6 +3631,7 @@ int main(void)
     RUN_TEST(test_in_window_malformed_reports_error_once_the_budget_is_gone);
     RUN_TEST(test_timestamped_activity_survives_delayed_wait_settle_state);
     RUN_TEST(test_precise_phy_tx_end_is_preferred_over_delayed_task_clock);
+    RUN_TEST(test_guard_after_own_frame_uses_tx_return);
     RUN_TEST(test_window_uses_frame_end_and_guard_uses_tx_return);
     RUN_TEST(test_timestamped_reply_survives_delayed_wait_settle_state);
     RUN_TEST(test_timestamped_phy_callback_delivers_normal_backward_reply);
@@ -3331,6 +3681,12 @@ int main(void)
     RUN_TEST(test_reset_clears_state);
     RUN_TEST(test_multiple_transactions_in_order);
     RUN_TEST(test_quiescent_reports_active_queued_and_drained_work);
+    RUN_TEST(test_reply_holds_next_frame_for_reply_gap_from_its_last_edge);
+    RUN_TEST(test_event_holds_next_frame_for_multi_master_gap);
+    RUN_TEST(test_undecodable_activity_outside_a_window_holds_for_multi_master_gap);
+    RUN_TEST(test_received_frame_never_shortens_the_armed_guard);
+    RUN_TEST(test_phy_bus_active_keeps_the_step_and_spends_no_retry);
+    RUN_TEST(test_bus_active_on_send_twice_repeat_still_answers_to_the_window);
 
     return UNITY_END();
 }

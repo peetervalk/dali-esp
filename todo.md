@@ -166,9 +166,74 @@ Reproduce it before fixing it.
    attach in the boot log, and a binary sensor that never changes.
 4. Add `use_interrupt: false` to the sensor. It should now follow the pin.
 
+### A Home Assistant scan holds the bus against the shell
+
+Read-only: the scan only queries. Either node.
+
+1. Open a shell session. Press the scan button in Home Assistant.
+2. While the scan log runs, type `query a0 status`, then `identify a0`.
+3. **Expected:** both refused with `busy`, and no frame of theirs in the scan
+   log. Once `DALI Scan Complete` is logged, the same lines run.
+4. Run `discover` in the shell, and press the scan button during it.
+   **Expected:** the button scan is refused (`Scan already in progress`), and
+   `discover` completes: the shell's own claim does not refuse its frames.
+
+### `restore` after a reboot reads the stored backup
+
+`restore` now reads the backup from a copy `setup()` loaded, never from the
+preferences API on the shell task. Read-only.
+
+1. On a node with a stored backup, reboot, open a session, and run
+   `restore plan`.
+2. **Expected:** a plan from the stored backup, not `no backup`. Then
+   `backup save` and an immediate `restore plan` plan from the new one.
+
 ---
 
 ## 2k sessions (control devices)
+
+### Spacing from received frames
+
+Our next frame now waits 9.6 ms after a reply to our query, from its last edge,
+and 15.1 ms after any other frame. The PHY declines while a frame is still
+arriving; see *Bus Timing* in `dali_protocol.md`. On 2k, the Steinel's events
+are the frames that used to be followed after 1.7 ms. Host-tested only.
+
+1. `stats` and note `TX retries`, `Reply timeouts` and `TX deferred (RX)`.
+2. With the Steinel emitting (walk under it), `capture start`, then
+   `query a0 status` ten times, then `capture export`.
+3. **Expected:** from each `rx` to the next `tx`, `timestamp_us` differs by at
+   least 23,752 after a reply and 29,244 after an event, for a 16-bit `tx`.
+   That is the gap plus 17 bit periods; see *Reading a `capture export`* in
+   `dali_commands.md`. Before the change these read about 17,000 and 15,900.
+4. Run `discover` three times, without `quiescent on all`, and `stats` after
+   each. **Expected:** every lamp found each time, `TX deferred (RX)` above
+   zero, and fewer retries per walk than *Why the retry backoff works*
+   recorded. Note the walk's duration for `current_status.md`, which gives the
+   pre-spacing figure.
+5. On 1k, repeat the `restore apply` that lost a frame after another unit's
+   reply, if a swap is due anyway, and count `DTR0 needed a second load`
+   lines; see *Bus timing with a logic analyzer*, step 3.
+
+### Headless dispatch acts on transmission
+
+A transmitting rule now moves its toggle and its lights only once the frame
+has gone out. Needs a node with a rule other than `observe`, such as a toggle
+on a Steinel event or a push button. Host-tested only.
+
+1. Trigger the rule. **Expected:** the log shows `dispatch queued ... -> gN`,
+   then `dispatch sent -> gN ...`, and the light entity follows the second.
+2. Trigger it twice in quick succession. **Expected:** on, then off, as before.
+3. The failure path, a frame that is not sent, cannot be provoked on a working
+   bus without disturbing it. It stays host-tested.
+
+### A failed instance enumeration is reported
+
+Seen on hardware before: a device line claiming N instances, then nothing.
+Now `dN: instance enumeration failed (<error>)` follows instead, naming
+`instances N` as the retry. It cannot be provoked on demand. Watch for the line
+in any `discover` with the Steinel emitting, and check that `instances 0` then
+enumerates.
 
 ### DTR0 read-back before every short-address write
 
@@ -435,6 +500,30 @@ first. With the read-back in place, one should do it.
 3. Run `restore apply`. Expect all three `OK` in one apply.
 4. Count the `DTR0 needed a second load` lines, as in the 2k DTR0 item.
 5. Each confirmed move should log `group membership followed the move`.
+
+### A staging hop avoids a missing unit's recorded address
+
+A spare is now chosen outside the addresses the backup recorded where it can
+be, so a unit that was only unpowered does not come back to find another
+sitting on its address. Host-tested only.
+
+1. With a backup of all sixteen, disconnect a15's mains, and swap a2 and a5 as
+   in the item above.
+2. Run `restore plan`. **Expected:** a15 reported missing, and the staging hop
+   to a16. The old planner took the lowest free address nothing wanted, a15.
+3. Reconnect a15 before `restore apply`, and check `discover` finds all
+   sixteen where the backup says.
+
+### A coupler press during a walk
+
+A status probe that meets another master's frame is now asked once more, so a
+coupler press no longer ends a `discover`. Host-tested only.
+
+1. Run `discover`, and press a coupler button every few seconds until it ends.
+2. **Expected:** the walk completes with all sixteen, and the pressed lamps
+   follow the coupler. A press inside a reply window costs one more status
+   query at that address. The walk's own second query is not a scheduler retry,
+   so `TX retries` does not count it; `capture` shows it.
 
 ### `restore groups`
 
@@ -728,47 +817,38 @@ through the GPIO ISR service, which was installed without
 - The service is shared with ESPHome, which installs it on its own terms. This
   and *The DALI PHY can break every other GPIO interrupt* want one fix.
 
-### P0 — Reserve the scheduler for a scan
+None of the fixes `project_log.md` weighed on 2026-09-25 fixes both. A fourth
+is designed in Part 3, *RX capture off the shared GPIO ISR service*. It is a
+software-stack change, so it waits for a go-ahead.
 
-The TCP shell's single-frame verbs do not observe the scan gate, so they can
-interleave with a button scan. The quiescence check plus the component-wide
-gate is not an atomic check-and-reserve. `dali_sched_is_quiescent()` no longer
-reports quiescent between dequeue and `SCHED_TX`, and a claim now waits for
-queued work to drain, but a true admission reservation is still missing.
+### P1 — Priority, collisions and the send-twice pair
 
-### P0 — Confirm transmission for every scheduler client
+Our frames are now spaced from received ones; see Part 1, *Spacing from
+received frames*. After another master's frame, ours always takes DALI-2
+priority 1's 13.5 ms. Still missing:
 
-Light entities act on completion. Three clients still report, or act on,
-admission rather than transmission:
+- **Priority and randomisation.** TI's devices wait 13.5, 14.9, 16.3, 17.9 or
+  19.5 ms by priority, each a range. Ours always takes the shortest and its
+  start, so it goes first against any DALI-2 device and collides with another
+  master doing the same. Which priority an application controller's frames
+  carry is a reading of IEC 62386-101 not yet made.
+- **Collision detection and recovery.** TI compares each RX half-bit with what
+  it sent, stops on a mismatch, breaks for 1.3 ms, and retries after 4.3 ms.
+  The PHY suppresses RX through its own TX, so it cannot see a collision at
+  all.
+- **A send-twice pair split by another master's frame.** The halves must
+  arrive as consecutive frames, as recalled from the standard; this is not
+  checked against the text or TI's source. The scheduler sends the second half
+  anyway and reports success. Fix: when a forward frame is routed between the
+  halves, end the step with `DALI_ERR_INTERVENED` and let the caller resend
+  the pair.
+- **A deadline-aware PHY call** for when a repeat would cross the 100 ms
+  send-twice limit.
 
-- the console's `OK`
-- the refresh pump
-- headless dispatch
-
-### P0 — Space forward frames from received frames
-
-Nothing spaces our forward frame from a received one. Ours follows a reply by
-about 2.9 ms, and an event by as little as 1.7 ms. TI's DALI-2 device firmware
-waits 13.5–19.5 ms after any frame, by priority, and DALI-1 wanted 22 Te after
-a reply.
-
-TI's SDK is a compact reference for:
-
-- the settle table
-- collision detection, avoidance and recovery
-
-Its receiver accepts a send-twice pair whose stop conditions are up to 94 ms
-apart, which is looser than the scheduler's own bracket.
-
-Also open:
-
-- DALI-2 priority and backoff
-- a deadline-aware PHY call for when a repeat would cross the 100 ms
-  send-twice limit
-
-A 1k `restore apply` move lost a frame right after another unit's reply. That
-fits, but one miss does not establish it. Measure first: *Bus timing with a
-logic analyzer*, step 3, and the second-load counts.
+TI's SDK is a compact reference for the settle table and for collision
+detection, avoidance and recovery. Its receiver accepts a send-twice pair whose
+stop conditions are up to 94 ms apart, which is looser than the scheduler's own
+bracket.
 
 ### P1 — `tools/dali-shell` waits up to 400 s for a device that restarted
 
@@ -804,13 +884,9 @@ Fixes, cheapest first:
 - Attach RX through ESPHome's own pin API.
 - Fix ESPHome upstream to accept an already installed service.
 
-Reproduce it first: *The GPIO ISR-service conflict*.
-
-### P1 — `load_address_backup()` calls ESPHome preferences from the shell task
-
-`ESP32PreferenceBackend::load()` walks the unlocked pending-save vector that
-the loop task's `save()` and `sync()` mutate. That is a data race. Fix: load
-once in `setup()`, and serve from `s_address_backup`.
+Part 3, *RX capture off the shared GPIO ISR service*, takes the first as its
+step 1 and fixes the RX interrupt with it. Reproduce the defect first: *The
+GPIO ISR-service conflict*.
 
 ### P1 — Entity limits fail silently
 
@@ -825,28 +901,30 @@ ESPHome 2026.9 pins `loopTask` to core 1, the core `dali_worker_core()` also
 gives the DALI, scan and shell tasks. Synchronization is unaffected, and the
 comments in the component say which task owns what rather than which core.
 But the PHY's pre-TX busy-wait runs on that shared core: 1.67 ms per frame, and
-33 ms per attempt on a stuck bus. Let the idle check use an edge time the ISR
-records.
+33 ms per attempt on a stuck bus.
 
-### P1 — One intervening frame aborts a whole scan
+A frame already on the wire no longer holds it: the PHY declines with
+`DALI_ERR_BUS_ACTIVE` instead. The RX ISR now records its last accepted edge,
+`s_rx_last_isr_edge_us`, which is the edge time this fix wants: the idle check
+can read how long the bus has been quiet instead of polling it for 1.67 ms.
 
-`discovery_scan_walk()` returns on any per-address error other than TIMEOUT,
-MALFORMED or RX_ACTIVITY. So a coupler button press during a reply window ends
-a 45 s walk. Fix: retry the address once, then record it as unreadable and
-reserved.
+### P1 — Record an address a walk cannot read
 
-### P1 — `restore_find_spare()` can stage onto a missing unit's recorded address
+A status or instance probe that fails for a reason that says nothing about the
+address, `INTERVENED` or `OVERFLOW`, is asked once more. A second such failure
+at the same address still ends the walk. Nothing records an address as
+unreadable, and one the walk could not read must not be reported free.
 
-If that unit is only unpowered, it comes back onto a contested address. Fix:
-prefer spares outside `dali_snapshot_used_mask()`, and add a host vector.
+Wanted: a flag, say `has_unreadable_status`, that reserves the address
+wherever a contested gear address is reserved today, without calling it
+contested. Contested means more than one unit; this means nothing is known. It
+reaches:
 
-### P1 — Report a failed input-device enumeration
-
-The post-scan loop in `cmd_discover` prints only on `DALI_OK` from
-`dali_discovery_query_input_device()`, and has no else branch. A lost query
-leaves a device line claiming N instances, no enumeration line, and no error.
-This has been seen on hardware. Fix: report the failure, and keep the count
-the device line already gave.
+- the commissioning used mask, which reads `has_undecodable_activity` directly
+- the commissioning audit
+- the restore planner, which needs a conflict kind of its own, because the
+  remedy is a rescan, not `address aN clear`
+- `backup save`, `discover`, the scan log and `export inventory`
 
 ### P1 — Clearing a shared device address
 
@@ -860,6 +938,28 @@ collision*. There are two candidates:
 
 Every query shares that path, so do not change the scheduler before the
 capture.
+
+### P2 — Reserve the scheduler for a scan
+
+The scan gate is a check before enqueue, not an admission reservation. The
+TCP and web shell now check it before every frame, as every component producer
+already did, so nothing new is queued once a Home Assistant scan raises it,
+and the scan waits for the queue to drain. A frame that passed the check in
+the moment before the gate went up still goes out, ahead of the scan's first
+query. A reservation at `dali_sched_enqueue()` itself would close that: an
+owner token, and while it is held only that owner's work is admitted.
+
+### P2 — The console and the refresh cursor act on admission
+
+Headless dispatch now acts on transmission. Two clients still act on
+admission, and neither publishes a state it has not read:
+
+- **The console's `OK` means queued,** as documented. A verb that waited for
+  its frame would publish `pending`, then `OK` or the error, as the
+  asynchronous verbs already do.
+- **The refresh pump moves its cursor once a light's level query is queued.**
+  A read that then fails is retried only on the next pass. Advancing from the
+  reply instead would retry it at once.
 
 ### P2 — Closed probes fill a busy shell's queue
 
@@ -1087,6 +1187,66 @@ Nothing yet. A `dev` change that makes a pinned comment wrong goes here.
   vendored Unity MIT license and third-party notice.
 
 # Part 3 — Design
+
+## RX capture off the shared GPIO ISR service
+
+Not approved. It would fix *P0 — The RX edge interrupt is not IRAM-safe* and
+*P1 — The DALI PHY can break every other GPIO interrupt* together.
+
+**The problem.** The RX edge interrupt goes through the GPIO ISR service, which
+every GPIO interrupt in the firmware shares, ESPHome's included. Two things
+follow:
+
+- It is masked during every flash write, because one handler on a shared
+  interrupt that is not IRAM-safe makes all of them non-IRAM. An edge during an
+  NVS commit is lost.
+- Whoever installs the service first sets its flags. ESPHome refuses a service
+  someone else installed, so a pin interrupt that attaches after DALI's
+  `setup()` never gets its handler.
+
+**What was weighed.** The first three are from `project_log.md`, 2026-09-25.
+
+| Option | Conflict | IRAM | Cost |
+|---|---|---|---|
+| Install after ESPHome's `setup()` | Fixed | Not fixed | Small |
+| Attach RX through ESPHome's pin API | Fixed | Not fixed | Small; ties the PHY to ESPHome, which the layering forbids |
+| Fix ESPHome upstream, then install with `ESP_INTR_FLAG_IRAM` | Fixed | Fixed, if every other handler is IRAM-safe, which is not ours to promise | Waits on upstream |
+| Capture RX edges with a peripheral that has its own interrupt | Fixed: DALI leaves the service | Fixed: that driver's ISR can be made cache-safe on its own | A new RX front end in the PHY |
+
+**The fourth, in more detail.** Two ESP32 peripherals could do it:
+
+- **MCPWM capture.** It timestamps each edge in hardware and raises an
+  interrupt per edge, with its direction. That maps onto the buffer-first
+  model unchanged: the capture ISR pushes timestamp and level into the same
+  ring, and the decoder does not change. The edge time comes from the capture
+  register rather than from when the ISR ran, which is better than today. The
+  ESP32, S3, C6 and H2 have it; the S2, C3 and C2 do not.
+- **RMT receive.** Every variant has it. It hands over whole frames as
+  level-and-duration pairs once the line has been idle for a set time, so the
+  decoder's input changes from edges to durations. Absolute times must be
+  inferred from when the frame completed. ESPHome's `remote_receiver` and
+  `remote_transmitter` share the channels.
+
+**Intended implementation, if approved.** Capture with MCPWM where the variant
+has it, and keep the GPIO path for the rest.
+
+1. The GPIO path installs its service only after ESPHome's own `setup()` has
+   run, so it never takes the service first. That alone fixes the conflict on
+   every variant.
+2. On MCPWM variants, a capture channel on the RX pin, both edges, pushes into
+   the existing ring from an IRAM-safe callback. Set the driver's cache-safe
+   option, the MCPWM counterpart of `CONFIG_GPTIMER_ISR_CACHE_SAFE`, in
+   `__init__.py` and `sdkconfig.defaults`; check its name on IDF 5.5.6 and
+   6.0.1.
+3. The self-echo and settle suppression move into the capture callback, which
+   keeps the ISR rules: no logging, no allocation, counters only.
+4. `rx_activity_unreported()` and the reply windows keep working, provided
+   capture timestamps are converted to the `esp_timer` microseconds the
+   scheduler compares them with.
+
+**Verification.** *Bus timing with a logic analyzer*, plus a bench check:
+stream frames while forcing NVS commits, as the 2026-09-25 stack review
+proposed for TX, and compare decoded frames against a capture.
 
 ## A browser GUI for the shell
 
@@ -1433,10 +1593,10 @@ so the cut is clean.
   - *The command console, verb by verb* (Part 1).
   - The console half of *P2 — DT8 in Home Assistant*.
   - *P1 — Find Couplers, paged or exportable*.
-  - The button-scan half of *P0 — Reserve the scheduler for a scan*. The
+  - The button-scan half of *P2 — Reserve the scheduler for a scan*. The
     claim's missing atomic reservation stays.
-  - The console's `OK` in *P0 — Confirm transmission for every scheduler
-    client*.
+  - The console's `OK` in *P2 — The console and the refresh cursor act on
+    admission*.
 
 **What is lost:**
 - **Commissioning through Home Assistant's remote access without a terminal.**

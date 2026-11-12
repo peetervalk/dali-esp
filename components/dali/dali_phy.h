@@ -94,10 +94,16 @@ void dali_phy_set_rx_callback(DaliPhyRxCallback cb, void *ctx);
 
 /*
  * Transmit a frame.  Blocks until transmission completes or timeout.
- * Must not be called from ISR context.
+ * Must not be called from ISR context, and must be called from the task that
+ * runs dali_phy_rx_process().
  * Returns DALI_ERR_BUSY if a TX is already in progress, DALI_ERR_BUS_STUCK if
  * the bus never went idle, and DALI_ERR_TIMING if the frame could not be
  * clocked out on time.
+ *
+ * Returns DALI_ERR_BUS_ACTIVE, having sent nothing, while another master's
+ * frame is on the wire or has ended without dali_phy_rx_process() yet
+ * reporting it. Run the RX decode and call again; the caller then knows what
+ * the frame was and how far to space its own from it.
  */
 DaliError dali_phy_tx(const DaliFrame *frame);
 
@@ -195,4 +201,11 @@ DaliError dali_phy_decode_manchester(const uint32_t *intervals,
  * edge; call dali_phy_rx_process() after the complete test waveform is queued.
  */
 DaliError dali_phy_test_feed_rx_edge(uint32_t timestamp_us, uint8_t level);
+
+/*
+ * The check dali_phy_tx() makes before it transmits, at a time the test
+ * chooses: are there edges, fed above, that dali_phy_rx_process() has not yet
+ * reported and that are younger than DALI_AFTER_FOREIGN_FRAME_GAP_US?
+ */
+bool dali_phy_test_rx_activity_unreported(uint32_t now_us);
 #endif

@@ -114,6 +114,15 @@ typedef struct {
      * own logging; it is never NULL. */
     bool (*bus_claim)(void *ctx, const char *what);
     void (*bus_release)(void *ctx);
+    /*
+     * True while the integration holds the bus for a walk of its own: a scan
+     * started from Home Assistant. Asked before every frame the session sends
+     * without a claim of its own, and such a frame is refused with
+     * DALI_ERR_BUSY rather than interleaved into the walk. A verb that holds
+     * its own claim is never refused by it. NULL when nothing else walks the
+     * bus, which is the native firmware.
+     */
+    bool (*bus_held_elsewhere)(void *ctx);
     /* Called after a workflow that invalidates cached device state, so the
      * integration can re-read what it holds. `restore apply` does not call it:
      * the only inventory it holds predates its moves, so it reports each move

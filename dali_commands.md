@@ -1551,6 +1551,16 @@ rxdebug                    # last malformed RX timing snapshot
 reset                      # reset PHY, scheduler, and diagnostic state
 ```
 
+`stats` includes `TX deferred (RX)`: how often the PHY declined to transmit
+because another master's frame was still arriving, or had just ended and was
+not yet decoded. Each one used to go out about 1.7 ms after that frame. Now it
+waits until the scheduler has spaced it; see *Bus Timing* in
+`dali_protocol.md`.
+
+While a scan started from Home Assistant holds the bus, a network session's
+verbs are refused with `busy` rather than interleaved into the walk. A verb
+that claimed the bus itself is never refused by its own claim.
+
 `help`, `list`, and `schema` are generated from the table the parser dispatches
 on, so they cannot drift from what the CLI accepts. `schema` also reports the
 session's policy, and marks each `special` entry with `commissioning`: `true` for
@@ -1571,6 +1581,13 @@ something else.
 | `timestamp_us` | Free-running microsecond clock; only differences are meaningful |
 | `raw`, `raw_bits` | The frame and its width — 16 or 24 forward, 8 backward |
 | `since_tx_us` | On an `rx` record: the backward frame's **last edge**, measured from the preceding TX **bus release** — the end of the forward frame's last data bit |
+
+The gap before our own next frame reads off two records. A `tx` record's
+`timestamp_us` is its bus release and an `rx` record's is its last edge, so from
+an `rx` to the next `tx`, subtract the forward frame's start and data bits,
+17 bit periods (14,161 us) for a 16-bit frame or 25 (20,825 us) for a 24-bit
+one. The remainder is the gap: at least 9,591 us after a reply to our query, and
+at least 15,083 us after anything else.
 
 `since_tx_us` is the field worth being careful with, because neither end of it
 is what a first reading assumes. It is anchored to the end of the forward

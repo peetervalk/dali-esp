@@ -90,6 +90,18 @@ static bool scan_error_is_absent(DaliError err)
 }
 
 /*
+ * A failure that says nothing about the address: another master's frame landed
+ * in the reply window, or the RX ring overflowed. One coupler press during a
+ * 45 s walk used to end it. The walk asks such an address once more. A second
+ * failure in a row still ends the walk, because nothing yet records an address
+ * as unreadable, and one the walk could not read must not be reported free.
+ */
+static bool scan_error_is_transient(DaliError err)
+{
+    return err == DALI_ERR_INTERVENED || err == DALI_ERR_OVERFLOW;
+}
+
+/*
  * Broadcast START QUIESCENT MODE, then wait for any event frame already on the
  * wire to finish.
  *
@@ -1080,6 +1092,9 @@ static DaliError discovery_scan_walk(DaliDiscoveryInventory *inventory,
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
         uint8_t status = 0u;
         DaliError err = dali_discovery_query_status(transport, addr, &status);
+        if (scan_error_is_transient(err)) {
+            err = dali_discovery_query_status(transport, addr, &status);
+        }
         if (err == DALI_OK) {
             err = dali_discovery_inventory_store_status(inventory, addr, status);
             if (err != DALI_OK) {
@@ -1128,6 +1143,11 @@ static DaliError discovery_scan_walk(DaliDiscoveryInventory *inventory,
         }
 
         DaliError inst_err = dali_discovery_query_u8(transport, &inst_q, &count);
+        if (scan_error_is_transient(inst_err)) {
+            /* Otherwise a pure input device whose probe met a coupler press
+             * would be passed over as absent. */
+            inst_err = dali_discovery_query_u8(transport, &inst_q, &count);
+        }
         if (inst_err == DALI_ERR_RX_ACTIVITY) {
             /*
              * Something answered in the device address space and could not be

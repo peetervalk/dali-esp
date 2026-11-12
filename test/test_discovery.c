@@ -9,6 +9,9 @@ typedef struct {
     bool      malformed[DALI_SHORT_ADDRESS_COUNT];
     int       bus_error_addr;
     DaliError bus_error;
+    /* How many status queries to bus_error_addr fail; 0 means every one. */
+    uint32_t  bus_error_count;
+    uint32_t  bus_error_hits;
     uint32_t  tx_count;
     uint32_t  sequence_count;
     uint32_t  query_next_device_type_count;
@@ -101,7 +104,10 @@ static DaliError mock_transact(const DaliFrame *frame,
 
     uint8_t addr = 0u;
     if (is_status_query(frame, &addr)) {
-        if (bus->bus_error_addr == (int)addr) {
+        if (bus->bus_error_addr == (int)addr &&
+            (bus->bus_error_count == 0u ||
+             bus->bus_error_hits < bus->bus_error_count)) {
+            bus->bus_error_hits++;
             return bus->bus_error;
         }
         if (bus->malformed[addr]) {
@@ -520,6 +526,66 @@ void test_scan_still_aborts_on_a_real_bus_error(void)
     TEST_ASSERT_FALSE(inventory.valid);
     TEST_ASSERT_EQUAL_UINT8(99u, found);
     TEST_ASSERT_EQUAL_UINT32(1u, s_bus.tx_count);
+}
+
+/*
+ * A coupler press inside one reply window used to end a 45 s walk. A failure
+ * that says nothing about the address is asked once more.
+ */
+void test_scan_asks_again_after_an_intervening_frame(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+
+    s_bus.present[4] = true;
+    s_bus.bus_error_addr = 4;
+    s_bus.bus_error = DALI_ERR_INTERVENED;
+    s_bus.bus_error_count = 1u;
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    TEST_ASSERT_TRUE(inventory.valid);
+    TEST_ASSERT_EQUAL_UINT8(1u, found);
+    TEST_ASSERT_TRUE(dali_discovery_inventory_get(&inventory, 4u)->present);
+    TEST_ASSERT_EQUAL_UINT32(1u, s_bus.bus_error_hits);
+}
+
+/* The same for the RX ring overflowing: a local fault, not a bus fact. */
+void test_scan_asks_again_after_an_rx_overflow(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 0u;
+
+    s_bus.bus_error_addr = 9;
+    s_bus.bus_error = DALI_ERR_OVERFLOW;
+    s_bus.bus_error_count = 1u;
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_OK,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+    TEST_ASSERT_TRUE(inventory.valid);
+    TEST_ASSERT_FALSE(dali_discovery_inventory_get(&inventory, 9u)->present);
+}
+
+/*
+ * Twice running still ends the walk: an address it could not read is not one
+ * it may report free, and nothing yet records it as unreadable.
+ */
+void test_scan_stops_when_an_address_is_intervened_twice(void)
+{
+    DaliDiscoveryInventory inventory;
+    uint8_t found = 99u;
+
+    s_bus.present[4] = true;
+    s_bus.bus_error_addr = 4;
+    s_bus.bus_error = DALI_ERR_INTERVENED;
+    DaliDiscoveryTransport t = transport();
+    TEST_ASSERT_EQUAL(DALI_ERR_INTERVENED,
+                      dali_discovery_scan(&inventory, &t, NULL, NULL, &found));
+
+    TEST_ASSERT_FALSE(inventory.valid);
+    TEST_ASSERT_EQUAL_UINT8(99u, found);
+    TEST_ASSERT_EQUAL_UINT32(2u, s_bus.bus_error_hits);
 }
 
 void test_query_status_rejects_bad_reply_width(void)
@@ -2470,6 +2536,9 @@ int main(void)
     RUN_TEST(test_scan_records_undecodable_activity_and_keeps_scanning);
     RUN_TEST(test_scan_records_undecodable_control_device_activity);
     RUN_TEST(test_scan_still_aborts_on_a_real_bus_error);
+    RUN_TEST(test_scan_asks_again_after_an_intervening_frame);
+    RUN_TEST(test_scan_asks_again_after_an_rx_overflow);
+    RUN_TEST(test_scan_stops_when_an_address_is_intervened_twice);
     RUN_TEST(test_query_status_rejects_bad_reply_width);
     RUN_TEST(test_query_input_device_clamps_and_keeps_optional_timeouts);
     RUN_TEST(test_query_input_device_reads_event_addressing);

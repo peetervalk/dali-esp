@@ -104,9 +104,18 @@ builders are in `dali_input_config`; common Part 103 queries are in
 - The stop bits take 1.664 ms after the stamp. TX-to-RX settle suppression is
   2 ms, counted from TX complete, after the stop bits.
 - Scheduler reply wait: 25 ms after TX handoff.
-- Gap before our next forward frame: 22 Te, counted from our own transmissions
-  only. Nothing yet spaces our frame from a received one; see `todo.md`,
-  *Space forward frames from received frames*.
+- Gap before our next forward frame:
+  - 22 Te after our own transmission.
+  - 22 Te after a reply to our own query, plus one half-bit: about 9.6 ms
+    from its last edge.
+  - 13.5 ms after the stop condition of any other frame: about 15.1 ms from
+    its last edge.
+
+  The scheduler arms the last two as RX observations arrive, and only ever
+  extends the hold. `dali_phy_tx()` declines with `DALI_ERR_BUS_ACTIVE` while
+  edges the decoder has not yet reported are younger than 15.1 ms, so a frame
+  still on the wire is spaced too. No priority or collision handling exists
+  yet; see `todo.md`.
 - Send-twice window: 100 ms.
 - GPIO16 and GPIO17 are connected to WROVER-E PSRAM and must not be used on
   that module. The pin schema does not reject them — they are ordinary pins on

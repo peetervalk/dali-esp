@@ -259,20 +259,45 @@ static bool shell_aborted(void)
     return s_session.aborted(s_session.abort_ctx);
 }
 
+/* Claims this session holds now, so its own claim never refuses its frames. */
+static uint8_t s_bus_claims;
+
 /* Claim the bus for a named long-running workflow, when the integration cares. */
 static bool shell_bus_claim(const char *what)
 {
     if (s_session.hooks.bus_claim == NULL) {
         return true;
     }
-    return s_session.hooks.bus_claim(s_session.hooks.ctx, what);
+    if (!s_session.hooks.bus_claim(s_session.hooks.ctx, what)) {
+        return false;
+    }
+    s_bus_claims++;
+    return true;
 }
 
 static void shell_bus_release(void)
 {
     if (s_session.hooks.bus_release != NULL) {
+        if (s_bus_claims > 0u) {
+            s_bus_claims--;
+        }
         s_session.hooks.bus_release(s_session.hooks.ctx);
     }
+}
+
+/*
+ * Is the bus held by a walk this session did not start: a scan from Home
+ * Assistant? Then a frame the session sends would land between the walk's
+ * queries, which is what reserving the bus for a scan rules out. Asked by the
+ * two blocking primitives every verb reaches the bus through, so one check
+ * covers every verb, multi-frame ones that take no claim included.
+ */
+static bool shell_bus_held_elsewhere(void)
+{
+    if (s_bus_claims > 0u || s_session.hooks.bus_held_elsewhere == NULL) {
+        return false;
+    }
+    return s_session.hooks.bus_held_elsewhere(s_session.hooks.ctx);
 }
 
 /* Report a verb the session policy does not permit, in one wording. */
@@ -602,6 +627,9 @@ static DaliError shell_sched_sync_impl(const DaliFrame *frame,
     if (honor_abort && shell_aborted()) {
         return DALI_ERR_CANCELLED;
     }
+    if (shell_bus_held_elsewhere()) {
+        return DALI_ERR_BUSY;
+    }
 
     TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
     (void)ulTaskNotifyTake(pdTRUE, 0u);
@@ -705,6 +733,10 @@ static DaliError shell_sched_sequence_sync(DaliSequence *seq,
     if (shell_aborted()) {
         shell_sequence_result_init(result_out, DALI_ERR_CANCELLED);
         return DALI_ERR_CANCELLED;
+    }
+    if (shell_bus_held_elsewhere()) {
+        shell_sequence_result_init(result_out, DALI_ERR_BUSY);
+        return DALI_ERR_BUSY;
     }
 
     TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
@@ -1583,6 +1615,7 @@ static void cmd_stats(void)
     shell_printf("Raw malformed:    %" PRIu32 "\r\n", g_dali_stats.raw_malformed);
     shell_printf("ISR overruns:     %" PRIu32 "\r\n", g_dali_stats.isr_overruns);
     shell_printf("Bus idle fails:   %" PRIu32 "\r\n", g_dali_stats.bus_idle_failures);
+    shell_printf("TX deferred (RX): %" PRIu32 "\r\n", g_dali_stats.tx_deferred_rx);
     shell_printf("RX TX echo drop:  %" PRIu32 "\r\n", g_dali_stats.rx_self_echo_suppressed);
     shell_printf("RX settle drop:   %" PRIu32 "\r\n", g_dali_stats.rx_settle_suppressed);
     shell_printf("RX glitch drop:   %" PRIu32 "\r\n", g_dali_stats.rx_glitch_drops);
@@ -3974,7 +4007,9 @@ static uint8_t shell_discover_bus(bool detailed)
             continue;
         }
         DaliDiscoveryInputDevice input;
-        if (dali_discovery_query_input_device(&transport, addr, &input) == DALI_OK) {
+        DaliError enum_err =
+            dali_discovery_query_input_device(&transport, addr, &input);
+        if (enum_err == DALI_OK) {
             (void)dali_discovery_inventory_update_input_device(inventory, &input);
             shell_input_cache_store(&input);
             if (detailed) {
@@ -3982,6 +4017,16 @@ static uint8_t shell_discover_bus(bool detailed)
                 shell_printf("  %02u: %u input instance(s) enumerated\r\n",
                        (unsigned)addr, (unsigned)count);
             }
+        } else {
+            /*
+             * Printed whether or not the walk is detailed. Without it the
+             * device line's instance count stood alone, with no enumeration
+             * and no error, which reads as a device whose instances were read.
+             * The count stays as the device line gave it.
+             */
+            shell_printf("  d%u: instance enumeration failed (%s); "
+                         "`instances %u` retries\r\n",
+                         (unsigned)addr, shell_err(enum_err), (unsigned)addr);
         }
     }
 
@@ -7911,6 +7956,7 @@ DaliError dali_shell_attach(const DaliShellSession *session)
     }
 
     s_session = *session;
+    s_bus_claims = 0u;
 #ifndef DALI_HOST_BUILD
     /* Recorded before the session goes live, so the very first foreign-task
      * write is already classified correctly. */

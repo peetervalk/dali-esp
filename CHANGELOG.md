@@ -18,7 +18,78 @@ At tagging:
 - re-check each label against `project_log.md` and `todo.md`
 - rename this heading to the version
 
-Nothing yet.
+### Fixed
+
+- **Our forward frames are spaced from received ones.** Before, ours followed
+  a reply by about 2.9 ms and an event by as little as 1.7 ms. That is under
+  the 2.4 ms a DALI-2 device needs to see its own stop condition, so the device
+  that had just sent an event could discard the frame. Now our next frame
+  waits:
+  - after a reply to our own query, 22 Te from its end: 9.6 ms from its last
+    edge;
+  - after any other frame, DALI-2 priority 1's 13.5 ms from its stop
+    condition: 15.1 ms from its last edge.
+
+  The PHY declines to transmit while a frame is still arriving, so a frame
+  queued during an event is spaced too. `stats` counts those declines as `TX
+  deferred (RX)`. Each frame that follows a reply now takes about 6.7 ms
+  longer, so a walk over present gear is somewhat slower. This is spacing, not
+  arbitration: no priority, randomisation or collision handling yet.
+
+  API: `DaliError` gains `DALI_ERR_BUS_ACTIVE` (14), which `dali_phy_tx()`
+  returns having sent nothing, and the scheduler absorbs. `dali_stats_t` gains
+  `tx_deferred_rx` at its end. `dali_frame.h` gains `DALI_AFTER_REPLY_GAP_US`
+  and `DALI_AFTER_FOREIGN_FRAME_GAP_US`.
+
+  **Host-tested:** seven scheduler vectors and six PHY vectors. Both builds
+  compile. Not yet on a bus; see *Spacing from received frames* in `todo.md`.
+
+- **Headless dispatch acts on transmission, not admission.** A rule that
+  transmits used to flip its toggle and tell the light entities the new state
+  as soon as its frame was queued. A frame that never reached the bus left
+  Home Assistant showing it had: an OFF that failed showed the lamps off. Now
+  both wait until the scheduler reports the frame sent, and a frame that fails
+  or is cancelled changes nothing and is logged at WARN. A toggle decides from
+  the confirmed state with presses still queued applied on top, so a quick
+  second press still toggles back. `observe` rules are unchanged.
+
+  API: `dali_dispatch_cb()` takes a completion callback; `dali_dispatch()`
+  keeps its signature. `DaliDispatchResult` gains `pending`. Call
+  `dali_dispatch_init()` after `dali_sched_init()`. Static RAM grows by 680 B
+  for 17 pending-action slots: `dali_test.yaml` links at 143,604 B.
+
+  **Host-tested:** eight new vectors, and two existing ones now complete the
+  frame before reading the toggle. Compiles. Not yet on a bus; see *Headless
+  dispatch acts on transmission* in `todo.md`.
+
+- **A coupler press no longer ends a scan.** A status or instance-count probe
+  that meets another master's frame in its reply window, or an RX ring
+  overflow, is asked once more. One intervening frame used to end a 45 s walk.
+  A second such failure at the same address still ends it.
+  **Host-tested:** three vectors. Not yet on a bus.
+
+- **`restore` avoids a missing unit's address for a staging hop or a unit
+  moved aside.** A free address the backup recorded belongs to a unit that is
+  missing now, and one that was only unpowered comes back onto it. Such an
+  address is now used only when nothing else is free. **Host-tested:** three
+  vectors. Not yet on a bus.
+
+- **`restore` no longer reads ESPHome preferences from the shell task.** That
+  read raced the loop task's saves. The stored backup is loaded once in
+  `setup()`, and `restore` reads that copy. **Unverified:** compiles, with no
+  host vector reaching the ESPHome layer.
+
+- **A Home Assistant scan holds the bus against the network shell.** On the
+  TCP and web bindings, a frame a verb sends without a claim of its own is
+  refused with `busy` while a scan from Home Assistant runs. Before, a
+  single-frame verb could interleave with the walk. A verb's own claim never
+  refuses it. API: `DaliShellHooks` gains `bus_held_elsewhere`.
+  **Unverified:** compiles. The shell is not built on the host.
+
+- **`discover` reports an instance enumeration that failed.** It printed
+  nothing, leaving a device line that claimed N instances. It now prints
+  `dN: instance enumeration failed (<error>)`, and names `instances N` as the
+  retry. **Unverified:** compiles.
 
 ## v3.1.0
 

@@ -185,6 +185,7 @@ class DaliShellServer : public Component {
   static bool aborted_cb(void *ctx);
   static bool bus_claim_cb(void *ctx, const char *what);
   static void bus_release_cb(void *ctx);
+  static bool bus_held_elsewhere_cb(void *ctx);
   static void export_config_cb(void *ctx, const DaliCliOut *out,
                                const DaliDiscoveryInventory *inventory,
                                DaliShellInputLookupFn input_lookup);

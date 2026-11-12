@@ -117,6 +117,22 @@ Protocol and state correctness come before broad new device support.
   - It is also re-sent on a MALFORMED or OVERFLOW observation inside its reply
     window.
   - Nothing that could not already repeat is repeated.
+- **Spacing.** Our next forward frame waits, whichever ends last:
+
+  | After | Gap | From the frame's last edge |
+  |---|---|---|
+  | Our own frame | 22 Te, from TX complete | n/a |
+  | A reply to our own query, decoded or claimed as activity | 22 Te from its end | 9.6 ms |
+  | Anything else: an event, another master's command, a reply to someone else, unclaimed activity | 13.5 ms from its stop condition, DALI-2 priority 1 as TI implements it | 15.1 ms |
+
+  - A received frame only ever extends the hold.
+  - A frame the RX decoder has not finished is the PHY's to catch.
+    `dali_phy_tx()` sends nothing and returns `DALI_ERR_BUS_ACTIVE` while
+    undecoded edges are younger than 15.1 ms. The scheduler keeps the step,
+    spends no retry, and spaces it once the decoder reports the frame. `stats`
+    counts these as `TX deferred (RX)`.
+  - This is spacing, not arbitration: no priority, no randomisation, no
+    collision detection.
 - **Events.** Unsolicited event frames reach their subscribers in every
   scheduler state. An event that lands inside a reply window aborts that
   transaction with `DALI_ERR_INTERVENED`.
@@ -191,8 +207,14 @@ Protocol and state correctness come before broad new device support.
   - Each present gear has its groups, device type, version, actual level and
     level profile read, along with QUERY NUMBER OF INSTANCES.
   - Each control device has its instances enumerated: type, resolution,
-    status, event scheme, event priority and three instance groups.
+    status, event scheme, event priority and three instance groups. An
+    enumeration that fails is printed as such, with the error, and the device
+    line keeps the instance count it gave.
   - Bank 0 identity is read in each space independently.
+  - A status or instance-count probe that fails for a reason that says
+    nothing about the address, another master's frame in the reply window or
+    an RX ring overflow, is asked once more. A second such failure at the same
+    address ends the walk.
 - **Contested addresses.** Two kinds of address are contested:
 
   | How it shows | What happens to it |
@@ -217,7 +239,9 @@ Protocol and state correctness come before broad new device support.
   expected traffic on a bus with sensors, not as a timing fault.
 - **Duration.** A walk costs about 0.34 s per empty address and 1.79 s per
   present gear, so walk length depends on what is on the bus: about 45 s for
-  16 gear and 29 s for 5.
+  16 gear and 29 s for 5. Those figures predate the received-frame spacing,
+  which holds each frame that follows a reply about 6.7 ms longer, so a
+  present gear now costs somewhat more.
 
 ### Commissioning
 
@@ -296,6 +320,10 @@ Protocol and state correctness come before broad new device support.
   restore is interruptible at any point and converges on re-run.
   - Cycles are broken by staging through a spare address.
   - A unit the backup never saw is moved aside.
+  - A spare for staging or moving aside is free on the bus, wanted by no
+    move, and if at all possible not an address the backup recorded. Such an
+    address belongs to a unit missing now, which would come back onto it if
+    it was only unpowered. One is borrowed only when nothing else is free.
   - Contested addresses are reserved, and reported as `contested` or `target
     contested`.
   - `apply` confirms each move before sending the next: the destination
@@ -342,6 +370,11 @@ Protocol and state correctness come before broad new device support.
 - **Bus claim.** A multi-frame workflow claims the bus through
   `try_claim_bus()`. That raises the scan gate, then waits up to 5 s for queued
   work to drain. A claim that cannot drain is refused.
+- **A scan from Home Assistant holds the bus against the shell.** On the TCP
+  and web bindings, a frame the session sends without a claim of its own is
+  refused with `busy` while that gate is raised. Both blocking primitives ask,
+  so this covers every verb, single-frame or not. A verb's own claim never
+  refuses it. The native build has nothing else that walks the bus.
 - **The TCP binding:**
 
   | Behaviour | How |
@@ -433,10 +466,19 @@ Protocol and state correctness come before broad new device support.
   coupler commands, and Part 103 events keyed by short address, instance,
   instance group, device group or instance type. An `observe` rule keeps Home
   Assistant in step with a coupler without retransmitting.
+  - Every other rule transmits, and acts on transmission. Its toggle state
+    changes, and the light entities hear of it, only once the scheduler
+    reports the frame sent. A frame that fails or is cancelled changes
+    nothing, and is logged at WARN as `not sent`.
+  - A toggle decides from the state the bus has confirmed, with the presses
+    still queued for that target applied on top. A second press before the
+    first one's frame goes out still toggles back.
 - **The scan gate.** Every component-owned producer observes it:
   - Refresh and due sensor polls stay pending.
   - Identify pauses.
   - Console and diagnostic actions are refused.
+  - The TCP and web shell's frames are refused, unless the shell raised the
+    gate itself.
   - Home Assistant light writes keep their target and retry.
 
   The local-only `queue` verb is the exception. Headless events are drained so
@@ -475,33 +517,38 @@ Facts about the code as it stands. Each has its fix, decision or measurement in
 **Bus timing and arbitration**
 
 - **No collision arbitration.** The controller has no proven collision
-  detection or arbitration strategy. DALI-2 priority and backoff are not
-  implemented. Direct-control couplers transmit too, so simultaneous traffic
-  remains a risk. *Space forward frames from received frames*.
-- **Forward frames follow received frames too closely.** Ours follows a reply
-  by about 2.9 ms and an event by as little as 1.7 ms. DALI-2 devices wait at
-  least 13.5 ms after any frame, by priority. *Space forward frames from
-  received frames*.
+  detection or arbitration strategy. Our frames are spaced from received ones,
+  but always at the shortest DALI-2 gap: no priority of our own, no
+  randomisation within the range, no backoff. Direct-control couplers transmit
+  too, so simultaneous traffic remains a risk. *Priority, collisions and the
+  send-twice pair*.
+- **A send-twice pair is not checked for an intervening frame.** Another
+  master's frame between our two halves breaks the pair at the receiver, but
+  the second half still goes out and the command reports success. *Priority,
+  collisions and the send-twice pair*.
 - **The RX edge interrupt is not IRAM-safe.** A frame that arrives during an
   NVS commit (light state, the group map, a backup) can be lost or garbled.
   *The RX edge interrupt is not IRAM-safe*.
 - **ESPHome's loop shares core 1 with the DALI tasks.** The PHY's pre-TX idle
   check busy-waits there: 1.67 ms per frame, 33 ms per attempt on a stuck bus.
-  *The PHY busy-waits on the loop's core*.
+  A frame already on the wire no longer holds it, since the PHY declines
+  instead. *The PHY busy-waits on the loop's core*.
 
 **Scheduling and scans**
 
-- **A scan is not reserved.** The TCP shell's single-frame verbs can interleave
-  with a button scan. *Reserve the scheduler for a scan*.
-- **Some clients act on admission, not transmission:** the console's `OK`, the
-  refresh pump, and headless dispatch. *Confirm transmission for every
-  scheduler client*.
-- **One intervening frame ends a scan.** Any per-address error other than
-  TIMEOUT, MALFORMED or RX_ACTIVITY stops the walk. *One intervening frame
-  aborts a whole scan*.
-- **`discover` can drop an input-device enumeration silently.** The device line
-  shows N instances, with no enumeration and no error. *Report a failed
-  input-device enumeration*.
+- **A scan holds the bus by a gate, not a reservation.** The shell and every
+  component producer check the gate before they queue, so a frame queued in
+  the moment before a scan raises it still goes out, before the scan's first
+  query. *Reserve the scheduler for a scan*.
+- **Two clients still act on admission:** the console's `OK` means queued, and
+  the refresh pump moves to the next light once its level query is queued, so
+  a read that then fails waits for the next pass. Neither publishes a state it
+  has not read. *The console and the refresh cursor act on admission*.
+- **Two failures in a row at one address end a scan.** One intervening frame
+  or RX overflow costs one more query; a second at the same address stops the
+  walk, because nothing records an address as unreadable. Any other error but
+  TIMEOUT, MALFORMED or RX_ACTIVITY stops it at once. *Record an address a
+  walk cannot read*.
 
 **Shared addresses**
 
@@ -516,8 +563,6 @@ Facts about the code as it stands. Each has its fix, decision or measurement in
 
 **Backup and restore**
 
-- **`restore_find_spare()` can stage onto a missing unit's recorded address.**
-  A unit that was only unpowered then returns to a contested address.
 - **Part 103 device groups are decode-only.** Discovery does not read them, the
   backup does not record them, and `address <dN> add` is refused. A replaced
   control device gets its address back, but not its device groups. *Part 103
@@ -556,8 +601,6 @@ Facts about the code as it stands. Each has its fix, decision or measurement in
 - **The DALI PHY can disable ESPHome pin interrupts that attach after it.** The
   workaround is `use_interrupt: false` on a `gpio` binary sensor. *The DALI PHY
   can break every other GPIO interrupt*.
-- **`load_address_backup()` reads ESPHome preferences from the shell task,**
-  which races the loop's `save()`.
 
 **Web shell**
 
@@ -593,8 +636,11 @@ Facts about the code as it stands. Each has its fix, decision or measurement in
   - The tell is a query whose answer depends on a register, or an enumeration
     pointer, that the same query or the frame just before it modifies.
 - Do not use GPIO16 or GPIO17 on the WROVER-E. Nothing enforces this.
-- **Static DRAM: `dali_test.yaml` links at 141,792 B of the 176.5 KiB static
+- **Static DRAM: `dali_test.yaml` links at 143,604 B of the 176.5 KiB static
   window.** The diagnostic shell is the largest single item in it.
+  - Headless dispatch holds 17 slots for actions waiting on their frame,
+    680 B, on every board whether or not it has rules: one per scheduler
+    queue entry, plus the frame on the wire.
   - `dali_shell.c` is compiled unconditionally through the
     `proto_dali_shell.c` shim. Nothing outside the shell's own front ends,
     `dali_shell_tcp.cpp` and `dali_shell_web.cpp`, references it, so

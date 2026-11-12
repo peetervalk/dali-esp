@@ -423,8 +423,15 @@ static uint8_t restore_find_cycle_member(const RestorePending *pending, uint8_t 
  * A free address that no remaining move wants, or RESTORE_NO_ADDRESS. The
  * staging hop and the displacement need exactly the same thing: somewhere a
  * unit can sit without becoming the next obstacle.
+ *
+ * An address the backup recorded is a last resort. Free on the bus and wanted
+ * by no move means its recorded unit is missing, and a unit that was only
+ * unpowered comes back onto it: a unit staged or displaced there would then
+ * share the address. So the first pass skips `recorded`, and only a space
+ * with no other room falls back on it.
  */
 static uint8_t restore_find_spare(uint64_t              occupied,
+                                  uint64_t              recorded,
                                   const RestorePending *pending,
                                   uint8_t               count)
 {
@@ -435,9 +442,14 @@ static uint8_t restore_find_spare(uint64_t              occupied,
         }
     }
 
+    const uint64_t taken = occupied | wanted;
     for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
-        const uint64_t bit = ((uint64_t)1u << addr);
-        if ((occupied & bit) == 0u && (wanted & bit) == 0u) {
+        if (((taken | recorded) & ((uint64_t)1u << addr)) == 0u) {
+            return addr;
+        }
+    }
+    for (uint8_t addr = 0u; addr < DALI_SHORT_ADDRESS_COUNT; addr++) {
+        if ((taken & ((uint64_t)1u << addr)) == 0u) {
             return addr;
         }
     }
@@ -496,6 +508,8 @@ static void restore_plan_space(DaliRestorePlan    *plan,
     RestorePending pending[DALI_SHORT_ADDRESS_COUNT];
     uint8_t        pending_count = 0u;
 
+    /* Where the backup's units belong; restore_find_spare() avoids them. */
+    const uint64_t recorded = dali_snapshot_used_mask(snapshot, space);
     uint64_t occupied  = 0u;
     uint64_t immovable = 0u;
     /* Identified, but no snapshot entry claims it. Not a blocker in its own
@@ -636,7 +650,8 @@ static void restore_plan_space(DaliRestorePlan    *plan,
          */
         const uint8_t victim = restore_find_cycle_member(pending, pending_count);
         if (victim != RESTORE_NO_ADDRESS) {
-            const uint8_t stage = restore_find_spare(occupied, pending, pending_count);
+            const uint8_t stage = restore_find_spare(occupied, recorded,
+                                                     pending, pending_count);
             if (stage == RESTORE_NO_ADDRESS) {
                 restore_add_conflict(&sink,
                                      DALI_RESTORE_CONFLICT_NO_STAGING_ADDRESS,
@@ -685,7 +700,8 @@ static void restore_plan_space(DaliRestorePlan    *plan,
         }
 
         const uint8_t squatter = pending[blocked].dst;
-        const uint8_t spare    = restore_find_spare(occupied, pending, pending_count);
+        const uint8_t spare    = restore_find_spare(occupied, recorded,
+                                                    pending, pending_count);
         if (spare == RESTORE_NO_ADDRESS) {
             /*
              * The space is full, so it will never move after all. Reclassify it

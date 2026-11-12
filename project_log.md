@@ -36,6 +36,33 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-11-12 (`dev` at `3931557` plus uncommitted changes)
+
+The four P0 items in `todo.md`, worked on in the order of *Which P0 first* in
+*Investigations* below, plus four of the small P1s. Nothing here touched a
+device or a bus.
+
+- **35/35 host suites build and pass** with MSYS2 UCRT64. New vectors:
+  - `test_scheduler`, 94, up from 87: six for the received-frame spacing and
+    the PHY's decline, and one that splits the guard-reference test so each
+    half asserts what it names. Six existing tests changed expectation: each
+    assumed our next frame went out 22 Te after our own, with a reply or event
+    received in between.
+  - `test_phy_decode`, 34, up from 28: the unreported-RX check.
+  - `test_dispatch`, 41, up from 33: acting on transmission. Two existing
+    tests now finish the frame before reading the toggle.
+  - `test_restore_plan`: three for the spare that avoids a missing unit's
+    address.
+  - `test_discovery`: three for asking an address again.
+- **The native firmware builds** on ESP-IDF 6.0.1, with no warning.
+- **`dali_test.yaml` compiles on ESPHome 2026.10.2** with no warning. RAM is
+  143,604 B, 696 B over the 142,908 B measured at `v3.1.0`. The map puts
+  680 B of that in the dispatch pool, 10 B in the new sequence counter, edge
+  stamp and claim count, and the rest in alignment. The new log strings are in the ELF, so
+  the build was not a stale tree.
+- **Not covered:** a bus, either node, `dali_test_psram.yaml` (no atomic
+  changed), and the shell and component changes, which no host suite reaches.
+
 ### Verified locally on 2026-11-11 (`v3.1.0` release prep, code at `7512686`)
 
 The checks `todo.md` lists for a release. The code is `7512686`, the `dev`
@@ -3257,6 +3284,103 @@ cleared by the 2026-08-14 entry above):
 ---
 
 # Investigations
+
+## The four P0 items, and spacing from received frames — decided 2026-11-12
+
+Supersedes nothing. Builds on *Nothing spaces a forward frame from a received
+one* (2026-09-29) and *Stack review* (2026-09-25).
+
+### Which P0 first
+
+The four P0 items were checked against the tree before any was started.
+
+- **Spacing from received frames** was the only one with bus evidence behind
+  it: a0's lost query on 2k on 2026-09-04, the pattern the retry backoff
+  broke, and the frame a 1k `restore apply` lost after another unit's reply.
+  `todo.md` said to measure first with a logic analyzer, which is not on site.
+  A measurement would say whether spacing explains the 1k loss, not whether to
+  space: TI, AN1220 and `esp_dali` all wait far longer than this stack did.
+- **Confirm transmission** was half out of date. The refresh pump reads levels
+  from replies and publishes nothing from admission; it only moves its cursor
+  on admission. Headless dispatch was the real case: `notify_lights()` ran
+  straight after `dali_dispatch()` queued the frame.
+- **The RX interrupt** is real and rare, and has no fix that is not a design
+  choice; see *RX capture off the shared GPIO ISR service* in `todo.md`.
+- **Reserving the scheduler for a scan** was narrower than its label. Every
+  multi-frame shell verb already claimed the bus, and each scan step is one
+  sequence. Only the network shell's unclaimed frames could land between
+  steps.
+
+### The gaps
+
+The operator chose the two values on 2026-11-12:
+
+- **After a reply to our own query, 22 Te,** AN1220's DALI-1 spacing after a
+  backward frame, and the gap this stack already left after its own frames.
+- **After anything else, 13.5 ms,** TI's priority-1 minimum.
+
+TI counts its wait from the stop condition, which its receiver detects 2 ms
+after the last falling edge: 1.2–1.6 ms after a frame's last edge. Counting
+13.5 ms from the last edge would have gone out up to 1.6 ms before TI's
+shortest gap. So both gaps are counted from a frame's last edge, with the
+difference built in:
+
+| Gap | From the last edge |
+|---|---|
+| 22 Te from the frame end, at most one half-bit after the last edge | 9,591 us |
+| 13.5 ms from the stop condition: last falling edge, one half-bit before the last edge, plus 2 ms | 15,083 us |
+
+A frame always ends on a rising edge into idle, after a low half-bit, so its
+last falling edge is one half-bit before its last edge. That holds for decoded
+frames, not for every undecodable observation; for those it is an estimate.
+
+### Where the scheduler cannot see
+
+Arming the gap when an observation arrives is not enough on its own. The
+decoder reports a frame only after 1.25 ms of silence, and `dali_phy_tx()`
+runs on the same task as `dali_phy_rx_process()`. A frame on the wire when the
+scheduler calls the PHY was therefore invisible to it: the PHY waited it out
+and transmitted 1.7 ms later. That is the path the 2026-09-25 review called
+deterministic.
+
+The PHY now declines instead. While the ring holds edges, or the decoder has a
+frame half-assembled, and the newest edge is under 15,083 us old,
+`dali_phy_tx()` returns `DALI_ERR_BUS_ACTIVE` without sending. The scheduler
+keeps the step, spends no retry, and returns. The task loop decodes the frame
+on its next pass, 1 ms later, and the scheduler arms its gap. The age bound
+means a lone edge the decoder never finishes, or a bus stuck low, holds
+transmission no longer than the longest gap. After that the idle wait reports
+a stuck bus, as before. Event traffic no longer reaches the busy-wait at all,
+because a frame on the wire has an edge at least every bit period.
+
+### Dispatch
+
+A transmitting action's effect is held in one of 17 slots until the
+scheduler completes its frame. The scheduler completes every admitted
+transaction exactly once, cancellations included, so the slots cannot leak.
+One vector cycles 51 actions through them to show it.
+
+A TOGGLE that decided from the confirmed state alone would regress a quick
+double press: the second would read "off" while the first's RECALL MAX was
+still queued, and send RECALL MAX again. So it decides from the confirmed state
+with the latest queued action for that target applied on top. If that queued
+frame fails, its slot is released and the confirmed bit was never changed, so
+the view falls back without anything having to undo it.
+
+### What was left open
+
+- **An address a walk cannot read.** `todo.md` asked for "retry once, then
+  record it as unreadable and reserved". The retry is in. Recording needs a
+  flag that every consumer of `dali_discovery_gear_address_contested()`
+  reserves, without calling the address contested. It also needs a restore
+  conflict kind of its own, since the remedy is a rescan. A second failure
+  still ends the walk, which is safe.
+- **The scan reservation** is a gate checked before enqueue, now checked by the
+  network shell too. A reservation at `dali_sched_enqueue()` stays at P2.
+- **The send-twice pair.** Writing the spacing showed that a frame from
+  another master between our two halves is routed as an event, and the second
+  half still goes out. It is now under *Priority, collisions and the
+  send-twice pair*.
 
 ## `v3.0.0` does not compile with PSRAM — found 2026-10-22
 

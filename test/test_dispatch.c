@@ -36,6 +36,28 @@ static void advance_to_next_forward(void)
     s_tick_ms += (DALI_FORWARD_INTERFRAME_US + 999u) / 1000u;
 }
 
+/* The frame just sent completes once the settle period has passed. */
+static void finish_tx(void)
+{
+    s_tick_ms += DALI_SETTLE_MS;
+    dali_sched_run();
+}
+
+/* Completion capture for dali_dispatch_cb(). */
+static int                s_done_count;
+static DaliError          s_done_result;
+static DaliDispatchResult s_done_state;
+static void              *s_done_ctx;
+static uint8_t            s_done_marker;
+
+static void on_done(DaliError result, const DaliDispatchResult *state, void *ctx)
+{
+    s_done_count++;
+    s_done_result = result;
+    s_done_state  = *state;
+    s_done_ctx    = ctx;
+}
+
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
 static DaliInputEvent make_legacy(DaliEventAddressKind kind,
@@ -87,6 +109,10 @@ void setUp(void)
     s_rx_ctx    = NULL;
     s_tick_ms   = 0u;
     memset(&g_dali_stats, 0, sizeof(g_dali_stats));
+    s_done_count  = 0;
+    s_done_result = DALI_ERR_INVALID;
+    memset(&s_done_state, 0, sizeof(s_done_state));
+    s_done_ctx    = NULL;
 
     DaliSchedOps ops = {
         .tx              = mock_tx,
@@ -94,6 +120,7 @@ void setUp(void)
         .get_tick_ms     = mock_get_tick_ms,
     };
     TEST_ASSERT_EQUAL(DALI_OK, dali_sched_init(&ops));
+    dali_dispatch_init();
 }
 
 void tearDown(void) {}
@@ -443,6 +470,7 @@ void test_broadcast_toggle_flips_between_recall_max_and_off(void)
     dali_sched_run();
     TEST_ASSERT_EQUAL_UINT8(1u, s_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0xFF05u, s_last_tx.data);
+    finish_tx();
     /* The toggle knows it turned things on; the published state does not claim
      * a level, because the on branch is RECALL MAX. */
     TEST_ASSERT_TRUE(state.broadcast_on);
@@ -454,6 +482,7 @@ void test_broadcast_toggle_flips_between_recall_max_and_off(void)
     dali_sched_run();
     TEST_ASSERT_EQUAL_UINT8(2u, s_tx_count);
     TEST_ASSERT_EQUAL_HEX32(0xFF00u, s_last_tx.data);
+    finish_tx();
     TEST_ASSERT_FALSE(state.broadcast_on);
     /* OFF is exactly level 0, so this half still publishes a state. */
     TEST_ASSERT_TRUE(result.has_state);
@@ -680,10 +709,18 @@ void test_mirror_updates_toggle_state(void)
     };
     DaliDispatchToggleState state = {};
 
+    /* A mirrored frame moves the toggle once it has gone out, not before. */
     dali_dispatch(mirror_table, 1u, &ev_on,  &state, NULL);
+    TEST_ASSERT_FALSE((state.group_on >> 6u) & 1u);
+    dali_sched_run();
+    finish_tx();
     TEST_ASSERT_TRUE((state.group_on >> 6u) & 1u);
 
     dali_dispatch(mirror_table, 1u, &ev_off, &state, NULL);
+    advance_to_next_forward();
+    dali_sched_run();
+    TEST_ASSERT_TRUE((state.group_on >> 6u) & 1u);
+    finish_tx();
     TEST_ASSERT_FALSE((state.group_on >> 6u) & 1u);
 }
 
@@ -862,6 +899,207 @@ void test_result_null_result_out_does_not_crash(void)
     TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(table, 1u, &ev, NULL, NULL));
 }
 
+/* ── Acting on transmission, not admission ───────────────────────────────── */
+
+/*
+ * A transmitting action used to flip the toggle and hand its inferred state to
+ * Home Assistant as soon as its frame was queued. These pin the replacement:
+ * nothing moves until the scheduler reports the frame sent.
+ */
+
+static const DaliDispatchEntry s_off_group3[] = {
+    { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 4, 0x02u, 0u,
+        DALI_DISPATCH_GROUP_EITHER, false, 0u },
+      { DALI_ADDR_GROUP, 3 }, DALI_DISPATCH_ACTION_OFF, 0 },
+};
+
+static const DaliDispatchEntry s_toggle_group0[] = {
+    { { DALI_EVENT_FRAME_INPUT_24BIT, DALI_EVENT_ADDRESS_SHORT, 4, 0x02u, 0u,
+        DALI_DISPATCH_GROUP_EITHER, false, 0u },
+      { DALI_ADDR_GROUP, 0 }, DALI_DISPATCH_ACTION_TOGGLE, 0 },
+};
+
+void test_transmitted_action_reports_through_done_once_sent(void)
+{
+    DaliInputEvent ev = make_dali2(DALI_EVENT_ADDRESS_SHORT, 4, 0, 0x02u);
+    DaliDispatchToggleState state = { .group_on = (uint16_t)(1u << 3u) };
+    DaliDispatchResult result = {};
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch_cb(s_off_group3, 1u, &ev, &state,
+                                                &result, on_done,
+                                                &s_done_marker));
+    /* Queued: the inference is there and marked pending; nothing moved. */
+    TEST_ASSERT_TRUE(result.matched);
+    TEST_ASSERT_TRUE(result.pending);
+    TEST_ASSERT_TRUE(result.has_state);
+    TEST_ASSERT_FALSE(result.is_on);
+    TEST_ASSERT_TRUE((state.group_on >> 3u) & 1u);
+    TEST_ASSERT_EQUAL(0, s_done_count);
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_HEX32(0x8700u, s_last_tx.data);   /* group 3 OFF */
+    TEST_ASSERT_EQUAL(0, s_done_count);
+
+    finish_tx();
+    TEST_ASSERT_EQUAL(1, s_done_count);
+    TEST_ASSERT_EQUAL(DALI_OK, s_done_result);
+    TEST_ASSERT_EQUAL_PTR(&s_done_marker, s_done_ctx);
+    TEST_ASSERT_FALSE(s_done_state.pending);
+    TEST_ASSERT_TRUE(s_done_state.matched);
+    TEST_ASSERT_TRUE(s_done_state.has_state);
+    TEST_ASSERT_FALSE(s_done_state.is_on);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_done_state.level);
+    TEST_ASSERT_EQUAL_INT(DALI_ADDR_GROUP, s_done_state.target.type);
+    TEST_ASSERT_EQUAL_UINT8(3u, s_done_state.target.address);
+    TEST_ASSERT_FALSE((state.group_on >> 3u) & 1u);
+}
+
+void test_failed_transmission_changes_nothing_and_says_so(void)
+{
+    DaliInputEvent ev = make_dali2(DALI_EVENT_ADDRESS_SHORT, 4, 0, 0x02u);
+    DaliDispatchToggleState state = { .group_on = (uint16_t)(1u << 3u) };
+    s_tx_result = DALI_ERR_BUS_STUCK;
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch_cb(s_off_group3, 1u, &ev, &state,
+                                                NULL, on_done, NULL));
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL(1, s_done_count);
+    TEST_ASSERT_EQUAL(DALI_ERR_BUS_STUCK, s_done_result);
+    /* The OFF never went out, so the group is still on as far as anyone knows. */
+    TEST_ASSERT_TRUE((state.group_on >> 3u) & 1u);
+}
+
+void test_cancelled_frame_changes_nothing_and_says_so(void)
+{
+    DaliInputEvent ev = make_dali2(DALI_EVENT_ADDRESS_SHORT, 4, 0, 0x02u);
+    DaliDispatchToggleState state = { .group_on = (uint16_t)(1u << 3u) };
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch_cb(s_off_group3, 1u, &ev, &state,
+                                                NULL, on_done, NULL));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_reset());
+    dali_sched_run();
+
+    TEST_ASSERT_EQUAL_UINT8(0u, s_tx_count);
+    TEST_ASSERT_EQUAL(1, s_done_count);
+    TEST_ASSERT_EQUAL(DALI_SCHED_RESET_ERROR, s_done_result);
+    TEST_ASSERT_TRUE((state.group_on >> 3u) & 1u);
+}
+
+void test_refused_frame_queues_nothing_and_never_calls_done(void)
+{
+    DaliInputEvent ev = make_dali2(DALI_EVENT_ADDRESS_SHORT, 4, 0, 0x02u);
+    DaliDispatchToggleState state = {};
+    DaliDispatchResult result = {};
+    DaliTransaction filler = {
+        .frame = { .data = 0x0100u, .bit_length = 16u },
+    };
+    for (uint8_t i = 0u; i < DALI_CMD_QUEUE_SIZE; i++) {
+        TEST_ASSERT_EQUAL(DALI_OK, dali_sched_enqueue(&filler));
+    }
+
+    TEST_ASSERT_EQUAL(DALI_ERR_QUEUE_FULL,
+                      dali_dispatch_cb(s_toggle_group0, 1u, &ev, &state,
+                                       &result, on_done, NULL));
+    TEST_ASSERT_FALSE(result.pending);
+
+    /* Refused, so not pending either: the next press decides from "off". */
+    TEST_ASSERT_EQUAL(DALI_OK, dali_sched_reset());
+    dali_sched_run();
+    TEST_ASSERT_EQUAL(0, s_done_count);
+    TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch_cb(s_toggle_group0, 1u, &ev,
+                                                &state, NULL, on_done, NULL));
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_HEX32(0x8105u, s_last_tx.data);   /* RECALL MAX */
+}
+
+/* Every completion returns its slot: far more actions than the pool holds. */
+void test_pending_slots_are_returned(void)
+{
+    DaliInputEvent ev = make_dali2(DALI_EVENT_ADDRESS_SHORT, 4, 0, 0x02u);
+    DaliDispatchToggleState state = {};
+
+    for (int i = 0; i < 3 * (int)(DALI_CMD_QUEUE_SIZE + 1u); i++) {
+        TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch_cb(s_toggle_group0, 1u, &ev,
+                                                    &state, NULL, on_done,
+                                                    NULL));
+        advance_to_next_forward();
+        dali_sched_run();
+        finish_tx();
+        TEST_ASSERT_EQUAL(i + 1, s_done_count);
+        TEST_ASSERT_EQUAL(DALI_OK, s_done_result);
+    }
+}
+
+/*
+ * The toggle decides from the bus state with queued actions on top, so a
+ * second press that lands before the first press's frame goes out still
+ * toggles back.
+ */
+void test_toggle_second_press_before_the_first_is_sent_toggles_back(void)
+{
+    DaliInputEvent ev = make_dali2(DALI_EVENT_ADDRESS_SHORT, 4, 0, 0x02u);
+    DaliDispatchToggleState state = {};
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(s_toggle_group0, 1u, &ev, &state, NULL));
+    TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(s_toggle_group0, 1u, &ev, &state, NULL));
+    TEST_ASSERT_FALSE(state.group_on & 1u);
+
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_HEX32(0x8105u, s_last_tx.data);   /* RECALL MAX */
+    finish_tx();
+    TEST_ASSERT_TRUE(state.group_on & 1u);
+
+    advance_to_next_forward();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_HEX32(0x8100u, s_last_tx.data);   /* OFF */
+    finish_tx();
+    TEST_ASSERT_FALSE(state.group_on & 1u);
+}
+
+/* A press whose frame failed leaves nothing behind for the next to read. */
+void test_toggle_falls_back_when_the_queued_frame_fails(void)
+{
+    DaliInputEvent ev = make_dali2(DALI_EVENT_ADDRESS_SHORT, 4, 0, 0x02u);
+    DaliDispatchToggleState state = {};
+
+    s_tx_result = DALI_ERR_BUS_STUCK;
+    TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(s_toggle_group0, 1u, &ev, &state, NULL));
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_HEX32(0x8105u, s_last_tx.data);
+    TEST_ASSERT_FALSE(state.group_on & 1u);
+
+    s_tx_result = DALI_OK;
+    TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch(s_toggle_group0, 1u, &ev, &state, NULL));
+    advance_to_next_forward();
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_UINT8(2u, s_tx_count);
+    TEST_ASSERT_EQUAL_HEX32(0x8105u, s_last_tx.data);   /* RECALL MAX again */
+}
+
+void test_observe_is_final_not_pending(void)
+{
+    DaliInputEvent ev = make_legacy(DALI_EVENT_ADDRESS_GROUP, 6, true, 0x00u);
+    DaliDispatchEntry table[] = {
+        { { DALI_EVENT_FRAME_LEGACY_16BIT, DALI_EVENT_ADDRESS_GROUP, 6,
+            DALI_DISPATCH_OPCODE_ANY, DALI_DISPATCH_INSTANCE_ANY,
+            DALI_DISPATCH_GROUP_EITHER, false, 0u },
+          { DALI_ADDR_GROUP, 6 }, DALI_DISPATCH_ACTION_OBSERVE, 0 },
+    };
+    DaliDispatchToggleState state = { .group_on = (uint16_t)(1u << 6u) };
+    DaliDispatchResult result = {};
+
+    TEST_ASSERT_EQUAL(DALI_OK, dali_dispatch_cb(table, 1u, &ev, &state, &result,
+                                                on_done, NULL));
+    TEST_ASSERT_TRUE(result.matched);
+    TEST_ASSERT_FALSE(result.pending);
+    TEST_ASSERT_FALSE((state.group_on >> 6u) & 1u);
+    /* Nothing was sent, so there is nothing to call back about. */
+    dali_sched_run();
+    TEST_ASSERT_EQUAL_UINT8(0u, s_tx_count);
+    TEST_ASSERT_EQUAL(0, s_done_count);
+}
+
 /* ── Main ────────────────────────────────────────────────────────────────── */
 
 int main(void)
@@ -901,5 +1139,14 @@ int main(void)
     RUN_TEST(test_result_action_recall_max_does_not_claim_a_level);
     RUN_TEST(test_result_toggle_infers_state);
     RUN_TEST(test_result_null_result_out_does_not_crash);
+    /* Acting on transmission */
+    RUN_TEST(test_transmitted_action_reports_through_done_once_sent);
+    RUN_TEST(test_failed_transmission_changes_nothing_and_says_so);
+    RUN_TEST(test_cancelled_frame_changes_nothing_and_says_so);
+    RUN_TEST(test_refused_frame_queues_nothing_and_never_calls_done);
+    RUN_TEST(test_pending_slots_are_returned);
+    RUN_TEST(test_toggle_second_press_before_the_first_is_sent_toggles_back);
+    RUN_TEST(test_toggle_falls_back_when_the_queued_frame_fails);
+    RUN_TEST(test_observe_is_final_not_pending);
     return UNITY_END();
 }

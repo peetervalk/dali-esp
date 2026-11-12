@@ -1304,6 +1304,32 @@ static void on_dali_unsolicited(const DaliFrame *frame, void * /*ctx*/)
     }
 }
 
+/*
+ * A transmitting dispatch action's outcome, from the scheduler's completion on
+ * this task. The lights hear about it only now: a frame that never reached the
+ * bus used to be published as if it had, and an OFF that failed showed the
+ * lamps off until the next refresh.
+ */
+static void on_dispatch_done(DaliError result, const DaliDispatchResult *res,
+                             void * /*ctx*/)
+{
+    char tgt[8];
+    format_target(tgt, sizeof(tgt), res->target);
+    if (result != DALI_OK) {
+        char err_buf[DALI_ERROR_TEXT_MAX];
+        ESP_LOGW(TAG, "dispatch action to %s not sent (%s); state left as it was",
+                 tgt, dali_error_text(result, err_buf, sizeof(err_buf)));
+        return;
+    }
+    if (res->has_state) {
+        ESP_LOGD(TAG, "dispatch sent -> %s %s level=%u", tgt,
+                 res->is_on ? "on" : "off", (unsigned)res->level);
+    } else {
+        ESP_LOGD(TAG, "dispatch sent -> %s state=unknown", tgt);
+    }
+    notify_lights(res);
+}
+
 /* ── DALI task (worker core; see dali_core_affinity.h) ───────────────────── */
 
 static void dali_task(void *raw_component)
@@ -1333,8 +1359,9 @@ static void dali_task(void *raw_component)
                 char event_str[48];
                 format_event(event_str, sizeof(event_str), &rec.event);
                 DaliDispatchResult result = {};
-                DaliError err = dali_dispatch(s_dispatch_table, s_dispatch_count,
-                                              &rec.event, &s_toggle_state, &result);
+                DaliError err = dali_dispatch_cb(s_dispatch_table, s_dispatch_count,
+                                                 &rec.event, &s_toggle_state, &result,
+                                                 on_dispatch_done, nullptr);
                 if (err == DALI_ERR_QUEUE_FULL || err == DALI_ERR_BUSY) {
                     /* A matched entry was refused by the scheduler. The action
                      * is dropped, not deferred: replaying it later would act on
@@ -1351,7 +1378,9 @@ static void dali_task(void *raw_component)
                 } else if (result.matched) {
                     char tgt[8];
                     format_target(tgt, sizeof(tgt), result.target);
-                    if (result.has_state) {
+                    if (result.pending) {
+                        ESP_LOGD(TAG, "dispatch queued %s -> %s", event_str, tgt);
+                    } else if (result.has_state) {
                         ESP_LOGD(TAG, "dispatch observed %s -> %s %s level=%u",
                                  event_str, tgt,
                                  result.is_on ? "on" : "off",
@@ -1361,7 +1390,9 @@ static void dali_task(void *raw_component)
                                  event_str, tgt);
                     }
                 }
-                notify_lights(&result);
+                /* A queued action reaches the lights through on_dispatch_done(),
+                 * once its frame has gone out. */
+                if (!result.pending) notify_lights(&result);
             }
         }
 
@@ -1387,6 +1418,7 @@ void DaliComponent::setup()
         return;
     }
 
+    dali_dispatch_init();
     dali_event_queue_init(&s_event_queue);
     dali_sched_set_event_callback(on_dali_unsolicited, nullptr);
 
@@ -1413,6 +1445,20 @@ void DaliComponent::setup()
      * persisted snapshot and so won't be polled until the next scan. */
     group_pref_ = global_preferences->make_preference<GroupMembershipPersist>(GROUP_MEMBERSHIP_MAGIC);
     backup_pref_ = global_preferences->make_preference<AddressBackupPersist>(ADDRESS_BACKUP_MAGIC);
+    /*
+     * Read the stored address backup once, here on the loop task, straight
+     * into the copy `restore` is served from. The shell task must not call the
+     * preferences API: ESP32PreferenceBackend::load() walks the pending-save
+     * list that the loop task's save() and sync() change without a lock. No
+     * session can attach before setup() has returned, so nothing races this
+     * write.
+     */
+    if (!backup_pref_.load(&s_address_backup) ||
+        s_address_backup.magic != ADDRESS_BACKUP_MAGIC ||
+        s_address_backup.len == 0u ||
+        s_address_backup.len > DALI_SNAPSHOT_BLOB_MAX) {
+        memset(&s_address_backup, 0, sizeof(s_address_backup));
+    }
     if (load_group_membership()) {
         ESP_LOGI(TAG, "group membership restored from flash");
     } else {
@@ -3259,31 +3305,18 @@ bool DaliComponent::load_address_backup(uint8_t *buf, uint32_t *len)
     if (buf == nullptr || len == nullptr) return false;
 
     /*
-     * Served from the staged copy when one exists, so a `backup save` followed
-     * immediately by a `restore` in the same session sees what was just taken
-     * rather than what survived the last reboot.
+     * Served from s_address_backup only, never from the preferences API: this
+     * runs on the shell task. setup() loaded what was on flash into it, and a
+     * `backup save` since replaced it, so a save followed at once by a
+     * `restore` sees what was just taken rather than what survived the last
+     * reboot.
      */
-    bool have_staged = false;
     portENTER_CRITICAL(&s_address_backup_mux);
-    have_staged = (s_address_backup.magic == ADDRESS_BACKUP_MAGIC &&
-                   s_address_backup.len > 0u &&
-                   s_address_backup.len <= DALI_SNAPSHOT_BLOB_MAX);
-    portEXIT_CRITICAL(&s_address_backup_mux);
-
-    if (!have_staged) {
-        AddressBackupPersist stored{};
-        if (!backup_pref_.load(&stored) || stored.magic != ADDRESS_BACKUP_MAGIC ||
-            stored.len == 0u || stored.len > DALI_SNAPSHOT_BLOB_MAX) {
-            return false;
-        }
-        portENTER_CRITICAL(&s_address_backup_mux);
-        s_address_backup = stored;
-        portEXIT_CRITICAL(&s_address_backup_mux);
-    }
-
-    portENTER_CRITICAL(&s_address_backup_mux);
-    const uint32_t stored_len = s_address_backup.len;
-    const bool     fits       = (*len >= stored_len);
+    const bool have_backup = (s_address_backup.magic == ADDRESS_BACKUP_MAGIC &&
+                              s_address_backup.len > 0u &&
+                              s_address_backup.len <= DALI_SNAPSHOT_BLOB_MAX);
+    const uint32_t stored_len = have_backup ? s_address_backup.len : 0u;
+    const bool     fits       = have_backup && (*len >= stored_len);
     if (fits) memcpy(buf, s_address_backup.blob, stored_len);
     portEXIT_CRITICAL(&s_address_backup_mux);
 
