@@ -36,6 +36,38 @@ supersedes.
 
 # Verification history
 
+### Verified in CI on 2026-11-19 (the release job, from `68c1cd8`; `v3.2.0` released)
+
+The operator pushed `v3.2.0` and found no GitHub Release. None had ever been
+made by a workflow: `v2.0.0`, `v3.0.0` and `v3.1.0` were created by hand, each
+with its `CHANGELOG.md` section as the body. At the operator's request,
+`release-packaging.yml` gained a job that does the same once the tag has built.
+The tag's own copy of the workflow predates that job, so it was run by hand.
+
+- **Run 44518158036,** dispatched from `dev` at `68c1cd8` with `ref: v3.2.0`
+  and `release: true`. GitHub accepted the new input, although the default
+  branch's copy of the workflow does not declare it.
+- **The packaging job built `v3.2.0`** from an empty directory on the latest
+  ESPHome. The release job then published `v3.2.0` at 11:51:35Z, as Latest
+  and not a prerelease, under `github-actions[bot]`.
+- **The body is the tag's `## v3.2.0` section,** 194 lines, identical to the
+  section extracted locally.
+- **Before the push, a dry run with `gh` stubbed by local git** took four
+  cases:
+  - `v3.2.0` was released as Latest;
+  - `v3.1.0` would have been released with `--latest=false`;
+  - `v1.0.5-dev`, which has no `CHANGELOG.md`, was refused with a named error;
+  - `main` was refused as not a tag.
+
+  The extraction reproduces the published bodies of `v2.0.0`, `v3.0.0` and
+  `v3.1.0`, apart from trailing blank lines the hand-made bodies carry.
+
+Not covered:
+
+- a tag push, which runs the job from the tag's copy of the workflow; the
+  first is the next release;
+- on GitHub, the prerelease, not-Latest and already-exists branches.
+
 ### Verified locally on 2026-11-19 (`v3.2.0` release prep, code at `b8b5269`)
 
 The checks `todo.md` lists for a release. The code is `b8b5269`, the `dev`

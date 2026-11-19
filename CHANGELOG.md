@@ -31,10 +31,12 @@ At tagging:
   - Run by hand with `release` ticked, it releases a tag that was pushed
     without one.
 
-  **Unverified:** a dry run with `gh` stubbed released `v3.2.0` as Latest,
-  kept Latest off `v3.1.0`, and refused a branch. The notes it extracts match
-  the published bodies of `v2.0.0`, `v3.0.0` and `v3.1.0`, apart from trailing
-  blank lines.
+  **Ran once, by hand:** it built `v3.2.0` and published its Release as Latest,
+  with the tag's section as the notes. A tag push has not run it yet; the
+  first will be the next release, because a tag push runs the workflow as the
+  tag has it. The prerelease, not-Latest and refusal branches ran only against
+  a stubbed `gh`. The notes it extracts match the published bodies of
+  `v2.0.0`, `v3.0.0` and `v3.1.0`, apart from trailing blank lines.
 
 ## v3.2.0
 
