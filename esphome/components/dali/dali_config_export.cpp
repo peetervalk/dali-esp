@@ -162,7 +162,7 @@ void emit_text_sensor(const DaliCliOut *out, const char *key,
 {
     if (sensor == nullptr) return;
     dali_cli_printf(out, "  %s:\r\n", key);
-    emit_named_key(out, "    ", "name", sensor->get_name().c_str());
+    emit_named_key(out, "    ", "name", entity_name(sensor));
 }
 
 /* A group bitmask as a YAML flow sequence: `[1, 4, 7]`. */

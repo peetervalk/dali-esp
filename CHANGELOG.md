@@ -9,16 +9,213 @@ Dated evidence for every claim here is in [project_log.md](project_log.md).
 
 ## Unreleased
 
-Everything on `dev` since `v3.1.0`. New changes are added here as they land.
+Everything on `dev` since `v3.2.0`. New changes are added here as they land.
 
 At tagging:
 
-- check each claim against the tree (`git grep <symbol> v3.1.0` settles most
+- check each claim against the tree (`git grep <symbol> v3.2.0` settles most
   of them in seconds)
 - re-check each label against `project_log.md` and `todo.md`
 - rename this heading to the version
 
 Nothing yet.
+
+## v3.2.0
+
+Sharing the bus with other masters, and Home Assistant state that follows what
+reached the bus:
+
+- Our frames are spaced from other masters' frames.
+- A send-twice pair that another master splits is sent again.
+- Headless dispatch tells Home Assistant only once its frame has gone out.
+- A light no longer sends back a level it has just read.
+
+Home Assistant YAML, the backup format and the build need no change. Two
+things an upgrade can meet:
+
+- **`devmem write` from a network shell needs `allow_commissioning: true`.**
+  Without it the verb is refused. The console and the native serial shell
+  still send it.
+- **C API.**
+  - `dali_shell.h` drops four `DALI_SHELL_*_MAX` macros that nothing used.
+  - `dali_dispatch()` returns a transmitting rule as `pending`, and moves its
+    toggle only once the frame is sent.
+  - `DaliShellHooks` gains a member in the middle, not at its end, so
+    initialise it by name.
+  - Everything else is added, as the *API* lines below list.
+
+### Changed
+
+- **`devmem write` needs the commissioning policy on a shell session,** as
+  `special write-memory` already did. Without `allow_commissioning: true` it is
+  refused with `devmem write: refused by session policy`. The control-device
+  WRITE MEMORY LOCATION specials, `C120xx` and `C121xx`, join the frames `raw`
+  and `raw2` refuse, so the hex spelling cannot get round the verb; the
+  console's `raw` refuses them too. The console's own `devmem write` is
+  unchanged. **Host-tested** for the frame classifier, with two vectors
+  turned from open to gated; the shell's refusal compiles, unverified.
+- **The network shell's close log names the reason:** `Shell session closed:`
+  then `the client closed it`, `the client stopped reading`, `idle timeout`,
+  or the errno of a failed send or receive. The idle timeout no longer logs a
+  line of its own as well. **Hardware-verified** on 1k for a client that
+  closes, one that stops reading, and one that reset before it was accepted.
+  The idle timeout's line is not yet verified.
+- **`tools/dali-shell`** gives `schema` 15 s instead of the 400 s command
+  timeout, and sets TCP keepalive on its session, so a device that restarted
+  is noticed in tens of seconds. A probe that met a busy shell now closes with
+  a reset, so `--list` no longer fills the device's two-place backlog. A
+  connect that times out names both causes: unreachable, or busy with two
+  clients waiting. **Hardware-verified** from Windows against 1k for a busy
+  shell: `--list` and the pick list mark it in use, and `--host` reports it
+  busy after 10 s, where it read `timed out`. Keepalive after a restart is
+  unverified, and the Linux keepalive branch did not run.
+- `dali_shell.h` no longer defines `DALI_SHELL_CAPTURE_MAX`,
+  `DALI_SHELL_SWITCH_MAPPING_MAX`, `DALI_SHELL_INPUT_CACHE_MAX` or
+  `DALI_SHELL_SENSOR_CACHE_MAX`. Nothing used them, and two disagreed with
+  the sizes the shell really uses.
+
+### Changed — development
+
+- **The ESPHome pin moves to 2026.11.0,** from 2026.10.2. ESP-IDF stays at
+  5.5.6.
+  - 2026.11.0's own requirements conflict on Intel macOS: it pins a
+    `cryptography` there that the `aioesphomeapi` it pins rejects.
+  - So `uv.lock` leaves Intel macOS out until a release fixes that. CI and
+    the development machines are unaffected.
+  - **Unverified:** `dali_test.yaml` compiles on it; not flashed.
+
+### Fixed
+
+- **A light no longer sends back a level it has just read.** When two profile
+  refreshes ran back to back, the reading of the first could reach the bus as
+  a command. On a group light that is a DAPC at one member's level, sent to
+  every member. Seen on 2k after three walks in a row, as an OFF to lamps that
+  were already off. Two faults:
+  - A refresh dropped the light's deduplication cache every time, because
+    the profile test read a flag that the refresh had just cleared. It now
+    keeps the cache unless the curve, MIN or MAX changed.
+  - A refresh forgot the pending echo of a reading. The echo now records the
+    profile it was mapped under and is matched under that profile, so a
+    refresh that lands before ESPHome's write leaves it recognizable.
+
+  API: `dali_light_profile.h` gains `dali_light_profile_changed()`,
+  `DaliLightEcho`, `dali_light_echo_record()` and `dali_light_echo_take()`.
+  **Host-tested:** eight vectors, one of them replaying the 2k sequence
+  through the write arbiter. `dali_test.yaml` compiles with no warning.
+  **Hardware-verified** on 2k: in two sessions of three walks, the double
+  refresh recurred after the last walk and the light sent nothing, where it
+  had sent an OFF before the fix. Not run on 1k.
+- **A send-twice pair split by another master's frame is sent again.** The
+  halves must reach a receiver as consecutive frames. Before, a frame between
+  them was routed as an event and the second half went out regardless, so the
+  command reported success while the receiver had discarded the pair. Now the
+  scheduler sends the whole pair once more, counted in `TX retries`, and a
+  second split reports `intervened`. Send-twice commands are idempotent in
+  practice, so a pair the receiver did accept costs nothing.
+  **Host-tested:** five vectors. Not yet on a bus, and no device on site can
+  split a pair; see *A send-twice pair split by another master's frame* in
+  `todo.md`.
+- **The PHY no longer polls 1.67 ms of idle before every frame.** It reads
+  the RX ISR's stamp of the last edge from another master. With the line high
+  and no edge for two bit periods it transmits at once, and a line low past
+  the 33 ms timeout is reported stuck at once. It polls as before only when
+  the stamp cannot decide. That poll ran on the core ESPHome's loop shares.
+  **Host-tested:** four vectors for the verdict; the loop around it compiles.
+  On 2k, `Bus idle fails` stayed 0 through event traffic. The stuck-bus
+  path is not yet on a bus.
+- **`dali_rb_clear()` drains from the consumer side.** It reset `head`, the
+  producer's index, which raced a push from the ISR on the other core in the
+  native build. **Host-tested:** one vector.
+- **A sensor poll asks QUERY INPUT VALUE once more** when it fails. That
+  query latches a fresh reading, so repeating it is safe; the latch reads
+  after it still get no retry. **Host-tested:** the poll vectors now pin both.
+- **Our forward frames are spaced from received ones.** Before, ours followed
+  a reply by about 2.9 ms and an event by as little as 1.7 ms. That is under
+  the 2.4 ms a DALI-2 device needs to see its own stop condition, so the device
+  that had just sent an event could discard the frame. Now our next frame
+  waits:
+  - after a reply to our own query, 22 Te from its end: 9.6 ms from its last
+    edge;
+  - after any other frame, DALI-2 priority 1's 13.5 ms from its stop
+    condition: 15.1 ms from its last edge.
+
+  The PHY declines to transmit while a frame is still arriving, so a frame
+  queued during an event is spaced too. `stats` counts those declines as `TX
+  deferred (RX)`, once per declined pass. Each frame that follows a reply now
+  takes about 6.7 ms longer, which did not measurably lengthen a 2k walk. This
+  is spacing, not arbitration: no priority, randomisation or collision
+  handling yet.
+
+  API: `DaliError` gains `DALI_ERR_BUS_ACTIVE` (14), which `dali_phy_tx()`
+  returns having sent nothing, and the scheduler absorbs. `dali_stats_t` gains
+  `tx_deferred_rx` at its end. `dali_frame.h` gains `DALI_AFTER_REPLY_GAP_US`
+  and `DALI_AFTER_FOREIGN_FRAME_GAP_US`.
+
+  **Host-tested:** seven scheduler vectors and six PHY vectors. Both builds
+  compile. **Hardware-verified** on 2k from `capture` timestamps: our frame
+  followed 195 replies by at least 10.7 ms, and 3 events by at least 16.2 ms.
+  Not yet measured with a logic analyzer, or on 1k.
+
+- **Headless dispatch acts on transmission, not admission.** A rule that
+  transmits used to flip its toggle and tell the light entities the new state
+  as soon as its frame was queued. A frame that never reached the bus left
+  Home Assistant showing it had: an OFF that failed showed the lamps off. Now
+  both wait until the scheduler reports the frame sent, and a frame that fails
+  or is cancelled changes nothing and is logged at WARN. A toggle decides from
+  the confirmed state with presses still queued applied on top, so a quick
+  second press still toggles back. `observe` rules are unchanged.
+
+  API: new `dali_dispatch_cb()` takes a completion callback, a
+  `DaliDispatchDoneCb`; `dali_dispatch()` keeps its signature and is
+  `dali_dispatch_cb()` without one. `DaliDispatchResult` gains `pending`.
+  New `dali_dispatch_init()` forgets every action still pending; call it after
+  re-initialising the scheduler. At boot the pending slots start empty. Static
+  RAM grows by 680 B for 17 pending-action slots: `dali_test.yaml` links at
+  143,604 B.
+
+  **Host-tested:** eight new vectors, and two existing ones now complete the
+  frame before reading the toggle. Compiles. Not yet on a bus; see *Headless
+  dispatch acts on transmission* in `todo.md`.
+
+- **A coupler press no longer ends a scan.** A status or instance-count probe
+  that meets another master's frame in its reply window, or an RX ring
+  overflow, is asked once more. One intervening frame used to end a 45 s walk.
+  A second such failure at the same address still ends it.
+  **Host-tested:** three vectors. Not yet on a bus.
+
+- **`restore` avoids a missing unit's address for a staging hop or a unit
+  moved aside.** A free address the backup recorded belongs to a unit that is
+  missing now, and one that was only unpowered comes back onto it. Such an
+  address is now used only when nothing else is free. **Host-tested:** three
+  vectors. Not yet on a bus.
+
+- **`restore` no longer reads ESPHome preferences from the shell task.** That
+  read raced the loop task's saves. The stored backup is loaded once in
+  `setup()`, and `restore` reads that copy. **Hardware-verified** on 1k after
+  a reboot: `restore plan` planned from the stored backup. A save followed at
+  once by a plan is not yet verified.
+
+- **A Home Assistant scan holds the bus against the network shell.** On the
+  TCP and web bindings, a frame a verb sends without a claim of its own is
+  refused with `busy` while a scan from Home Assistant runs. Before, a
+  single-frame verb could interleave with the walk. A verb's own claim never
+  refuses it. API: `DaliShellHooks` gains `bus_held_elsewhere`, after
+  `bus_release` rather than at the end; NULL when nothing else walks the bus.
+  **Unverified:** compiles. The shell is not built on the host.
+
+- **`discover` reports an instance enumeration that failed.** It printed
+  nothing, leaving a device line that claimed N instances. It now prints
+  `dN: instance enumeration failed (<error>)`, and names `instances N` as the
+  retry. **Unverified:** compiles.
+
+- **ESPHome 2026.11 builds the component without warnings.** It printed a
+  deprecation warning for each light, sensor and export use of
+  `EntityBase::get_name()`, which ESPHome removes in 2027.5.0. All three uses
+  now read the name through one helper, `entity_name()`, which switches on
+  `ESPHOME_VERSION_CODE`. The `manifest.json` floor stays at 2026.6.0, which
+  has none of the new accessors. `export config` prints the same names.
+  **Unverified:** `dali_test.yaml` compiles without a warning on 2026.11.0 and
+  on 2026.6.0; not flashed.
 
 ## v3.1.0
 

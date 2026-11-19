@@ -67,12 +67,20 @@ Two separately typed commands cannot meet this window, which is why `raw2`
 exists and why every multi-frame helper runs as one scheduler sequence rather
 than as lines a user is expected to type quickly.
 
-All locally generated forward frames share the same rounded 22 Te minimum gap.
-This is not DALI-2 priority/backoff or multi-master arbitration: the scheduler
-cannot prove that an external command did not intervene. The PHY now exports the
-precise ISR timestamp at which its own transmission released the bus, but the
-scheduler does not yet derive backward/external-frame gaps or full arbitration
-state from externally received frames.
+All locally generated forward frames share the same rounded 22 Te minimum gap
+from each other. Received frames add their own gaps; see *Bus Timing*.
+
+The halves of a pair must reach a receiver as consecutive frames. When a
+decoded forward frame, or undecodable activity, arrives between ours, the
+scheduler sends the whole pair again, once, and counts it in `tx_retries`; a
+second split ends the step with `DALI_ERR_INTERVENED`. A backward frame between
+the halves is not counted, and neither is a frame whose last edge came before
+our first half ended. The PHY makes the check reliable: a frame on the wire
+when the second half is due makes `dali_phy_tx()` decline, so the frame is
+decoded before that half can go out. That the halves must be consecutive is
+this project's reading; the standard's text has not been checked on it.
+
+None of this is DALI-2 priority, backoff or multi-master arbitration.
 
 ### Timestamped RX observations and reply outcomes
 
@@ -697,8 +705,12 @@ Steinel HF 360 II memory-bank layout and its tuning workflow are in
 | Timestamped reply attribution closes | 28.664 ms after the frame end |
 | Scheduler reply wait after TX handoff | 25 ms |
 | Retry hold-off after an expired reply window | 11.163 ms (11 bit periods + 2 ms), from the timeout |
-| Gap before our next forward frame | 22 Te (9.174 ms), from our own TX complete; a received frame arms none |
-| Idle required before transmitting | 2 bit periods (1.666 ms), counted from when the PHY starts polling |
+| Gap before our next forward frame, after our own | 22 Te (9.174 ms), from our own TX complete |
+| Gap after a reply to our own query | 22 Te from its end, counted as its last edge plus one half-bit: 9.591 ms from the last edge (`DALI_AFTER_REPLY_GAP_US`) |
+| Gap after any other received frame | 13.5 ms from its stop condition, 2 ms after its last falling edge: 15.083 ms from the last edge (`DALI_AFTER_FOREIGN_FRAME_GAP_US`) |
+| TX declined while RX is unreported | `DALI_ERR_BUS_ACTIVE` while undecoded edges are under 15.083 ms old |
+| Idle required before transmitting | 2 bit periods (1.666 ms) since the RX ISR's last edge, with the line high now; polled only when the stamp cannot decide |
+| Stuck bus, before transmitting | Low and no edge for 40 bit periods (33.3 ms): reported at once, or after polling that long |
 | RX frame end | 1.25 ms (1.5 bit periods) without an edge |
 | Send-twice window | 100 ms |
 | Post-RANDOMISE settle, before the first COMPARE | 100 ms |
@@ -725,12 +737,40 @@ put DALI-1's 7–22 Te reply after the stop bits, 4.58–10.83 ms from the last
 data bit, and 5.5–10.5 ms nests inside that only when measured from the frame
 end (`project_log.md`, 2026-09-29).
 
-A DALI-2 control device spaces its own forward frames far more widely than this
-table does. TI's device firmware waits 13.5, 14.9, 16.3, 17.9 or 19.5 ms after
-the last frame on the wire, whoever sent it, for priorities 1–5; DALI-1 wanted
-22 Te after a backward frame. Nothing here waits after a received frame beyond
-the idle check above. That is the open P0 item *Space forward frames from
-received frames* in `todo.md`.
+A DALI-2 control device waits 13.5, 14.9, 16.3, 17.9 or 19.5 ms after the last
+frame on the wire, whoever sent it, for priorities 1–5, in TI's device
+firmware. DALI-1 wanted 22 Te after a backward frame. The two received-frame
+gaps above follow those two references:
+
+- **After a reply to our own query,** 22 Te. That covers a decoded backward
+  frame the reply window accepted, and undecodable activity it claimed, such
+  as several gear answering COMPARE.
+- **After anything else,** priority 1's 13.5 ms, from the stop condition as
+  TI detects it: 2 ms after the frame's last falling edge, which is one
+  half-bit before its last edge. That covers an event, another master's
+  command, a backward frame that answered someone else, and activity no window
+  claimed. Before, our frame followed an event by as little as 1.7 ms, under
+  the 2.4 ms an emitter needs to see its own stop condition.
+
+The scheduler arms each gap when the RX observation reaches it, and a gap only
+ever extends the hold already armed. A frame the decoder has not finished is
+invisible to the scheduler, so the PHY covers it. `dali_phy_tx()` sends nothing
+and returns `DALI_ERR_BUS_ACTIVE` while the ring holds edges, or a frame is
+half-assembled, and the newest edge is under 15.083 ms old. The scheduler keeps
+the step without spending a retry, and the next pass of the DALI task decodes
+the frame and arms its gap. `stats` counts each declined pass as `TX deferred
+(RX)`. A frame held for the whole of a 24-bit event is declined on several
+passes, so the counter reads higher than the number of frames held.
+
+After a reply to our own query the gap is 22 Te, shorter than any DALI-2
+device's wait. So queries sent back to back hold event sources off until the
+run ends. On 2k, 150 in a row delayed two Steinel events by up to 0.82 s.
+
+This is spacing, not arbitration. Our frame still goes out at the shortest
+DALI-2 gap, with no priority of its own, no randomisation within the range, and
+no collision detection; see *Priority, collisions and the send-twice pair* in
+`todo.md`. Nothing here checks the standard's text; the figures are TI's and
+AN1220's.
 
 The open edge has been two values since 2026-08-25, and which one applies is
 decided by whether the observation decoded. `DALI_REPLY_WINDOW_OPEN_US`

@@ -17,7 +17,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/peetervalk/dali-esp.git
-      ref: v3.1.0
+      ref: v3.2.0
     components: [dali]
     refresh: 0s
 
@@ -51,10 +51,10 @@ dali:
     # dropped connection does not need it: TCP keepalive reclaims that in
     # about 45 s. 0 disables it.
     idle_timeout: 10min
-    # The port is unauthenticated, so `commission` and the nine commissioning
-    # primitives are refused unless this opts in. True here because
-    # commissioning is what this firmware is for — set it false on anything
-    # left flashed on a shared network. RANDOMISE cannot be undone.
+    # The port is unauthenticated, so `commission`, the nine commissioning
+    # primitives and `devmem write` are refused unless this opts in. True here
+    # because commissioning is what this firmware is for — set it false on
+    # anything left flashed on a shared network. RANDOMISE cannot be undone.
     allow_commissioning: true
     # The same shell in a browser, at http://dali-starter.local:8080/. It is
     # the session the TCP port gives, with the same policy and idle timeout,

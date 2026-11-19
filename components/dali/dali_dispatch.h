@@ -130,6 +130,12 @@ typedef struct {
  * OBSERVE and MIRROR also update this so a mix of legacy direct-control,
  * phantom-translation, and TOGGLE entries stays consistent.
  * Zero-initialize on startup; no persistence across power cycles.
+ *
+ * It holds what has happened on the bus: an observed frame at once, a
+ * transmitted one only when the scheduler reports it sent. A TOGGLE decides
+ * from this state with the actions still queued for the target applied on
+ * top, so a second press before the first one's frame goes out still toggles
+ * back.
  */
 typedef struct {
     uint16_t group_on;  /* bit N = group N considered on */
@@ -143,6 +149,11 @@ typedef struct {
  * Inferred bus state produced by a successful dispatch action.
  * has_state is false when the resulting brightness cannot be inferred without
  * querying the bus (e.g. GO_TO_SCENE, RECALL_MIN, DIM_UP/DOWN, GO_TO_LAST).
+ *
+ * pending is true when the action transmits. The state above is then what the
+ * bus will be in once the frame goes out, not what it is. Do not publish it:
+ * it arrives again, through the DaliDispatchDoneCb, when the scheduler reports
+ * the frame sent or failed. OBSERVE transmits nothing, so its result is final.
  */
 typedef struct {
     bool       has_state;  /* false = brightness inference not possible */
@@ -150,7 +161,19 @@ typedef struct {
     DaliTarget target;     /* output target that was commanded */
     bool       is_on;
     uint8_t    level;      /* DAPC level 1–254 when is_on; 0 when off */
+    bool       pending;    /* true = queued; final state comes through done */
 } DaliDispatchResult;
+
+/*
+ * Reports a transmitting action's outcome, from the scheduler's owner task.
+ * result is DALI_OK once the frame has gone out, and the state is applied to
+ * the toggle state before this is called. Otherwise result is the scheduler's
+ * error, and the toggle state is left as it was. state is the inference
+ * dali_dispatch_cb() returned as pending, with pending cleared.
+ */
+typedef void (*DaliDispatchDoneCb)(DaliError result,
+                                   const DaliDispatchResult *state,
+                                   void *ctx);
 
 /* ── Toggle state helpers ─────────────────────────────────────────────────── */
 
@@ -166,17 +189,43 @@ void dali_dispatch_seed_toggle(DaliDispatchToggleState *state,
 /* ── API ──────────────────────────────────────────────────────────────────── */
 
 /*
+ * Forget every action still waiting for its frame, without calling back. Call
+ * after dali_sched_init(), before the first dispatch; a scheduler that has
+ * been re-initialized will never complete what was queued on the old one.
+ */
+void dali_dispatch_init(void);
+
+/*
  * Scan the table for the first entry whose key matches event, then execute
- * its action by calling the appropriate dali_control_* function.
+ * its action.
  *
- * Returns DALI_OK when a matching entry executes (even for fire-and-forget
- * scheduler transactions), or DALI_OK silently when no entry matches.
- * Returns DALI_ERR_INVALID for bad arguments or an unmappable frame
- * (e.g. MIRROR on DAPC level 0xFF).
+ * OBSERVE transmits nothing: it updates toggle_state and result_out at once.
+ * Every other action queues one frame and returns with result_out->pending
+ * set. Its effect on toggle_state is applied only once the scheduler reports
+ * that frame sent, and done is then called exactly once, with the outcome
+ * either way. A frame that never reaches the bus changes nothing.
+ *
+ * Returns DALI_OK when a matching entry executes, or DALI_OK silently when no
+ * entry matches. Returns DALI_ERR_INVALID for bad arguments or an unmappable
+ * frame (e.g. MIRROR on DAPC level 0xFF), and the scheduler's error when the
+ * frame was refused: nothing was queued, and done is not called.
+ *
+ * Must run on the scheduler's owner task, the one that calls dali_sched_run(),
+ * because that is where the completions arrive. There is no lock.
  *
  * toggle_state may be NULL when the table contains no TOGGLE entries.
  * result_out   may be NULL when the caller does not need inferred state.
+ * done         may be NULL when the caller does not need the outcome.
  */
+DaliError dali_dispatch_cb(const DaliDispatchEntry  *table,
+                           uint8_t                   count,
+                           const DaliInputEvent     *event,
+                           DaliDispatchToggleState  *toggle_state,
+                           DaliDispatchResult       *result_out,
+                           DaliDispatchDoneCb        done,
+                           void                     *done_ctx);
+
+/* dali_dispatch_cb() without a completion callback. */
 DaliError dali_dispatch(const DaliDispatchEntry  *table,
                         uint8_t                   count,
                         const DaliInputEvent     *event,

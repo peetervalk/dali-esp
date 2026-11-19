@@ -35,7 +35,7 @@ class DaliInputSensor : public sensor::Sensor, public Component, public DaliBusS
 
   void describe_config(DaliSensorConfig *out) const override {
     if (out == nullptr) return;
-    out->name            = this->get_name().c_str();
+    out->name            = entity_name(this);
     out->address         = address_;
     out->instance        = instance_;
     out->poll_interval_s = poll_interval_s_;

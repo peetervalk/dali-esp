@@ -185,6 +185,7 @@ class DaliShellServer : public Component {
   static bool aborted_cb(void *ctx);
   static bool bus_claim_cb(void *ctx, const char *what);
   static void bus_release_cb(void *ctx);
+  static bool bus_held_elsewhere_cb(void *ctx);
   static void export_config_cb(void *ctx, const DaliCliOut *out,
                                const DaliDiscoveryInventory *inventory,
                                DaliShellInputLookupFn input_lookup);
@@ -218,6 +219,12 @@ class DaliShellServer : public Component {
   // Set when a send() fails or the peer closes; read by aborted_cb() so an
   // in-flight workflow stops instead of writing into a dead socket.
   bool peer_lost_{false};
+  // Why the peer was lost, for the close log: the errno of the first failed
+  // send or receive, and which it was. 0 when no call failed.
+  int  lost_errno_{0};
+  bool lost_on_send_{false};
+  void mark_peer_lost(int err, bool on_send);
+  const char *session_end_text(SessionEnd why) const;
 
   // Per-session input state: one or the other, by client_kind_.
   DaliCliPeerSniffer sniffer_{};

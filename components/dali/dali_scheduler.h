@@ -92,7 +92,13 @@ typedef void (*DaliSchedTraceCb)(const DaliSchedTraceEvent *event, void *cb_ctx)
 typedef struct {
     DaliFrame             frame;
     bool                  needs_reply;   /* expect a backward frame after TX   */
-    bool                  send_twice;    /* must transmit the frame twice      */
+    /*
+     * Must transmit the frame twice, as two consecutive frames on the bus. A
+     * frame from another master between the halves voids the pair, so the
+     * scheduler sends the whole pair once more; a second such split finishes
+     * the step with DALI_SCHED_INTERVENED_ERROR.
+     */
+    bool                  send_twice;
     uint8_t               retries_left;  /* retry budget; 0 = no retries       */
     DaliSchedCompletionCb on_complete;   /* optional; NULL = fire-and-forget   */
     void                 *cb_ctx;        /* forwarded to on_complete           */

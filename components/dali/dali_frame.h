@@ -92,6 +92,41 @@
 /* DALI_HALF_BIT_US rounds nominal Te upward, making this 22 Te guard 9174 µs. */
 #define DALI_FORWARD_INTERFRAME_US (DALI_HALF_BIT_US * 22u)
 /*
+ * Spacing before our next forward frame, counted from a frame that something
+ * else put on the bus. DALI_FORWARD_INTERFRAME_US counts from our own
+ * transmissions only. Both values below are measured from the received
+ * observation's last edge, the one instant the PHY stamps.
+ *
+ * After a reply to our own query, whether a decoded backward frame or
+ * undecodable activity the reply window claimed, the gap is 22 Te. That is
+ * AN1220's DALI-1 spacing after a backward frame. It runs from the frame end,
+ * which is at most one half-bit after the last edge: a frame whose final
+ * half-bit is high ends that much later.
+ *
+ * After anything else, the gap is 13.5 ms from the stop condition. That covers
+ * another master's forward frame, a Part 103 event, a backward frame that
+ * answered someone else, and activity no window claimed. 13.5 ms is the
+ * shortest of the DALI-2 multi-master settling times, priority 1, as TI's
+ * Part 103 device firmware implements them. That firmware detects the stop
+ * condition 2 ms after a frame's last falling edge, which comes one half-bit
+ * before its last edge. A device that has just sent an event discards any
+ * frame that starts before its stop condition, which is how a query sent
+ * 1.7 ms after an event was lost. This is the project's reading of TI's SDK;
+ * the standard's text has not been checked. See project_log.md, *Nothing
+ * spaces a forward frame from a received one*.
+ *
+ * The scheduler arms these as RX observations arrive. A frame the RX decoder
+ * has not finished yet is the PHY's to catch: dali_phy_tx() declines with
+ * DALI_ERR_BUS_ACTIVE while unreported edges are younger than the longer gap.
+ */
+#define DALI_RX_FRAME_END_AFTER_LAST_EDGE_US      DALI_HALF_BIT_US
+#define DALI_RX_STOP_CONDITION_AFTER_LAST_EDGE_US (2000u - DALI_HALF_BIT_US)
+#define DALI_MULTI_MASTER_SETTLE_MIN_US           13500u
+#define DALI_AFTER_REPLY_GAP_US \
+    (DALI_RX_FRAME_END_AFTER_LAST_EDGE_US + DALI_FORWARD_INTERFRAME_US)
+#define DALI_AFTER_FOREIGN_FRAME_GAP_US \
+    (DALI_RX_STOP_CONDITION_AFTER_LAST_EDGE_US + DALI_MULTI_MASTER_SETTLE_MIN_US)
+/*
  * Hold-off before retransmitting a frame whose reply window expired.
  *
  * The ordinary forward-interframe guard is armed when the frame is sent, so it
@@ -194,6 +229,14 @@ typedef enum {
      * caller can read "we gave up waiting" as "nothing answered".
      */
     DALI_ERR_WAIT_EXPIRED = 13,
+    /*
+     * The PHY declined to transmit, and nothing reached the bus. Edges arrived
+     * that the RX decoder has not yet turned into a frame, and they are too
+     * recent for the frame they belong to be safely followed. The scheduler
+     * keeps the step, lets the decoder run, and spaces the frame from what it
+     * reports. It never reaches a caller.
+     */
+    DALI_ERR_BUS_ACTIVE = 14,
 } DaliError;
 
 /*
@@ -278,6 +321,11 @@ typedef struct {
     volatile uint32_t tx_frames_ok;
     /* Undecodable PHY observations attributed to an active reply window. */
     volatile uint32_t reply_rx_activity;
+    /* Transmissions the PHY declined with DALI_ERR_BUS_ACTIVE: another
+     * master's frame was ending, or still on the wire, when ours was due.
+     * Before the deferral, each would have gone out about 1.7 ms after that
+     * frame. Counted by the scheduler, once per declined attempt. */
+    volatile uint32_t tx_deferred_rx;
 } dali_stats_t;
 
 /* Global stats instance — defined in dali_phy.c, read everywhere */

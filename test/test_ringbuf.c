@@ -75,6 +75,31 @@ void test_clear_resets_buffer(void)
     TEST_ASSERT_EQUAL(DALI_OK, dali_rb_push_from_isr(&s_rb, 42u));
 }
 
+/*
+ * Clearing drains from the consumer's side: head, the producer's index, is
+ * never written. So a cleared buffer still holds its full capacity, and the
+ * next element out is the next one pushed.
+ */
+void test_clear_leaves_head_to_the_producer(void)
+{
+    for (uint32_t i = 0u; i < 5u; i++) {
+        dali_rb_push_from_isr(&s_rb, i);
+    }
+    const uint32_t head_before = s_rb.head;
+    dali_rb_clear(&s_rb);
+    TEST_ASSERT_EQUAL_UINT32(head_before, s_rb.head);
+    TEST_ASSERT_TRUE(dali_rb_empty(&s_rb));
+
+    for (uint32_t i = 0u; i < CAPACITY; i++) {
+        TEST_ASSERT_EQUAL(DALI_OK, dali_rb_push_from_isr(&s_rb, 100u + i));
+    }
+    TEST_ASSERT_EQUAL(DALI_ERR_OVERFLOW, dali_rb_push_from_isr(&s_rb, 999u));
+
+    uint32_t val = 0u;
+    TEST_ASSERT_EQUAL(DALI_OK, dali_rb_pop(&s_rb, &val));
+    TEST_ASSERT_EQUAL_UINT32(100u, val);
+}
+
 void test_wrap_around(void)
 {
     /* Push half, pop half, then fill again — exercises index wrap */
@@ -107,6 +132,7 @@ int main(void)
     RUN_TEST(test_overflow_at_capacity);
     RUN_TEST(test_empty_pop_returns_timeout);
     RUN_TEST(test_clear_resets_buffer);
+    RUN_TEST(test_clear_leaves_head_to_the_producer);
     RUN_TEST(test_wrap_around);
     return UNITY_END();
 }

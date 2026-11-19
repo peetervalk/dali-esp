@@ -1815,12 +1815,14 @@ static void test_raw_classifier_gates_part_103_addressing(void)
         TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
     }
 
-    /* Device DTR loads and memory writes are `devmem write`'s frames, and that
-     * verb is not gated. */
+    /* A device DTR load is open, as `dtr` is. The memory write is gated, as
+     * `devmem write` is: spelling it in hex must not get round the verb. */
     TEST_ASSERT_EQUAL(DALI_OK, dali_build_control_device_dtr_data(DALI_DTR0, 5u, &frame));
     TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
     frame = dali_cmd_control_device_write_memory_location_no_reply(0x55u);
-    TEST_ASSERT_FALSE(dali_cli_raw_frame_is_commissioning(&frame));
+    TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&frame));
+    frame = dali_cmd_control_device_write_memory_location(0x55u);
+    TEST_ASSERT_TRUE(dali_cli_raw_frame_is_commissioning(&frame));
 }
 
 /* Device-level SET SHORT ADDRESS is `address dN set`'s frame; the instance

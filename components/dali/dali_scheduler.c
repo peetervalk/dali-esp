@@ -58,6 +58,10 @@ static uint32_t        s_q_rejected_busy;
 static volatile DaliSchedState s_state;
 static DaliTransaction s_active;          /* copy of the current transaction */
 static uint8_t         s_send_count;      /* 1 = first TX done, 2 = both done */
+/* Something reached the bus between the halves of the active send-twice pair. */
+static bool            s_pair_intervened;
+/* The active step has already sent its pair again once. */
+static bool            s_pair_restarted;
 static uint32_t        s_state_entered_ms;
 static bool            s_active_is_sequence;
 static DaliSequence    s_active_sequence;
@@ -305,6 +309,47 @@ static void sched_arm_tx_gap(uint32_t frame_done_us, uint32_t gap_us)
 }
 
 /*
+ * Hold our next forward frame until gap_us after a received observation's last
+ * edge. This only ever extends the guard. A reply that ends inside the 22 Te
+ * our own frame armed still pushes it out, and an old frame decoded late
+ * cannot pull an armed guard in.
+ *
+ * The guard is re-armed from now with whatever remains, rather than from the
+ * edge, so the millisecond ceiling in sched_tx_guard_active() is counted from
+ * the same moment as the microsecond span. An edge that the clock says is
+ * still to come is clamped to the full gap.
+ *
+ * Without timestamps the observation is taken to have ended now, which only
+ * the host's synthesised dali_sched_notify_rx() does.
+ */
+static void sched_hold_tx_after_rx(const DaliPhyRxObservation *observation,
+                                   uint32_t gap_us)
+{
+    uint32_t now_us = sched_now_us();
+    uint32_t remaining_us = gap_us;
+
+    if (observation->has_timestamps) {
+        int32_t left_us =
+            (int32_t)((observation->last_edge_us + gap_us) - now_us);
+        if (left_us <= 0) {
+            return;
+        }
+        if ((uint32_t)left_us < remaining_us) {
+            remaining_us = (uint32_t)left_us;
+        }
+    }
+
+    if (sched_tx_guard_active(now_us)) {
+        uint32_t armed_left_us =
+            s_tx_guard_duration_us - (now_us - s_tx_guard_started_us);
+        if (armed_left_us >= remaining_us) {
+            return;
+        }
+    }
+    sched_arm_tx_gap(now_us, remaining_us);
+}
+
+/*
  * Spend one retry on the active step and go back to TX, or report that the
  * budget is gone.
  *
@@ -328,6 +373,7 @@ static bool sched_retry_active_step(void)
     g_dali_stats.tx_retries++;
     sched_arm_tx_gap(sched_now_us(), DALI_REPLY_TIMEOUT_BACKOFF_US);
     s_send_count = 0u;
+    s_pair_intervened = false;
     s_send_twice_first_started_us = 0u;
     s_send_twice_first_started_ms = 0u;
     return true;
@@ -398,6 +444,8 @@ static bool sched_finish_active_step(DaliError result, const DaliFrame *reply)
 
     sched_load_sequence_step(s_active_sequence_step);
     s_send_count = 0u;
+    s_pair_intervened = false;
+    s_pair_restarted = false;
     s_send_twice_first_started_us = 0u;
     s_send_twice_first_started_ms = 0u;
     s_reply_received = false;
@@ -571,11 +619,13 @@ static SchedIgnoreReason sched_classify_ignored(
  *
  * This used to admit only SCHED_IDLE and SCHED_WAIT_REPLY, and everything else
  * was counted rx_event_unroutable and dropped. That lost real events, and not
- * only during walks: when a frame is queued while a control device's event is
- * on the wire, dali_phy_tx() waits for the event to end and then transmits, and
- * the RX decode that completes the event runs only after that, with the
+ * only during walks: when a frame was queued while a control device's event was
+ * on the wire, dali_phy_tx() waited for the event to end and then transmitted,
+ * and the RX decode that completed the event ran only after that, with the
  * scheduler in WAIT_SETTLE. Every event overlapping the start of a queued frame
  * went nowhere -- for headless dispatch, a button press that did nothing.
+ * dali_phy_tx() now declines with DALI_ERR_BUS_ACTIVE instead, but an event
+ * can still finish decoding during SCHED_TX's guard or a settle wait.
  *
  * Nothing here needs the gate. Our own frames never reach this point (the PHY
  * drops RX through TX and the settle after it), so a decoded 16/24-bit frame is
@@ -674,6 +724,8 @@ static void sched_clear_active_for_reset(void)
     memset(&s_reply_frame, 0, sizeof(s_reply_frame));
     s_state = SCHED_IDLE;
     s_send_count = 0u;
+    s_pair_intervened = false;
+    s_pair_restarted = false;
     s_send_twice_first_started_us = 0u;
     s_send_twice_first_started_ms = 0u;
     s_state_entered_ms = 0u;
@@ -797,6 +849,40 @@ static bool sched_apply_reset_if_requested(void)
     return true;
 }
 
+/*
+ * A send-twice pair must reach a receiver as two consecutive frames. Before,
+ * another master's frame between our halves was routed as an event and the
+ * second half went out regardless, so the command reported success while the
+ * receiver had discarded the pair.
+ *
+ * Counted: a decoded forward frame, and undecodable activity, which may have
+ * been one. Resending a pair costs one more pair; missing a void one loses the
+ * command. Not counted: a decoded backward frame, which no receiver takes for
+ * a command, and anything whose last edge came before our first half ended,
+ * which was on the wire before the pair began and was only decoded late. Our
+ * own first half never arrives here, because the PHY drops RX through its own
+ * frame and the settle after it.
+ *
+ * The PHY's DALI_ERR_BUS_ACTIVE makes the note reliable. A frame on the wire
+ * when the second half is due makes the PHY decline, so the frame is decoded,
+ * and noted here, before that half can go out.
+ */
+static void sched_note_pair_intervention(const DaliPhyRxObservation *observation)
+{
+    if (!s_active.send_twice || s_send_count != 1u) {
+        return;
+    }
+    if (observation->result == DALI_OK &&
+        observation->frame.bit_length == DALI_BACKWARD_FRAME_BITS) {
+        return;
+    }
+    if (observation->has_timestamps && s_have_last_tx_us &&
+        (int32_t)(observation->last_edge_us - s_last_tx_us) <= 0) {
+        return;
+    }
+    s_pair_intervened = true;
+}
+
 /* ---------------------------------------------------------------------------
  * PHY RX callback — registered with PHY during init
  * --------------------------------------------------------------------------*/
@@ -827,6 +913,8 @@ DaliError dali_sched_init(const DaliSchedOps *ops)
     s_q_rejected_busy = 0u;
     s_state       = SCHED_IDLE;
     s_send_count  = 0u;
+    s_pair_intervened = false;
+    s_pair_restarted  = false;
     s_reply_received = false;
     s_reply_intervened = false;
     s_reply_error = DALI_OK;
@@ -927,6 +1015,8 @@ next:
                 s_active_step_started = false;
             }
             s_send_count = 0u;
+            s_pair_intervened = false;
+            s_pair_restarted = false;
             s_send_twice_first_started_us = 0u;
             s_send_twice_first_started_ms = 0u;
             s_reply_received = false;
@@ -938,6 +1028,34 @@ next:
 
         case SCHED_TX: {
             uint32_t now_us = sched_now_us();
+            if (s_active.send_twice && s_send_count == 1u && s_pair_intervened) {
+                s_pair_intervened = false;
+                if (s_pair_restarted) {
+                    ESP_LOGE(TAG, "send-twice pair split twice");
+                    if (sched_finish_active_step(DALI_SCHED_INTERVENED_ERROR,
+                                                 NULL)) {
+                        s_state = SCHED_TX;
+                    } else {
+                        s_state = SCHED_IDLE;
+                    }
+                    goto next;
+                }
+                /*
+                 * Send the whole pair again, once. Send-twice commands are
+                 * idempotent in practice: repeating SET MAX LEVEL, ADD TO
+                 * GROUP, RESET, INITIALISE or quiescent START does no harm,
+                 * and RANDOMISE only draws a new number before any search. So
+                 * a pair the receiver did accept after all costs nothing. Most
+                 * callers queue these fire-and-forget and could not resend one
+                 * themselves. The gap the intervening frame armed still holds
+                 * the first half.
+                 */
+                s_pair_restarted = true;
+                s_send_count = 0u;
+                s_send_twice_first_started_us = 0u;
+                s_send_twice_first_started_ms = 0u;
+                g_dali_stats.tx_retries++;
+            }
             if (s_active.send_twice && s_send_count == 1u &&
                 sched_send_twice_window_missed(now_us, true)) {
                 ESP_LOGE(TAG, "send-twice window missed");
@@ -959,8 +1077,25 @@ next:
                 s_send_twice_first_started_ms = s_ops.get_tick_ms();
             }
 
+            const bool step_was_started = s_active_step_started;
             s_active_step_started = true;
             DaliError err = s_ops.tx(&s_active.frame);
+            if (err == DALI_ERR_BUS_ACTIVE) {
+                /*
+                 * Nothing went out. Another master's frame is ending, or is
+                 * still on the wire, and the RX decoder has not yet reported
+                 * it, so nothing here knows which gap it calls for. Keep the
+                 * step and return. The task loop runs dali_phy_rx_process()
+                 * before the next pass, the frame is reported, and
+                 * sched_hold_tx_after_rx() arms its gap. Not a retry: no
+                 * budget is spent, and a send-twice repeat still answers to its
+                 * 100 ms window, checked at the top of the next pass. A first
+                 * send re-anchors that window when it really goes out.
+                 */
+                s_active_step_started = step_was_started;
+                g_dali_stats.tx_deferred_rx++;
+                return;
+            }
             if (err != DALI_OK) {
                 ESP_LOGE(TAG, "phy_tx failed: %d", (int)err);
                 /* An error may follow a partial waveform. Delay the next attempt
@@ -1123,6 +1258,8 @@ void dali_sched_notify_rx_observation(
         return;
     }
 
+    sched_note_pair_intervention(observation);
+
     if (observation->result != DALI_OK) {
         /* Undecodable activity keeps the standard's open edge: this is the
          * path where a wrong call becomes COMPARE=YES and invents gear. */
@@ -1139,8 +1276,12 @@ void dali_sched_notify_rx_observation(
              * therefore COMPARE=YES); lesser ambiguity and overflow abort.
              */
             sched_latch_reply_error(reply_error);
+            /* Several gear answering COMPARE at once is still a reply. */
+            sched_hold_tx_after_rx(observation, DALI_AFTER_REPLY_GAP_US);
             return;
         }
+        /* Something else was on the wire, and its shape is unknown. */
+        sched_hold_tx_after_rx(observation, DALI_AFTER_FOREIGN_FRAME_GAP_US);
         sched_count_ignored(SCHED_IGNORE_UNDECODABLE);
         return;
     }
@@ -1162,6 +1303,7 @@ void dali_sched_notify_rx_observation(
         s_reply_received = false;
         s_reply_error = DALI_OK;
         s_reply_intervened = true;
+        sched_hold_tx_after_rx(observation, DALI_AFTER_FOREIGN_FRAME_GAP_US);
         sched_route_unsolicited_or_ignore(observation);
         return;
     }
@@ -1178,9 +1320,17 @@ void dali_sched_notify_rx_observation(
         sched_observation_in_reply_window(observation, decoded_backward)) {
         s_reply_frame    = *frame;
         s_reply_received = true;
+        sched_hold_tx_after_rx(observation, DALI_AFTER_REPLY_GAP_US);
         return;
     }
 
+    /*
+     * An event, another master's command, or a backward frame answering
+     * someone else. The device that sent it, and any device waiting to send at
+     * a DALI-2 priority, is owed the multi-master settling time before our
+     * next frame starts.
+     */
+    sched_hold_tx_after_rx(observation, DALI_AFTER_FOREIGN_FRAME_GAP_US);
     sched_route_unsolicited_or_ignore(observation);
 }
 

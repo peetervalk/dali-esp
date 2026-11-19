@@ -1012,7 +1012,9 @@ multi-byte read is not reduced to its last value. The same holds for
 `devmem read`.
 
 `devmem write` unlocks the bank by writing `0x55` to lock byte offset `0x02`,
-then writes the requested byte. Its seven logical steps are one queue entry and
+then writes the requested byte. A shell session refuses it without
+`allow_commissioning: true`, as it refuses `special write-memory`; the console
+still sends it. Its seven logical steps are one queue entry and
 run contiguously relative to other traffic from this controller. The no-reply
 write does not acknowledge or verify that the device committed the byte, and an
 external bus master is not excluded. **No write path reads its value back.**
@@ -1057,7 +1059,9 @@ because spelling a command in hex should not reach what spelling it by name
 cannot. The set is exactly what `special` and `config` hold back: `INITIALISE`,
 `RANDOMISE`, `WITHDRAW`, the `SEARCHADDR` loads, `PROGRAM SHORT ADDRESS` and the
 gear memory writes; `SET SHORT ADDRESS` to a short address, group or broadcast;
-and the 24-bit control-device forms of the addressing commands. `TERMINATE`,
+the 24-bit control-device forms of the addressing commands; and the
+control-device WRITE MEMORY LOCATION specials, `C120xx` and `C121xx`, which are
+`devmem write`'s. `TERMINATE`,
 `COMPARE` and the verify and query specials only end or observe a window, and
 pass. A shell session refuses a gated frame without `allow_commissioning: true`
 (`raw (commissioning frame): refused by session policy`), and the console
@@ -1187,8 +1191,9 @@ acknowledges it, so the shell prints a line only when it could not be sent.
 There is no verb for it; the Part 102 `special terminate` is unrelated and
 addresses gear.
 
-Over TCP, `commission` and the nine commissioning specials are refused unless the
-YAML sets `allow_commissioning: true`, because the port is unauthenticated. A
+Over TCP, `commission`, the nine commissioning specials and `devmem write` are
+refused unless the YAML sets `allow_commissioning: true`, because the port is
+unauthenticated. A
 connection that opens with an HTTP request is closed before any of its lines
 runs, so a web page cannot reach the shell's TCP port through a browser. The
 `web:` page takes the same policy. It reaches the shell only from the device's
@@ -1551,6 +1556,18 @@ rxdebug                    # last malformed RX timing snapshot
 reset                      # reset PHY, scheduler, and diagnostic state
 ```
 
+`stats` includes `TX deferred (RX)`: how many times the PHY declined to
+transmit because another master's frame was still arriving, or had just ended
+and was not yet decoded. Such a frame used to go out about 1.7 ms after the
+other one. Now it waits until the scheduler has spaced it; see *Bus Timing* in
+`dali_protocol.md`. The count is of declined attempts, not frames. The
+scheduler retries on every pass of the DALI task, so one frame held behind a
+24-bit event can add several.
+
+While a scan started from Home Assistant holds the bus, a network session's
+verbs are refused with `busy` rather than interleaved into the walk. A verb
+that claimed the bus itself is never refused by its own claim.
+
 `help`, `list`, and `schema` are generated from the table the parser dispatches
 on, so they cannot drift from what the CLI accepts. `schema` also reports the
 session's policy, and marks each `special` entry with `commissioning`: `true` for
@@ -1565,12 +1582,32 @@ can never be captured — only its tail, with `dropped` naming what was lost.
 records that answer the question beat 128 that happen to be the end of
 something else.
 
+**To catch another device's frames, leave room for them.** Queries sent back
+to back leave 9.6 ms after each reply, shorter than any DALI-2 device waits.
+So an event source stays silent until the run ends, and a capture of the run
+holds no events. From `tools/dali-shell`, pace the lines with a script, such
+as `{ echo "capture start"; for i in $(seq 50); do echo "query a0 status";
+sleep 0.2; done; echo "capture export"; } | dali-shell --host <node>`. Each event then
+appears twice: as an `rx` record, stamped at its last edge, and as an `event`
+record, stamped when the task handled it.
+
+Do not use `quiescent off` as the filler, at least not with the Steinel.
+STOP QUIESCENT MODE restarts its report timers, so a run of them stops its
+events.
+
 | Field | Meaning |
 |---|---|
 | `kind` | `tx` or `rx` |
 | `timestamp_us` | Free-running microsecond clock; only differences are meaningful |
 | `raw`, `raw_bits` | The frame and its width — 16 or 24 forward, 8 backward |
 | `since_tx_us` | On an `rx` record: the backward frame's **last edge**, measured from the preceding TX **bus release** — the end of the forward frame's last data bit |
+
+The gap before our own next frame reads off two records. A `tx` record's
+`timestamp_us` is its bus release and an `rx` record's is its last edge, so from
+an `rx` to the next `tx`, subtract the forward frame's start and data bits,
+17 bit periods (14,161 us) for a 16-bit frame or 25 (20,825 us) for a 24-bit
+one. The remainder is the gap: at least 9,591 us after a reply to our query, and
+at least 15,083 us after anything else.
 
 `since_tx_us` is the field worth being careful with, because neither end of it
 is what a first reading assumes. It is anchored to the end of the forward

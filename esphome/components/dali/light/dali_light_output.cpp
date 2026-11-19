@@ -62,11 +62,15 @@ void DaliLightOutput::begin_level_profile_update(uint32_t generation) {
    * deduplication cache: nothing can be sent while !profile_ready_, and if the
    * profile comes back unchanged — the common case, since MIN/MAX/curve are
    * commissioning data — the cached level still means what it meant. Dropping
-   * it every refresh would make every repeat command retransmit. */
+   * it every refresh would make every repeat command retransmit.
+   *
+   * The echo of a reading is kept too. It carries the profile it was mapped
+   * under, so its write is still recognized if it arrives during or after this
+   * refresh. Forgetting it here turned a reading into a command whenever a
+   * second refresh started between the push and ESPHome's write. */
   profile_generation_ = generation;
   profile_ready_ = false;
   write_.pending = false;
-  echo_valid_ = false;
 }
 
 void DaliLightOutput::set_level_profile(const DaliLevelProfile &profile,
@@ -90,12 +94,14 @@ void DaliLightOutput::set_level_profile(const DaliLevelProfile &profile,
     effective = {DALI_DIM_CURVE_STANDARD, 1u, DALI_DAPC_MAX_LEVEL};
   }
 
-  const bool changed = !profile_ready_ || effective.curve != profile_.curve ||
-                       effective.min_level != profile_.min_level ||
-                       effective.max_level != profile_.max_level;
+  /* Only a real change makes the cached level ambiguous. Compared against
+   * profile_known_, not profile_ready_: begin_level_profile_update() has just
+   * cleared profile_ready_, so testing it made every refresh a change. */
+  const bool changed =
+      dali_light_profile_changed(profile_known_, &profile_, &effective);
   profile_ = effective;
+  profile_known_ = true;
   profile_ready_ = true;
-  /* Only a real change makes the cached level ambiguous. */
   if (changed) dali_light_write_invalidate(&write_);
   map_logical_request_();
 }
@@ -217,6 +223,11 @@ void DaliLightOutput::setup_state(light::LightState *state) {
  * genuinely equals the current bus state is a no-op the write arbiter already
  * suppresses.
  *
+ * The level is compared under the profile the reading was mapped with, not the
+ * current one. A profile refresh can start between the push and this write;
+ * when the echo was tied to the refresh generation, that refresh made the
+ * echo unrecognizable and the reading went out as a command.
+ *
  * There is deliberately no time window. The previous ten-second startup
  * suppression discarded every command in the first ten seconds after boot,
  * including ones a person had just issued.
@@ -232,25 +243,20 @@ void DaliLightOutput::write_state(light::LightState *state) {
    * 0.1 %, well under the 1/254 a linear reading treated as the floor, and OFF
    * is a separate command rather than the bottom of the curve. */
   bool desired_is_on = target.is_on() && brightness > 0.0f;
-  uint8_t desired_level = 0u;
-  bool desired_level_valid =
-      !desired_is_on || brightness_to_level_(brightness, &desired_level);
 
   if (suppress_initial_write_) {
     suppress_initial_write_ = false;
-    echo_valid_ = false;
+    echo_.valid = false;
     ESP_LOGD(TAG, "suppressing initial restore/default write to %s %u",
              target_type_name(target_.type), (unsigned)target_.address);
     return;
   }
 
-  if (echo_valid_ && echo_profile_generation_ == profile_generation_ &&
-      echo_is_on_ == desired_is_on &&
-      (!desired_is_on || (desired_level_valid && echo_level_ == desired_level))) {
-    echo_valid_ = false;
+  /* Matched under the profile the reading was mapped with, which a refresh
+   * that landed in between may have replaced. */
+  if (dali_light_echo_take(&echo_, desired_is_on, brightness)) {
     return;  // state came from the bus — do not send it back
   }
-  echo_valid_ = false;
 
   /* Record the desired state itself rather than relying on LightState: a
    * bus-state publication can overwrite remote_values before this is sent. */
@@ -337,15 +343,10 @@ void DaliLightOutput::apply_bus_state() {
   /* Record the exact bus state which LightCall::perform() will schedule back
    * into write_state(). The unrounded local float maps to the same raw level;
    * Home Assistant may independently quantize its externally visible byte. */
-  echo_valid_ = true;
-  echo_is_on_ = is_on;
-  echo_profile_generation_ = profile_generation_;
-  echo_level_ = 0u;
-  if (is_on && !brightness_to_level_(brightness, &echo_level_)) {
+  if (!dali_light_echo_record(&echo_, &profile_, is_on, brightness)) {
     ESP_LOGW(TAG, "cannot canonicalize level %u for %s %u",
              (unsigned) level, target_type_name(target_.type),
              (unsigned) target_.address);
-    echo_valid_ = false;
   }
   call.set_transition_length(0);
   clear_unused_color_fields_(state_->remote_values);

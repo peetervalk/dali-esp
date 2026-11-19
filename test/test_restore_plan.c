@@ -342,6 +342,77 @@ void test_staging_skips_an_occupied_address_to_reach_a_free_one(void)
     TEST_ASSERT_EQUAL_UINT8(0u, final_address_of(DALI_SNAPSHOT_SPACE_GEAR, 0u));
 }
 
+/*
+ * A free address the backup recorded belongs to a unit that is missing now. If
+ * that unit was only unpowered, it comes back onto that address, so staging
+ * there would leave two units sharing it.
+ */
+void test_staging_avoids_the_recorded_address_of_a_missing_unit(void)
+{
+    record(DALI_SNAPSHOT_SPACE_GEAR, 1u, 1u);
+    record(DALI_SNAPSHOT_SPACE_GEAR, 0u, 2u);
+    record(DALI_SNAPSHOT_SPACE_GEAR, 2u, 3u);   /* missing: unpowered, say */
+    on_bus(0u, 1u);
+    on_bus(1u, 2u);
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_FALSE(s_plan.incomplete);
+    TEST_ASSERT_EQUAL_UINT8(3u, s_plan.move_count);
+    TEST_ASSERT_EQUAL_INT(DALI_RESTORE_MOVE_STAGE, s_plan.moves[0].kind);
+    TEST_ASSERT_EQUAL_UINT8(3u, s_plan.moves[0].to);   /* not a2 */
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
+
+    TEST_ASSERT_EQUAL_UINT8(1u, final_address_of(DALI_SNAPSHOT_SPACE_GEAR, 0u));
+    TEST_ASSERT_EQUAL_UINT8(0u, final_address_of(DALI_SNAPSHOT_SPACE_GEAR, 1u));
+}
+
+/* The same for a unit moved aside: it would keep the address it lands on. */
+void test_displacement_avoids_the_recorded_address_of_a_missing_unit(void)
+{
+    for (uint8_t addr = 0u; addr < 4u; addr++) {
+        record(DALI_SNAPSHOT_SPACE_GEAR, addr, addr);
+        on_bus(addr, addr);
+    }
+    record(DALI_SNAPSHOT_SPACE_GEAR, 4u, 100u);
+    on_bus(5u, 100u);                           /* recorded at a4, on a5 */
+    on_bus(4u, 200u);                           /* in no backup */
+    record(DALI_SNAPSHOT_SPACE_GEAR, 6u, 150u);  /* missing */
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_FALSE(s_plan.incomplete);
+    TEST_ASSERT_EQUAL_UINT8(2u, s_plan.move_count);
+    TEST_ASSERT_EQUAL_INT(DALI_RESTORE_MOVE_DISPLACE, s_plan.moves[0].kind);
+    TEST_ASSERT_EQUAL_UINT8(4u, s_plan.moves[0].from);
+    TEST_ASSERT_EQUAL_UINT8(7u, s_plan.moves[0].to);   /* not a6 */
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
+    TEST_ASSERT_EQUAL_UINT8(4u, final_address_of(DALI_SNAPSHOT_SPACE_GEAR, 5u));
+}
+
+/* Only a last resort: a space with no other room still converges. */
+void test_a_recorded_address_is_borrowed_when_nothing_else_is_free(void)
+{
+    record(DALI_SNAPSHOT_SPACE_GEAR, 1u, 100u);
+    record(DALI_SNAPSHOT_SPACE_GEAR, 0u, 101u);
+    on_bus(0u, 100u);
+    on_bus(1u, 101u);
+    for (uint8_t addr = 2u; addr < 63u; addr++) {
+        record(DALI_SNAPSHOT_SPACE_GEAR, addr, addr);
+        on_bus(addr, addr);
+    }
+    record(DALI_SNAPSHOT_SPACE_GEAR, 63u, 63u);  /* missing */
+
+    TEST_ASSERT_EQUAL_INT(DALI_OK,
+                          dali_restore_plan(&s_plan, &s_snapshot, &s_inventory));
+    TEST_ASSERT_FALSE(s_plan.incomplete);
+    TEST_ASSERT_EQUAL_INT(DALI_RESTORE_MOVE_STAGE, s_plan.moves[0].kind);
+    TEST_ASSERT_EQUAL_UINT8(63u, s_plan.moves[0].to);
+    replay_and_assert_safe(DALI_SNAPSHOT_SPACE_GEAR);
+    TEST_ASSERT_EQUAL_UINT8(1u, final_address_of(DALI_SNAPSHOT_SPACE_GEAR, 0u));
+    TEST_ASSERT_EQUAL_UINT8(0u, final_address_of(DALI_SNAPSHOT_SPACE_GEAR, 1u));
+}
+
 void test_a_cycle_with_no_free_address_fails_closed(void)
 {
     /* Every address occupied and every unit displaced: nothing can be staged,
@@ -1183,6 +1254,9 @@ int main(void)
     RUN_TEST(test_a_two_cycle_is_broken_by_staging_through_a_free_address);
     RUN_TEST(test_a_three_cycle_is_resolved_with_one_staging_hop);
     RUN_TEST(test_staging_skips_an_occupied_address_to_reach_a_free_one);
+    RUN_TEST(test_staging_avoids_the_recorded_address_of_a_missing_unit);
+    RUN_TEST(test_displacement_avoids_the_recorded_address_of_a_missing_unit);
+    RUN_TEST(test_a_recorded_address_is_borrowed_when_nothing_else_is_free);
     RUN_TEST(test_a_cycle_with_no_free_address_fails_closed);
     RUN_TEST(test_a_unit_absent_from_the_backup_is_reported_and_left_alone);
     RUN_TEST(test_a_recorded_unit_missing_from_the_bus_is_reported);

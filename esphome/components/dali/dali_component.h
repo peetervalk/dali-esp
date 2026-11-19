@@ -1,7 +1,9 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "esphome/core/entity_base.h"
 #include "esphome/core/preferences.h"
+#include "esphome/core/version.h"
 #include "../../../components/dali/dali_refresh_cursor.h"
 
 extern "C" {
@@ -45,6 +47,31 @@ struct DaliShellConfigInfo {
  */
 using DaliShellInputLookupFn = bool (*)(uint8_t addr,
                                         DaliDiscoveryInputDevice *out);
+
+/*
+ * An entity's name as a C string that lives as long as the program does.
+ * DaliLightConfig and DaliSensorConfig need that, because they carry the
+ * pointer out of describe_config().
+ *
+ * ESPHome 2026.11.0 deprecates get_name() and removes it in 2027.5.0. The
+ * replacement it suggests, get_name_to(), may return a pointer into the
+ * caller's buffer, which would not outlive describe_config().
+ *
+ * This component builds only for the ESP32, where flash is memory-mapped. On
+ * 2026.11 there, get_name_progmem().progmem_ptr() is the same pointer
+ * get_name().c_str() returns, so neither branch changes what is printed.
+ *
+ * None of the new accessors exists before 2026.11.0. Delete the second branch
+ * when manifest.json's floor reaches that version.
+ */
+inline const char *entity_name(const EntityBase *entity) {
+  if (entity == nullptr) return "";
+#if ESPHOME_VERSION_CODE >= VERSION_CODE(2026, 11, 0)
+  return entity->get_name_progmem().progmem_ptr();
+#else
+  return entity->get_name().c_str();
+#endif
+}
 
 /*
  * What a light entity was configured with, as `export config` needs to print

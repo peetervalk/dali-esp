@@ -1150,7 +1150,7 @@ void test_error_name_covers_every_enumerator(void)
 {
     /* The point of the helper is that no defined code reaches an operator as a
      * bare number, so a new enumerator without a name has to fail here. */
-    for (int err = DALI_OK; err <= DALI_ERR_WAIT_EXPIRED; err++) {
+    for (int err = DALI_OK; err <= DALI_ERR_BUS_ACTIVE; err++) {
         const char *name = dali_error_name((DaliError)err);
         TEST_ASSERT_NOT_NULL_MESSAGE(name, "DaliError enumerator has no name");
         TEST_ASSERT_TRUE_MESSAGE(name[0] != '\0', "DaliError name is empty");
@@ -1172,7 +1172,7 @@ void test_error_name_spells_the_operator_visible_codes(void)
 
 void test_error_name_returns_null_for_unknown_codes(void)
 {
-    TEST_ASSERT_NULL(dali_error_name((DaliError)(DALI_ERR_WAIT_EXPIRED + 1)));
+    TEST_ASSERT_NULL(dali_error_name((DaliError)(DALI_ERR_BUS_ACTIVE + 1)));
     TEST_ASSERT_NULL(dali_error_name((DaliError)99));
     TEST_ASSERT_NULL(dali_error_name((DaliError)-1));
 }

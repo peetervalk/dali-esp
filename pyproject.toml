@@ -11,7 +11,7 @@ name = "dali-esp-tools"
 version = "0.0.0"
 requires-python = ">=3.12,<3.15"
 dependencies = [
-    "esphome==2026.10.2",
+    "esphome==2026.11.0",
 ]
 
 [tool.uv]
@@ -19,3 +19,8 @@ package = false
 # The uv that wrote uv.lock. An older one may not read the lock's format; this
 # makes it say so and ask for `uv self update`, or `winget upgrade astral-sh.uv`.
 required-version = ">=0.13.5"
+# ESPHome 2026.11.0 pins cryptography==50.0.2 on Intel macOS, where the
+# aioesphomeapi it pins caps cryptography below 49, so no lock covering that
+# platform resolves. Nothing here builds on Intel macOS; drop this line once a
+# release pins the two consistently (2026.10.2 pinned 48.0.1 there).
+environments = ["sys_platform != 'darwin' or platform_machine != 'x86_64'"]

@@ -16,7 +16,7 @@ A reusable C protocol stack (`components/dali`) drives the bus — PHY, schedule
 - Diagnostic shell over TCP (`shell:`): the full native CLI — discover, identify, commissioning, live trace, rolling capture, JSON export — from a terminal, with no serial cable. The same shell, running the same code, as the serial console on a native ESP-IDF build
 - Free-text DALI command console in HA: queries, config, memory bank read/write, raw 16/24-bit frames
 - Protocol core is plain C with no ESPHome dependency; protocol and cross-task
-  helpers are covered by 34 host test suites, and CI additionally builds the
+  helpers are covered by 35 host test suites, and CI additionally builds the
   ESPHome component, the native ESP-IDF firmware, and a release tag as a
   consumer would fetch it
 
@@ -35,23 +35,23 @@ Notes: GPIO16/17 are unavailable on WROVER-E — the PSRAM die uses them, and dr
 
 ### Cores
 
-The DALI worker, the scan task and the shell task all block on bus round-trips, a full scan for tens of seconds, so they run as their own tasks and never on the main loop. On a dual-core part they are pinned to core 1. ESPHome 2026.9 pins its main loop to core 1 as well, so the two share that core. A blocked task yields, but the PHY's short pre-transmit idle check busy-waits on that core; `current_status.md` lists it under *Known Limitations*. Two cores is what the firmware is tested on.
+The DALI worker, the scan task and the shell task all block on bus round-trips, a full scan for tens of seconds, so they run as their own tasks and never on the main loop. On a dual-core part they are pinned to core 1. ESPHome 2026.9 pins its main loop to core 1 as well, so the two share that core. A blocked task yields. The PHY's pre-transmit idle check reads the RX interrupt's edge stamp, and polls the line on that core only when the stamp cannot decide, such as just after another master's frame. Two cores is what the firmware is tested on.
 
 A single-core target is handled rather than supported: `dali_core_affinity.h` requests no affinity when the part reports one core, because `xTaskCreatePinnedToCore()` fails outright against a core that does not exist. Nothing here has been built or run on one, and a scan there would share its core with Wi-Fi and the API for the whole walk.
 
 ### Memory
 
-Both columns are the `v3.1.0` tree built on ESPHome 2026.10.2 for the classic ESP32 with esp-idf: [dali_test.yaml](dali_test.yaml) — the CI config, which enables everything the component has, the browser shell included — and the same config with the `shell:` block removed. The table is re-measured at each release.
+Both columns are the `v3.2.0` tree built on ESPHome 2026.11.0 for the classic ESP32 with esp-idf: [dali_test.yaml](dali_test.yaml) — the CI config, which enables everything the component has, the browser shell included — and the same config with the `shell:` block removed. The table is re-measured at each release.
 
 | Segment | With `shell:` | Without | Region |
 |---|---|---|---|
-| Static DRAM (`.data` + `.bss` + `.noinit`) | 139.6 KiB (79%) | 69.8 KiB (40%) | 176.5 KiB (`dram0_0_seg`) |
+| Static DRAM (`.data` + `.bss` + `.noinit`) | 140.4 KiB (80%) | 70.5 KiB (40%) | 176.5 KiB (`dram0_0_seg`) |
 | IRAM (`.text` + `.vectors`) | 77.1 KiB (60%) | 77.1 KiB (60%) | 128 KiB (`iram0_0_seg`, default) |
-| App image | 1,088,688 B (59%) | 938,656 B (51%) | 1.75 MB partition |
+| App image | 1,096,615 B (60%) | 945,363 B (52%) | 1.75 MB partition |
 
-What is left of the static window — 36.9 KiB with the shell, 106.7 KiB without — joins the ~128 KiB D/IRAM pool as heap, less whatever Wi-Fi and the API hold at runtime. Every buffer in the protocol stack is fixed-size, so none of this grows with the number of fixtures on the bus, and none of it shrinks on a small one either. On a real board the number to watch is free heap, which ESPHome's `debug:` component reports; the link-time figure only says where you start.
+What is left of the static window — 36.1 KiB with the shell, 106.0 KiB without — joins the ~128 KiB D/IRAM pool as heap, less whatever Wi-Fi and the API hold at runtime. Every buffer in the protocol stack is fixed-size, so none of this grows with the number of fixtures on the bus, and none of it shrinks on a small one either. On a real board the number to watch is free heap, which ESPHome's `debug:` component reports; the link-time figure only says where you start.
 
-**The diagnostic shell is the largest single item, by a distance.** Its static data is 68.0 KiB, and most of that is session caches: the input-instance cache (13.1 KiB), two capture rings (19.0 KiB), two inventories (12.5 KiB), and the held backup with its wire form (7.6 KiB). `dali_shell.c` is compiled unconditionally (`proto_dali_shell.c` is a build shim), but nothing outside the shell's own network front ends references it, so with no `shell:` block the linker drops all of it: **69.8 KiB of RAM and 146.5 KiB of flash back**. 45.9 KiB of that flash is the browser page, which only `web:` builds in. Once a bus is commissioned, that is the cheapest headroom on offer.
+**The diagnostic shell is the largest single item, by a distance.** Its static data is 68.0 KiB, and most of that is session caches: the input-instance cache (13.1 KiB), two capture rings (19.0 KiB), two inventories (12.5 KiB), and the held backup with its wire form (7.6 KiB). `dali_shell.c` is compiled unconditionally (`proto_dali_shell.c` is a build shim), but nothing outside the shell's own network front ends references it, so with no `shell:` block the linker drops all of it: **69.8 KiB of RAM and 147.7 KiB of flash back**. 46.7 KiB of that flash is the browser page, with the verb reference built in, which only `web:` builds in. Once a bus is commissioned, that is the cheapest headroom on offer.
 
 **`sram1_as_iram: true` is inert at this size.** IRAM sits at 77.1 KiB of the default 128 KiB — the same with or without the shell, whose code is all in flash — so there is no overflow for it to relieve. An image whose code really does land above `0x400A0000` needs a bootloader that knows the region, so a device OTA'd from a bootloader older than the option can fail to boot.
 
@@ -145,7 +145,7 @@ The native ESP-IDF serial firmware passes no persistence hooks at all, so a back
 
 A bus with two lamp groups, one individually addressed lamp, and a DALI-2 multi-sensor (e.g. Steinel HF 360 II) at short address 0:
 
-The example pins `v3.1.0`, the current release. `dev` carries newer work;
+The example pins `v3.2.0`, the current release. `dev` carries newer work;
 compile and test it separately before pointing an installation at it.
 
 ```yaml
@@ -158,7 +158,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/peetervalk/dali-esp.git
-      ref: v3.1.0
+      ref: v3.2.0
     components: [dali]
 
 dali:
@@ -290,7 +290,7 @@ text:
 
 ## Development
 
-Host tests (no hardware needed) — 34 suites over the C protocol stack and the
+Host tests (no hardware needed) — 35 suites over the C protocol stack and the
 cross-task helpers the ESPHome layer depends on:
 
 ```sh

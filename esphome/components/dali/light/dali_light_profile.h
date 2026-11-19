@@ -90,5 +90,73 @@ inline DaliError dali_light_observed_level_to_brightness(
   return DALI_OK;
 }
 
+/*
+ * Whether a refreshed profile changes what a raw level means.
+ *
+ * Only a change makes a light's deduplication cache ambiguous: the cache holds
+ * a raw level, and an unchanged curve and window still map it to the same
+ * light output. `had_profile` is whether the light has ever held a profile. A
+ * refresh in progress is not "no profile", so a caller must not pass a flag
+ * that the start of a refresh clears; that dropped the cache on every refresh.
+ */
+inline bool dali_light_profile_changed(bool had_profile,
+                                       const DaliLevelProfile *before,
+                                       const DaliLevelProfile *after) {
+  if (!had_profile || before == nullptr || after == nullptr) return true;
+  return before->curve != after->curve ||
+         before->min_level != after->min_level ||
+         before->max_level != after->max_level;
+}
+
+/*
+ * The echo of a bus reading.
+ *
+ * Pushing a reading into ESPHome schedules a write of that same state, which
+ * must not reach the bus as a command. The echo records the state, and the
+ * profile it was mapped under, so the write is recognized by value. Matching
+ * under the recorded profile rather than the current one keeps the echo
+ * recognizable across a profile refresh that lands before the write does.
+ */
+struct DaliLightEcho {
+  bool valid;
+  bool is_on;
+  uint8_t level;
+  DaliLevelProfile profile;
+};
+
+/* Record a reading about to be pushed. Returns false, leaving no echo, when an
+ * on-state brightness has no level under `profile`. */
+inline bool dali_light_echo_record(DaliLightEcho *echo,
+                                   const DaliLevelProfile *profile,
+                                   bool is_on, float brightness) {
+  if (echo == nullptr) return false;
+  echo->valid = false;
+  if (profile == nullptr) return false;
+  echo->is_on = is_on;
+  echo->level = 0u;
+  echo->profile = *profile;
+  if (is_on &&
+      dali_light_brightness_to_level(profile, brightness, &echo->level) != DALI_OK) {
+    return false;
+  }
+  echo->valid = true;
+  return true;
+}
+
+/* Consume the echo against the next write. True when the write is the echo,
+ * which must then not be sent. Any write consumes it, matched or not, so an
+ * echo outlives at most one write. */
+inline bool dali_light_echo_take(DaliLightEcho *echo, bool is_on,
+                                 float brightness) {
+  if (echo == nullptr || !echo->valid) return false;
+  echo->valid = false;
+  if (echo->is_on != is_on) return false;
+  if (!is_on) return true;
+  uint8_t level = 0u;
+  return dali_light_brightness_to_level(&echo->profile, brightness, &level) ==
+             DALI_OK &&
+         level == echo->level;
+}
+
 }  // namespace dali
 }  // namespace esphome
