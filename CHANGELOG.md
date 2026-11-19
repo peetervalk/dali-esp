@@ -48,6 +48,16 @@ At tagging:
   `DALI_SHELL_SENSOR_CACHE_MAX`. Nothing used them, and two disagreed with
   the sizes the shell really uses.
 
+### Changed — development
+
+- **The ESPHome pin moves to 2026.11.0,** from 2026.10.2. ESP-IDF stays at
+  5.5.6.
+  - 2026.11.0's own requirements conflict on Intel macOS: it pins a
+    `cryptography` there that the `aioesphomeapi` it pins rejects.
+  - So `uv.lock` leaves Intel macOS out until a release fixes that. CI and
+    the development machines are unaffected.
+  - **Unverified:** `dali_test.yaml` compiles on it; not flashed.
+
 ### Fixed
 
 - **A light no longer sends back a level it has just read.** When two profile

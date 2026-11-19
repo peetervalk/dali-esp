@@ -36,6 +36,40 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-11-19 (ESPHome pin to 2026.11.0, code at `27d48cc`)
+
+The operator's Home Assistant now builds with ESPHome 2026.11. Its compiles of
+1k and 2k, both `ref: dev`, showed deprecation warnings that the 2026.10.2 pin
+could not reproduce, so the pin moved. Nothing here touched a device or a bus.
+
+- **The pin moved to 2026.11.0,** released 2026-11-18 and the only stable
+  2026.11 on PyPI. ESP-IDF stays at 5.5.6.
+- **`uv lock` did not resolve until Intel macOS was left out.**
+  - On Darwin x86_64, 2026.11.0 requires `cryptography==50.0.2` and
+    `aioesphomeapi==46.25.1`, which requires `cryptography<49` there.
+    2026.10.2 required 48.0.1 on that platform.
+  - uv locks every platform at once, so one platform's conflict fails the
+    whole lock.
+  - `[tool.uv] environments` now excludes Darwin x86_64. Nothing here builds
+    there, and CI runs on `ubuntu-latest`.
+- `uv lock` updated 15 packages and removed `bitstring` and `tibs`. Among them,
+  `aioesphomeapi` went from 46.12.0 to 46.25.1 and `esptool` from 5.4.0 to
+  5.6.0.
+- **`dali_test.yaml` compiles on 2026.11.0** in a full rebuild of 931 steps.
+  It has four warnings and no other, all the same deprecation:
+  `EntityBase::get_name()`, to be removed in 2027.5.0.
+  - They come from three call sites: `dali_config_export.cpp:165`,
+    `light/dali_light_output.h:83` and `sensor/dali_input_sensor.h:38`. Two
+    translation units include the light's header, so it warns twice.
+  - They are the warnings the operator's builds showed.
+- **RAM is 143,724 B,** 88 B over the 143,636 B at `5b88772` on 2026.10.2.
+  Since `5b88772` only documentation has changed, so the 88 B are ESPHome's.
+- **The replacements do not exist at the floor.** `get_name_to()`,
+  `write_name_to()`, `get_name_progmem()` and `get_log_name()` are new in
+  2026.11.0. Neither 2026.6.0, the `manifest.json` floor, nor 2026.10.2 has
+  them. This was read from `entity_base.h` in the PyPI wheels. Both versions
+  generate `ESPHOME_VERSION_CODE`.
+
 ### Verified on 2026-11-12 on 2k (a refresh no longer resends a reading; `5b88772`, ESPHome 2026.10.2)
 
 *A refresh no longer resends a bus reading* in `todo.md`, run with the
