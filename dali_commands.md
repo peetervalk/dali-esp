@@ -1191,8 +1191,9 @@ acknowledges it, so the shell prints a line only when it could not be sent.
 There is no verb for it; the Part 102 `special terminate` is unrelated and
 addresses gear.
 
-Over TCP, `commission` and the nine commissioning specials are refused unless the
-YAML sets `allow_commissioning: true`, because the port is unauthenticated. A
+Over TCP, `commission`, the nine commissioning specials and `devmem write` are
+refused unless the YAML sets `allow_commissioning: true`, because the port is
+unauthenticated. A
 connection that opens with an HTTP request is closed before any of its lines
 runs, so a web page cannot reach the shell's TCP port through a browser. The
 `web:` page takes the same policy. It reaches the shell only from the device's

@@ -418,7 +418,8 @@ a POST, so keep `allow_commissioning` off on those wherever a browser is used.
 
 The same rule refuses the nine commissioning primitives under `special`
 (`initialise`, `randomise`, `search-h/m/l`, `program-short`, `withdraw`, and both
-write-memory forms). `terminate` always stays available, because it is what
+write-memory forms), and `devmem write`, the control-device memory write.
+`terminate` always stays available, because it is what
 closes an initialise window another tool opened. What each primitive does on
 its own, and the few jobs worth reaching for them by hand, is in
 [The nine primitives, by hand](#the-nine-primitives-by-hand).

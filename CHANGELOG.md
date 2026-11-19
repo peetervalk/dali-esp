@@ -9,14 +9,40 @@ Dated evidence for every claim here is in [project_log.md](project_log.md).
 
 ## Unreleased
 
-Everything on `dev` since `v3.1.0`. New changes are added here as they land.
+Everything on `dev` since `v3.2.0`. New changes are added here as they land.
 
 At tagging:
 
-- check each claim against the tree (`git grep <symbol> v3.1.0` settles most
+- check each claim against the tree (`git grep <symbol> v3.2.0` settles most
   of them in seconds)
 - re-check each label against `project_log.md` and `todo.md`
 - rename this heading to the version
+
+Nothing yet.
+
+## v3.2.0
+
+Sharing the bus with other masters, and Home Assistant state that follows what
+reached the bus:
+
+- Our frames are spaced from other masters' frames.
+- A send-twice pair that another master splits is sent again.
+- Headless dispatch tells Home Assistant only once its frame has gone out.
+- A light no longer sends back a level it has just read.
+
+Home Assistant YAML, the backup format and the build need no change. Two
+things an upgrade can meet:
+
+- **`devmem write` from a network shell needs `allow_commissioning: true`.**
+  Without it the verb is refused. The console and the native serial shell
+  still send it.
+- **C API.**
+  - `dali_shell.h` drops four `DALI_SHELL_*_MAX` macros that nothing used.
+  - `dali_dispatch()` returns a transmitting rule as `pending`, and moves its
+    toggle only once the frame is sent.
+  - `DaliShellHooks` gains a member in the middle, not at its end, so
+    initialise it by name.
+  - Everything else is added, as the *API* lines below list.
 
 ### Changed
 
@@ -103,7 +129,6 @@ At tagging:
 - **A sensor poll asks QUERY INPUT VALUE once more** when it fails. That
   query latches a fresh reading, so repeating it is safe; the latch reads
   after it still get no retry. **Host-tested:** the poll vectors now pin both.
-
 - **Our forward frames are spaced from received ones.** Before, ours followed
   a reply by about 2.9 ms and an event by as little as 1.7 ms. That is under
   the 2.4 ms a DALI-2 device needs to see its own stop condition, so the device
@@ -140,10 +165,13 @@ At tagging:
   the confirmed state with presses still queued applied on top, so a quick
   second press still toggles back. `observe` rules are unchanged.
 
-  API: `dali_dispatch_cb()` takes a completion callback; `dali_dispatch()`
-  keeps its signature. `DaliDispatchResult` gains `pending`. Call
-  `dali_dispatch_init()` after `dali_sched_init()`. Static RAM grows by 680 B
-  for 17 pending-action slots: `dali_test.yaml` links at 143,604 B.
+  API: new `dali_dispatch_cb()` takes a completion callback, a
+  `DaliDispatchDoneCb`; `dali_dispatch()` keeps its signature and is
+  `dali_dispatch_cb()` without one. `DaliDispatchResult` gains `pending`.
+  New `dali_dispatch_init()` forgets every action still pending; call it after
+  re-initialising the scheduler. At boot the pending slots start empty. Static
+  RAM grows by 680 B for 17 pending-action slots: `dali_test.yaml` links at
+  143,604 B.
 
   **Host-tested:** eight new vectors, and two existing ones now complete the
   frame before reading the toggle. Compiles. Not yet on a bus; see *Headless
@@ -171,7 +199,8 @@ At tagging:
   TCP and web bindings, a frame a verb sends without a claim of its own is
   refused with `busy` while a scan from Home Assistant runs. Before, a
   single-frame verb could interleave with the walk. A verb's own claim never
-  refuses it. API: `DaliShellHooks` gains `bus_held_elsewhere`.
+  refuses it. API: `DaliShellHooks` gains `bus_held_elsewhere`, after
+  `bus_release` rather than at the end; NULL when nothing else walks the bus.
   **Unverified:** compiles. The shell is not built on the host.
 
 - **`discover` reports an instance enumeration that failed.** It printed

@@ -19,7 +19,7 @@ constraints, the documentation rules, and the build, test and CI notes.
 
 | | |
 |---|---|
-| Latest tag | `v3.1.0`. `main` is the tag, and the tagged tree pins it |
+| Latest tag | `v3.2.0`. `main` is the tag, and the tagged tree pins it |
 | Next release | Not planned. What `dev` changes after the tag collects in `CHANGELOG.md` under *Unreleased* |
 | `dev` vs `main` | `dev` carries everything since the tag |
 

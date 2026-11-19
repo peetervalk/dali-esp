@@ -36,6 +36,82 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-11-19 (`v3.2.0` release prep, code at `b8b5269`)
+
+The checks `todo.md` lists for a release. The code is `b8b5269`, the `dev`
+head, on which CI's Host Tests, ESP-IDF Build and ESPHome Build passed. The
+release-prep change touches only documentation and the two pinned configs.
+The operator chose `v3.2.0` as a minor release. Nothing here touched a device
+or a bus.
+
+- **The ESPHome pin stays at 2026.11.0.** PyPI lists no later stable
+  release.
+- **35/35 host suites build and pass** with MSYS2 UCRT64.
+- **`dali_test.yaml` compiles on 2026.11.0 with no warning.** So does
+  `_local/dali-noshell.yaml`, the same config without its `shell:` block, in a
+  build directory of its own. That copy was regenerated from `dali_test.yaml`:
+  the old one predated two dispatch rules and the API key change.
+- **`dali-starter.yaml` validates** as a copy pointing at the working tree,
+  deleted afterwards. Its pin to `v3.2.0` fails `esphome config` until the tag
+  exists.
+
+**Memory, re-measured.** The README table is updated from this.
+
+| Segment | With `shell:` | Without | Region |
+|---|---|---|---|
+| Static DRAM | 143,724 B (79.5%) | 72,236 B (40.0%) | 180,736 B (`dram0_0_seg`) |
+| ↳ `.bss` | 127,736 B | 56,280 B | |
+| ↳ `.data` | 15,828 B | 15,796 B | |
+| ↳ `.noinit` | 160 B | 160 B | |
+| IRAM (`.text` + `.vectors`) | 78,967 B (60.2%) | 78,967 B (60.2%) | 131,072 B |
+| App image | 1,096,615 B (59.8%) | 945,363 B (51.5%) | 1,835,008 B |
+
+- **Both columns grew about 810 B since `v3.1.0`:** 816 B with the shell and
+  808 B without. That is the dispatch pool, the light's echo profile, and
+  ESPHome 2026.11.0's own 88 B, as the entries of 2026-11-12 and of this date
+  itemise.
+- **The shell costs 71,488 B of RAM and 151,252 B of flash.** At `v3.1.0` it
+  cost 71,480 B and 150,032 B.
+- **`proto_dali_shell.c.obj` holds 69,593 B of static data,** 5 B more than
+  at `v3.1.0`.
+- **The browser page is 47,773 B,** up from 46,964 B.
+  - `shell.html` is unchanged since `v3.1.0`. The page embeds
+    `dali_commands.md`, which gained 36 lines.
+  - This build's page predates this prep's three-line edit to that file.
+
+**`CHANGELOG.md` against the tree.**
+
+- **Every symbol the `v3.2.0` section names as new is in `HEAD` and absent at
+  `v3.1.0`:**
+  - `DALI_ERR_BUS_ACTIVE`, `tx_deferred_rx`, and the two gap constants;
+  - `dali_dispatch_cb()`, `DaliDispatchDoneCb` and `dali_dispatch_init()`;
+  - `bus_held_elsewhere`;
+  - the four `dali_light_profile` additions, and `entity_name()`.
+
+  So are the strings `TX deferred (RX)`, `dispatch sent`, `instance
+  enumeration failed` and the close reasons. The four removed `DALI_SHELL_*_MAX`
+  macros are in `v3.1.0`'s `dali_shell.h` and not in `HEAD`.
+- **Three API lines corrected:**
+  - `dali_dispatch_cb()` is new, not a changed signature.
+  - `dali_dispatch_init()` matters only after the scheduler is re-initialised,
+    because the pending slots are static and start empty.
+  - `bus_held_elsewhere` sits after `bus_release`, not at the end of
+    `DaliShellHooks`. The in-tree binding assigns every hook by name.
+- **The labels match the entries of 2026-11-12 and 2026-11-19.** None
+  changed.
+- **The section now opens with a summary.** It names the two things an
+  upgrade can meet: `devmem write` behind the policy, and the C API lines.
+
+**Docs brought up to date for the tag:**
+
+- The starter's `allow_commissioning` comment, `commissioning_readme.md` and
+  `dali_commands.md` now name `devmem write` among what the policy refuses.
+- The README no longer says the pre-transmit idle check busy-waits on every
+  frame. Its host suite count reads 35.
+
+Not covered: a flashed `v3.2.0` build, and a bus. `release-packaging.yml` runs
+on the tag only once it is pushed.
+
 ### Verified locally on 2026-11-19 (the `get_name()` deprecation, on `7e5d456`)
 
 The fix for the four warnings in the entry below: a helper, `entity_name()` in
