@@ -80,7 +80,7 @@ class DaliLightOutput : public light::LightOutput, public DaliBusLight {
   // and for a group entity may be a scan-derived pick. Neither was in the YAML.
   void describe_config(DaliLightConfig *out) const override {
     if (out == nullptr) return;
-    out->name              = state_ != nullptr ? state_->get_name().c_str() : "";
+    out->name              = entity_name(state_);
     out->target_type       = static_cast<uint8_t>(target_.type);
     out->target_address    = target_.address;
     out->query_address     = query_address_;

@@ -36,6 +36,29 @@ supersedes.
 
 # Verification history
 
+### Verified locally on 2026-11-19 (the `get_name()` deprecation, on `7e5d456`)
+
+The fix for the four warnings in the entry below: a helper, `entity_name()` in
+`dali_component.h`, reads an entity's name through `get_name_progmem()` from
+2026.11.0 on and through `get_name()` before, switching on
+`ESPHOME_VERSION_CODE`. The light, the sensor and the export's text sensors use
+it. The tree was not committed when this was run. Nothing here touched a device
+or a bus.
+
+- **`dali_test.yaml` compiles on 2026.11.0 with no warning.** It rebuilt the
+  seven translation units that include `dali_component.h`, the three that
+  warned among them. RAM (143,724 B) and flash (1,096,615 B) are the same to
+  the byte as without the fix. On the ESP32 the new accessor returns the
+  pointer `get_name()` did.
+- **It compiles on 2026.6.0, the `manifest.json` floor, with no warning.**
+  - The run used `uvx --from esphome==2026.6.0`, on an ignored copy of
+    `dali_test.yaml` named `dali-test-floor`, so that it kept its own build
+    directory.
+  - That version builds through PlatformIO, with ESP-IDF 5.5.4.
+  - The generated `version.h` reads 2026.6.0, so the older branch is the one
+    that compiled. The newer one would not have: 2026.6.0 has no
+    `get_name_progmem()`.
+
 ### Verified locally on 2026-11-19 (ESPHome pin to 2026.11.0, code at `27d48cc`)
 
 The operator's Home Assistant now builds with ESPHome 2026.11. Its compiles of

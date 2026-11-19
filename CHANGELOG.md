@@ -179,6 +179,15 @@ At tagging:
   `dN: instance enumeration failed (<error>)`, and names `instances N` as the
   retry. **Unverified:** compiles.
 
+- **ESPHome 2026.11 builds the component without warnings.** It printed a
+  deprecation warning for each light, sensor and export use of
+  `EntityBase::get_name()`, which ESPHome removes in 2027.5.0. All three uses
+  now read the name through one helper, `entity_name()`, which switches on
+  `ESPHOME_VERSION_CODE`. The `manifest.json` floor stays at 2026.6.0, which
+  has none of the new accessors. `export config` prints the same names.
+  **Unverified:** `dali_test.yaml` compiles without a warning on 2026.11.0 and
+  on 2026.6.0; not flashed.
+
 ## v3.1.0
 
 The diagnostic shell in a browser, and fixes to the network shell's heap use
