@@ -1199,6 +1199,9 @@ Nothing yet. A `dev` change that makes a pinned comment wrong goes here.
   claim, not the heading: `git grep <symbol> <previous tag>` settles it in
   seconds. Re-check every verification label against `project_log.md`, then
   rename the heading to the version.
+  - The heading must read exactly `## vX.Y.Z`, the tag's name.
+    `release-packaging.yml` publishes that section as the GitHub Release
+    notes, and fails a tag that has none.
   - The list for v2.0.0 had not been emptied at v1.3.0, so it claimed two
     releases' worth of breaks as new.
   - At v3.0.0, one label covered a fix made after the bus run it cited.

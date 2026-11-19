@@ -20,6 +20,11 @@ name: Release Packaging
 # uv.lock pin. A user builds with whatever ESPHome their Home Assistant ships,
 # so this proves the tag against the current release. With no checkout it
 # could not read the pin anyway.
+#
+# Once that build passes, the second job publishes the tag's GitHub Release,
+# with the tag's own CHANGELOG.md section as its notes. A tag that does not
+# build is never released. A manual run releases only when asked to, and only
+# a tag; that is how a tag pushed before this job existed gets its Release.
 
 on:
   push:
@@ -30,6 +35,15 @@ on:
         description: "Tag or branch to build as an external component"
         required: true
         default: "main"
+      release:
+        description: "Then publish the GitHub Release for it (ref must be a tag)"
+        type: boolean
+        default: false
+
+# The build reads the repository anonymously, over HTTPS. Only the release job
+# writes, and it asks for that itself.
+permissions:
+  contents: read
 
 jobs:
   clean-checkout:
@@ -171,3 +185,79 @@ jobs:
             echo "::error::could not locate the fetched component, and only $units modules vendored"
             exit 1
           fi
+
+  release:
+    name: GitHub Release from the tag's CHANGELOG section
+    needs: clean-checkout
+    if: github.event_name == 'push' || inputs.release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if ! gh api "repos/$GH_REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::$TAG is not a tag in $GH_REPO; only a tag is released"
+            exit 1
+          fi
+
+          # A re-run, or a release made by hand, is left alone.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::$TAG already has a release; left as it is"
+            exit 0
+          fi
+
+          # The notes are CHANGELOG.md as the tag has it, so they describe what
+          # was tagged, not what the default branch says now. Read through the
+          # API, which keeps this workflow free of a checkout.
+          if ! gh api -H "Accept: application/vnd.github.raw" \
+              "repos/$GH_REPO/contents/CHANGELOG.md?ref=$TAG" > CHANGELOG.md; then
+            echo "::error::$TAG has no CHANGELOG.md to take the notes from"
+            exit 1
+          fi
+
+          # The section is everything under "## <tag>" up to the next "## "
+          # heading, with the blank lines around it trimmed.
+          tr -d '\r' < CHANGELOG.md | awk -v heading="## $TAG" '
+            $0 == heading { found = 1; next }
+            found && /^## / { exit }
+            found { line[n++] = $0 }
+            END {
+              first = 0; while (first < n && line[first] == "") first++
+              last = n - 1; while (last >= first && line[last] == "") last--
+              for (i = first; i <= last; i++) print line[i]
+            }' > notes.md
+
+          if [ ! -s notes.md ]; then
+            echo "::error::CHANGELOG.md at $TAG has no '## $TAG' section, or it is empty"
+            exit 1
+          fi
+
+          # A tag with a suffix, such as v1.0.5-dev, is a prerelease. Otherwise
+          # the release is Latest only when no plain vX.Y.Z tag is newer, so a
+          # fix tagged on an older line does not take the badge.
+          case "$TAG" in
+            *-*)
+              flags=(--prerelease)
+              ;;
+            *)
+              newest=$(gh api --paginate "repos/$GH_REPO/git/matching-refs/tags/v" --jq '.[].ref' \
+                | sed 's#^refs/tags/##' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+              if [ "$TAG" = "$newest" ]; then
+                flags=(--latest)
+              else
+                flags=(--latest=false)
+              fi
+              ;;
+          esac
+
+          gh release create "$TAG" --verify-tag --title "$TAG" \
+            --notes-file notes.md "${flags[@]}"
+          echo "Published $TAG (${flags[*]}), $(wc -l < notes.md) lines of notes."

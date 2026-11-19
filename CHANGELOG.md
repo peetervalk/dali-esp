@@ -18,7 +18,23 @@ At tagging:
 - re-check each label against `project_log.md` and `todo.md`
 - rename this heading to the version
 
-Nothing yet.
+### Changed — development
+
+- **A pushed tag publishes its own GitHub Release.** `release-packaging.yml`
+  gains a second job that runs once the tag has built from an empty directory.
+  Its notes are the tag's `## vX.Y.Z` section of `CHANGELOG.md`, read at the
+  tag.
+  - A tag without that section fails, rather than publishing empty notes.
+  - A suffixed tag is a prerelease, and Latest goes only to the newest plain
+    `vX.Y.Z`.
+  - A release that already exists is left alone.
+  - Run by hand with `release` ticked, it releases a tag that was pushed
+    without one.
+
+  **Unverified:** a dry run with `gh` stubbed released `v3.2.0` as Latest,
+  kept Latest off `v3.1.0`, and refused a branch. The notes it extracts match
+  the published bodies of `v2.0.0`, `v3.0.0` and `v3.1.0`, apart from trailing
+  blank lines.
 
 ## v3.2.0
 

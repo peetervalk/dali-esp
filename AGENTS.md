@@ -267,7 +267,7 @@ Four workflows in `.github/workflows/`:
 | `host-tests.yml` | The host suites, cmake/ctest over `test/` | push main/dev, PR to main |
 | `idf-build.yml` | Native firmware, `idf.py build` for esp32 on IDF 6.0.1 | push main/dev, PR to main |
 | `esphome-build.yml` | Source/shim/`SRCS` agreement, config discovery, per-config schema validation, and a compile of every `type: local` config, on the ESPHome version `uv.lock` pins | push main/dev, PR to main |
-| `release-packaging.yml` | `esphome compile` from a git tag in an empty directory, on the latest ESPHome | tag `v*`, manual |
+| `release-packaging.yml` | `esphome compile` from a git tag in an empty directory, on the latest ESPHome; then, for a tag, the GitHub Release | tag `v*`, manual |
 
 - **`esphome-build.yml` names no configuration.** `discover` runs `git ls-files
   'dali*.yaml'` and sorts the results by whether `external_components` says
@@ -290,6 +290,13 @@ Four workflows in `.github/workflows/`:
   on purpose. Run inside a repo checkout, it would pass for the wrong reason.
   `workflow_dispatch` takes a ref, so a branch can be packaging-tested before
   it is tagged.
+- **A tag's GitHub Release is published by `release-packaging.yml`,** once the
+  tag has built. Its notes are the tag's own `## vX.Y.Z` section of
+  `CHANGELOG.md`, so a tag whose heading was not renamed fails rather than
+  publishing empty notes. A suffixed tag is a prerelease, and Latest goes only
+  to the newest plain `vX.Y.Z`. A release that already exists is left alone. To
+  release a tag pushed without one, run the workflow by hand with that tag as
+  `ref` and `release` ticked.
 - **The two ESPHome workflows run different versions, on purpose.**
   - `esphome-build.yml` builds the pin, so CI and the development machines
     build the same ESPHome. A new ESPHome release reaches it only as a commit
